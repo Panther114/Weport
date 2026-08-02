@@ -25,6 +25,15 @@ Native stack only (~14 MB DLLs + Tauri binary). No Chromium, no Electron.
 - NSIS installer (English + 简体中文)
 - Auto-update (GUI + `weport update`)
 
+## Getting the database key (important)
+
+Same model as WeFlow: the key is captured **during WeChat login**, not from a fully auto-logged-in session.
+
+1. Disable WeChat **auto-login**
+2. Click **提取密钥** (or `weport key`)
+3. When status says **已准备就绪**, log in / re-login WeChat (confirm on phone if asked)
+4. Key fills in (or paste a known 64-char hex key manually)
+
 ## CLI
 
 ```bash
