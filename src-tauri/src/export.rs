@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
