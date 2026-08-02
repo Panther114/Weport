@@ -71,9 +71,11 @@ Thumbs.db
 *.ipch
 *.aps
 
-wcdb/
+/wcdb/
 !resources/wcdb/
 !resources/wcdb/**
+!src-tauri/resources/wcdb/
+!src-tauri/resources/wcdb/**
 xkey/
 server/
 *info
