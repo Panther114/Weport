@@ -31,6 +31,8 @@ pub struct WorkerRequest {
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
+    pub usernames: Option<Vec<String>>,
+    #[serde(default)]
     pub limit: Option<i32>,
     #[serde(default)]
     pub offset: Option<i32>,
@@ -173,6 +175,7 @@ impl Drop for WcdbWorker {
             wxid: None,
             session_id: None,
             username: None,
+            usernames: None,
             limit: None,
             offset: None,
         });
@@ -339,6 +342,38 @@ pub fn run_worker_loop() -> ! {
                             id: req.id,
                             ok: true,
                             data: Some(c),
+                            error: None,
+                            debug: None,
+                        },
+                        Err(e) => WorkerResponse {
+                            id: req.id,
+                            ok: false,
+                            data: None,
+                            error: Some(e),
+                            debug: None,
+                        },
+                    }
+                }
+                None => WorkerResponse {
+                    id: req.id,
+                    ok: false,
+                    data: None,
+                    error: Some("not open".into()),
+                    debug: None,
+                },
+            },
+            "display_names" => match engine.as_ref() {
+                Some(eng) => {
+                    let list = req.usernames.unwrap_or_default();
+                    match eng.display_names(&list) {
+                        Ok(map) => WorkerResponse {
+                            id: req.id,
+                            ok: true,
+                            data: Some(Value::Object(
+                                map.into_iter()
+                                    .map(|(k, v)| (k, Value::String(v)))
+                                    .collect(),
+                            )),
                             error: None,
                             debug: None,
                         },

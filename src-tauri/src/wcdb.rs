@@ -30,6 +30,7 @@ impl WcdbHandle {
                 wxid: Some(wxid.to_string()),
                 session_id: None,
                 username: None,
+                usernames: None,
                 limit: None,
                 offset: None,
             })
@@ -62,6 +63,7 @@ impl WcdbHandle {
                 wxid: None,
                 session_id: None,
                 username: None,
+                usernames: None,
                 limit: None,
                 offset: None,
             })
@@ -87,6 +89,7 @@ impl WcdbHandle {
                 wxid: None,
                 session_id: Some(session_id.into()),
                 username: None,
+                usernames: None,
                 limit: Some(limit),
                 offset: Some(offset),
             })
@@ -138,6 +141,7 @@ impl WcdbHandle {
                 wxid: None,
                 session_id: None,
                 username: Some(username.into()),
+                usernames: None,
                 limit: None,
                 offset: None,
             })
@@ -146,6 +150,45 @@ impl WcdbHandle {
             return Err(resp.error.unwrap_or_else(|| "contact failed".into()));
         }
         Ok(resp.data.unwrap_or(Value::Null))
+    }
+
+    /// Batch display names: remark → nickName → alias → username (WeFlow order).
+    pub fn display_names(
+        &self,
+        usernames: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        if usernames.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let resp = with_worker(|w| {
+            w.request(WorkerRequest {
+                id: 0,
+                cmd: "display_names".into(),
+                resource_root: None,
+                account_dir: None,
+                key: None,
+                wxid: None,
+                session_id: None,
+                username: None,
+                usernames: Some(usernames.to_vec()),
+                limit: None,
+                offset: None,
+            })
+        })?;
+        if !resp.ok {
+            return Err(resp.error.unwrap_or_else(|| "display_names failed".into()));
+        }
+        let mut map = std::collections::HashMap::new();
+        if let Some(Value::Object(obj)) = resp.data {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    if !s.is_empty() {
+                        map.insert(k, s.to_string());
+                    }
+                }
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -161,6 +204,7 @@ impl Drop for WcdbHandle {
                 wxid: None,
                 session_id: None,
                 username: None,
+                usernames: None,
                 limit: None,
                 offset: None,
             })

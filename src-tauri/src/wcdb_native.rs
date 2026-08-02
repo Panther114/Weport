@@ -33,6 +33,7 @@ struct WcdbApi {
     get_sessions: FnGetSessions,
     get_messages: FnGetMessages,
     get_contact: FnGetContact,
+    get_display_names: Option<FnGetDisplayNames>,
     free_string: FnFreeString,
     dll_dir: PathBuf,
 }
@@ -151,6 +152,8 @@ impl WcdbApi {
         let get_contact: FnGetContact = load_symbol(&lib, b"wcdb_get_contact\0")?;
         let free_string: FnFreeString = load_symbol(&lib, b"wcdb_free_string\0")?;
         let set_my_wxid = try_load_optional::<FnSetMyWxid>(&lib, b"wcdb_set_my_wxid\0");
+        let get_display_names =
+            try_load_optional::<FnGetDisplayNames>(&lib, b"wcdb_get_display_names\0");
 
         // InitProtection path candidates — prefer directory that contains the DLL (WeFlow order)
         let mut try_paths: Vec<PathBuf> = vec![
@@ -226,6 +229,7 @@ impl WcdbApi {
             get_sessions,
             get_messages,
             get_contact,
+            get_display_names,
             free_string,
             dll_dir,
         })
@@ -402,6 +406,139 @@ impl NativeEngine {
             }
             api.take_json(out)
         })
+    }
+
+    /// Batch display names via wcdb_get_display_names, with per-contact fallback.
+    pub fn display_names(
+        &self,
+        usernames: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        if usernames.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        // Try native batch API first
+        let batch = self.with_api_handle(|api, handle| {
+            let Some(get_dn) = api.get_display_names else {
+                return Ok(None);
+            };
+            let payload = serde_json::to_string(usernames).map_err(|e| e.to_string())?;
+            let c = CString::new(payload).map_err(|_| "usernames 非法".to_string())?;
+            let mut out: *mut c_char = std::ptr::null_mut();
+            let code = unsafe { get_dn(handle, c.as_ptr(), &mut out) };
+            if code != 0 || out.is_null() {
+                api.free_c_string(out);
+                return Ok(None);
+            }
+            let value = api.take_json(out)?;
+            Ok(Some(value))
+        })?;
+
+        let mut map = std::collections::HashMap::new();
+        if let Some(value) = batch {
+            parse_display_name_payload(&value, &mut map);
+        }
+
+        // Fill missing via contact
+        for u in usernames {
+            if map.contains_key(u) {
+                continue;
+            }
+            match self.contact(u) {
+                Ok(c) => {
+                    let name = pick_contact_display(&c, u);
+                    map.insert(u.clone(), name);
+                }
+                Err(_) => {
+                    map.insert(u.clone(), u.clone());
+                }
+            }
+        }
+        Ok(map)
+    }
+}
+
+fn pick_contact_display(contact: &Value, fallback: &str) -> String {
+    for key in [
+        "remark",
+        "Remark",
+        "nickName",
+        "nickname",
+        "NickName",
+        "nick_name",
+        "alias",
+        "Alias",
+        "displayName",
+        "name",
+    ] {
+        if let Some(v) = contact.get(key).and_then(|x| x.as_str()) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    fallback.to_string()
+}
+
+fn parse_display_name_payload(
+    value: &Value,
+    map: &mut std::collections::HashMap<String, String>,
+) {
+    match value {
+        Value::Object(obj) => {
+            // Could be { map: {...} } or direct { wxid: name }
+            if let Some(Value::Object(inner)) = obj.get("map") {
+                for (k, v) in inner {
+                    if let Some(s) = v.as_str() {
+                        if !s.trim().is_empty() {
+                            map.insert(k.clone(), s.trim().to_string());
+                        }
+                    }
+                }
+            } else {
+                for (k, v) in obj {
+                    if k == "success" || k == "error" {
+                        continue;
+                    }
+                    if let Some(s) = v.as_str() {
+                        if !s.trim().is_empty() {
+                            map.insert(k.clone(), s.trim().to_string());
+                        }
+                    } else if let Some(inner) = v.as_object() {
+                        // { username: { displayName / nickName } }
+                        let name = inner
+                            .get("displayName")
+                            .or_else(|| inner.get("nickName"))
+                            .or_else(|| inner.get("remark"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if !name.is_empty() {
+                            map.insert(k.clone(), name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                if let Some(obj) = item.as_object() {
+                    let username = obj
+                        .get("username")
+                        .or_else(|| obj.get("userName"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if username.is_empty() {
+                        continue;
+                    }
+                    let name = pick_contact_display(item, username);
+                    map.insert(username.to_string(), name);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

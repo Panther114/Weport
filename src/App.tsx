@@ -31,13 +31,14 @@ const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 let toastSeq = 1
 
 export default function App() {
-  const [version, setVersion] = useState('0.2.0')
+  const [version, setVersion] = useState('0.4.0')
   const [dbPath, setDbPath] = useState('')
   const [exportPath, setExportPath] = useState('')
   const [format, setFormat] = useState<Format>('txt')
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedWxid, setSelectedWxid] = useState('')
   const [decryptKey, setDecryptKey] = useState('')
+  const [showKey, setShowKey] = useState(false)
   const [keyReady, setKeyReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
@@ -566,15 +567,29 @@ export default function App() {
 
             <div className="field" style={{ marginTop: 12 }}>
               <label htmlFor="decryptKey">数据库密钥</label>
-              <input
-                id="decryptKey"
-                className="path-input"
-                value={decryptKey}
-                placeholder="64 位十六进制密钥…"
-                onChange={(e) => setDecryptKey(e.target.value.trim())}
-                spellCheck={false}
-                disabled={busy}
-              />
+              <div className="path-row">
+                <input
+                  id="decryptKey"
+                  className="path-input"
+                  type={showKey ? 'text' : 'password'}
+                  value={decryptKey}
+                  placeholder="64 位十六进制密钥…"
+                  onChange={(e) => setDecryptKey(e.target.value.trim())}
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={busy}
+                />
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  disabled={busy}
+                  title={showKey ? '隐藏密钥' : '显示密钥'}
+                  aria-label={showKey ? '隐藏密钥' : '显示密钥'}
+                >
+                  {showKey ? '隐藏' : '显示'}
+                </button>
+              </div>
             </div>
 
             <div className="btn-row">
