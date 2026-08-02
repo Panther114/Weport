@@ -96,3 +96,8 @@ weflow-web-offical
 /scripts/syncWedecrypt.py
 /scripts/syncWelive.py
 /WeLive
+
+# Local reference clone — never ship
+/WeFlow/
+WeFlow/
+

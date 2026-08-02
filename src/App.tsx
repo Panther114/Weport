@@ -36,9 +36,11 @@ export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedWxid, setSelectedWxid] = useState('')
   const [decryptKey, setDecryptKey] = useState('')
+  const [keyReady, setKeyReady] = useState(false)
   const [status, setStatus] = useState('就绪 — 将自动扫描微信数据目录')
   const [statusKind, setStatusKind] = useState<StatusKind>('idle')
   const [busy, setBusy] = useState(false)
+  const [keyHelpOpen, setKeyHelpOpen] = useState(false)
   const [progress, setProgress] = useState<ExportProgress | null>(null)
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
@@ -123,7 +125,23 @@ export default function App() {
         setBusyStatus(session ? `${label} · ${session}` : label)
       }),
       listen<string>('engine-status', (event) => {
-        setBusyStatus(event.payload)
+        const msg = event.payload
+        setBusyStatus(msg)
+        if (
+          msg.includes('已准备就绪') ||
+          msg.includes('可以登录') ||
+          msg.includes('Hook安装成功') ||
+          msg.includes('现在登录')
+        ) {
+          setKeyReady(true)
+        }
+      }),
+      listen<string>('key-status', (event) => {
+        const msg = event.payload
+        setBusyStatus(msg)
+        if (msg.includes('已准备就绪') || msg.includes('可以登录') || msg.includes('Hook安装成功')) {
+          setKeyReady(true)
+        }
       })
     ]
 
@@ -173,25 +191,31 @@ export default function App() {
   }
 
   async function extractKey() {
-    if (!dbPath.trim() || !selectedWxid) {
-      setErrStatus('请先选择数据目录与账号')
+    if (!dbPath.trim()) {
+      setErrStatus('请先选择微信数据目录')
       return
     }
     setBusy(true)
-    setBusyStatus('正在提取数据库密钥（请保持微信已登录）…')
+    setKeyReady(false)
+    setKeyHelpOpen(true)
+    setBusyStatus('正在连接微信进程…（密钥在登录瞬间捕获，请先关闭微信自动登录）')
     try {
       const result = await invoke<{ success: boolean; key?: string; error?: string }>('extract_db_key', {
         dbPath: dbPath.trim(),
-        wxid: selectedWxid
+        wxid: selectedWxid || ''
       })
       if (result.success && result.key) {
         setDecryptKey(result.key)
+        setKeyReady(false)
+        setKeyHelpOpen(false)
         setOkStatus('密钥提取成功')
       } else {
         setErrStatus(result.error || '密钥提取失败')
+        setKeyHelpOpen(true)
       }
     } catch (e) {
       setErrStatus(String(e))
+      setKeyHelpOpen(true)
     } finally {
       setBusy(false)
     }
@@ -216,18 +240,24 @@ export default function App() {
     setBusyStatus('开始导出全部会话…')
 
     try {
-      let key = decryptKey
-      if (!key) {
-        setBusyStatus('未检测到密钥，正在自动提取…')
+      let key = decryptKey.trim()
+      if (!key || key.length !== 64) {
+        setKeyReady(false)
+        setKeyHelpOpen(true)
+        setBusyStatus('未检测到密钥，开始自动提取…关闭微信自动登录，就绪后重新登录')
         const keyResult = await invoke<{ success: boolean; key?: string; error?: string }>('extract_db_key', {
           dbPath: dbPath.trim(),
           wxid: selectedWxid
         })
         if (!keyResult.success || !keyResult.key) {
-          throw new Error(keyResult.error || '密钥提取失败，请确认微信已登录后再试')
+          throw new Error(
+            keyResult.error ||
+              '密钥提取失败。密钥需在登录瞬间捕获：关闭自动登录 → 提取密钥 → 提示就绪后重新登录微信。'
+          )
         }
         key = keyResult.key
         setDecryptKey(key)
+        setKeyHelpOpen(false)
       }
 
       const result = await invoke<{
@@ -350,11 +380,39 @@ export default function App() {
             <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
               重新扫描
             </button>
-            <button className="secondary-btn" type="button" onClick={() => void extractKey()} disabled={busy || !selectedWxid}>
+            <button className="secondary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
               提取密钥
             </button>
           </div>
-          {decryptKey ? <p className="hint ok">数据库密钥已就绪</p> : <p className="hint">导出时若无密钥将自动提取（需微信已登录）</p>}
+          <div className="field" style={{ marginTop: 10 }}>
+            <label htmlFor="decryptKey">数据库密钥（64 位十六进制，可手动粘贴）</label>
+            <input
+              id="decryptKey"
+              className="path-input"
+              value={decryptKey}
+              placeholder="自动提取或粘贴已有密钥…"
+              onChange={(e) => setDecryptKey(e.target.value.trim())}
+              spellCheck={false}
+              disabled={busy}
+            />
+          </div>
+          {decryptKey.length === 64 ? (
+            <p className="hint ok">数据库密钥已就绪</p>
+          ) : (
+            <p className="hint">
+              密钥在<strong>登录瞬间</strong>捕获（与 WeFlow 相同）。请关闭微信「自动登录」，点击提取密钥，状态变为就绪后重新登录微信。
+            </p>
+          )}
+          {keyReady && busy && (
+            <p className="hint ok" role="status">
+              Hook 已就绪 — 请现在登录或退出后重新登录微信（手机确认登录）。
+            </p>
+          )}
+          {keyHelpOpen && !decryptKey && !busy && (
+            <p className="hint err">
+              若一直停在登录相关提示：退出微信账号 → 关闭自动登录 → 再点「提取密钥」→ 看到就绪后再登录。
+            </p>
+          )}
         </section>
 
         <section className="panel">

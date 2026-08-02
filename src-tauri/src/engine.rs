@@ -105,8 +105,10 @@ pub fn extract_key(
     let root = resource_root(app);
     let dll = resolve_key_dll(&root);
     let app2 = app.clone();
-    let result = extract_db_key(&dll, Duration::from_secs(180), |msg| {
-        let _ = app2.emit("engine-status", msg);
+    // WeFlow uses ~60s; allow 120s so user can re-login after Hook ready.
+    let result = extract_db_key(&dll, Duration::from_secs(120), |msg| {
+        let _ = app2.emit("engine-status", &msg);
+        let _ = app2.emit("key-status", &msg);
     });
     match result {
         Ok(key) => Ok(json!({ "success": true, "key": key })),
