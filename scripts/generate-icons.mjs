@@ -35,9 +35,14 @@ function createPng(size) {
   const height = size
   const raw = Buffer.alloc((width * 4 + 1) * height)
 
-  const bg = [18, 21, 28, 255]
-  const accent = [232, 162, 58, 255]
-  const dark = [26, 18, 6, 255]
+  const darkInk = [22, 14, 6, 255]
+  const amberLo = [196, 120, 32, 255]
+  const amberHi = [243, 192, 106, 255]
+
+  const smoothstep = (e0, e1, x) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
+    return t * t * (3 - 2 * t)
+  }
 
   for (let y = 0; y < height; y++) {
     const row = y * (width * 4 + 1)
@@ -46,53 +51,54 @@ function createPng(size) {
       const i = row + 1 + x * 4
       const nx = (x + 0.5) / width
       const ny = (y + 0.5) / height
-      // rounded square background
-      const inset = 0.08
-      const rx = Math.min(Math.max(nx, inset), 1 - inset)
-      const ry = Math.min(Math.max(ny, inset), 1 - inset)
-      const inRound =
-        nx > inset && nx < 1 - inset && ny > inset && ny < 1 - inset
 
-      let px = bg
-      if (inRound) {
-        // soft fill
-        px = [bg[0] + 8, bg[1] + 10, bg[2] + 14, 255]
-        // amber plate
-        const plate =
-          nx > 0.18 && nx < 0.82 && ny > 0.18 && ny < 0.82
-        if (plate) {
-          const g = 0.85 + 0.15 * (1 - ny)
-          px = [
-            Math.round(accent[0] * g),
-            Math.round(accent[1] * g),
-            Math.round(accent[2] * g),
-            255
-          ]
-          // three horizontal bars (export mark)
-          const bars = [
-            [0.34, 0.42, 0.28, 0.72],
-            [0.48, 0.56, 0.28, 0.58],
-            [0.62, 0.70, 0.28, 0.68]
-          ]
-          for (const [y0, y1, x0, x1] of bars) {
-            if (ny >= y0 && ny <= y1 && nx >= x0 && nx <= x1) {
-              px = dark
-            }
-          }
-          // signal dot
-          const dx = nx - 0.72
-          const dy = ny - 0.52
-          if (dx * dx + dy * dy < 0.012) {
-            px = dark
-          }
-        }
-      } else {
-        px = [0, 0, 0, 0]
+      // Superellipse-ish rounded square mask
+      const cx = (nx - 0.5) * 2
+      const cy = (ny - 0.5) * 2
+      const rr = Math.pow(Math.abs(cx), 3.6) + Math.pow(Math.abs(cy), 3.6)
+      const edge = smoothstep(0.78, 0.92, rr)
+      if (edge >= 1) {
+        raw[i] = 0
+        raw[i + 1] = 0
+        raw[i + 2] = 0
+        raw[i + 3] = 0
+        continue
       }
+
+      // Amber metal plate with vertical gradient + soft highlight
+      const g = 0.72 + 0.28 * (1 - ny)
+      const hi = smoothstep(0.12, 0.0, Math.hypot(nx - 0.32, ny - 0.28))
+      let px = [
+        Math.round(amberLo[0] * g + amberHi[0] * (1 - g) * 0.35 + 40 * hi),
+        Math.round(amberLo[1] * g + amberHi[1] * (1 - g) * 0.35 + 28 * hi),
+        Math.round(amberLo[2] * g + amberHi[2] * (1 - g) * 0.35 + 12 * hi),
+        255
+      ]
+
+      // Three export bars (optical weight)
+      const bars = [
+        [0.33, 0.41, 0.26, 0.74],
+        [0.47, 0.55, 0.26, 0.6],
+        [0.61, 0.69, 0.26, 0.7]
+      ]
+      for (const [y0, y1, x0, x1] of bars) {
+        if (ny >= y0 && ny <= y1 && nx >= x0 && nx <= x1) {
+          px = darkInk
+        }
+      }
+      // Signal node
+      const dx = nx - 0.72
+      const dy = ny - 0.52
+      if (dx * dx + dy * dy < 0.011) {
+        px = darkInk
+      }
+
+      // Soft outer AA
+      const a = Math.round(255 * (1 - edge))
       raw[i] = px[0]
       raw[i + 1] = px[1]
       raw[i + 2] = px[2]
-      raw[i + 3] = px[3]
+      raw[i + 3] = a
     }
   }
 

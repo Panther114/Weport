@@ -4,10 +4,12 @@
 
 Exports every contact and group chat from local WeChat **4.x** data to:
 
-| Format | File names |
-|--------|------------|
-| TXT | `群聊_[name].txt` / `私聊_[name].txt` |
-| JSON | `群聊_[name].json` / `私聊_[name].json` |
+| Format | Location | File names |
+|--------|----------|------------|
+| TXT | `{out}/TXT/` | `群聊_[name].txt` / `私聊_[name].txt` |
+| JSON | `{out}/JSON/` | `群聊_[name].json` / `私聊_[name].json` |
+
+Root also gets `export_log.txt` (last TXT / JSON run times). Re-export **overwrites** same filenames.
 
 All processing is **local**. Nothing is uploaded.
 

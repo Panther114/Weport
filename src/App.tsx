@@ -26,12 +26,33 @@ type Format = 'txt' | 'json'
 type ToastKind = 'ok' | 'err' | 'info'
 type Toast = { id: number; kind: ToastKind; title: string; body?: string }
 
+type ExportLogInfo = {
+  path?: string
+  txt?: string | null
+  json?: string | null
+  exists?: boolean
+}
+
 const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 
 let toastSeq = 1
 
+function MarkIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M5 7.5h14M5 12h9.5M5 16.5h12"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+      <circle cx="18.2" cy="12" r="2.4" fill="currentColor" />
+    </svg>
+  )
+}
+
 export default function App() {
-  const [version, setVersion] = useState('0.4.0')
+  const [version, setVersion] = useState('0.4.1')
   const [dbPath, setDbPath] = useState('')
   const [exportPath, setExportPath] = useState('')
   const [format, setFormat] = useState<Format>('txt')
@@ -46,6 +67,8 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const [clearOpen, setClearOpen] = useState(false)
+  const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
 
@@ -53,6 +76,8 @@ export default function App() {
     () => accounts.find((a) => a.wxid === selectedWxid) || null,
     [accounts, selectedWxid]
   )
+
+  const formatFolder = format === 'json' ? 'JSON' : 'TXT'
 
   const pushToast = useCallback((kind: ToastKind, title: string, body?: string, ms = 5200) => {
     const id = toastSeq++
@@ -69,6 +94,19 @@ export default function App() {
     if (t) window.clearTimeout(t)
     toastTimers.current.delete(id)
     setToasts((prev) => prev.filter((x) => x.id !== id))
+  }, [])
+
+  const refreshExportLog = useCallback(async (path: string) => {
+    if (!path.trim()) {
+      setExportLog(null)
+      return
+    }
+    try {
+      const log = await invoke<ExportLogInfo>('get_export_log', { outputDir: path.trim() })
+      setExportLog(log)
+    } catch {
+      setExportLog(null)
+    }
   }, [])
 
   const refreshAccounts = useCallback(
@@ -142,7 +180,6 @@ export default function App() {
   useEffect(() => {
     void getVersion().then(setVersion).catch(() => undefined)
 
-    // Restore persisted settings first
     ;(async () => {
       try {
         const s = await invoke<{
@@ -154,7 +191,10 @@ export default function App() {
         }>('get_settings')
         if (s.dbPath) setDbPath(s.dbPath)
         if (s.decryptKey) setDecryptKey(s.decryptKey)
-        if (s.exportPath) setExportPath(s.exportPath)
+        if (s.exportPath) {
+          setExportPath(s.exportPath)
+          await refreshExportLog(s.exportPath)
+        }
         if (s.selectedWxid) setSelectedWxid(s.selectedWxid)
         if (s.format === 'json' || s.format === 'txt') setFormat(s.format)
         if (s.dbPath) {
@@ -199,9 +239,8 @@ export default function App() {
       unsubs.forEach((p) => void p.then((u) => u()))
       toastTimers.current.forEach((t) => window.clearTimeout(t))
     }
-  }, [detectDb, pushToast, refreshAccounts])
+  }, [detectDb, pushToast, refreshAccounts, refreshExportLog])
 
-  // Persist on meaningful changes (debounced via effect)
   useEffect(() => {
     if (!dbPath && !decryptKey && !exportPath) return
     const t = window.setTimeout(() => {
@@ -209,6 +248,10 @@ export default function App() {
     }, 400)
     return () => window.clearTimeout(t)
   }, [dbPath, decryptKey, exportPath, selectedWxid, format, persist])
+
+  useEffect(() => {
+    void refreshExportLog(exportPath)
+  }, [exportPath, refreshExportLog])
 
   useEffect(() => {
     let cancelled = false
@@ -248,6 +291,7 @@ export default function App() {
     })
     if (typeof selected === 'string' && selected) {
       setExportPath(selected)
+      await refreshExportLog(selected)
     }
   }
 
@@ -327,6 +371,8 @@ export default function App() {
         success: boolean
         successCount?: number
         failCount?: number
+        formatFolder?: string
+        formatDir?: string
         error?: string
       }>('export_all', {
         dbPath: dbPath.trim(),
@@ -336,8 +382,16 @@ export default function App() {
         format
       })
 
+      await refreshExportLog(exportPath.trim())
+
       if (result.success) {
-        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${exportPath}`)
+        const folder = result.formatFolder || formatFolder
+        pushToast(
+          'ok',
+          '导出完成',
+          `成功 ${result.successCount ?? 0} 个会话 → ${folder}/（已覆盖同名文件）`,
+          7000
+        )
         setProgress((p) =>
           p
             ? { ...p, current: p.total || p.current, phaseLabel: '完成', phase: 'complete' }
@@ -356,6 +410,34 @@ export default function App() {
     } finally {
       setBusy(false)
       setBusyLabel('')
+    }
+  }
+
+  async function confirmClearLibrary() {
+    if (!exportPath.trim()) {
+      pushToast('err', '请先选择输出文件夹')
+      setClearOpen(false)
+      return
+    }
+    setBusy(true)
+    setBusyLabel('正在清空导出库…')
+    try {
+      const result = await invoke<{ success: boolean; message?: string; removed?: string[] }>(
+        'clear_export_library',
+        { outputDir: exportPath.trim() }
+      )
+      await refreshExportLog(exportPath.trim())
+      pushToast(
+        'ok',
+        result.message || '已清空导出库',
+        result.removed?.length ? `已删除 ${result.removed.length} 项` : undefined
+      )
+    } catch (e) {
+      pushToast('err', '清空失败', String(e), 10000)
+    } finally {
+      setBusy(false)
+      setBusyLabel('')
+      setClearOpen(false)
     }
   }
 
@@ -410,22 +492,21 @@ export default function App() {
 
   return (
     <div className="shell">
-      {/* design contract: two-column operate console — source left, export right */}
       <header className="topbar">
         <div className="brand">
           <div className="mark" aria-hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-              <path d="M4 7h16M4 12h10M4 17h14" strokeLinecap="round" />
-              <circle cx="18.5" cy="12" r="2.2" fill="currentColor" stroke="none" />
-            </svg>
+            <MarkIcon />
           </div>
-          <div>
+          <div className="brand-text">
             <h1>Weport</h1>
-            <p>微信聊天记录导出 · v{version}{busyLabel ? ` · ${busyLabel}` : ''}</p>
+            <p>
+              微信聊天记录导出 · v{version}
+              {busyLabel ? ` · ${busyLabel}` : ''}
+            </p>
           </div>
         </div>
         <div className="top-actions">
-          <button className="icon-btn" title="关于" type="button" onClick={() => setAboutOpen(true)}>
+          <button className="icon-btn" title="关于与更新" type="button" onClick={() => setAboutOpen(true)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <circle cx="12" cy="12" r="9" />
               <path d="M12 11v6" strokeLinecap="round" />
@@ -436,9 +517,9 @@ export default function App() {
       </header>
 
       {updateInfo && (
-        <div className="panel" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'center' }}>
+        <div className="update-banner">
           <div>
-            <h2 style={{ margin: 0, fontSize: 13 }}>发现新版本 v{updateInfo.version}</h2>
+            <h2>发现新版本 v{updateInfo.version}</h2>
             <p className="hint" style={{ marginTop: 4 }}>
               {updateInfo.body || '建议更新以获得修复与改进。'}
             </p>
@@ -450,15 +531,14 @@ export default function App() {
       )}
 
       <div className="workspace">
-        {/* LEFT: locate + key */}
         <div className="column">
           <section className="panel">
             <div className="panel-head">
               <h2>数据位置</h2>
-              <span>默认路径 + 浅层搜索</span>
+              <span>xwechat_files</span>
             </div>
             <div className="field">
-              <label htmlFor="dbPath">微信数据文件夹 (xwechat_files)</label>
+              <label htmlFor="dbPath">微信数据文件夹</label>
               <div className="path-row">
                 <input
                   id="dbPath"
@@ -606,9 +686,8 @@ export default function App() {
           </section>
         </div>
 
-        {/* RIGHT: export */}
         <div className="column">
-          <section className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          <section className="panel panel-fill">
             <div className="panel-head">
               <h2>导出</h2>
               <span>全部联系人 + 群聊</span>
@@ -649,7 +728,7 @@ export default function App() {
                   id="exportPath"
                   className="path-input"
                   value={exportPath}
-                  placeholder="选择导出目录…"
+                  placeholder="选择导出根目录…"
                   onChange={(e) => setExportPath(e.target.value)}
                   spellCheck={false}
                 />
@@ -660,9 +739,25 @@ export default function App() {
             </div>
 
             <p className="hint">
-              文件命名：<code>群聊_名称.{format}</code> / <code>私聊_名称.{format}</code>
-              {selectedAccount ? ` · 账号 ${selectedAccount.nickname || selectedAccount.wxid}` : ''}
+              导出写入 <code>{formatFolder}/</code>，同名文件<strong>直接覆盖</strong>。
+              命名：<code>群聊_名称.{format}</code> / <code>私聊_名称.{format}</code>
+              {selectedAccount ? ` · ${selectedAccount.nickname || selectedAccount.wxid}` : ''}
             </p>
+
+            <div className="export-meta" aria-live="polite">
+              <div className="row">
+                <span>上次 TXT</span>
+                <strong className={exportLog?.txt ? undefined : 'muted'}>{exportLog?.txt || '尚未导出'}</strong>
+              </div>
+              <div className="row">
+                <span>上次 JSON</span>
+                <strong className={exportLog?.json ? undefined : 'muted'}>{exportLog?.json || '尚未导出'}</strong>
+              </div>
+              <div className="row">
+                <span>日志文件</span>
+                <span className="muted">export_log.txt</span>
+              </div>
+            </div>
 
             {progress && (
               <div className="progress" aria-live="polite">
@@ -680,19 +775,29 @@ export default function App() {
               </div>
             )}
 
-            <div style={{ marginTop: 'auto', paddingTop: 16 }}>
+            <div className="export-actions">
               <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
-                {busy ? '处理中…' : '导出全部聊天记录'}
+                {busy && progress ? '导出中…' : '导出全部聊天记录'}
               </button>
+              <div className="btn-row">
+                <button
+                  className="danger-btn"
+                  type="button"
+                  disabled={busy || !exportPath.trim()}
+                  onClick={() => setClearOpen(true)}
+                >
+                  清空导出库
+                </button>
+              </div>
               <p className="hint">
-                导出使用本地 WCDB 引擎解密数据库。数据不会上传。若出现错误码 -1006，请确认安装完整或以管理员运行。
+                清空会删除输出目录下的 <code>TXT/</code>、<code>JSON/</code> 与 <code>export_log.txt</code>
+                ，不会删除你选的根文件夹。数据仅在本地处理。
               </p>
             </div>
           </section>
         </div>
       </div>
 
-      {/* Toasts */}
       <div className="toast-stack" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className="toast" data-kind={t.kind}>
@@ -707,6 +812,40 @@ export default function App() {
         ))}
       </div>
 
+      {clearOpen && (
+        <div className="modal-backdrop" onClick={() => !busy && setClearOpen(false)}>
+          <div
+            className="modal danger"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="clear-title"
+          >
+            <h3 id="clear-title">清空导出库？</h3>
+            <p>
+              将删除下列内容（不可恢复）：
+            </p>
+            <p style={{ marginTop: 8 }}>
+              <code>TXT/</code>、<code>JSON/</code>、<code>export_log.txt</code>
+              {exportPath ? (
+                <>
+                  <br />
+                  根目录：{exportPath}
+                </>
+              ) : null}
+            </p>
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" disabled={busy} onClick={() => setClearOpen(false)}>
+                取消
+              </button>
+              <button className="danger-btn" type="button" disabled={busy} onClick={() => void confirmClearLibrary()}>
+                {busy ? '清空中…' : '确认清空'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {aboutOpen && (
         <div className="modal-backdrop" onClick={() => setAboutOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
@@ -714,11 +853,14 @@ export default function App() {
             <p>
               轻量纯 Tauri 微信聊天记录导出工具。读取本机微信 4.x 数据，导出全部私聊与群聊为 TXT / JSON。
             </p>
+            <p style={{ marginTop: 8 }}>
+              导出写入 <code>TXT/</code> 与 <code>JSON/</code> 子目录；根目录 <code>export_log.txt</code> 记录上次导出时间。
+            </p>
             <p style={{ marginTop: 8 }}>数据仅在本地处理。路径与密钥会保存在本机，关闭应用后自动恢复。</p>
             <p style={{ marginTop: 8, fontSize: 12, color: 'var(--text-faint)' }}>
               更新源：GitHub Releases (Panther114/Weport)
             </p>
-            <div className="modal-actions" style={{ flexWrap: 'wrap' }}>
+            <div className="modal-actions">
               <button
                 className="secondary-btn"
                 type="button"

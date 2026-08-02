@@ -195,8 +195,12 @@ Export options:
   --key <hex>          Database decrypt key
   --all                Export every contact and group (default when no --sessions)
   --sessions a,b       Specific session usernames
-  --flat               Flat files in output folder (default)
   --no-media           Skip media (default)
+
+Layout under --out:
+  TXT/                 text exports (overwrite same names)
+  JSON/                json exports
+  export_log.txt       last export times for TXT and JSON
 
 File names:
   群聊_[name].txt|json

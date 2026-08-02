@@ -90,6 +90,18 @@ async fn export_all(
     result?
 }
 
+#[tauri::command]
+fn clear_export_library(output_dir: String) -> Result<Value, EngineError> {
+    let path = std::path::PathBuf::from(output_dir.trim());
+    export::clear_export_library(&path).map_err(EngineError::Message)
+}
+
+#[tauri::command]
+fn get_export_log(output_dir: String) -> Result<Value, EngineError> {
+    let path = std::path::PathBuf::from(output_dir.trim());
+    Ok(export::read_export_log(&path))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -106,7 +118,9 @@ pub fn run() {
             diagnose_native,
             get_settings,
             set_settings,
-            export_all
+            export_all,
+            clear_export_library,
+            get_export_log
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

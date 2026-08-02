@@ -32,7 +32,18 @@ impl ExportFormat {
             Self::Json => "json",
         }
     }
+
+    /// Subfolder under the user-selected export root (uppercase).
+    pub fn folder_name(self) -> &'static str {
+        match self {
+            Self::Txt => "TXT",
+            Self::Json => "JSON",
+        }
+    }
 }
+
+/// Root-level log file next to TXT/ and JSON/ folders.
+pub const EXPORT_LOG_NAME: &str = "export_log.txt";
 
 pub struct ExportProgress {
     pub current: f64,
@@ -433,30 +444,127 @@ fn msg_sender(msg: &Value, is_group_chat: bool, names: &HashMap<String, String>)
     }
 }
 
-fn unique_path(preferred: PathBuf) -> PathBuf {
-    if !preferred.exists() {
-        return preferred;
-    }
-    let stem = preferred
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("session");
-    let ext = preferred
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("txt");
-    let parent = preferred.parent().unwrap_or_else(|| Path::new("."));
-    for i in 2..10_000 {
-        let candidate = parent.join(format!("{stem}_{i}.{ext}"));
-        if !candidate.exists() {
-            return candidate;
+/// Read existing export_log.txt timestamps (TXT / JSON lines).
+fn parse_export_log(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let mut txt = None;
+    let mut json = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("TXT:") {
+            let v = rest.trim();
+            if !v.is_empty() && v != "—" && !v.eq_ignore_ascii_case("never") {
+                txt = Some(v.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("JSON:") {
+            let v = rest.trim();
+            if !v.is_empty() && v != "—" && !v.eq_ignore_ascii_case("never") {
+                json = Some(v.to_string());
+            }
         }
     }
-    parent.join(format!(
-        "{stem}_{}.{}",
-        chrono::Local::now().timestamp(),
-        ext
-    ))
+    (txt, json)
+}
+
+fn write_export_log(
+    root: &Path,
+    format: ExportFormat,
+    when: &str,
+    success: usize,
+    fail: usize,
+) -> Result<(), String> {
+    let log_path = root.join(EXPORT_LOG_NAME);
+    let (mut txt_line, mut json_line) = parse_export_log(&log_path);
+    let summary = format!("{when}  ·  success={success}  fail={fail}");
+    match format {
+        ExportFormat::Txt => txt_line = Some(summary),
+        ExportFormat::Json => json_line = Some(summary),
+    }
+    let body = format!(
+        "# Weport export log\n\
+         # Last successful run times for each format (local time).\n\
+         # Files live under TXT/ and JSON/ subfolders; re-export overwrites same names.\n\
+         \n\
+         TXT: {}\n\
+         JSON: {}\n",
+        txt_line.as_deref().unwrap_or("—"),
+        json_line.as_deref().unwrap_or("—"),
+    );
+    fs::write(&log_path, body).map_err(|e| format!("写入导出日志失败: {e}"))
+}
+
+/// Read last-export summary for the UI.
+pub fn read_export_log(root: &Path) -> Value {
+    let log_path = root.join(EXPORT_LOG_NAME);
+    let (txt, json) = parse_export_log(&log_path);
+    json!({
+        "path": log_path.to_string_lossy(),
+        "txt": txt,
+        "json": json,
+        "exists": log_path.exists(),
+    })
+}
+
+/// Empty the export library: remove TXT/, JSON/, and export_log.txt under root.
+/// Does not delete the root folder itself.
+pub fn clear_export_library(root: &Path) -> Result<Value, String> {
+    if root.as_os_str().is_empty() {
+        return Err("输出目录为空".into());
+    }
+    if !root.exists() {
+        return Ok(json!({
+            "success": true,
+            "removed": [],
+            "message": "目录不存在，无需清理",
+        }));
+    }
+    if !root.is_dir() {
+        return Err(format!("不是目录: {}", root.display()));
+    }
+
+    let mut removed: Vec<String> = Vec::new();
+    for name in ["TXT", "JSON", EXPORT_LOG_NAME] {
+        let p = root.join(name);
+        if !p.exists() {
+            continue;
+        }
+        if p.is_dir() {
+            fs::remove_dir_all(&p).map_err(|e| format!("删除 {} 失败: {e}", p.display()))?;
+        } else {
+            fs::remove_file(&p).map_err(|e| format!("删除 {} 失败: {e}", p.display()))?;
+        }
+        removed.push(p.to_string_lossy().into_owned());
+    }
+
+    // Also remove any legacy flat chat files in the root (群聊_/私聊_)
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let is_legacy = (name.starts_with("群聊_") || name.starts_with("私聊_"))
+                && (name.ends_with(".txt") || name.ends_with(".json"));
+            if is_legacy {
+                let _ = fs::remove_file(&path);
+                removed.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    Ok(json!({
+        "success": true,
+        "removed": removed,
+        "message": if removed.is_empty() {
+            "导出库已是空的"
+        } else {
+            "已清空导出库"
+        },
+    }))
 }
 
 fn write_txt(
@@ -591,7 +699,10 @@ pub fn export_all(
     format: ExportFormat,
     mut on_progress: impl FnMut(ExportProgress),
 ) -> Result<Value, String> {
+    // Root = user-selected folder; chat files go under TXT/ or JSON/
     fs::create_dir_all(output_dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
+    let format_dir = output_dir.join(format.folder_name());
+    fs::create_dir_all(&format_dir).map_err(|e| format!("创建格式子目录失败: {e}"))?;
 
     let sessions = db.sessions()?;
     let total = sessions.len() as f64;
@@ -672,8 +783,8 @@ pub fn export_all(
         messages.sort_by_key(|m| msg_timestamp(m));
 
         let base = format!("{}{}", prefix_for(&sid), sanitize_name(&display));
-        let preferred = output_dir.join(format!("{base}.{}", format.ext()));
-        let path = unique_path(preferred);
+        // Always overwrite same path (no _2 suffix)
+        let path = format_dir.join(format!("{base}.{}", format.ext()));
 
         let write_result = match format {
             ExportFormat::Txt => write_txt(&path, &sid, &display, &messages, &names),
@@ -692,6 +803,9 @@ pub fn export_all(
         }
     }
 
+    let when = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let _ = write_export_log(output_dir, format, &when, success, fail);
+
     on_progress(ExportProgress {
         current: total,
         total,
@@ -706,6 +820,10 @@ pub fn export_all(
         "failed": failed,
         "files": outputs,
         "outputDir": output_dir.to_string_lossy(),
+        "formatDir": format_dir.to_string_lossy(),
+        "formatFolder": format.folder_name(),
+        "exportLog": output_dir.join(EXPORT_LOG_NAME).to_string_lossy(),
+        "exportedAt": when,
     }))
 }
 
@@ -860,6 +978,61 @@ mod tests {
         assert!(text.contains("会话: Max Shuang"));
         assert!(text.contains("Max Shuang: ok"), "body was:\n{text}");
         assert!(!text.contains("[其他]"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_folders_are_uppercase() {
+        assert_eq!(ExportFormat::Txt.folder_name(), "TXT");
+        assert_eq!(ExportFormat::Json.folder_name(), "JSON");
+    }
+
+    #[test]
+    fn export_log_merges_formats() {
+        let dir = std::env::temp_dir().join(format!("weport-log-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        write_export_log(&dir, ExportFormat::Txt, "2026-01-01 12:00:00", 10, 0).unwrap();
+        write_export_log(&dir, ExportFormat::Json, "2026-01-02 13:00:00", 5, 1).unwrap();
+        let (t, j) = parse_export_log(&dir.join(EXPORT_LOG_NAME));
+        assert!(t.unwrap().contains("2026-01-01"));
+        assert!(j.unwrap().contains("2026-01-02"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_export_library_removes_subdirs_and_log() {
+        let dir = std::env::temp_dir().join(format!("weport-clear-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("TXT")).unwrap();
+        fs::create_dir_all(dir.join("JSON")).unwrap();
+        fs::write(dir.join("TXT").join("a.txt"), "x").unwrap();
+        fs::write(dir.join(EXPORT_LOG_NAME), "TXT: hi\n").unwrap();
+        let r = clear_export_library(&dir).unwrap();
+        assert!(r["success"].as_bool().unwrap());
+        assert!(!dir.join("TXT").exists());
+        assert!(!dir.join("JSON").exists());
+        assert!(!dir.join(EXPORT_LOG_NAME).exists());
+        assert!(dir.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overwrite_writes_same_path() {
+        let dir = std::env::temp_dir().join(format!("weport-ow-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let sub = dir.join("TXT");
+        fs::create_dir_all(&sub).unwrap();
+        let path = sub.join("私聊_Test.txt");
+        let names = HashMap::new();
+        let m1 = vec![json!({"message_content":"first","local_type":"1","is_send":"1"})];
+        let m2 = vec![json!({"message_content":"second","local_type":"1","is_send":"1"})];
+        write_txt(&path, "wxid_x", "Test", &m1, &names).unwrap();
+        write_txt(&path, "wxid_x", "Test", &m2, &names).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("second"));
+        assert!(!text.contains("first"));
+        assert!(!sub.join("私聊_Test_2.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
