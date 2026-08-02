@@ -2,7 +2,10 @@ mod engine;
 mod export;
 mod key;
 mod paths;
+mod settings;
 mod wcdb;
+mod wcdb_native;
+mod wcdb_worker;
 
 use engine::{
     accounts, detect, diagnose_resources, extract_key, export_all_sessions, EngineError,
@@ -10,6 +13,7 @@ use engine::{
 };
 use paths::AccountInfo;
 use serde_json::Value;
+use settings::{load_settings, save_settings, AppSettings};
 use tauri::Manager;
 
 #[tauri::command]
@@ -40,6 +44,16 @@ async fn extract_db_key(
 #[tauri::command]
 async fn diagnose_native(app: tauri::AppHandle) -> Result<Value, EngineError> {
     Ok(diagnose_resources(&app))
+}
+
+#[tauri::command]
+fn get_settings() -> AppSettings {
+    load_settings()
+}
+
+#[tauri::command]
+fn set_settings(settings: AppSettings) -> Result<(), EngineError> {
+    save_settings(&settings).map_err(EngineError::Message)
 }
 
 #[tauri::command]
@@ -90,6 +104,8 @@ pub fn run() {
             scan_accounts,
             extract_db_key,
             diagnose_native,
+            get_settings,
+            set_settings,
             export_all
         ])
         .setup(|app| {

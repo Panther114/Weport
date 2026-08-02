@@ -116,9 +116,56 @@ export default function App() {
     }
   }, [pushToast, refreshAccounts])
 
+  const persist = useCallback(
+    (patch: Partial<{ dbPath: string; decryptKey: string; exportPath: string; selectedWxid: string; format: Format }>) => {
+      const next = {
+        dbPath: patch.dbPath ?? dbPath,
+        decryptKey: patch.decryptKey ?? decryptKey,
+        exportPath: patch.exportPath ?? exportPath,
+        selectedWxid: patch.selectedWxid ?? selectedWxid,
+        format: patch.format ?? format
+      }
+      void invoke('set_settings', {
+        settings: {
+          dbPath: next.dbPath,
+          decryptKey: next.decryptKey,
+          exportPath: next.exportPath,
+          selectedWxid: next.selectedWxid,
+          format: next.format
+        }
+      }).catch(() => undefined)
+    },
+    [dbPath, decryptKey, exportPath, selectedWxid, format]
+  )
+
   useEffect(() => {
     void getVersion().then(setVersion).catch(() => undefined)
-    void detectDb()
+
+    // Restore persisted settings first
+    ;(async () => {
+      try {
+        const s = await invoke<{
+          dbPath?: string
+          decryptKey?: string
+          exportPath?: string
+          selectedWxid?: string
+          format?: string
+        }>('get_settings')
+        if (s.dbPath) setDbPath(s.dbPath)
+        if (s.decryptKey) setDecryptKey(s.decryptKey)
+        if (s.exportPath) setExportPath(s.exportPath)
+        if (s.selectedWxid) setSelectedWxid(s.selectedWxid)
+        if (s.format === 'json' || s.format === 'txt') setFormat(s.format)
+        if (s.dbPath) {
+          await refreshAccounts(s.dbPath)
+          if (s.selectedWxid) setSelectedWxid(s.selectedWxid)
+        } else {
+          await detectDb()
+        }
+      } catch {
+        await detectDb()
+      }
+    })()
 
     const unsubs = [
       listen<ExportProgress>('export-progress', (event) => {
@@ -151,7 +198,16 @@ export default function App() {
       unsubs.forEach((p) => void p.then((u) => u()))
       toastTimers.current.forEach((t) => window.clearTimeout(t))
     }
-  }, [detectDb, pushToast])
+  }, [detectDb, pushToast, refreshAccounts])
+
+  // Persist on meaningful changes (debounced via effect)
+  useEffect(() => {
+    if (!dbPath && !decryptKey && !exportPath) return
+    const t = window.setTimeout(() => {
+      persist({})
+    }, 400)
+    return () => window.clearTimeout(t)
+  }, [dbPath, decryptKey, exportPath, selectedWxid, format, persist])
 
   useEffect(() => {
     let cancelled = false
@@ -302,6 +358,27 @@ export default function App() {
     }
   }
 
+  async function checkForUpdates(fromAbout = false) {
+    setUpdateBusy(true)
+    try {
+      const update = await check()
+      if (!update) {
+        pushToast('ok', '已是最新版本', `当前 v${version}`)
+        setUpdateInfo(null)
+        if (fromAbout) {
+          // keep about open
+        }
+        return
+      }
+      setUpdateInfo({ version: update.version, body: update.body || undefined })
+      pushToast('info', `发现新版本 v${update.version}`, '点击更新横幅或下方按钮安装')
+    } catch (e) {
+      pushToast('err', '检查更新失败', String(e))
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
   async function installUpdate() {
     setUpdateBusy(true)
     try {
@@ -311,14 +388,15 @@ export default function App() {
         setUpdateInfo(null)
         return
       }
-      pushToast('info', `正在下载 v${update.version}…`)
+      pushToast('info', `正在下载 v${update.version}…`, '下载完成后将自动安装并重启', 8000)
       await update.downloadAndInstall()
-      pushToast('ok', '更新已安装', '即将重启…')
+      pushToast('ok', '更新已安装', '正在重启…')
       await relaunch()
     } catch (e) {
-      pushToast('err', '更新失败', String(e))
+      pushToast('err', '更新失败', String(e), 10000)
     } finally {
       setUpdateBusy(false)
+      setBusyLabel('')
     }
   }
 
@@ -620,10 +698,25 @@ export default function App() {
             <h3>Weport v{version}</h3>
             <p>
               轻量纯 Tauri 微信聊天记录导出工具。读取本机微信 4.x 数据，导出全部私聊与群聊为 TXT / JSON。
-              支持 CLI 与 GUI，内置自动更新。
             </p>
-            <p style={{ marginTop: 8 }}>数据仅在本地处理，不会上传。</p>
-            <div className="modal-actions">
+            <p style={{ marginTop: 8 }}>数据仅在本地处理。路径与密钥会保存在本机，关闭应用后自动恢复。</p>
+            <p style={{ marginTop: 8, fontSize: 12, color: 'var(--text-faint)' }}>
+              更新源：GitHub Releases (Panther114/Weport)
+            </p>
+            <div className="modal-actions" style={{ flexWrap: 'wrap' }}>
+              <button
+                className="secondary-btn"
+                type="button"
+                disabled={updateBusy}
+                onClick={() => void checkForUpdates(true)}
+              >
+                {updateBusy ? '检查中…' : '检查更新'}
+              </button>
+              {updateInfo && (
+                <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
+                  安装 v{updateInfo.version}
+                </button>
+              )}
               <button className="secondary-btn" type="button" onClick={() => setAboutOpen(false)}>
                 关闭
               </button>

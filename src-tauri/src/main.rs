@@ -5,7 +5,10 @@ mod cli_update;
 mod export;
 mod key;
 mod paths;
+mod settings;
 mod wcdb;
+mod wcdb_native;
+mod wcdb_worker;
 
 use serde_json::json;
 use std::env;
@@ -226,6 +229,12 @@ fn run_cli(args: &[String]) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    // WCDB host mode: process MUST be named WeFlow.exe (dll security check).
+    if args.iter().any(|a| a == "--wcdb-worker") {
+        wcdb_worker::run_worker_loop();
+    }
+
     if is_cli_invocation(&args) {
         std::process::exit(run_cli(&args));
     }
