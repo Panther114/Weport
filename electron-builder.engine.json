@@ -1,0 +1,70 @@
+{
+  "appId": "com.weport.engine",
+  "productName": "weport-engine",
+  "artifactName": "${productName}-${version}.${ext}",
+  "directories": {
+    "output": "release/engine"
+  },
+  "files": [
+    "dist-electron/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "dist-electron/main.js",
+    "name": "weport-engine",
+    "productName": "weport-engine"
+  },
+  "extraResources": [
+    {
+      "from": "resources/",
+      "to": "resources/",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "electron/assets/wasm/",
+      "to": "assets/wasm/"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "dir",
+        "arch": ["x64"]
+      }
+    ],
+    "executableName": "weport-engine",
+    "signAndEditExecutable": false,
+    "extraFiles": [
+      {
+        "from": "resources/runtime/win32/msvcp140.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/runtime/win32/msvcp140_1.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/runtime/win32/vcruntime140.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/runtime/win32/vcruntime140_1.dll",
+        "to": "."
+      }
+    ]
+  },
+  "asar": true,
+  "asarUnpack": [
+    "node_modules/silk-wasm/**/*",
+    "node_modules/sherpa-onnx-node/**/*",
+    "node_modules/sherpa-onnx-*/*",
+    "node_modules/sherpa-onnx-*/**/*",
+    "node_modules/ffmpeg-static/**/*",
+    "resources/wedecrypt/**/*.node"
+  ],
+  "afterPack": "scripts/after-pack.cjs",
+  "forceCodeSigning": false,
+  "npmRebuild": false
+}
