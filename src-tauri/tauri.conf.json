@@ -45,7 +45,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/**/*"
+      "resources/native/win32/x64/**/*"
     ],
     "windows": {
       "digestAlgorithm": "sha256",
@@ -62,8 +62,7 @@
         "type": "downloadBootstrapper",
         "silent": true
       }
-    },
-    "externalBin": []
+    }
   },
   "plugins": {
     "updater": {

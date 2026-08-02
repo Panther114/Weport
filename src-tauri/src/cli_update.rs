@@ -204,7 +204,7 @@ File names:
 
 Examples:
   weport detect
-  weport export --db "C:\Users\me\Documents\xwechat_files" --wxid wxid_xxx --key <hex> --out D:\export --format txt --all
+  weport export --db "C:\\Users\\me\\Documents\\xwechat_files" --wxid wxid_xxx --key <hex> --out D:\\export --format txt
   weport update --install
 "#
     );

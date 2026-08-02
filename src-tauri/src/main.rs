@@ -2,19 +2,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cli_update;
+mod export;
+mod key;
+mod paths;
+mod wcdb;
 
+use serde_json::json;
 use std::env;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 fn is_cli_invocation(args: &[String]) -> bool {
     if args.len() <= 1 {
         return false;
     }
-    let first = args[1].as_str();
-    // GUI launch flags from OS / shortcuts
     matches!(
-        first,
+        args[1].as_str(),
         "help"
             | "-h"
             | "--help"
@@ -24,147 +26,208 @@ fn is_cli_invocation(args: &[String]) -> bool {
             | "detect"
             | "accounts"
             | "key"
-            | "image-key"
-            | "config"
-            | "config-set"
-            | "connect"
-            | "sessions"
             | "export"
             | "update"
             | "cli"
-    ) || first.starts_with('-') && first != "--"
+    )
 }
 
-fn resolve_engine_exe() -> Option<PathBuf> {
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidates = [
-                dir.join("engine").join("weport-engine.exe"),
-                dir.join("resources")
-                    .join("engine")
-                    .join("weport-engine.exe"),
-                dir.join("resources")
-                    .join("engine")
-                    .join("win-unpacked")
-                    .join("weport-engine.exe"),
-            ];
-            for c in candidates {
-                if c.exists() {
-                    return Some(c);
-                }
-            }
+fn flag(args: &[String], name: &str) -> Option<String> {
+    let key = format!("--{name}");
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == key {
+            return args.get(i + 1).cloned();
         }
-    }
-
-    // Dev layout
-    let cwd = env::current_dir().ok()?;
-    let roots = [
-        cwd.clone(),
-        cwd.join(".."),
-        cwd.join("src-tauri").join(".."),
-    ];
-    for root in roots {
-        let c = root
-            .join("release")
-            .join("engine")
-            .join("win-unpacked")
-            .join("weport-engine.exe");
-        if c.exists() {
-            return Some(c);
+        if let Some(rest) = args[i].strip_prefix(&format!("{key}=")) {
+            return Some(rest.to_string());
         }
+        i += 1;
     }
     None
 }
 
-fn run_engine_cli(args: &[String]) -> i32 {
-    // Built-in update / help / version handled here when possible
-    if args.len() >= 2 {
-        match args[1].as_str() {
-            "help" | "-h" | "--help" => {
-                cli_update::print_cli_help();
-                return 0;
-            }
-            "version" | "-V" | "--version" => {
-                println!("weport {}", env!("CARGO_PKG_VERSION"));
-                return 0;
-            }
-            "update" => {
-                let install = args.iter().any(|a| a == "--install" || a == "install");
-                let yes = args.iter().any(|a| a == "-y" || a == "--yes");
-                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-                let result = if install {
-                    rt.block_on(cli_update::perform_update(yes))
-                } else {
-                    rt.block_on(cli_update::check_update())
-                };
-                return match result {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        eprintln!("[update] {e}");
-                        1
-                    }
-                };
-            }
-            "cli" => {
-                // strip "cli" and forward
-                return run_engine_cli_forward(&args[2..]);
-            }
-            _ => {}
-        }
-    }
-    run_engine_cli_forward(&args[1..])
+fn has_flag(args: &[String], name: &str) -> bool {
+    args.iter()
+        .any(|a| a == &format!("--{name}") || a == name || a == &format!("-{name}"))
 }
 
-fn run_engine_cli_forward(engine_args: &[String]) -> i32 {
-    if let Some(engine) = resolve_engine_exe() {
-        let mut cmd = Command::new(&engine);
-        cmd.args(engine_args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        return match cmd.status() {
-            Ok(status) => status.code().unwrap_or(1),
-            Err(e) => {
-                eprintln!("Failed to start engine {}: {e}", engine.display());
-                1
-            }
-        };
-    }
-
-    // Dev fallback: node scripts/weport-cli.cjs
-    let project = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let candidates = [
-        project.join("scripts").join("weport-cli.cjs"),
-        project.join("..").join("scripts").join("weport-cli.cjs"),
-    ];
-    for cli in candidates {
-        if cli.exists() {
-            let mut cmd = Command::new("node");
-            cmd.arg(&cli)
-                .args(engine_args)
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit());
-            return match cmd.status() {
-                Ok(status) => status.code().unwrap_or(1),
-                Err(e) => {
-                    eprintln!("Failed to start node CLI: {e}");
-                    1
+fn resource_root() -> PathBuf {
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for c in [
+                dir.join("resources"),
+                dir.to_path_buf(),
+                dir.join("..").join("resources"),
+            ] {
+                if c
+                    .join("native")
+                    .join("win32")
+                    .join("x64")
+                    .join("wcdb_api.dll")
+                    .exists()
+                    || c
+                        .join("wcdb")
+                        .join("win32")
+                        .join("x64")
+                        .join("wcdb_api.dll")
+                        .exists()
+                {
+                    return c;
                 }
-            };
+            }
         }
     }
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for root in [cwd.clone(), cwd.join("..")] {
+        let p = root.join("src-tauri").join("resources");
+        if p
+            .join("native")
+            .join("win32")
+            .join("x64")
+            .join("wcdb_api.dll")
+            .exists()
+        {
+            return p;
+        }
+        let p2 = root.join("resources");
+        if p2
+            .join("wcdb")
+            .join("win32")
+            .join("x64")
+            .join("wcdb_api.dll")
+            .exists()
+        {
+            return p2;
+        }
+    }
+    cwd
+}
 
-    eprintln!("Weport engine not found. Install Weport or run from a built release.");
-    eprintln!("Try: weport help");
-    1
+fn run_cli(args: &[String]) -> i32 {
+    match args.get(1).map(|s| s.as_str()).unwrap_or("help") {
+        "help" | "-h" | "--help" => {
+            cli_update::print_cli_help();
+            0
+        }
+        "version" | "-V" | "--version" => {
+            println!("weport {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        "update" => {
+            let install = has_flag(args, "install") || args.iter().any(|a| a == "--install");
+            let yes = has_flag(args, "yes") || args.iter().any(|a| a == "-y" || a == "--yes");
+            let rt = tokio::runtime::Runtime::new().expect("tokio");
+            let result = if install {
+                rt.block_on(cli_update::perform_update(yes))
+            } else {
+                rt.block_on(cli_update::check_update())
+            };
+            match result {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("[update] {e}");
+                    1
+                }
+            }
+        }
+        "detect" => match paths::detect_db_path() {
+            Ok(path) => {
+                println!("{}", json!({ "success": true, "path": path }));
+                0
+            }
+            Err(e) => {
+                println!("{}", json!({ "success": false, "error": e }));
+                1
+            }
+        },
+        "accounts" => {
+            let db = flag(args, "db").unwrap_or_default();
+            if db.is_empty() {
+                eprintln!("Missing --db <path>");
+                return 1;
+            }
+            let list = paths::scan_accounts(std::path::Path::new(&db));
+            println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default());
+            0
+        }
+        "key" => {
+            let root = resource_root();
+            let dll = paths::resolve_key_dll(&root);
+            match key::extract_db_key(&dll, std::time::Duration::from_secs(180), |msg| {
+                eprintln!("[key] {msg}");
+            }) {
+                Ok(k) => {
+                    println!("{}", json!({ "success": true, "key": k }));
+                    0
+                }
+                Err(e) => {
+                    println!("{}", json!({ "success": false, "error": e }));
+                    1
+                }
+            }
+        }
+        "export" => {
+            let db = flag(args, "db").unwrap_or_default();
+            let wxid = flag(args, "wxid").unwrap_or_default();
+            let key_hex = flag(args, "key").unwrap_or_default();
+            let out = flag(args, "out").unwrap_or_default();
+            let format = flag(args, "format").unwrap_or_else(|| "txt".into());
+            if db.is_empty() || wxid.is_empty() || key_hex.is_empty() || out.is_empty() {
+                eprintln!(
+                    "Usage: weport export --db <path> --wxid <id> --key <hex> --out <dir> [--format txt|json]"
+                );
+                return 1;
+            }
+            let root = resource_root();
+            let account = match paths::resolve_account_dir(std::path::Path::new(&db), &wxid) {
+                Some(p) => p,
+                None => {
+                    eprintln!("Account directory not found");
+                    return 1;
+                }
+            };
+            let _lock = wcdb::WCDB_LOCK.lock().unwrap();
+            let handle = match wcdb::WcdbHandle::open(&root, &account, &key_hex, &wxid) {
+                Ok(h) => h,
+                Err(e) => {
+                    println!("{}", json!({ "success": false, "error": e }));
+                    return 1;
+                }
+            };
+            let fmt = export::ExportFormat::from_str(&format);
+            match export::export_all(&handle, std::path::Path::new(&out), fmt, |p| {
+                eprintln!(
+                    "[export] {} {}/{} {}",
+                    p.phase_label, p.current, p.total, p.current_session
+                );
+            }) {
+                Ok(v) => {
+                    println!("{v}");
+                    if v.get("success").and_then(|x| x.as_bool()).unwrap_or(false) {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(e) => {
+                    println!("{}", json!({ "success": false, "error": e }));
+                    1
+                }
+            }
+        }
+        other => {
+            eprintln!("Unknown command: {other}");
+            cli_update::print_cli_help();
+            1
+        }
+    }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if is_cli_invocation(&args) {
-        let code = run_engine_cli(&args);
-        std::process::exit(code);
+        std::process::exit(run_cli(&args));
     }
     weport_lib::run();
 }

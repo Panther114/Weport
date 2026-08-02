@@ -1,17 +1,26 @@
 mod engine;
+mod export;
+mod key;
+mod paths;
+mod wcdb;
 
-use engine::{AccountInfo, EngineError, EngineState};
+use engine::{accounts, detect, extract_key, export_all_sessions, EngineError, EngineState};
+use paths::AccountInfo;
 use serde_json::Value;
 use tauri::Manager;
 
 #[tauri::command]
 async fn detect_db_path(app: tauri::AppHandle) -> Result<Value, EngineError> {
-    engine::detect_db_path(app).await
+    tokio::task::spawn_blocking(move || detect(&app))
+        .await
+        .map_err(|e| EngineError::Message(e.to_string()))?
 }
 
 #[tauri::command]
 async fn scan_accounts(app: tauri::AppHandle, db_path: String) -> Result<Vec<AccountInfo>, EngineError> {
-    engine::scan_accounts(app, db_path).await
+    tokio::task::spawn_blocking(move || accounts(&app, db_path))
+        .await
+        .map_err(|e| EngineError::Message(e.to_string()))?
 }
 
 #[tauri::command]
@@ -20,7 +29,9 @@ async fn extract_db_key(
     db_path: String,
     wxid: String,
 ) -> Result<Value, EngineError> {
-    engine::extract_db_key(app, db_path, wxid).await
+    tokio::task::spawn_blocking(move || extract_key(&app, db_path, wxid))
+        .await
+        .map_err(|e| EngineError::Message(e.to_string()))?
 }
 
 #[tauri::command]
@@ -34,15 +45,27 @@ async fn export_all(
     format: String,
 ) -> Result<Value, EngineError> {
     {
-        let mut running = state.running.lock().await;
+        let mut running = state
+            .running
+            .lock()
+            .map_err(|_| EngineError::Message("状态锁失败".into()))?;
         if *running {
             return Err(EngineError::Message("已有导出任务在进行中".into()));
         }
         *running = true;
     }
-    let result = engine::export_all(app, db_path, wxid, decrypt_key, output_dir, format).await;
-    *state.running.lock().await = false;
-    result
+
+    let result = tokio::task::spawn_blocking(move || {
+        export_all_sessions(&app, db_path, wxid, decrypt_key, output_dir, format)
+    })
+    .await
+    .map_err(|e| EngineError::Message(e.to_string()));
+
+    if let Ok(mut running) = state.running.lock() {
+        *running = false;
+    }
+
+    result?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,7 +84,6 @@ pub fn run() {
             export_all
         ])
         .setup(|app| {
-            // Ensure main window title
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Weport");
             }
