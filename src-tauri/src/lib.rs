@@ -4,7 +4,10 @@ mod key;
 mod paths;
 mod wcdb;
 
-use engine::{accounts, detect, extract_key, export_all_sessions, EngineError, EngineState};
+use engine::{
+    accounts, detect, diagnose_resources, extract_key, export_all_sessions, EngineError,
+    EngineState,
+};
 use paths::AccountInfo;
 use serde_json::Value;
 use tauri::Manager;
@@ -32,6 +35,11 @@ async fn extract_db_key(
     tokio::task::spawn_blocking(move || extract_key(&app, db_path, wxid))
         .await
         .map_err(|e| EngineError::Message(e.to_string()))?
+}
+
+#[tauri::command]
+async fn diagnose_native(app: tauri::AppHandle) -> Result<Value, EngineError> {
+    Ok(diagnose_resources(&app))
 }
 
 #[tauri::command]
@@ -81,6 +89,7 @@ pub fn run() {
             detect_db_path,
             scan_accounts,
             extract_db_key,
+            diagnose_native,
             export_all
         ])
         .setup(|app| {

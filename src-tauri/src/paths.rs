@@ -1,8 +1,9 @@
 //! Locate WeChat 4.x data directories and account folders.
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,12 +17,11 @@ pub struct AccountInfo {
 pub fn default_wechat_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        // WeChat 4.x default on Windows
         roots.push(home.join("Documents").join("xwechat_files"));
-        // Alternate Documents location
-        if let Ok(user_profile) = std::env::var("USERPROFILE") {
-            roots.push(PathBuf::from(user_profile).join("Documents").join("xwechat_files"));
-        }
+        roots.push(home.join("Documents").join("WeChat Files")); // legacy name sometimes
+    }
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        roots.push(PathBuf::from(&user_profile).join("Documents").join("xwechat_files"));
     }
     roots
 }
@@ -50,7 +50,113 @@ pub fn find_account_dirs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Fast BFS for folders named `xwechat_files` up to `max_depth` under common roots.
+/// Skips system-heavy trees. Time-budgeted so UI stays responsive.
+pub fn find_xwechat_files_shallow(max_depth: usize, budget: Duration) -> Vec<PathBuf> {
+    let start = Instant::now();
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut seeds: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        seeds.push(home.clone());
+        seeds.push(home.join("Documents"));
+        seeds.push(home.join("Desktop"));
+        seeds.push(home.join("Downloads"));
+        if let Some(parent) = home.parent() {
+            // e.g. C:\Users — scan sibling profiles shallowly
+            seeds.push(parent.to_path_buf());
+        }
+    }
+    // Drive roots (Windows)
+    for letter in b'C'..=b'G' {
+        let root = PathBuf::from(format!("{}:\\", letter as char));
+        if root.is_dir() {
+            seeds.push(root);
+        }
+    }
+
+    // BFS queue: (path, depth_from_seed)
+    let mut q: VecDeque<(PathBuf, usize)> = VecDeque::new();
+    for s in seeds {
+        if seen.insert(s.clone()) {
+            q.push_back((s, 0));
+        }
+    }
+
+    let skip_name = |name: &str| -> bool {
+        let lower = name.to_lowercase();
+        matches!(
+            lower.as_str(),
+            "windows"
+                | "program files"
+                | "program files (x86)"
+                | "programdata"
+                | "$recycle.bin"
+                | "system volume information"
+                | "node_modules"
+                | ".git"
+                | "appdata"
+                | "intel"
+                | "msocache"
+                | "perflogs"
+                | "recovery"
+                | "config.msi"
+        ) || lower.starts_with('$')
+            || lower.ends_with(".app")
+    };
+
+    while let Some((dir, depth)) = q.pop_front() {
+        if start.elapsed() > budget {
+            break;
+        }
+        if depth > max_depth {
+            continue;
+        }
+
+        // Match current dir name
+        if let Some(name) = dir.file_name().and_then(|s| s.to_str()) {
+            if name.eq_ignore_ascii_case("xwechat_files") {
+                if dir.is_dir() && !found.iter().any(|p| p == &dir) {
+                    found.push(dir.clone());
+                }
+            }
+        }
+
+        if depth == max_depth {
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if start.elapsed() > budget {
+                break;
+            }
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if skip_name(&name) {
+                continue;
+            }
+            // Under Users, only walk one more into profile subfolders we care about
+            if depth == 0 && dir.ends_with("Users") {
+                // profile folders only
+            }
+            if seen.insert(path.clone()) {
+                q.push_back((path, depth + 1));
+            }
+        }
+    }
+
+    found
+}
+
 pub fn detect_db_path() -> Result<PathBuf, String> {
+    // 1) Defaults first
     for root in default_wechat_roots() {
         if !root.is_dir() {
             continue;
@@ -58,8 +164,29 @@ pub fn detect_db_path() -> Result<PathBuf, String> {
         if !find_account_dirs(&root).is_empty() || is_account_dir(&root) {
             return Ok(root);
         }
+        // empty xwechat_files still useful as a hit
+        if root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| n.eq_ignore_ascii_case("xwechat_files"))
+            .unwrap_or(false)
+        {
+            return Ok(root);
+        }
     }
-    Err("未能自动检测到微信数据库目录（默认 Documents\\xwechat_files）".into())
+
+    // 2) Fast shallow search (depth 3, ~2.5s budget)
+    let hits = find_xwechat_files_shallow(3, Duration::from_millis(2500));
+    for hit in &hits {
+        if !find_account_dirs(hit).is_empty() || is_account_dir(hit) {
+            return Ok(hit.clone());
+        }
+    }
+    if let Some(first) = hits.into_iter().next() {
+        return Ok(first);
+    }
+
+    Err("未能自动检测到微信数据目录（默认 Documents\\xwechat_files，并已浅层搜索 xwechat_files）".into())
 }
 
 fn mtime_secs(path: &Path) -> Option<i64> {
@@ -91,40 +218,6 @@ fn parse_global_config(root: &Path) -> Option<(String, String, String)> {
     let cipher = Aes128CfbDec::new_from_slices(&key, &iv).ok()?;
     cipher.decrypt(&mut data);
 
-    let extract = |name: &str| -> String {
-        let key_bytes = name.as_bytes();
-        let Some(idx) = data.windows(key_bytes.len()).position(|w| w == key_bytes) else {
-            return String::new();
-        };
-        let mut offset = idx + key_bytes.len();
-        // skip two varints (mmkv layout)
-        for _ in 0..2 {
-            let mut shift = 0u32;
-            let mut value = 0u32;
-            while offset < data.len() && shift < 32 {
-                let b = data[offset];
-                offset += 1;
-                value |= ((b & 0x7f) as u32) << shift;
-                if b & 0x80 == 0 {
-                    break;
-                }
-                shift += 7;
-            }
-            if shift == 0 {
-                break;
-            }
-            // second varint is string length — capture on second loop
-            if name == "__len_probe__" {
-                let _ = value;
-            }
-        }
-        // re-parse more carefully
-        let _ = offset;
-        String::new()
-    };
-    let _ = extract;
-
-    // Simpler string extraction: search key then read following printable/utf8 length-prefixed region
     let get_mmkv = |key_name: &str| -> String {
         let kb = key_name.as_bytes();
         let Some(idx) = data.windows(kb.len()).position(|w| w == kb) else {
@@ -192,7 +285,6 @@ pub fn scan_accounts(root: &Path) -> Vec<AccountInfo> {
         if name.is_empty() || name == "all_users" || name.starts_with('.') {
             continue;
         }
-        // Skip obvious non-account folders
         if name == "Backup" || name == "WMPF" {
             continue;
         }
@@ -235,7 +327,6 @@ pub fn resolve_account_dir(db_root: &Path, wxid: &str) -> Option<PathBuf> {
     if is_account_dir(&direct) {
         return Some(direct);
     }
-    // suffix variants wxid_xxx_1234
     if let Ok(entries) = fs::read_dir(db_root) {
         let lower = wxid.to_lowercase();
         for entry in entries.flatten() {
@@ -292,72 +383,63 @@ fn find_named_file(dir: &Path, name: &str, max_depth: usize) -> Option<PathBuf> 
     None
 }
 
-pub fn resource_native_dir(app_resource_dir: &Path) -> PathBuf {
-    // Prefer bundled slim layout
+/// Resolve directory containing wcdb_api.dll (WeFlow-compatible layouts).
+pub fn resolve_wcdb_dir(resource_root: &Path) -> PathBuf {
     let candidates = [
-        app_resource_dir.join("native"),
-        app_resource_dir.join("resources").join("native"),
-        app_resource_dir
+        // WeFlow layout
+        resource_root
+            .join("wcdb")
+            .join("win32")
+            .join("x64"),
+        resource_root
             .join("resources")
             .join("wcdb")
             .join("win32")
-            .join("x64")
-            .parent() // go up — not ideal
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| app_resource_dir.to_path_buf()),
+            .join("x64"),
+        // Slim layout used earlier
+        resource_root.join("native").join("win32").join("x64"),
+        resource_root
+            .join("resources")
+            .join("native")
+            .join("win32")
+            .join("x64"),
+        resource_root.to_path_buf(),
     ];
-    for c in candidates {
-        if c.join("wcdb_api.dll").exists() || c.join("wcdb").exists() {
-            return c;
+    for c in &candidates {
+        if c.join("wcdb_api.dll").exists() {
+            return c.clone();
         }
     }
-    // Dev: project resources
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for root in [cwd.clone(), cwd.join("..")] {
-        let p = root.join("resources").join("native").join("win32").join("x64");
-        if p.join("wcdb_api.dll").exists() {
-            return p;
-        }
-        let p2 = root.join("resources").join("wcdb").join("win32").join("x64");
-        if p2.join("wcdb_api.dll").exists() {
-            return p2.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
-        }
-    }
-    app_resource_dir.to_path_buf()
-}
-
-pub fn resolve_wcdb_dir(resource_root: &Path) -> PathBuf {
-    let slim = resource_root.join("native").join("win32").join("x64");
-    if slim.join("wcdb_api.dll").exists() {
-        return slim;
-    }
-    let classic = resource_root
-        .join("wcdb")
-        .join("win32")
-        .join("x64");
-    if classic.join("wcdb_api.dll").exists() {
-        return classic;
-    }
-    // resource_root itself may be the dll dir
-    if resource_root.join("wcdb_api.dll").exists() {
-        return resource_root.to_path_buf();
-    }
-    classic
+    candidates[0].clone()
 }
 
 pub fn resolve_key_dll(resource_root: &Path) -> PathBuf {
     let candidates = [
+        resource_root
+            .join("key")
+            .join("win32")
+            .join("x64")
+            .join("wx_key.dll"),
+        resource_root
+            .join("resources")
+            .join("key")
+            .join("win32")
+            .join("x64")
+            .join("wx_key.dll"),
         resource_root
             .join("native")
             .join("win32")
             .join("x64")
             .join("wx_key.dll"),
         resource_root
-            .join("key")
+            .join("resources")
+            .join("native")
             .join("win32")
             .join("x64")
             .join("wx_key.dll"),
         resource_root.join("wx_key.dll"),
+        // same folder as wcdb
+        resolve_wcdb_dir(resource_root).join("wx_key.dll"),
     ];
     for c in &candidates {
         if c.exists() {

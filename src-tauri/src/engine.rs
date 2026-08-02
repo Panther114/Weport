@@ -38,47 +38,59 @@ impl Default for EngineState {
     }
 }
 
-fn resource_root(app: &AppHandle) -> PathBuf {
-    if let Ok(dir) = app.path().resource_dir() {
-        // Packaged: resources/native/win32/x64 is under resource_dir
-        if dir.join("native").join("win32").join("x64").join("wcdb_api.dll").exists() {
-            return dir;
-        }
-        if dir.join("wcdb_api.dll").exists() {
-            return dir;
-        }
-        // Sometimes files land in resource_dir/resources
-        if dir.join("resources").join("native").join("win32").join("x64").join("wcdb_api.dll").exists() {
-            return dir.join("resources");
-        }
-        return dir;
-    }
-    // Dev fallback
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for root in [cwd.clone(), cwd.join(".."), cwd.join("src-tauri").join("..")] {
-        if root
-            .join("src-tauri")
-            .join("resources")
+fn looks_like_resource_root(dir: &std::path::Path) -> bool {
+    dir.join("wcdb")
+        .join("win32")
+        .join("x64")
+        .join("wcdb_api.dll")
+        .exists()
+        || dir
             .join("native")
             .join("win32")
             .join("x64")
             .join("wcdb_api.dll")
             .exists()
-        {
-            return root.join("src-tauri").join("resources");
+        || dir.join("wcdb_api.dll").exists()
+}
+
+fn resource_root(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = app.path().resource_dir() {
+        if looks_like_resource_root(&dir) {
+            return dir;
         }
-        if root
-            .join("resources")
-            .join("wcdb")
-            .join("win32")
-            .join("x64")
-            .join("wcdb_api.dll")
-            .exists()
-        {
-            return root.join("resources");
+        if looks_like_resource_root(&dir.join("resources")) {
+            return dir.join("resources");
+        }
+        // Tauri may nest as resource_dir/wcdb/...
+        return dir;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for root in [cwd.clone(), cwd.join(".."), cwd.join("src-tauri").join("..")] {
+        let p = root.join("src-tauri").join("resources");
+        if looks_like_resource_root(&p) {
+            return p;
+        }
+        let p2 = root.join("resources");
+        if looks_like_resource_root(&p2) {
+            return p2;
         }
     }
     cwd
+}
+
+/// Public for diagnostics / UI
+pub fn diagnose_resources(app: &AppHandle) -> Value {
+    let root = resource_root(app);
+    let wcdb = crate::paths::resolve_wcdb_dir(&root);
+    let key = crate::paths::resolve_key_dll(&root);
+    json!({
+        "resourceRoot": root,
+        "wcdbDir": wcdb,
+        "wcdbApiExists": wcdb.join("wcdb_api.dll").exists(),
+        "wcdbCoreExists": wcdb.join("WCDB.dll").exists(),
+        "keyDll": key,
+        "keyExists": key.exists(),
+    })
 }
 
 pub fn detect(app: &AppHandle) -> Result<Value, EngineError> {
