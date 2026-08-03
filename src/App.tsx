@@ -40,19 +40,14 @@ let toastSeq = 1
 function MarkIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path
-        d="M5 7.5h14M5 12h9.5M5 16.5h12"
-        stroke="currentColor"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-      />
-      <circle cx="18.2" cy="12" r="2.4" fill="currentColor" />
+      <path d="M4 7h16M4 12h11M4 17h14" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="17" y="10.5" width="3" height="3" fill="currentColor" />
     </svg>
   )
 }
 
 export default function App() {
-  const [version, setVersion] = useState('0.4.1')
+  const [version, setVersion] = useState('0.4.2')
   const [dbPath, setDbPath] = useState('')
   const [exportPath, setExportPath] = useState('')
   const [format, setFormat] = useState<Format>('txt')
@@ -500,7 +495,7 @@ export default function App() {
           <div className="brand-text">
             <h1>Weport</h1>
             <p>
-              微信聊天记录导出 · v{version}
+              WeChat export · v{version}
               {busyLabel ? ` · ${busyLabel}` : ''}
             </p>
           </div>

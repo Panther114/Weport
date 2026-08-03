@@ -1,28 +1,23 @@
 # Weport DESIGN
 
 ## Mode
-Operate — task-first export console for Windows WeChat history.
+Operate — desktop WeChat export console.
 
 ## Thesis
-A precise dual-column instrument: locate local WeChat data on the left, dump every chat on the right. No marketing chrome — only control, status, and progress.
+Mission-control instrument: black void, white signal, zero decoration. Locate data left, launch export right.
 
 ## Visual world
-- Near-black graphite (`#07080b` base) with soft amber + cool-blue atmospheric glows
-- Single amber signal accent (`#e6a23c` → `#f3c06a`) for primary actions and selection
-- Glass-like panels: translucent fills, 16px radius, hairline borders, soft inset highlight
-- System UI type (Segoe UI Variable) + Cascadia Mono for paths
-- Subtle film grain overlay; restrained motion (enter, press scale 0.96)
+- **Palette:** pure black `#000` ground, white `#fff` text/CTA, gray rungs `#666` / `#a0a0a0` only
+- **Type:** project face `Weport` (`src/assets/fonts/weport.ttf`) for UI + mono paths; uppercase tracked labels
+- **Geometry:** 0–2px radius, 1px hairlines, full-bleed columns with a single vertical split
+- **Controls:** white fill primary (inverts on hover); outline secondary; no color status hues
+- **Motion:** opacity enter only; press scale `0.96–0.98`
 
 ## Signature
-Amber progress meter with live session name while exporting; segmented TXT/JSON format switch.
+White-on-black primary export bar + 2px progress line.
 
 ## Layout
-Two columns (~1080×720): data / account / key left; export library right. Primary export CTA pinned at bottom of right column; secondary “clear library” as danger action.
+Two equal columns under a thin topbar. Sections separated by hairlines, not cards-in-cards.
 
-## Export library layout (filesystem)
-```
-{output}/
-  TXT/           # text exports (overwrite on re-run)
-  JSON/          # json exports
-  export_log.txt # last run times for TXT and JSON
-```
+## Anti-reference
+Previous amber/glass graphite UI is discarded. No warm accents, blur panels, or soft pill chips.

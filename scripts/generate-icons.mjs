@@ -1,6 +1,5 @@
 /**
- * Generate Weport PNG/ICO icons without external deps (pure Node).
- * Creates a compact amber-on-graphite mark suitable for Windows installers.
+ * Generate Weport PNG/ICO icons — monochrome SpaceX-style mark.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -35,10 +34,8 @@ function createPng(size) {
   const height = size
   const raw = Buffer.alloc((width * 4 + 1) * height)
 
-  const darkInk = [22, 14, 6, 255]
-  const amberLo = [196, 120, 32, 255]
-  const amberHi = [243, 192, 106, 255]
-
+  const black = [0, 0, 0, 255]
+  const white = [255, 255, 255, 255]
   const smoothstep = (e0, e1, x) => {
     const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
     return t * t * (3 - 2 * t)
@@ -52,12 +49,11 @@ function createPng(size) {
       const nx = (x + 0.5) / width
       const ny = (y + 0.5) / height
 
-      // Superellipse-ish rounded square mask
-      const cx = (nx - 0.5) * 2
-      const cy = (ny - 0.5) * 2
-      const rr = Math.pow(Math.abs(cx), 3.6) + Math.pow(Math.abs(cy), 3.6)
-      const edge = smoothstep(0.78, 0.92, rr)
-      if (edge >= 1) {
+      // Hard rounded square (tech plate)
+      const pad = 0.06
+      const inside =
+        nx > pad && nx < 1 - pad && ny > pad && ny < 1 - pad
+      if (!inside) {
         raw[i] = 0
         raw[i + 1] = 0
         raw[i + 2] = 0
@@ -65,40 +61,44 @@ function createPng(size) {
         continue
       }
 
-      // Amber metal plate with vertical gradient + soft highlight
-      const g = 0.72 + 0.28 * (1 - ny)
-      const hi = smoothstep(0.12, 0.0, Math.hypot(nx - 0.32, ny - 0.28))
-      let px = [
-        Math.round(amberLo[0] * g + amberHi[0] * (1 - g) * 0.35 + 40 * hi),
-        Math.round(amberLo[1] * g + amberHi[1] * (1 - g) * 0.35 + 28 * hi),
-        Math.round(amberLo[2] * g + amberHi[2] * (1 - g) * 0.35 + 12 * hi),
-        255
-      ]
+      // Black field with white rim
+      let px = black
+      const rim = 0.09
+      if (
+        nx < pad + rim ||
+        nx > 1 - pad - rim ||
+        ny < pad + rim ||
+        ny > 1 - pad - rim
+      ) {
+        px = white
+      }
 
-      // Three export bars (optical weight)
+      // Three bars + signal square
       const bars = [
-        [0.33, 0.41, 0.26, 0.74],
-        [0.47, 0.55, 0.26, 0.6],
-        [0.61, 0.69, 0.26, 0.7]
+        [0.32, 0.4, 0.24, 0.76],
+        [0.46, 0.54, 0.24, 0.62],
+        [0.6, 0.68, 0.24, 0.72]
       ]
       for (const [y0, y1, x0, x1] of bars) {
         if (ny >= y0 && ny <= y1 && nx >= x0 && nx <= x1) {
-          px = darkInk
+          px = white
         }
       }
-      // Signal node
-      const dx = nx - 0.72
-      const dy = ny - 0.52
-      if (dx * dx + dy * dy < 0.011) {
-        px = darkInk
+      if (nx >= 0.7 && nx <= 0.8 && ny >= 0.46 && ny <= 0.56) {
+        px = white
       }
 
-      // Soft outer AA
-      const a = Math.round(255 * (1 - edge))
+      // Soft outer AA only
+      const edge = Math.min(
+        smoothstep(pad, pad + 0.01, nx),
+        smoothstep(pad, pad + 0.01, 1 - nx),
+        smoothstep(pad, pad + 0.01, ny),
+        smoothstep(pad, pad + 0.01, 1 - ny)
+      )
       raw[i] = px[0]
       raw[i + 1] = px[1]
       raw[i + 2] = px[2]
-      raw[i + 3] = a
+      raw[i + 3] = Math.round(255 * edge)
     }
   }
 
@@ -122,7 +122,6 @@ function createPng(size) {
 }
 
 function createIco(sizes) {
-  // ICO with embedded PNGs (Vista+)
   const images = sizes.map((s) => ({ size: s, png: createPng(s) }))
   const headerSize = 6
   const dirEntrySize = 16
@@ -151,7 +150,6 @@ function createIco(sizes) {
   return Buffer.concat([header, ...entries, ...blobs])
 }
 
-// Minimal ICNS (mac optional) — write PNG set only if needed; create placeholder icns via iconutil alternative: store pngs
 const png32 = createPng(32)
 const png128 = createPng(128)
 const png256 = createPng(256)
@@ -163,9 +161,7 @@ fs.writeFileSync(path.join(iconsDir, '128x128@2x.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.ico'), ico)
 
-// Tauri also accepts icon.icns — write a minimal multi-png icns
 function createIcns() {
-  // Use 'ic07' (128), 'ic08' (256), 'ic09' (512->use 256), 'ic12' (32@2x=64) simplified: only ic08 + ic07
   const entries = [
     { type: 'ic07', data: png128 },
     { type: 'ic08', data: png256 },
