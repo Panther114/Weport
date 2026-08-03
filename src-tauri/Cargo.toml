@@ -1,6 +1,6 @@
 [package]
 name = "weport"
-version = "0.5.3"
+version = "0.5.4"
 description = "Weport — lightweight WeChat chat history exporter (native egui)"
 authors = ["Panther114"]
 edition = "2021"

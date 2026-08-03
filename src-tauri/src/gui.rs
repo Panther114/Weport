@@ -102,10 +102,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
 fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
     style.spacing.indent = 10.0;
-    style.spacing.window_margin = Margin::same(10);
+    style.spacing.window_margin = Margin::same(12);
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.panel_fill = BG;
@@ -170,6 +170,7 @@ struct WeportApp {
     accounts: Vec<AccountInfo>,
     selected_wxid: String,
     decrypt_key: String,
+    account_keys: std::collections::HashMap<String, String>,
     show_key: bool,
     busy: bool,
     busy_label: String,
@@ -191,6 +192,13 @@ impl WeportApp {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
         let s = load_settings();
+        let account_keys = s.account_keys.clone();
+        // Current account's key wins; fall back to the legacy flat key.
+        let decrypt_key = account_keys
+            .get(&s.selected_wxid)
+            .cloned()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| s.decrypt_key.clone());
         let mut app = Self {
             db_path: s.db_path,
             export_path: s.export_path,
@@ -201,7 +209,8 @@ impl WeportApp {
             },
             accounts: Vec::new(),
             selected_wxid: s.selected_wxid,
-            decrypt_key: s.decrypt_key,
+            decrypt_key,
+            account_keys,
             show_key: false,
             busy: false,
             busy_label: String::new(),
@@ -242,13 +251,28 @@ impl WeportApp {
     }
 
     fn persist(&self) {
+        let mut account_keys = self.account_keys.clone();
+        // Always keep the current field under the selected account so an
+        // extracted / pasted key survives restarts, updates and account switches.
+        account_keys.insert(self.selected_wxid.clone(), self.decrypt_key.clone());
         let _ = save_settings(&AppSettings {
             db_path: self.db_path.clone(),
             decrypt_key: self.decrypt_key.clone(),
             export_path: self.export_path.clone(),
             selected_wxid: self.selected_wxid.clone(),
             format: self.format.clone(),
+            account_keys,
         });
+    }
+
+    fn select_account(&mut self, wxid: &str) {
+        self.selected_wxid = wxid.to_string();
+        self.decrypt_key = self
+            .account_keys
+            .get(wxid)
+            .cloned()
+            .unwrap_or_default();
+        self.persist();
     }
 
     fn refresh_export_log(&mut self) {
@@ -561,7 +585,10 @@ impl WeportApp {
                     self.accounts = list;
                     if n > 0 {
                         if !self.accounts.iter().any(|a| a.wxid == self.selected_wxid) {
-                            self.selected_wxid = self.accounts[0].wxid.clone();
+                            // Selected account disappeared — move to the newest one
+                            // and restore its stored key (never wipe the key).
+                            let first = self.accounts[0].wxid.clone();
+                            self.select_account(&first);
                         }
                         self.push_toast(0, format!("找到 {n} 个账号"), self.db_path.clone(), 3.0);
                     } else {
@@ -641,7 +668,7 @@ impl WeportApp {
             .fill(PANEL)
             .stroke(Stroke::new(1.0_f32, LINE))
             .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::symmetric(10, 8))
+            .inner_margin(Margin::symmetric(16, 12))
     }
 }
 
@@ -881,10 +908,10 @@ impl eframe::App for WeportApp {
         }
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(8, 6)))
+            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(40, 14)))
             .show(ctx, |ui| {
                 let full = ui.available_size();
-                let gap = 8.0;
+                let gap = 12.0;
                 let col_w = (full.x - gap) * 0.5;
 
                 ui.horizontal_top(|ui| {
@@ -926,14 +953,14 @@ impl WeportApp {
                 ui.label(RichText::new(right).size(12.0).color(TEXT_FAINT));
             });
         });
-        ui.add_space(3.0);
+        ui.add_space(5.0);
         let y = ui.cursor().top();
         ui.painter().hline(
             ui.max_rect().x_range(),
             y,
             Stroke::new(1.0_f32, LINE),
         );
-        ui.add_space(6.0);
+        ui.add_space(9.0);
     }
 
     fn ui_left(&mut self, ui: &mut egui::Ui) {
@@ -999,7 +1026,7 @@ impl WeportApp {
             });
         });
 
-        ui.add_space(6.0);
+        ui.add_space(12.0);
 
         // Accounts — name + wxid on one line
         WeportApp::panel_frame().show(ui, |ui| {
@@ -1077,16 +1104,14 @@ impl WeportApp {
                                 .response
                                 .interact(Sense::click());
                             if resp.clicked() && !self.busy {
-                                self.selected_wxid = acc.wxid;
-                                self.decrypt_key.clear();
-                                self.persist();
+                                self.select_account(&acc.wxid);
                             }
                         }
                     });
             }
         });
 
-        ui.add_space(6.0);
+        ui.add_space(12.0);
 
         // Key — compact steps
         WeportApp::panel_frame().show(ui, |ui| {
@@ -1250,7 +1275,7 @@ impl WeportApp {
             });
 
             let folder = if self.format == "json" { "JSON" } else { "TXT" };
-            ui.add_space(3.0);
+            ui.add_space(5.0);
             ui.label(
                 RichText::new(format!(
                     "写入 {folder}/，同名覆盖 · 群聊_名称 / 私聊_名称"
