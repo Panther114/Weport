@@ -102,10 +102,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
 fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-    style.spacing.button_padding = Vec2::new(14.0, 8.0);
-    style.spacing.indent = 14.0;
-    style.spacing.window_margin = Margin::same(14);
+    style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.spacing.indent = 10.0;
+    style.spacing.window_margin = Margin::same(10);
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.panel_fill = BG;
@@ -639,9 +639,9 @@ impl WeportApp {
     fn panel_frame() -> Frame {
         Frame::new()
             .fill(PANEL)
-            .stroke(Stroke::new(1.0, LINE))
-            .corner_radius(CornerRadius::same(12))
-            .inner_margin(Margin::same(14))
+            .stroke(Stroke::new(1.0_f32, LINE))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(10, 8))
     }
 }
 
@@ -798,33 +798,38 @@ impl eframe::App for WeportApp {
             });
 
         egui::TopBottomPanel::top("top")
+            .exact_height(36.0)
             .frame(
                 Frame::new()
                     .fill(BG)
-                    .inner_margin(Margin::symmetric(16, 12))
-                    .stroke(Stroke::new(1.0, LINE)),
+                    .inner_margin(Margin::symmetric(10, 4))
+                    .stroke(Stroke::new(1.0_f32, LINE)),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_centered(|ui| {
                     ui.label(
                         RichText::new("WEPORT")
-                            .size(18.0)
+                            .size(15.0)
                             .strong()
                             .color(TEXT)
-                            .extra_letter_spacing(2.0),
+                            .extra_letter_spacing(1.5),
                     );
                     ui.label(
                         RichText::new(format!("v{APP_VERSION}"))
-                            .size(13.0)
+                            .size(12.5)
                             .color(TEXT_FAINT),
                     );
                     if !self.busy_label.is_empty() {
                         ui.separator();
-                        ui.label(RichText::new(&self.busy_label).size(13.0).color(TEXT_DIM));
+                        ui.label(RichText::new(&self.busy_label).size(12.5).color(TEXT_DIM));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new(RichText::new("ⓘ  关于").size(14.0)).corner_radius(R))
+                            .add(
+                                egui::Button::new(RichText::new("ⓘ 关于").size(13.0))
+                                    .corner_radius(R)
+                                    .min_size(Vec2::new(0.0, 26.0)),
+                            )
                             .clicked()
                         {
                             self.about_open = true;
@@ -838,27 +843,36 @@ impl eframe::App for WeportApp {
                 .frame(
                     Frame::new()
                         .fill(ELEVATED)
-                        .inner_margin(Margin::symmetric(16, 10))
-                        .stroke(Stroke::new(1.0, LINE_STRONG)),
+                        .inner_margin(Margin::symmetric(10, 6))
+                        .stroke(Stroke::new(1.0_f32, LINE_STRONG)),
                 )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(
                                 RichText::new(format!("发现新版本 v{ver}"))
-                                    .size(14.0)
+                                    .size(13.5)
                                     .strong(),
                             );
                             if !notes.is_empty() {
                                 ui.label(
-                                    RichText::new(notes.chars().take(120).collect::<String>())
-                                        .size(12.5)
+                                    RichText::new(notes.chars().take(100).collect::<String>())
+                                        .size(12.0)
                                         .color(TEXT_DIM),
                                 );
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if rounded_button(ui, "立即更新", true, !self.busy).clicked() {
+                            if ui
+                                .add_enabled(
+                                    !self.busy,
+                                    egui::Button::new(RichText::new("立即更新").size(13.0).color(BG))
+                                        .fill(TEXT)
+                                        .corner_radius(R)
+                                        .min_size(Vec2::new(88.0, 30.0)),
+                                )
+                                .clicked()
+                            {
                                 self.spawn_update_install();
                             }
                         });
@@ -867,10 +881,10 @@ impl eframe::App for WeportApp {
         }
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::same(12)))
+            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(8, 6)))
             .show(ctx, |ui| {
                 let full = ui.available_size();
-                let gap = 12.0;
+                let gap = 8.0;
                 let col_w = (full.x - gap) * 0.5;
 
                 ui.horizontal_top(|ui| {
@@ -903,42 +917,49 @@ impl WeportApp {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(title)
-                    .size(13.0)
+                    .size(12.5)
                     .strong()
                     .color(TEXT)
-                    .extra_letter_spacing(1.0),
+                    .extra_letter_spacing(0.8),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(right).size(12.5).color(TEXT_FAINT));
+                ui.label(RichText::new(right).size(12.0).color(TEXT_FAINT));
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(3.0);
+        let y = ui.cursor().top();
         ui.painter().hline(
             ui.max_rect().x_range(),
-            ui.cursor().top(),
-            Stroke::new(1.0, LINE),
+            y,
+            Stroke::new(1.0_f32, LINE),
         );
-        ui.add_space(10.0);
+        ui.add_space(6.0);
     }
 
     fn ui_left(&mut self, ui: &mut egui::Ui) {
-        // Data path
+        // Data path — compact
         WeportApp::panel_frame().show(ui, |ui| {
             self.section_title(ui, "数据位置", "xwechat_files");
-            ui.label(RichText::new("微信数据文件夹").size(13.0).color(TEXT_FAINT));
             ui.horizontal(|ui| {
+                ui.label(RichText::new("数据文件夹").size(12.5).color(TEXT_FAINT));
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.db_path)
-                        .desired_width(ui.available_width() - 88.0)
-                        .font(FontId::new(13.5, FontFamily::Monospace))
-                        .hint_text(r"C:\Users\…\xwechat_files"),
+                        .desired_width(ui.available_width() - 70.0)
+                        .font(FontId::new(13.0, FontFamily::Monospace))
+                        .hint_text(r"C:\Users\…\xwechat_files")
+                        .margin(Margin::symmetric(6, 4)),
                 );
                 if resp.lost_focus() {
                     self.persist();
                     self.spawn_scan_accounts();
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("浏览").corner_radius(R).min_size(Vec2::new(72.0, 34.0)))
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(RichText::new("浏览").size(13.0))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(56.0, 28.0)),
+                    )
                     .clicked()
                 {
                     if let Some(p) = rfd::FileDialog::new()
@@ -951,10 +972,15 @@ impl WeportApp {
                     }
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("重新扫描").corner_radius(R))
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(RichText::new("重新扫描").size(13.0))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(0.0, 28.0)),
+                    )
                     .clicked()
                 {
                     self.spawn_detect();
@@ -962,7 +988,9 @@ impl WeportApp {
                 if ui
                     .add_enabled(
                         !self.busy && !self.db_path.trim().is_empty(),
-                        egui::Button::new("刷新账号").corner_radius(R),
+                        egui::Button::new(RichText::new("刷新账号").size(13.0))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(0.0, 28.0)),
                     )
                     .clicked()
                 {
@@ -971,9 +999,9 @@ impl WeportApp {
             });
         });
 
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
-        // Accounts
+        // Accounts — name + wxid on one line
         WeportApp::panel_frame().show(ui, |ui| {
             let n = self.accounts.len();
             self.section_title(
@@ -987,17 +1015,16 @@ impl WeportApp {
                 .as_str(),
             );
             if self.accounts.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        RichText::new("选择或扫描数据目录后显示账号")
-                            .size(13.5)
-                            .color(TEXT_FAINT),
-                    );
-                });
+                ui.label(
+                    RichText::new("选择或扫描数据目录后显示账号")
+                        .size(13.0)
+                        .color(TEXT_FAINT),
+                );
             } else {
                 egui::ScrollArea::vertical()
-                    .max_height(160.0)
+                    .max_height(140.0)
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
                         for acc in self.accounts.clone() {
                             let active = acc.wxid == self.selected_wxid;
                             let fill = if active { TEXT } else { ELEVATED };
@@ -1007,39 +1034,40 @@ impl WeportApp {
                             } else {
                                 TEXT_FAINT
                             };
+                            let name = acc
+                                .nickname
+                                .clone()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| acc.wxid.clone());
                             let resp = Frame::new()
                                 .fill(fill)
                                 .stroke(Stroke::new(
                                     1.0_f32,
                                     if active { TEXT } else { LINE },
                                 ))
-                                .corner_radius(CornerRadius::same(10))
-                                .inner_margin(Margin::symmetric(12, 10))
+                                .corner_radius(CornerRadius::same(8))
+                                .inner_margin(Margin::symmetric(8, 5))
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                RichText::new(
-                                                    acc.nickname.clone().unwrap_or_else(|| acc.wxid.clone()),
-                                                )
-                                                .size(15.0)
+                                        ui.label(
+                                            RichText::new(&name)
+                                                .size(14.0)
                                                 .strong()
                                                 .color(fg),
-                                            );
-                                            ui.label(
-                                                RichText::new(&acc.wxid)
-                                                    .size(12.0)
-                                                    .color(dim)
-                                                    .family(FontFamily::Monospace),
-                                            );
-                                        });
+                                        );
+                                        ui.label(
+                                            RichText::new(&acc.wxid)
+                                                .size(12.0)
+                                                .color(dim)
+                                                .family(FontFamily::Monospace),
+                                        );
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 ui.label(
                                                     RichText::new(if active { "当前" } else { "选择" })
-                                                        .size(12.0)
+                                                        .size(11.5)
                                                         .color(if active { BG } else { TEXT_FAINT }),
                                                 );
                                             },
@@ -1053,66 +1081,58 @@ impl WeportApp {
                                 self.decrypt_key.clear();
                                 self.persist();
                             }
-                            ui.add_space(6.0);
                         }
                     });
             }
         });
 
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
-        // Key
+        // Key — compact steps
         WeportApp::panel_frame().show(ui, |ui| {
             let key_ok = self.decrypt_key.trim().len() == 64;
             self.section_title(ui, "解密密钥", if key_ok { "已就绪" } else { "待提取" });
             for (i, line) in [
-                "打开微信，并关闭「自动登录」",
-                "点击下方「提取密钥」（保持 Weport 在前台）",
-                "出现「已准备就绪」后，登录或重新登录微信",
-                "密钥自动填入；也可粘贴 64 位十六进制密钥",
+                "打开微信并关闭「自动登录」",
+                "点「提取密钥」，就绪后重新登录微信",
+                "密钥自动填入，或粘贴 64 位十六进制",
             ]
             .iter()
             .enumerate()
             {
                 ui.horizontal(|ui| {
-                    Frame::new()
-                        .fill(ELEVATED)
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(Margin::symmetric(8, 4))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("{}", i + 1))
-                                    .size(13.0)
-                                    .strong()
-                                    .color(TEXT),
-                            );
-                        });
-                    ui.label(RichText::new(*line).size(13.5).color(TEXT_DIM));
+                    ui.label(
+                        RichText::new(format!("{}.", i + 1))
+                            .size(12.5)
+                            .strong()
+                            .color(TEXT_DIM),
+                    );
+                    ui.label(RichText::new(*line).size(13.0).color(TEXT_DIM));
                 });
-                ui.add_space(4.0);
             }
             if self.key_ready_hint && self.busy {
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 Frame::new()
                     .fill(ELEVATED)
-                    .stroke(Stroke::new(1.0, LINE_STRONG))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(Margin::same(10))
+                    .stroke(Stroke::new(1.0_f32, LINE_STRONG))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(8, 6))
                     .show(ui, |ui| {
                         ui.label(
-                            RichText::new("Hook 已就绪 — 请现在登录微信，或退出后重新登录")
-                                .size(13.5)
+                            RichText::new("Hook 已就绪 — 请现在登录/重新登录微信")
+                                .size(13.0)
                                 .color(TEXT),
                         );
                     });
             }
-            ui.add_space(8.0);
-            ui.label(RichText::new("数据库密钥").size(13.0).color(TEXT_FAINT));
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
+                ui.label(RichText::new("密钥").size(12.5).color(TEXT_FAINT));
                 let mut te = egui::TextEdit::singleline(&mut self.decrypt_key)
-                    .desired_width(ui.available_width() - 80.0)
-                    .font(FontId::new(13.5, FontFamily::Monospace))
-                    .hint_text("64 位十六进制密钥…");
+                    .desired_width(ui.available_width() - 64.0)
+                    .font(FontId::new(13.0, FontFamily::Monospace))
+                    .hint_text("64 位十六进制…")
+                    .margin(Margin::symmetric(6, 4));
                 if !self.show_key {
                     te = te.password(true);
                 }
@@ -1121,38 +1141,45 @@ impl WeportApp {
                 }
                 let lab = if self.show_key { "隐藏" } else { "显示" };
                 if ui
-                    .add(egui::Button::new(lab).corner_radius(R).min_size(Vec2::new(64.0, 34.0)))
+                    .add(
+                        egui::Button::new(RichText::new(lab).size(13.0))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(52.0, 28.0)),
+                    )
                     .clicked()
                 {
                     self.show_key = !self.show_key;
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             if ui
                 .add_enabled(
                     !self.busy,
-                    egui::Button::new(if self.busy && self.progress.is_none() {
-                        "提取中…"
-                    } else {
-                        "提取密钥"
-                    })
+                    egui::Button::new(
+                        RichText::new(if self.busy && self.progress.is_none() {
+                            "提取中…"
+                        } else {
+                            "提取密钥"
+                        })
+                        .size(14.0)
+                        .color(BG),
+                    )
                     .corner_radius(R)
-                    .min_size(Vec2::new(ui.available_width(), 42.0))
+                    .min_size(Vec2::new(ui.available_width(), 34.0))
                     .fill(TEXT)
-                    .stroke(Stroke::new(1.0, TEXT)),
+                    .stroke(Stroke::new(1.0_f32, TEXT)),
                 )
                 .clicked()
             {
                 self.spawn_extract_key();
             }
-            // force black text on white fill — egui may not invert; paint overlay if needed
-            ui.add_space(6.0);
+            ui.add_space(2.0);
             if key_ok {
-                ui.label(RichText::new("密钥已就绪，可在右侧开始导出。").size(13.5).color(TEXT));
+                ui.label(RichText::new("密钥已就绪，可在右侧导出。").size(12.5).color(TEXT));
             } else {
                 ui.label(
-                    RichText::new("密钥在登录瞬间捕获，不是从已登录会话直接读取。")
-                        .size(13.0)
+                    RichText::new("密钥在登录瞬间捕获，非已登录会话直读。")
+                        .size(12.0)
                         .color(TEXT_FAINT),
                 );
             }
@@ -1163,19 +1190,19 @@ impl WeportApp {
         WeportApp::panel_frame().show(ui, |ui| {
             self.section_title(ui, "导出", "全部联系人 + 群聊");
 
-            ui.label(RichText::new("格式").size(13.0).color(TEXT_FAINT));
             ui.horizontal(|ui| {
+                ui.label(RichText::new("格式").size(12.5).color(TEXT_FAINT));
                 for (id, lab) in [("txt", "TXT"), ("json", "JSON")] {
                     let active = self.format == id;
                     let fill = if active { TEXT } else { ELEVATED };
                     let fg = if active { BG } else { TEXT_DIM };
                     if ui
                         .add(
-                            egui::Button::new(RichText::new(lab).size(14.0).color(fg))
+                            egui::Button::new(RichText::new(lab).size(13.5).color(fg))
                                 .fill(fill)
-                                .stroke(Stroke::new(1.0, if active { TEXT } else { LINE }))
+                                .stroke(Stroke::new(1.0_f32, if active { TEXT } else { LINE }))
                                 .corner_radius(R)
-                                .min_size(Vec2::new((ui.available_width() - 8.0) * 0.5, 40.0)),
+                                .min_size(Vec2::new(72.0, 30.0)),
                         )
                         .clicked()
                         && !self.busy
@@ -1186,15 +1213,16 @@ impl WeportApp {
                 }
             });
 
-            ui.add_space(10.0);
-            ui.label(RichText::new("输出文件夹").size(13.0).color(TEXT_FAINT));
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
+                ui.label(RichText::new("输出").size(12.5).color(TEXT_FAINT));
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut self.export_path)
-                            .desired_width(ui.available_width() - 88.0)
-                            .font(FontId::new(13.5, FontFamily::Monospace))
-                            .hint_text("选择导出根目录…"),
+                            .desired_width(ui.available_width() - 70.0)
+                            .font(FontId::new(13.0, FontFamily::Monospace))
+                            .hint_text("导出根目录…")
+                            .margin(Margin::symmetric(6, 4)),
                     )
                     .changed()
                 {
@@ -1202,7 +1230,12 @@ impl WeportApp {
                     self.refresh_export_log();
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("浏览").corner_radius(R).min_size(Vec2::new(72.0, 34.0)))
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(RichText::new("浏览").size(13.0))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(56.0, 28.0)),
+                    )
                     .clicked()
                 {
                     if let Some(p) = rfd::FileDialog::new()
@@ -1217,29 +1250,29 @@ impl WeportApp {
             });
 
             let folder = if self.format == "json" { "JSON" } else { "TXT" };
-            ui.add_space(8.0);
+            ui.add_space(3.0);
             ui.label(
                 RichText::new(format!(
-                    "导出写入 {folder}/，同名文件直接覆盖。命名：群聊_名称 / 私聊_名称"
+                    "写入 {folder}/，同名覆盖 · 群聊_名称 / 私聊_名称"
                 ))
-                .size(13.0)
+                .size(12.0)
                 .color(TEXT_FAINT),
             );
 
-            ui.add_space(10.0);
+            ui.add_space(6.0);
             Frame::new()
                 .fill(ELEVATED)
-                .stroke(Stroke::new(1.0, LINE))
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::same(12))
+                .stroke(Stroke::new(1.0_f32, LINE))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     row_meta(ui, "上次 TXT", self.export_log_txt.as_deref().unwrap_or("尚未导出"));
                     row_meta(ui, "上次 JSON", self.export_log_json.as_deref().unwrap_or("尚未导出"));
-                    row_meta(ui, "日志文件", "export_log.txt");
+                    row_meta(ui, "日志", "export_log.txt");
                 });
 
             if let Some((cur, total, session, phase)) = &self.progress {
-                ui.add_space(12.0);
+                ui.add_space(6.0);
                 let pct = if *total > 0.0 {
                     (*cur / *total).clamp(0.0, 1.0) as f32
                 } else if phase == "完成" {
@@ -1248,13 +1281,13 @@ impl WeportApp {
                     0.0
                 };
                 let bar = ui.available_width();
-                let (_, rect) = ui.allocate_space(Vec2::new(bar, 8.0));
+                let (_, rect) = ui.allocate_space(Vec2::new(bar, 6.0));
                 ui.painter()
-                    .rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(40, 40, 40));
+                    .rect_filled(rect, CornerRadius::same(3), Color32::from_rgb(40, 40, 40));
                 let mut fill = rect;
                 fill.set_width(rect.width() * pct);
                 ui.painter()
-                    .rect_filled(fill, CornerRadius::same(4), TEXT);
+                    .rect_filled(fill, CornerRadius::same(3), TEXT);
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if session.is_empty() {
@@ -1262,14 +1295,14 @@ impl WeportApp {
                         } else {
                             session.as_str()
                         })
-                        .size(13.0)
+                        .size(12.5)
                         .color(TEXT_DIM),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if *total > 0.0 {
                             ui.label(
                                 RichText::new(format!("{:.0} / {:.0}", cur.min(*total), total))
-                                    .size(13.0)
+                                    .size(12.5)
                                     .color(TEXT_FAINT),
                             );
                         }
@@ -1277,7 +1310,7 @@ impl WeportApp {
                 });
             }
 
-            ui.add_space(16.0);
+            ui.add_space(8.0);
             let export_label = if self.busy && self.progress.is_some() {
                 "导出中…"
             } else {
@@ -1286,32 +1319,32 @@ impl WeportApp {
             if ui
                 .add_enabled(
                     !self.busy,
-                    egui::Button::new(RichText::new(export_label).size(15.0).color(BG))
+                    egui::Button::new(RichText::new(export_label).size(14.5).color(BG))
                         .fill(TEXT)
-                        .stroke(Stroke::new(1.0, TEXT))
+                        .stroke(Stroke::new(1.0_f32, TEXT))
                         .corner_radius(R)
-                        .min_size(Vec2::new(ui.available_width(), 48.0)),
+                        .min_size(Vec2::new(ui.available_width(), 38.0)),
                 )
                 .clicked()
             {
                 self.spawn_export();
             }
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             if ui
                 .add_enabled(
                     !self.busy && !self.export_path.trim().is_empty(),
-                    egui::Button::new(RichText::new("清空导出库").size(14.0))
+                    egui::Button::new(RichText::new("清空导出库").size(13.0))
                         .corner_radius(R)
-                        .min_size(Vec2::new(ui.available_width(), 40.0)),
+                        .min_size(Vec2::new(ui.available_width(), 32.0)),
                 )
                 .clicked()
             {
                 self.clear_open = true;
             }
-            ui.add_space(8.0);
+            ui.add_space(3.0);
             ui.label(
-                RichText::new("清空删除 TXT/、JSON/ 与 export_log.txt，保留根文件夹。数据仅本地处理。")
-                    .size(12.5)
+                RichText::new("清空删除 TXT/、JSON/、export_log.txt；数据仅本地处理。")
+                    .size(11.5)
                     .color(TEXT_FAINT),
             );
         });
@@ -1443,9 +1476,9 @@ impl WeportApp {
 
 fn row_meta(ui: &mut egui::Ui, left: &str, right: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(left).size(13.0).color(TEXT_DIM));
+        ui.label(RichText::new(left).size(12.5).color(TEXT_DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(right).size(13.0).color(TEXT));
+            ui.label(RichText::new(right).size(12.5).color(TEXT));
         });
     });
 }

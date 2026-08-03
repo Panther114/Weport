@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.5.0"
+$version = "0.5.1"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
