@@ -138,7 +138,6 @@ mod win {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
         GetWindowThreadProcessId, IsWindowVisible,
@@ -176,15 +175,18 @@ mod win {
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                // fallback: list processes
-                return find_wechat_pids().contains(&pid);
-            }
-            CloseHandle(h);
-            true
+        // The pid must still be a WeChat process (by name) or own a WeChat window.
+        // A bare OpenProcess existence check is wrong here: Windows recycles PIDs
+        // quickly, so a dead WeChat pid may already belong to an unrelated live
+        // process and the poll loop would never notice WeChat exited (WeFlow's
+        // keyService checks the pid against the tasklist, never bare existence).
+        if find_wechat_pids().contains(&pid) {
+            return true;
         }
+        if let Some(window_pid) = wait_for_wechat_window_pid(Duration::from_millis(250)) {
+            return window_pid == pid;
+        }
+        false
     }
 
     fn window_title(hwnd: HWND) -> String {
