@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.5.2"
+$version = "0.5.3"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -36,9 +36,9 @@ $nsiBody = @"
 !include "MUI2.nsh"
 Name "Weport"
 OutFile "$($outSetup -replace '\\','/')"
-InstallDir "`$PROGRAMFILES64\Weport"
-InstallDirRegKey HKLM "Software\Weport" "InstallDir"
-RequestExecutionLevel admin
+InstallDir "`$LOCALAPPDATA\Programs\Weport"
+InstallDirRegKey HKCU "Software\Weport" "InstallDir"
+RequestExecutionLevel user
 Unicode true
 SetCompressor /SOLID lzma
 !define MUI_ICON "$($icon -replace '\\','/')"
@@ -52,21 +52,25 @@ SetCompressor /SOLID lzma
 
 Section "Install"
   SetOutPath "`$INSTDIR"
+  nsExec::Exec "taskkill /F /IM weport.exe"
+  Sleep 500
   File "weport.exe"
   SetOutPath "`$INSTDIR\resources"
   File /r "resources\*.*"
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Weport" "InstallDir" "`$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayName" "Weport"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayVersion" "$version"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayIcon" "`$INSTDIR\weport.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "UninstallString" "`$INSTDIR\Uninstall.exe"
+  WriteRegStr HKCU "Software\Weport" "InstallDir" "`$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayName" "Weport"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayVersion" "$version"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayIcon" "`$INSTDIR\weport.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "UninstallString" "`$INSTDIR\Uninstall.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "QuietUninstallString" "`$INSTDIR\Uninstall.exe /S"
   CreateDirectory "`$SMPROGRAMS\Weport"
   CreateShortCut "`$SMPROGRAMS\Weport\Weport.lnk" "`$INSTDIR\weport.exe"
   CreateShortCut "`$DESKTOP\Weport.lnk" "`$INSTDIR\weport.exe"
 SectionEnd
 
 Section "Uninstall"
+  nsExec::Exec "taskkill /F /IM weport.exe"
   Delete "`$INSTDIR\weport.exe"
   Delete "`$INSTDIR\Uninstall.exe"
   RMDir /r "`$INSTDIR\resources"
@@ -74,8 +78,8 @@ Section "Uninstall"
   Delete "`$SMPROGRAMS\Weport\Weport.lnk"
   RMDir "`$SMPROGRAMS\Weport"
   Delete "`$DESKTOP\Weport.lnk"
-  DeleteRegKey HKLM "Software\Weport"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport"
+  DeleteRegKey HKCU "Software\Weport"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport"
 SectionEnd
 "@
 [System.IO.File]::WriteAllText($nsi, $nsiBody)

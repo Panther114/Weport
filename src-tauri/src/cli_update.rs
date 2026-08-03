@@ -6,7 +6,6 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 
 const REPO: &str = "Panther114/Weport";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -143,12 +142,10 @@ pub async fn perform_update(yes: bool) -> Result<(), Box<dyn std::error::Error>>
 
     #[cfg(windows)]
     {
-        // NSIS silent if --yes
-        let mut cmd = Command::new(&installer_path);
-        if yes {
-            cmd.arg("/S");
-        }
-        cmd.spawn()?;
+        // NSIS silent if --yes. Launch via ShellExecuteEx (like Explorer), not
+        // CreateProcess: CreateProcess cannot start an exe that requires
+        // elevation and fails with ERROR_ELEVATION_REQUIRED (os error 740).
+        launch_installer(&installer_path, yes)?;
     }
 
     #[cfg(not(windows))]
@@ -165,6 +162,53 @@ pub async fn perform_update(yes: bool) -> Result<(), Box<dyn std::error::Error>>
             "installer": installer_path
         })
     );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn launch_installer(installer_path: &std::path::Path, silent: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let mut file: Vec<u16> = installer_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut params: Vec<u16> = wide(if silent { "/S" } else { "" });
+    let mut verb: Vec<u16> = wide("open");
+
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = verb.as_mut_ptr();
+    info.lpFile = file.as_mut_ptr();
+    info.lpParameters = if silent {
+        params.as_mut_ptr()
+    } else {
+        ptr::null_mut()
+    };
+    info.nShow = SW_SHOWNORMAL;
+
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!(
+            "启动安装程序失败: {err}\n安装包: {}",
+            installer_path.display()
+        )
+        .into());
+    }
     Ok(())
 }
 
