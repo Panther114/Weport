@@ -1,29 +1,20 @@
-//! Pure-Rust WeChat export engine (no Electron / Node).
+//! Pure-Rust WeChat export engine (no WebView / Tauri).
 use crate::export::{export_all, ExportFormat};
 use crate::key::extract_db_key;
 use crate::paths::{
     detect_db_path, resolve_account_dir, resolve_key_dll, scan_accounts, AccountInfo,
 };
+use crate::resource_root::resource_root;
 use crate::wcdb::{WcdbHandle, WCDB_LOCK};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("{0}")]
     Message(String),
-}
-
-impl serde::Serialize for EngineError {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
 }
 
 pub struct EngineState {
@@ -38,49 +29,8 @@ impl Default for EngineState {
     }
 }
 
-fn looks_like_resource_root(dir: &std::path::Path) -> bool {
-    dir.join("wcdb")
-        .join("win32")
-        .join("x64")
-        .join("wcdb_api.dll")
-        .exists()
-        || dir
-            .join("native")
-            .join("win32")
-            .join("x64")
-            .join("wcdb_api.dll")
-            .exists()
-        || dir.join("wcdb_api.dll").exists()
-}
-
-fn resource_root(app: &AppHandle) -> PathBuf {
-    if let Ok(dir) = app.path().resource_dir() {
-        if looks_like_resource_root(&dir) {
-            return dir;
-        }
-        if looks_like_resource_root(&dir.join("resources")) {
-            return dir.join("resources");
-        }
-        // Tauri may nest as resource_dir/wcdb/...
-        return dir;
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for root in [cwd.clone(), cwd.join(".."), cwd.join("src-tauri").join("..")] {
-        let p = root.join("src-tauri").join("resources");
-        if looks_like_resource_root(&p) {
-            return p;
-        }
-        let p2 = root.join("resources");
-        if looks_like_resource_root(&p2) {
-            return p2;
-        }
-    }
-    cwd
-}
-
-/// Public for diagnostics / UI
-pub fn diagnose_resources(app: &AppHandle) -> Value {
-    let root = resource_root(app);
+pub fn diagnose_resources() -> Value {
+    let root = resource_root();
     let wcdb = crate::paths::resolve_wcdb_dir(&root);
     let key = crate::paths::resolve_key_dll(&root);
     json!({
@@ -93,15 +43,14 @@ pub fn diagnose_resources(app: &AppHandle) -> Value {
     })
 }
 
-pub fn detect(app: &AppHandle) -> Result<Value, EngineError> {
-    let _ = app;
+pub fn detect() -> Result<Value, EngineError> {
     match detect_db_path() {
         Ok(path) => Ok(json!({ "success": true, "path": path })),
         Err(e) => Ok(json!({ "success": false, "error": e })),
     }
 }
 
-pub fn accounts(_app: &AppHandle, db_path: String) -> Result<Vec<AccountInfo>, EngineError> {
+pub fn accounts(db_path: String) -> Result<Vec<AccountInfo>, EngineError> {
     let root = PathBuf::from(db_path.trim());
     if !root.is_dir() {
         return Err(EngineError::Message("数据目录不存在".into()));
@@ -110,17 +59,12 @@ pub fn accounts(_app: &AppHandle, db_path: String) -> Result<Vec<AccountInfo>, E
 }
 
 pub fn extract_key(
-    app: &AppHandle,
-    _db_path: String,
-    _wxid: String,
+    mut on_status: impl FnMut(String),
 ) -> Result<Value, EngineError> {
-    let root = resource_root(app);
+    let root = resource_root();
     let dll = resolve_key_dll(&root);
-    let app2 = app.clone();
-    // WeFlow uses ~60s; allow 120s so user can re-login after Hook ready.
     let result = extract_db_key(&dll, Duration::from_secs(120), |msg| {
-        let _ = app2.emit("engine-status", &msg);
-        let _ = app2.emit("key-status", &msg);
+        on_status(msg);
     });
     match result {
         Ok(key) => Ok(json!({ "success": true, "key": key })),
@@ -129,14 +73,14 @@ pub fn extract_key(
 }
 
 pub fn export_all_sessions(
-    app: &AppHandle,
     db_path: String,
     wxid: String,
     decrypt_key: String,
     output_dir: String,
     format: String,
+    on_progress: impl FnMut(crate::export::ExportProgress),
 ) -> Result<Value, EngineError> {
-    let root = resource_root(app);
+    let root = resource_root();
     let db_root = PathBuf::from(db_path.trim());
     let account_dir = resolve_account_dir(&db_root, wxid.trim())
         .ok_or_else(|| EngineError::Message("未找到账号目录".into()))?;
@@ -156,24 +100,5 @@ pub fn export_all_sessions(
     let db = WcdbHandle::open(&root, &account_dir, &key, wxid.trim())
         .map_err(EngineError::Message)?;
 
-    let app2 = app.clone();
-    let result = export_all(&db, &out, fmt, |p| {
-        let _ = app2.emit(
-            "export-progress",
-            json!({
-                "current": p.current,
-                "total": p.total,
-                "currentSession": p.current_session,
-                "phaseLabel": p.phase_label,
-                "phase": "exporting"
-            }),
-        );
-        let _ = app2.emit(
-            "engine-status",
-            format!("{} · {}", p.phase_label, p.current_session),
-        );
-    })
-    .map_err(EngineError::Message)?;
-
-    Ok(result)
+    export_all(&db, &out, fmt, on_progress).map_err(EngineError::Message)
 }

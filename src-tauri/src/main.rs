@@ -1,10 +1,13 @@
-// Prevents additional console window on Windows in release
+// Native Weport — no console window in release GUI builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cli_update;
+mod engine;
 mod export;
+mod gui;
 mod key;
 mod paths;
+mod resource_root;
 mod settings;
 mod wcdb;
 mod wcdb_native;
@@ -12,7 +15,6 @@ mod wcdb_worker;
 
 use serde_json::json;
 use std::env;
-use std::path::PathBuf;
 
 fn is_cli_invocation(args: &[String]) -> bool {
     if args.len() <= 1 {
@@ -53,58 +55,6 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn has_flag(args: &[String], name: &str) -> bool {
     args.iter()
         .any(|a| a == &format!("--{name}") || a == name || a == &format!("-{name}"))
-}
-
-fn resource_root() -> PathBuf {
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for c in [
-                dir.join("resources"),
-                dir.to_path_buf(),
-                dir.join("..").join("resources"),
-            ] {
-                if c
-                    .join("native")
-                    .join("win32")
-                    .join("x64")
-                    .join("wcdb_api.dll")
-                    .exists()
-                    || c
-                        .join("wcdb")
-                        .join("win32")
-                        .join("x64")
-                        .join("wcdb_api.dll")
-                        .exists()
-                {
-                    return c;
-                }
-            }
-        }
-    }
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for root in [cwd.clone(), cwd.join("..")] {
-        let p = root.join("src-tauri").join("resources");
-        if p
-            .join("native")
-            .join("win32")
-            .join("x64")
-            .join("wcdb_api.dll")
-            .exists()
-        {
-            return p;
-        }
-        let p2 = root.join("resources");
-        if p2
-            .join("wcdb")
-            .join("win32")
-            .join("x64")
-            .join("wcdb_api.dll")
-            .exists()
-        {
-            return p2;
-        }
-    }
-    cwd
 }
 
 fn run_cli(args: &[String]) -> i32 {
@@ -155,7 +105,7 @@ fn run_cli(args: &[String]) -> i32 {
             0
         }
         "key" => {
-            let root = resource_root();
+            let root = resource_root::resource_root();
             let dll = paths::resolve_key_dll(&root);
             match key::extract_db_key(&dll, std::time::Duration::from_secs(180), |msg| {
                 eprintln!("[key] {msg}");
@@ -182,29 +132,19 @@ fn run_cli(args: &[String]) -> i32 {
                 );
                 return 1;
             }
-            let root = resource_root();
-            let account = match paths::resolve_account_dir(std::path::Path::new(&db), &wxid) {
-                Some(p) => p,
-                None => {
-                    eprintln!("Account directory not found");
-                    return 1;
-                }
-            };
-            let _lock = wcdb::WCDB_LOCK.lock().unwrap();
-            let handle = match wcdb::WcdbHandle::open(&root, &account, &key_hex, &wxid) {
-                Ok(h) => h,
-                Err(e) => {
-                    println!("{}", json!({ "success": false, "error": e }));
-                    return 1;
-                }
-            };
-            let fmt = export::ExportFormat::from_str(&format);
-            match export::export_all(&handle, std::path::Path::new(&out), fmt, |p| {
-                eprintln!(
-                    "[export] {} {}/{} {}",
-                    p.phase_label, p.current, p.total, p.current_session
-                );
-            }) {
+            match engine::export_all_sessions(
+                db,
+                wxid,
+                key_hex,
+                out,
+                format,
+                |p| {
+                    eprintln!(
+                        "[export] {} {}/{} {}",
+                        p.phase_label, p.current, p.total, p.current_session
+                    );
+                },
+            ) {
                 Ok(v) => {
                     println!("{v}");
                     if v.get("success").and_then(|x| x.as_bool()).unwrap_or(false) {
@@ -214,7 +154,7 @@ fn run_cli(args: &[String]) -> i32 {
                     }
                 }
                 Err(e) => {
-                    println!("{}", json!({ "success": false, "error": e }));
+                    println!("{}", json!({ "success": false, "error": e.to_string() }));
                     1
                 }
             }
@@ -230,7 +170,6 @@ fn run_cli(args: &[String]) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // WCDB host mode: process MUST be named WeFlow.exe (dll security check).
     if args.iter().any(|a| a == "--wcdb-worker") {
         wcdb_worker::run_worker_loop();
     }
@@ -238,5 +177,9 @@ fn main() {
     if is_cli_invocation(&args) {
         std::process::exit(run_cli(&args));
     }
-    weport_lib::run();
+
+    if let Err(e) = gui::run_gui() {
+        eprintln!("GUI error: {e}");
+        std::process::exit(1);
+    }
 }

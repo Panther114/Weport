@@ -1,6 +1,6 @@
 # Weport
 
-**Lightweight WeChat chat history exporter for Windows** — pure **Tauri** (no Electron).
+**Lightweight WeChat chat history exporter for Windows** — pure **native Rust + egui** (no Electron, no WebView2).
 
 Exports every contact and group chat from local WeChat **4.x** data to:
 
@@ -73,11 +73,12 @@ Artifacts: `src-tauri/target/release/bundle/nsis/`.
 
 | Layer | Role |
 |-------|------|
-| `src/` | React GUI |
-| `src-tauri/` | Tauri shell, CLI, Rust export engine |
-| `src-tauri/resources/native/win32/x64/` | WCDB + key DLLs only |
+| `src-tauri/src/gui.rs` | Native egui GUI |
+| `src-tauri/src/` | CLI + WCDB worker + export engine |
+| `src-tauri/resources/` | WCDB + key DLLs |
+| `assets/icons/logo.webp` | App / installer icon source |
 
-No Node/Electron runtime is shipped.
+No Node/Electron/WebView2 runtime is shipped in the product binary.
 
 ## Privacy
 

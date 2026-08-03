@@ -1,8 +1,8 @@
 {
   "name": "weport",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "private": true,
-  "description": "Weport — lightweight WeChat chat history exporter for Windows (pure Tauri, no Electron)",
+  "description": "Weport — lightweight WeChat chat history exporter for Windows (native egui, no WebView)",
   "author": {
     "name": "Panther114",
     "email": "panther114@users.noreply.github.com"
