@@ -19,13 +19,16 @@ Native stack only (~14 MB DLLs + Tauri binary). No Chromium, no Electron.
 
 ## Features
 
-- **GUI** — compact modern Tauri app
-- **CLI** — same binary: `weport export …`
+- **GUI** — compact native egui UI (no WebView, no Electron)
+- **CLI** — same binary: `weport export …`, `weport antirecall …`
 - Auto-scan default data folder (`Documents\xwechat_files`)
 - Auto key extraction via `wx_key.dll` (WeChat must be logged in)
 - WCDB access via `wcdb_api.dll` (pure Rust FFI)
 - NSIS installer (English + 简体中文)
 - Auto-update (GUI + `weport update`)
+- **Anti-recall (WeChat 4)** — patch `Weixin.dll` so recalled messages stay visible inside WeChat (mechanism from [RevokeMsgPatcher](https://github.com/huiyadanli/RevokeMsgPatcher), GPLv3)
+- **Message popup** — top-right always-on-top toast for incoming messages and recalls (requires the decrypt key; logic adapted from WeFlow)
+- **Tray + background** — close to tray, silent startup, launch at Windows login (Settings → 设置)
 
 ## Getting the database key (important)
 
@@ -36,6 +39,12 @@ Same model as WeFlow: the key is captured **during WeChat login**, not from a fu
 3. When status says **已准备就绪**, log in / re-login WeChat (confirm on phone if asked)
 4. Key fills in (or paste a known 64-char hex key manually)
 
+## Anti-recall & popup (v0.6.0)
+
+- **设置 → 防撤回（微信 4）**: patch WeChat's `Weixin.dll` so recalled messages stay visible inside WeChat. Requires WeChat 4 (Weixin.exe), admin elevation (UAC) and a fully closed WeChat. Re-apply after each WeChat update; restore via 还原补丁.
+- **设置 → 消息弹窗提醒**: with the decrypt key available, Weport watches the account's local databases and shows a top-right, always-on-top, non-focusing toast for new incoming messages and recalls. Recalled-message detection works independently of the patch (reads the `revokemsg` rows WeChat writes).
+- **设置 → 启动与托盘**: launch at Windows login (HKCU Run key), silent background start, close-to-tray. Tray menu: 显示主窗口 / 退出.
+
 ## CLI
 
 ```bash
@@ -44,6 +53,9 @@ weport version
 weport detect
 weport accounts --db "C:\Users\me\Documents\xwechat_files"
 weport key
+weport antirecall status
+weport antirecall apply
+weport antirecall remove
 weport export --db "..." --wxid wxid_xxx --key <hex> --out D:\export --format txt
 weport update
 weport update --install
@@ -55,28 +67,30 @@ Requirements: Node 20+, Rust stable, WebView2 (Windows).
 
 ```bash
 npm install
-npm run dev          # Tauri GUI
+npm run dev          # Tauri dev shell (vestigial; the app runs native egui)
 cargo run --manifest-path src-tauri/Cargo.toml -- detect
 ```
 
 ### Release build
 
 ```bash
-npm run icons
+npm run icons                     # regenerate the white icon set
+cargo build --release --manifest-path src-tauri/Cargo.toml
 # ensure src-tauri/resources/native/win32/x64 has WCDB + wx_key DLLs
-npm run tauri:build
+powershell -File scripts/package-release.ps1   # NSIS installer + signed latest.json
 ```
 
-Artifacts: `src-tauri/target/release/bundle/nsis/`.
+Artifacts: `src-tauri/target/release/bundle/nsis/` (`Weport_<version>_x64-setup.exe` + `latest.json`).
 
 ## Architecture
 
 | Layer | Role |
 |-------|------|
-| `src-tauri/src/gui.rs` | Native egui GUI |
-| `src-tauri/src/` | CLI + WCDB worker + export engine |
-| `src-tauri/resources/` | WCDB + key DLLs |
-| `assets/icons/logo.webp` | App / installer icon source |
+| `src-tauri/src/gui.rs` | Native egui GUI (main window, settings, toast viewport) |
+| `src-tauri/src/` | CLI + WCDB worker + export engine + anti-recall + notify watcher + tray |
+| `src-tauri/resources/` | WCDB + key DLLs + anti-recall patch data |
+| `scripts/generate-icons.mjs` | White icon generator (single source of truth) |
+| `assets/icons/icon.png` | App window icon (embedded) |
 
 No Node/Electron/WebView2 runtime is shipped in the product binary.
 

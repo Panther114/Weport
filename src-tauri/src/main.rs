@@ -1,14 +1,18 @@
 // Native Weport — no console window in release GUI builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod antirecall;
 mod cli_update;
 mod engine;
 mod export;
 mod gui;
 mod key;
+mod notify;
 mod paths;
 mod resource_root;
 mod settings;
+mod startup;
+mod tray;
 mod wcdb;
 mod wcdb_native;
 mod wcdb_worker;
@@ -33,6 +37,7 @@ fn is_cli_invocation(args: &[String]) -> bool {
             | "key"
             | "export"
             | "update"
+            | "antirecall"
             | "cli"
     )
 }
@@ -120,6 +125,19 @@ fn run_cli(args: &[String]) -> i32 {
                 }
             }
         }
+        "antirecall" => {
+            let action = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("status");
+            match run_antirecall_cli(args, action) {
+                Ok(code) => code,
+                Err(e) => {
+                    println!("{}", json!({ "success": false, "error": e }));
+                    1
+                }
+            }
+        }
         "export" => {
             let db = flag(args, "db").unwrap_or_default();
             let wxid = flag(args, "wxid").unwrap_or_default();
@@ -167,11 +185,153 @@ fn run_cli(args: &[String]) -> i32 {
     }
 }
 
+fn run_antirecall_cli(args: &[String], action: &str) -> Result<i32, String> {
+    match action {
+        "status" => {
+            let Some(install) = antirecall::find_weixin_install_path() else {
+                println!(
+                    "{}",
+                    json!({ "success": false, "error": "未找到微信 4 安装路径（Weixin.exe / Weixin.dll）" })
+                );
+                return Ok(1);
+            };
+            let state = antirecall::patch_state(&install);
+            let state_str = match state {
+                antirecall::PatchState::NotInstalled => "not_installed",
+                antirecall::PatchState::WeChatRunning => "wechat_running",
+                antirecall::PatchState::Patched => "patched",
+                antirecall::PatchState::NotPatched => "not_patched",
+                antirecall::PatchState::Unsupported => "unsupported",
+            };
+            println!(
+                "{}",
+                json!({
+                    "success": true,
+                    "installPath": install.display().to_string(),
+                    "state": state_str
+                })
+            );
+            Ok(0)
+        }
+        "apply" | "remove" => {
+            let install = flag(args, "install-path")
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(antirecall::find_weixin_install_path)
+                .ok_or_else(|| "未找到微信 4 安装路径，请使用 --install-path <目录> 指定".to_string())?;
+
+            let result = if antirecall::is_elevated() {
+                let r = if action == "apply" {
+                    antirecall::apply(&install)
+                } else {
+                    antirecall::remove(&install)
+                };
+                r.map(|_| {
+                    json!({ "success": true, "message": if action == "apply" { "防撤回补丁已安装" } else { "防撤回补丁已还原" } })
+                })
+                .map_err(|e| e.to_string())
+            } else {
+                // Relaunch elevated and wait for the result file.
+                let result_file = env::temp_dir().join(format!(
+                    "weport-antirecall-{}.json",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_file(&result_file);
+                let args: Vec<String> = vec![
+                    format!("--antirecall-{action}"),
+                    format!("\"{}\"", install.display()),
+                    format!("--antirecall-result \"{}\"", result_file.display()),
+                ];
+                antirecall::relaunch_elevated(&args)?;
+                wait_for_result_file(&result_file, 120)
+            };
+
+            match result {
+                Ok(v) => {
+                    println!("{v}");
+                    Ok(0)
+                }
+                Err(e) => {
+                    println!("{}", json!({ "success": false, "error": e }));
+                    Ok(1)
+                }
+            }
+        }
+        other => {
+            eprintln!("Unknown antirecall action: {other}");
+            eprintln!("Usage: weport antirecall status|apply|remove [--install-path <dir>]");
+            Ok(1)
+        }
+    }
+}
+
+/// Poll for the elevated child's result file (bounded wait).
+fn wait_for_result_file(path: &std::path::Path, timeout_secs: u64) -> Result<serde_json::Value, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.trim().is_empty() {
+                let _ = std::fs::remove_file(path);
+                return serde_json::from_str(&text).map_err(|e| format!("解析结果失败: {e}"));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = std::fs::remove_file(path);
+            return Err("等待管理员授权超时（可能取消了 UAC 弹窗）".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.iter().any(|a| a == "--wcdb-worker") {
         wcdb_worker::run_worker_loop();
+    }
+
+    // Elevated anti-recall helper entry (spawned with "runas" by the GUI/CLI).
+    if let Some(idx) = args
+        .iter()
+        .position(|a| a == "--antirecall-apply" || a == "--antirecall-remove")
+    {
+        let action = if args[idx] == "--antirecall-apply" {
+            "apply"
+        } else {
+            "remove"
+        };
+        let install = args
+            .get(idx + 1)
+            .cloned()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        let result_file = flag(&args, "antirecall-result").unwrap_or_default();
+        std::process::exit(antirecall::run_elevated_action(
+            action,
+            &install,
+            &result_file,
+        ));
+    }
+
+    // Read-only diagnostics (no elevation needed).
+    if let Some(idx) = args.iter().position(|a| a == "--antirecall-dryrun") {
+        let install = args
+            .get(idx + 1)
+            .cloned()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        match antirecall::dry_run(std::path::Path::new(&install)) {
+            Ok(v) => {
+                println!("{v}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("{}", json!({ "success": false, "error": e }));
+                std::process::exit(1);
+            }
+        }
     }
 
     if is_cli_invocation(&args) {

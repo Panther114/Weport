@@ -1,5 +1,12 @@
 /**
- * Generate Weport PNG/ICO icons — monochrome SpaceX-style mark.
+ * Generate Weport PNG/ICO icons — monochrome white mark on transparent.
+ *
+ * Single source of truth for every icon the app ships:
+ *   src-tauri/icons/*   → bundle icons, NSIS installer icon, exe resource icon
+ *   assets/icons/icon.png → window icon embedded by gui.rs
+ *
+ * The design is the white "signal plate": a rounded-square outline ring,
+ * three signal bars and one square — all white, background fully transparent.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -8,7 +15,9 @@ import zlib from 'node:zlib'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const iconsDir = path.resolve(__dirname, '..', 'src-tauri', 'icons')
+const assetsDir = path.resolve(__dirname, '..', 'assets', 'icons')
 fs.mkdirSync(iconsDir, { recursive: true })
+fs.mkdirSync(assetsDir, { recursive: true })
 
 function crc32(buf) {
   let c = ~0
@@ -34,12 +43,14 @@ function createPng(size) {
   const height = size
   const raw = Buffer.alloc((width * 4 + 1) * height)
 
-  const black = [0, 0, 0, 255]
   const white = [255, 255, 255, 255]
   const smoothstep = (e0, e1, x) => {
     const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
     return t * t * (3 - 2 * t)
   }
+
+  const pad = 0.075
+  const ring = 0.085
 
   for (let y = 0; y < height; y++) {
     const row = y * (width * 4 + 1)
@@ -49,56 +60,43 @@ function createPng(size) {
       const nx = (x + 0.5) / width
       const ny = (y + 0.5) / height
 
-      // Hard rounded square (tech plate)
-      const pad = 0.06
-      const inside =
-        nx > pad && nx < 1 - pad && ny > pad && ny < 1 - pad
-      if (!inside) {
-        raw[i] = 0
-        raw[i + 1] = 0
-        raw[i + 2] = 0
-        raw[i + 3] = 0
-        continue
+      // Distance to the rounded-square plate edge (positive = inside plate)
+      const dx = Math.max(nx - pad, pad + 1 - nx, 0)
+      const dy = Math.max(ny - pad, pad + 1 - ny, 0)
+      const edgeDist = Math.max(dx, dy)
+
+      let alpha = 0
+
+      // White ring: plate border band
+      if (edgeDist >= -ring && edgeDist <= 0.012) {
+        const t = 1 - Math.abs(edgeDist) / ring
+        alpha = Math.max(alpha, smoothstep(0, 0.5, t))
       }
 
-      // Black field with white rim
-      let px = black
-      const rim = 0.09
-      if (
-        nx < pad + rim ||
-        nx > 1 - pad - rim ||
-        ny < pad + rim ||
-        ny > 1 - pad - rim
-      ) {
-        px = white
-      }
-
-      // Three bars + signal square
+      // Three signal bars + signal square (white)
       const bars = [
-        [0.32, 0.4, 0.24, 0.76],
-        [0.46, 0.54, 0.24, 0.62],
-        [0.6, 0.68, 0.24, 0.72]
+        [0.34, 0.42, 0.26, 0.76],
+        [0.48, 0.56, 0.26, 0.62],
+        [0.62, 0.7, 0.26, 0.72]
       ]
       for (const [y0, y1, x0, x1] of bars) {
         if (ny >= y0 && ny <= y1 && nx >= x0 && nx <= x1) {
-          px = white
+          alpha = 1
         }
       }
-      if (nx >= 0.7 && nx <= 0.8 && ny >= 0.46 && ny <= 0.56) {
-        px = white
+      if (nx >= 0.72 && nx <= 0.82 && ny >= 0.48 && ny <= 0.58) {
+        alpha = 1
       }
 
-      // Soft outer AA only
-      const edge = Math.min(
-        smoothstep(pad, pad + 0.01, nx),
-        smoothstep(pad, pad + 0.01, 1 - nx),
-        smoothstep(pad, pad + 0.01, ny),
-        smoothstep(pad, pad + 0.01, 1 - ny)
-      )
-      raw[i] = px[0]
-      raw[i + 1] = px[1]
-      raw[i + 2] = px[2]
-      raw[i + 3] = Math.round(255 * edge)
+      // Soft AA on the ring
+      if (alpha > 0 && alpha < 1) {
+        // keep fractional ring alpha as-is
+      }
+
+      raw[i] = white[0]
+      raw[i + 1] = white[1]
+      raw[i + 2] = white[2]
+      raw[i + 3] = Math.round(255 * Math.min(1, alpha))
     }
   }
 
@@ -153,18 +151,24 @@ function createIco(sizes) {
 const png32 = createPng(32)
 const png128 = createPng(128)
 const png256 = createPng(256)
+const png512 = createPng(512)
 const ico = createIco([16, 32, 48, 64, 128, 256])
 
+// Tauri bundle icons
 fs.writeFileSync(path.join(iconsDir, '32x32.png'), png32)
 fs.writeFileSync(path.join(iconsDir, '128x128.png'), png128)
 fs.writeFileSync(path.join(iconsDir, '128x128@2x.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.ico'), ico)
 
+// Universal window-icon copy (embedded by gui.rs)
+fs.writeFileSync(path.join(assetsDir, 'icon.png'), png512)
+
 function createIcns() {
   const entries = [
     { type: 'ic07', data: png128 },
     { type: 'ic08', data: png256 },
+    { type: 'ic09', data: png512 },
     { type: 'ic12', data: createPng(64) },
     { type: 'ic13', data: png256 }
   ]
@@ -183,4 +187,5 @@ function createIcns() {
 }
 
 fs.writeFileSync(path.join(iconsDir, 'icon.icns'), createIcns())
-console.log('Icons written to', iconsDir)
+console.log('White icons written to', iconsDir)
+console.log('Universal window icon written to', assetsDir)

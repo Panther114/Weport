@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.5.4"
+$version = "0.6.0"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -122,7 +122,7 @@ if (Test-Path $key) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "Native egui UI (no WebView2). Same export/key features."
+  notes = "v0.6.0: anti-recall for WeChat 4 (Weixin.dll patch, admin required), top-right message/recall popups, tray + background mode, launch at login, white icon, settings panel."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

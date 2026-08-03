@@ -1,12 +1,16 @@
 //! Native egui shell — SpaceX monochrome, rounded, dense, larger type.
+use crate::antirecall;
 use crate::engine::{self, EngineState};
 use crate::export;
+use crate::notify::{NotifyConfig, NotifyEvent, NotifyKind, NotifyService};
 use crate::paths::AccountInfo;
 use crate::settings::{load_settings, save_settings, AppSettings};
+use crate::startup;
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Margin,
-    RichText, Sense, Stroke, StrokeKind, Vec2,
+    RichText, Sense, Stroke, Vec2,
 };
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -40,7 +44,46 @@ enum BgMsg {
     UpdateCheck(Result<Option<(String, String)>, String>),
     UpdateInstall(Result<(), String>),
     ClearDone(Result<String, String>),
+    AntiStatus(Result<(String, String), String>),
+    AntiDone(Result<serde_json::Value, String>),
 }
+
+/// Primary-display work-area rect (top-right toast placement).
+fn primary_work_area() -> (f32, f32, f32, f32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+        };
+        unsafe {
+            let pt = POINT { x: 0, y: 0 };
+            let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+            if !mon.is_null() {
+                let mut info: MONITORINFO = std::mem::zeroed();
+                info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                if GetMonitorInfoW(mon, &mut info) != 0 {
+                    let r = info.rcWork;
+                    return (
+                        r.left as f32,
+                        r.top as f32,
+                        (r.right - r.left) as f32,
+                        (r.bottom - r.top) as f32,
+                    );
+                }
+            }
+        }
+    }
+    (0.0, 0.0, 1920.0, 1040.0)
+}
+
+fn toast_vp_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("weport-toast")
+}
+
+const TOAST_W: f32 = 344.0;
+const TOAST_H: f32 = 96.0;
+const TOAST_DURATION: f64 = 6.0;
 
 pub fn run_gui() -> eframe::Result<()> {
     let icon = load_app_icon();
@@ -65,13 +108,13 @@ pub fn run_gui() -> eframe::Result<()> {
         Box::new(|cc| {
             setup_style(&cc.egui_ctx);
             setup_fonts(&cc.egui_ctx);
-            Ok(Box::new(WeportApp::new()))
+            Ok(Box::new(WeportApp::new(cc)))
         }),
     )
 }
 
 fn load_app_icon() -> Option<egui::IconData> {
-    let bytes = include_bytes!("../../assets/icons/logo.webp");
+    let bytes = include_bytes!("../../assets/icons/icon.png");
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     Some(egui::IconData {
@@ -178,10 +221,31 @@ struct WeportApp {
     toasts: Vec<Toast>,
     about_open: bool,
     clear_open: bool,
+    settings_open: bool,
     key_ready_hint: bool,
     export_log_txt: Option<String>,
     export_log_json: Option<String>,
     update_info: Option<(String, String)>,
+    // --- v0.6.0: background / tray / settings ---
+    launch_at_startup: bool,
+    start_in_background: bool,
+    close_to_tray: bool,
+    anti_recall_enabled: bool,
+    notifications_enabled: bool,
+    tray: Option<crate::tray::Tray>,
+    quit_requested: bool,
+    main_visible: bool,
+    pending_start_hidden: bool,
+    // anti-recall
+    anti_install: Option<String>,
+    anti_state: Option<String>, // human-readable status line
+    anti_busy: bool,
+    // notifications
+    notify: Option<NotifyService>,
+    toast_queue: VecDeque<NotifyEvent>,
+    current_toast: Option<NotifyEvent>,
+    toast_shown_at: f64,
+    notify_cfg_sent: Option<NotifyConfig>,
     tx: Sender<BgMsg>,
     rx: Receiver<BgMsg>,
     engine_busy: Arc<AtomicBool>,
@@ -189,7 +253,7 @@ struct WeportApp {
 }
 
 impl WeportApp {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = mpsc::channel();
         let s = load_settings();
         let account_keys = s.account_keys.clone();
@@ -199,6 +263,18 @@ impl WeportApp {
             .cloned()
             .filter(|k| !k.is_empty())
             .unwrap_or_else(|| s.decrypt_key.clone());
+
+        // Tray (Windows only; harmless to skip elsewhere).
+        #[cfg(windows)]
+        let tray = crate::tray::Tray::spawn(cc.egui_ctx.clone()).ok().flatten();
+        #[cfg(not(windows))]
+        let tray = None;
+
+        let notify = NotifyService::start();
+
+        let start_hidden = s.start_in_background;
+        // Reconcile the stored preference with the actual Windows Run key.
+        let launch_at_startup = startup::is_run_at_startup() || s.launch_at_startup;
         let mut app = Self {
             db_path: s.db_path,
             export_path: s.export_path,
@@ -218,10 +294,28 @@ impl WeportApp {
             toasts: Vec::new(),
             about_open: false,
             clear_open: false,
+            settings_open: false,
             key_ready_hint: false,
             export_log_txt: None,
             export_log_json: None,
             update_info: None,
+            launch_at_startup,
+            start_in_background: s.start_in_background,
+            close_to_tray: s.close_to_tray,
+            anti_recall_enabled: s.anti_recall_enabled,
+            notifications_enabled: s.notifications_enabled,
+            tray,
+            quit_requested: false,
+            main_visible: true,
+            pending_start_hidden: start_hidden,
+            anti_install: None,
+            anti_state: None,
+            anti_busy: false,
+            notify: Some(notify),
+            toast_queue: VecDeque::new(),
+            current_toast: None,
+            toast_shown_at: 0.0,
+            notify_cfg_sent: None,
             tx,
             rx,
             engine_busy: Arc::new(AtomicBool::new(false)),
@@ -234,6 +328,8 @@ impl WeportApp {
         }
         app.refresh_export_log();
         app.spawn_update_check(false);
+        // Startup anti-recall sanity check (status only, never patches by itself).
+        app.spawn_antirecall_status();
         app
     }
 
@@ -262,6 +358,11 @@ impl WeportApp {
             selected_wxid: self.selected_wxid.clone(),
             format: self.format.clone(),
             account_keys,
+            launch_at_startup: self.launch_at_startup,
+            start_in_background: self.start_in_background,
+            close_to_tray: self.close_to_tray,
+            anti_recall_enabled: self.anti_recall_enabled,
+            notifications_enabled: self.notifications_enabled,
         });
     }
 
@@ -503,6 +604,118 @@ impl WeportApp {
         });
     }
 
+    /// Background check of the WeChat 4 anti-recall patch state.
+    fn spawn_antirecall_status(&mut self) {
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let r = antirecall::find_weixin_install_path()
+                .ok_or_else(|| "未找到微信 4 安装目录".to_string())
+                .and_then(|install| {
+                    let state = antirecall::patch_state(&install);
+                    let label = match state {
+                        antirecall::PatchState::NotInstalled => "未安装微信 4".to_string(),
+                        antirecall::PatchState::WeChatRunning => "微信正在运行（需退出后操作）".to_string(),
+                        antirecall::PatchState::Patched => "已安装（撤回消息将保留）".to_string(),
+                        antirecall::PatchState::NotPatched => "未安装".to_string(),
+                        antirecall::PatchState::Unsupported => "版本不受支持".to_string(),
+                    };
+                    Ok((install.display().to_string(), label))
+                });
+            let _ = tx.send(BgMsg::AntiStatus(r));
+        });
+    }
+
+    /// Apply or remove the anti-recall patch through an elevated child.
+    fn spawn_antirecall_action(&mut self, apply: bool) {
+        if self.anti_busy {
+            return;
+        }
+        let Some(install) = self.anti_install.clone() else {
+            self.push_toast(1, "未找到微信 4 安装目录", "", 6.0);
+            return;
+        };
+        self.anti_busy = true;
+        self.push_toast(
+            2,
+            if apply { "正在安装防撤回补丁…" } else { "正在还原防撤回补丁…" },
+            "需要管理员权限，微信需已完全退出",
+            6.0,
+        );
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result_file = std::env::temp_dir().join(format!(
+                "weport-antirecall-{}.json",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&result_file);
+            let args = vec![
+                format!("--antirecall-{}", if apply { "apply" } else { "remove" }),
+                format!("\"{install}\""),
+                format!("--antirecall-result \"{}\"", result_file.display()),
+            ];
+            let r = antirecall::relaunch_elevated(&args)
+                .map_err(|e| e.to_string())
+                .and_then(|_| {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                    loop {
+                        if let Ok(text) = std::fs::read_to_string(&result_file) {
+                            if !text.trim().is_empty() {
+                                let _ = std::fs::remove_file(&result_file);
+                                return serde_json::from_str(&text)
+                                    .map_err(|e| format!("解析结果失败: {e}"));
+                            }
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            let _ = std::fs::remove_file(&result_file);
+                            return Err("等待管理员授权超时（可能取消了 UAC 弹窗）".to_string());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                });
+            let _ = tx.send(BgMsg::AntiDone(r));
+        });
+    }
+
+    fn sync_notify_config(&mut self) {
+        let cfg = NotifyConfig {
+            enabled: self.notifications_enabled
+                && !self.db_path.trim().is_empty()
+                && !self.selected_wxid.is_empty()
+                && self.decrypt_key.trim().len() == 64,
+            db_root: self.db_path.clone(),
+            wxid: self.selected_wxid.clone(),
+            decrypt_key: self.decrypt_key.clone(),
+        };
+        let changed = match &self.notify_cfg_sent {
+            Some(prev) => {
+                prev.enabled != cfg.enabled
+                    || prev.db_root != cfg.db_root
+                    || prev.wxid != cfg.wxid
+                    || prev.decrypt_key != cfg.decrypt_key
+            }
+            None => true,
+        };
+        if changed {
+            self.notify_cfg_sent = Some(cfg.clone());
+            if let Some(n) = &self.notify {
+                n.configure(cfg);
+            }
+        }
+    }
+
+    fn advance_toast(&mut self) {
+        self.current_toast = self.toast_queue.pop_front();
+        self.toast_shown_at = now_secs();
+        if self.current_toast.is_some() {
+            // Keep the toast viewport alive while a toast is up.
+        }
+    }
+
+    fn dismiss_current_toast(&mut self) {
+        self.current_toast = None;
+        self.advance_toast();
+    }
+
     fn poll_bg(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -562,7 +775,7 @@ impl WeportApp {
                         self.push_toast(
                             0,
                             "导出完成",
-                            format!("成功 {n} 个会话 → {folder}/（已覆盖同名）"),
+                            format!("成功 {n} 个会话 -> {folder}/（已覆盖同名）"),
                             7.0,
                         );
                         if let Some(p) = &mut self.progress {
@@ -653,6 +866,39 @@ impl WeportApp {
                     self.clear_open = false;
                     self.push_toast(1, "清空失败", e, 8.0);
                 }
+                BgMsg::AntiStatus(Ok((install, label))) => {
+                    self.anti_install = Some(install);
+                    self.anti_state = Some(label.clone());
+                    if self.anti_recall_enabled && label == "未安装" {
+                        self.push_toast(2, "防撤回未生效", "微信 4 的防撤回补丁尚未安装，可在设置中启用", 8.0);
+                    } else if self.anti_recall_enabled && label == "微信正在运行（需退出后操作）" {
+                        self.push_toast(2, "微信正在运行", "防撤回补丁需要退出微信后安装", 6.0);
+                    }
+                }
+                BgMsg::AntiStatus(Err(e)) => {
+                    let msg = e.clone();
+                    self.anti_state = Some(e);
+                    self.push_toast(2, "防撤回状态未知", msg, 6.0);
+                }
+                BgMsg::AntiDone(Ok(v)) => {
+                    self.anti_busy = false;
+                    let ok = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let msg = v
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or(if ok { "操作成功" } else { "操作失败" });
+                    if ok {
+                        self.push_toast(0, msg, "", 6.0);
+                    } else {
+                        self.push_toast(1, "防撤回操作失败", msg, 10.0);
+                    }
+                    self.spawn_antirecall_status();
+                }
+                BgMsg::AntiDone(Err(e)) => {
+                    self.anti_busy = false;
+                    self.push_toast(1, "防撤回操作失败", e, 10.0);
+                    self.spawn_antirecall_status();
+                }
             }
         }
         // prune toasts
@@ -727,74 +973,73 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn rounded_button(
-    ui: &mut egui::Ui,
-    label: &str,
-    primary: bool,
-    enabled: bool,
-) -> egui::Response {
-    let desired = Vec2::new(
-        ui.available_width().min(280.0).max(88.0),
-        40.0,
-    );
-    let (rect, resp) = ui.allocate_exact_size(
-        if primary && ui.available_width() > 200.0 {
-            Vec2::new(ui.available_width(), 46.0)
-        } else {
-            Vec2::new(desired.x.min(ui.available_width()), 40.0)
-        },
-        Sense::click(),
-    );
-    let enabled = enabled && !ui.ctx().is_context_menu_open();
-    let resp = if enabled {
-        resp
-    } else {
-        resp.on_disabled_hover_text("busy")
-    };
-
-    let bg = if !enabled {
-        Color32::from_rgb(40, 40, 40)
-    } else if primary {
-        if resp.hovered() || resp.is_pointer_button_down_on() {
-            Color32::from_rgb(230, 230, 230)
-        } else {
-            TEXT
-        }
-    } else if resp.hovered() {
-        Color32::from_rgb(32, 32, 32)
-    } else {
-        ELEVATED
-    };
-    let fg = if primary && enabled { BG } else { TEXT };
-    let stroke = if primary {
-        Stroke::new(1.0, TEXT)
-    } else {
-        Stroke::new(1.0, if resp.hovered() { LINE_STRONG } else { LINE })
-    };
-
-    ui.painter()
-        .rect(rect, CornerRadius::same(R), bg, stroke, StrokeKind::Inside);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        FontId::new(if primary { 15.0 } else { 14.0 }, FontFamily::Proportional),
-        if enabled {
-            fg
-        } else {
-            TEXT_FAINT
-        },
-    );
-    if enabled {
-        resp
-    } else {
-        resp.interact(Sense::hover())
-    }
-}
-
 impl eframe::App for WeportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_bg(ctx);
+        self.sync_notify_config();
+
+        // --- Tray events (show / toggle / quit) ---
+        if let Some(tray) = &mut self.tray {
+            while let Some(ev) = tray.poll() {
+                match ev {
+                    crate::tray::TrayEvent::ShowMainWindow => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        self.main_visible = true;
+                    }
+                    crate::tray::TrayEvent::ToggleMainWindow => {
+                        if self.main_visible {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            self.main_visible = false;
+                        } else {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            self.main_visible = true;
+                        }
+                    }
+                    crate::tray::TrayEvent::Quit => {
+                        self.quit_requested = true;
+                    }
+                }
+            }
+        }
+
+        // Close-to-tray: veto window close and hide instead (unless quitting).
+        if !self.quit_requested && self.tray.is_some() && self.close_to_tray {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.main_visible = false;
+            }
+        }
+        if self.quit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if self.pending_start_hidden && self.tray.is_some() {
+            self.pending_start_hidden = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.main_visible = false;
+        }
+
+        // --- Notification toasts from the watcher ---
+        if let Some(notify) = &self.notify {
+            while let Some(ev) = notify.poll() {
+                self.toast_queue.push_back(ev);
+            }
+        }
+        let now = now_secs();
+        if self.current_toast.is_none() && !self.toast_queue.is_empty() {
+            self.advance_toast();
+        }
+        if let Some(_t) = &self.current_toast {
+            if now - self.toast_shown_at > TOAST_DURATION {
+                self.dismiss_current_toast();
+            }
+        }
+        self.render_toast_viewport(ctx);
+        if self.current_toast.is_some() || !self.toast_queue.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
 
         // Toasts
         egui::Area::new(egui::Id::new("toasts"))
@@ -853,7 +1098,17 @@ impl eframe::App for WeportApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("ⓘ 关于").size(13.0))
+                                egui::Button::new(RichText::new("设置").size(13.0))
+                                    .corner_radius(R)
+                                    .min_size(Vec2::new(0.0, 26.0)),
+                            )
+                            .clicked()
+                        {
+                            self.settings_open = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("关于").size(13.0))
                                     .corner_radius(R)
                                     .min_size(Vec2::new(0.0, 26.0)),
                             )
@@ -940,6 +1195,108 @@ impl eframe::App for WeportApp {
 }
 
 impl WeportApp {
+    /// Top-right always-on-top toast window (egui secondary viewport).
+    fn render_toast_viewport(&mut self, ctx: &egui::Context) {
+        let builder = egui::ViewportBuilder::default()
+            .with_title("WeportToast")
+            .with_inner_size([TOAST_W, TOAST_H])
+            .with_min_inner_size([TOAST_W, TOAST_H])
+            .with_max_inner_size([TOAST_W, TOAST_H])
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_taskbar(false);
+
+        let toast = self.current_toast.clone();
+        let mut dismiss = false;
+        let (wx, wy, ww, _wh) = primary_work_area();
+        let pos = [wx + ww - TOAST_W - 20.0, wy + 20.0];
+
+        ctx.show_viewport_immediate(toast_vp_id(), builder, |vctx, class| {
+            vctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
+            if let Some(t) = &toast {
+                vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
+                vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(
+                    pos[0],
+                    pos[1],
+                )));
+
+                egui::CentralPanel::default()
+                    .frame(Frame::NONE.fill(Color32::TRANSPARENT))
+                    .show(vctx, |ui| {
+                        let accent = match t.kind {
+                            NotifyKind::Recalled => Color32::from_rgb(255, 190, 120),
+                            NotifyKind::NewMessage => TEXT,
+                        };
+                        let card = Frame::new()
+                            .fill(PANEL)
+                            .stroke(Stroke::new(1.0, LINE_STRONG))
+                            .corner_radius(CornerRadius::same(12))
+                            .inner_margin(Margin::symmetric(14, 10));
+                        let resp = card
+                            .show(ui, |ui| {
+                                ui.set_min_width(TOAST_W - 28.0);
+                                ui.horizontal(|ui| {
+                                    let kind_label = match t.kind {
+                                        NotifyKind::NewMessage => "新消息",
+                                        NotifyKind::Recalled => "撤回提醒",
+                                    };
+                                    ui.label(
+                                        RichText::new(kind_label)
+                                            .size(11.5)
+                                            .strong()
+                                            .color(accent),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new("点击关闭")
+                                                    .size(10.5)
+                                                    .color(TEXT_FAINT),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.add_space(2.0);
+                                ui.label(
+                                    RichText::new(&t.title)
+                                        .size(14.5)
+                                        .strong()
+                                        .color(TEXT),
+                                );
+                                ui.add_space(3.0);
+                                let body = if t.content.chars().count() > 60 {
+                                    let mut s: String = t.content.chars().take(60).collect();
+                                    s.push('…');
+                                    s
+                                } else {
+                                    t.content.clone()
+                                };
+                                ui.label(
+                                    RichText::new(body).size(12.5).color(TEXT_DIM),
+                                );
+                            })
+                            .response;
+                        if resp.clicked() {
+                            dismiss = true;
+                        }
+                    });
+            } else {
+                vctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
+                if class == egui::ViewportClass::Embedded {
+                    // Fallback (no multi-viewport backend): nothing to show.
+                }
+            }
+        });
+        if dismiss {
+            self.dismiss_current_toast();
+        }
+    }
+
     fn section_title(&self, ui: &mut egui::Ui, title: &str, right: &str) {
         ui.horizontal(|ui| {
             ui.label(
@@ -1376,6 +1733,9 @@ impl WeportApp {
     }
 
     fn ui_modals(&mut self, ctx: &egui::Context) {
+        if self.settings_open {
+            self.ui_settings(ctx);
+        }
         if self.clear_open {
             egui::Window::new("清空导出库？")
                 .collapsible(false)
@@ -1496,6 +1856,217 @@ impl WeportApp {
                     });
                 });
         }
+    }
+}
+
+impl WeportApp {
+    /// Settings modal: startup / tray behavior / anti-recall / notifications.
+    fn ui_settings(&mut self, ctx: &egui::Context) {
+        let mut startup_toggled = false;
+        let mut bg_toggled = false;
+        let mut tray_toggled = false;
+        let mut notify_toggled = false;
+        let mut anti_toggled: Option<bool> = None; // Some(apply) to run
+
+        egui::Window::new("设置")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                Frame::new()
+                    .fill(PANEL)
+                    .stroke(Stroke::new(1.0, LINE_STRONG))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::same(18)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(460.0);
+
+                // --- Startup & tray ---
+                WeportApp::settings_section(ui, "启动与托盘");
+                startup_toggled |= ui
+                    .checkbox(&mut self.launch_at_startup, "开机时自动启动 Weport")
+                    .changed();
+                ui.label(
+                    RichText::new("写入当前用户注册表 Run 项（HKCU），无需管理员权限")
+                        .size(11.5)
+                        .color(TEXT_FAINT),
+                );
+                bg_toggled |= ui
+                    .checkbox(&mut self.start_in_background, "启动后隐藏到托盘（后台运行）")
+                    .changed();
+                tray_toggled |= ui
+                    .checkbox(&mut self.close_to_tray, "关闭窗口时最小化到托盘而不是退出")
+                    .changed();
+                if self.tray.is_none() {
+                    ui.label(
+                        RichText::new("当前系统无法创建托盘图标，后台/托盘功能不可用")
+                            .size(11.5)
+                            .color(Color32::from_rgb(255, 200, 200)),
+                    );
+                }
+
+                ui.add_space(10.0);
+
+                // --- Anti-recall ---
+                WeportApp::settings_section(ui, "防撤回（微信 4）");
+                let ar_checked = ui
+                    .checkbox(&mut self.anti_recall_enabled, "启用防撤回：撤回的消息在微信内保留")
+                    .changed();
+                if ar_checked {
+                    if self.anti_recall_enabled {
+                        anti_toggled = Some(true);
+                    } else {
+                        anti_toggled = Some(false);
+                    }
+                }
+                if let Some(install) = &self.anti_install {
+                    ui.label(
+                        RichText::new(format!("安装目录：{install}"))
+                            .size(11.5)
+                            .color(TEXT_FAINT)
+                            .family(FontFamily::Monospace),
+                    );
+                }
+                let status = self.anti_state.clone().unwrap_or_else(|| "检测中…".to_string());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("状态").size(12.5).color(TEXT_DIM));
+                    let color = if status.contains("已安装") {
+                        Color32::from_rgb(160, 255, 170)
+                    } else if status == "未安装" {
+                        Color32::from_rgb(255, 210, 130)
+                    } else {
+                        TEXT_DIM
+                    };
+                    ui.label(RichText::new(&status).size(12.5).color(color));
+                    if ui
+                        .add_enabled(!self.anti_busy, egui::Button::new("刷新").corner_radius(R).min_size(Vec2::new(56.0, 24.0)))
+                        .clicked()
+                    {
+                        self.spawn_antirecall_status();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.anti_busy && self.anti_install.is_some(),
+                            egui::Button::new(
+                                RichText::new(if self.anti_busy { "处理中…" } else { "安装补丁" })
+                                    .size(13.0)
+                                    .color(BG),
+                            )
+                            .fill(TEXT)
+                            .stroke(Stroke::new(1.0, TEXT))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(110.0, 32.0)),
+                        )
+                        .clicked()
+                    {
+                        anti_toggled = Some(true);
+                        self.anti_recall_enabled = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.anti_busy && self.anti_install.is_some(),
+                            egui::Button::new("还原补丁").corner_radius(R).min_size(Vec2::new(96.0, 32.0)),
+                        )
+                        .clicked()
+                    {
+                        anti_toggled = Some(false);
+                        self.anti_recall_enabled = false;
+                    }
+                });
+                ui.label(
+                    RichText::new("安装/还原需要管理员权限（UAC），并要求微信已完全退出。微信更新后需重新安装。")
+                        .size(11.5)
+                        .color(TEXT_FAINT),
+                );
+
+                ui.add_space(10.0);
+
+                // --- Notifications ---
+                WeportApp::settings_section(ui, "消息弹窗提醒");
+                notify_toggled |= ui
+                    .checkbox(&mut self.notifications_enabled, "收到新消息/撤回时，在屏幕右上角弹窗")
+                    .changed();
+                ui.label(
+                    RichText::new("需要已提取解密密钥；弹窗不聚焦、不抢输入。撤回内容在补丁未安装时也能检测。")
+                        .size(11.5)
+                        .color(TEXT_FAINT),
+                );
+                if self.notifications_enabled
+                    && (self.db_path.trim().is_empty()
+                        || self.selected_wxid.is_empty()
+                        || self.decrypt_key.trim().len() != 64)
+                {
+                    ui.label(
+                        RichText::new("提示：请先选择数据目录、账号并提取密钥。")
+                            .size(11.5)
+                            .color(Color32::from_rgb(255, 210, 130)),
+                    );
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new("关闭").corner_radius(R).min_size(Vec2::new(90.0, 34.0)))
+                            .clicked()
+                        {
+                            self.settings_open = false;
+                        }
+                    });
+                });
+            });
+
+        if startup_toggled {
+            let enabled = self.launch_at_startup;
+            match startup::set_run_at_startup(enabled) {
+                Ok(()) => {
+                    self.launch_at_startup = enabled;
+                    self.push_toast(
+                        0,
+                        if enabled { "已设置开机自启动" } else { "已取消开机自启动" },
+                        "",
+                        4.0,
+                    );
+                }
+                Err(e) => {
+                    self.launch_at_startup = !enabled;
+                    self.push_toast(1, "设置开机自启动失败", e, 8.0);
+                }
+            }
+            self.persist();
+        }
+        if bg_toggled {
+            self.persist();
+        }
+        if tray_toggled {
+            self.persist();
+        }
+        if notify_toggled {
+            self.persist();
+            self.sync_notify_config();
+        }
+        if let Some(apply) = anti_toggled {
+            self.spawn_antirecall_action(apply);
+            self.persist();
+        }
+    }
+
+    fn settings_section(ui: &mut egui::Ui, title: &str) {
+        ui.label(
+            RichText::new(title)
+                .size(12.5)
+                .strong()
+                .color(TEXT)
+                .extra_letter_spacing(0.8),
+        );
+        ui.add_space(3.0);
+        let y = ui.cursor().top();
+        ui.painter()
+            .hline(ui.max_rect().x_range(), y, Stroke::new(1.0_f32, LINE));
+        ui.add_space(7.0);
     }
 }
 

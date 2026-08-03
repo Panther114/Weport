@@ -23,6 +23,25 @@ pub struct AppSettings {
     pub format: String,
     #[serde(default)]
     pub account_keys: HashMap<String, String>,
+    /// Launch Weport at Windows login (registry Run key).
+    #[serde(default)]
+    pub launch_at_startup: bool,
+    /// Start hidden in the background (tray) instead of showing the window.
+    #[serde(default)]
+    pub start_in_background: bool,
+    /// Keep running in the tray when the window is closed.
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+    /// Patch WeChat 4 (Weixin.dll) so recalled messages stay visible.
+    #[serde(default)]
+    pub anti_recall_enabled: bool,
+    /// Show a top-right toast for incoming chat messages.
+    #[serde(default)]
+    pub notifications_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn settings_dir() -> Result<PathBuf, String> {
@@ -77,8 +96,16 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn sandbox() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("weport-settings-test-{}", std::process::id()));
+    // Tests share the WEPORT_SETTINGS_DIR process env var, so they must not
+    // run concurrently.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn sandbox(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "weport-settings-test-{}-{}",
+            std::process::id(),
+            name
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         std::env::set_var("WEPORT_SETTINGS_DIR", &dir);
@@ -87,7 +114,8 @@ mod tests {
 
     #[test]
     fn roundtrip_keeps_account_keys() {
-        let dir = sandbox();
+        let _guard = TEST_LOCK.lock().unwrap();
+        let dir = sandbox("roundtrip");
         let mut keys = HashMap::new();
         keys.insert("wxid_a".into(), "a".repeat(64));
         keys.insert("wxid_b".into(), "b".repeat(64));
@@ -98,6 +126,7 @@ mod tests {
             selected_wxid: "wxid_a".into(),
             format: "txt".into(),
             account_keys: keys.clone(),
+            ..Default::default()
         };
         save_settings(&s).unwrap();
 
@@ -111,7 +140,8 @@ mod tests {
 
     #[test]
     fn corrupt_main_file_falls_back_to_backup() {
-        let dir = sandbox();
+        let _guard = TEST_LOCK.lock().unwrap();
+        let dir = sandbox("corrupt");
         let mut keys = HashMap::new();
         keys.insert("wxid_a".into(), "a".repeat(64));
         let s = AppSettings {
@@ -121,6 +151,7 @@ mod tests {
             selected_wxid: "wxid_a".into(),
             format: "txt".into(),
             account_keys: keys,
+            ..Default::default()
         };
         save_settings(&s).unwrap();
         // Second save creates the .bak of the first good copy.

@@ -1,6 +1,6 @@
 [package]
 name = "weport"
-version = "0.5.4"
+version = "0.6.0"
 description = "Weport — lightweight WeChat chat history exporter (native egui)"
 authors = ["Panther114"]
 edition = "2021"
@@ -48,6 +48,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Registry",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_LibraryLoader"
 ] }
 

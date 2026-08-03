@@ -93,6 +93,19 @@ fn decode_cbuf(buf: &[u8]) -> String {
     String::from_utf8_lossy(&buf[..end]).trim().to_string()
 }
 
+/// Is any WeChat 4 (Weixin.exe / wechat.exe) process currently running?
+/// Used by the anti-recall patcher to refuse patching a live DLL.
+pub fn wechat_running() -> bool {
+    #[cfg(windows)]
+    {
+        !win::find_wechat_pids().is_empty()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Normalize DLL status lines the same way WeFlow WelcomePage does.
 pub fn normalize_status_message(message: &str) -> String {
     if message.contains("Hook安装成功") {

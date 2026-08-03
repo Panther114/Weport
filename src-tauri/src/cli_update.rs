@@ -226,10 +226,16 @@ Commands:
   detect               Auto-detect WeChat data directory
   accounts --db <path> List accounts under a data directory
   key                  Extract database key (WeChat must be logged in)
+  antirecall status    Show WeChat 4 anti-recall patch state
+  antirecall apply     Install anti-recall patch (needs admin, WeChat closed)
+  antirecall remove    Restore Weixin.dll from backup (needs admin)
   export --out <dir> [opts]
   update               Check for updates (CLI)
   update --install     Download and run latest installer
   update --install -y  Silent install when possible
+
+Anti-recall options:
+  --install-path <dir> WeChat 4 install directory (auto-detected by default)
 
 Export options:
   --out <dir>          Output folder (required)

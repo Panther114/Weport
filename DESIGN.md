@@ -13,7 +13,7 @@ Mission-control dual rail: locate & unlock left, export right. Dense layout, lar
 - Black ground / white signal (SpaceX monochrome)
 - Rounded corners (~10px) on panels and buttons
 - Custom face `src/assets/fonts/weport.ttf`
-- App icon from `assets/icons/logo.webp` (exe + window + installer)
+- White-on-transparent app icon from `scripts/generate-icons.mjs` → `src-tauri/icons/*` (exe + installer) + `assets/icons/icon.png` (window icon)
 
 ## Signature
 White primary export bar + progress line; inverted account selection chips.

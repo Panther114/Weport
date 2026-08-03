@@ -103,3 +103,7 @@ weflow-web-offical
 /WeFlow/
 WeFlow/
 
+# RevokeMsgPatcher — reference clone, never ship
+/RevokeMsgPatcher/
+RevokeMsgPatcher/
+
