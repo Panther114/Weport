@@ -28,7 +28,7 @@ Native stack only (~14 MB DLLs + Tauri binary). No Chromium, no Electron.
 - Auto-update (GUI + `weport update`)
 - **Anti-recall (WeChat 4)** — patch `Weixin.dll` so recalled messages stay visible inside WeChat (mechanism from [RevokeMsgPatcher](https://github.com/huiyadanli/RevokeMsgPatcher), GPLv3)
 - **Message popup** — top-right always-on-top toast for incoming messages and recalls (requires the decrypt key; logic adapted from WeFlow)
-- **Tray + background** — close to tray, silent startup, launch at Windows login (Settings → 设置)
+- **Tray + background** — auto-start at login, tray-only by default, close to tray (Settings → 设置)
 
 ## Getting the database key (important)
 
@@ -39,11 +39,12 @@ Same model as WeFlow: the key is captured **during WeChat login**, not from a fu
 3. When status says **已准备就绪**, log in / re-login WeChat (confirm on phone if asked)
 4. Key fills in (or paste a known 64-char hex key manually)
 
-## Anti-recall & popup (v0.6.1)
+## Anti-recall, tray & popup (v0.6.2)
 
-- **首页 → 安装防撤回**: patch WeChat's `Weixin.dll` so recalled messages stay visible inside WeChat. Requires WeChat 4 (Weixin.exe), admin elevation (UAC) and a fully closed WeChat. Re-apply after each WeChat update; restore via 还原补丁.
-- **首页 → 消息提醒**: with the decrypt key available, Weport watches the account's local databases and shows a top-right, always-on-top, non-focusing toast for new incoming messages and recalls. Recalled-message detection works independently of the patch (reads the `revokemsg` rows WeChat writes).
-- **设置**: launch at Windows login (HKCU Run key), silent background start, close-to-tray, and GitHub release update checks. Tray menu: 显示主窗口 / 退出.
+- **安装防撤回**: patch WeChat's `Weixin.dll` so recalled messages stay visible inside WeChat. Requires WeChat 4 (Weixin.exe), admin elevation (UAC) and a fully closed WeChat. Re-apply after each WeChat update; restore via 还原补丁.
+- **消息提醒**: with the decrypt key available, Weport watches the account's local databases and shows a top-right, always-on-top, non-focusing toast for new incoming messages and recalls.
+- **Tray defaults**: installs enable login auto-start; the app starts in the tray and keeps running when the window is closed. Tray menu: 显示主窗口 / 退出. Single-instance (second launch exits quietly).
+- **Icon**: white WeChat-style dual-bubble mark for exe, tray, installer, and taskbar.
 
 ## CLI
 

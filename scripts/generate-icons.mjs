@@ -1,12 +1,12 @@
 /**
- * Generate Weport PNG/ICO icons — monochrome white mark on transparent.
+ * Generate Weport PNG/ICO icons — white WeChat-style mark on transparent.
  *
  * Single source of truth for every icon the app ships:
  *   src-tauri/icons/*   → bundle icons, NSIS installer icon, exe resource icon
  *   assets/icons/icon.png → window icon embedded by gui.rs
  *
- * The design is the white "signal plate": a rounded-square outline ring,
- * three signal bars and one square — all white, background fully transparent.
+ * Design: classic dual speech-bubble silhouette (WeChat-like), solid white
+ * on fully transparent background. Readable at 16–256px.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -38,65 +38,106 @@ function chunk(type, data) {
   return Buffer.concat([len, typeBuf, data, crcBuf])
 }
 
+function clamp01(x) {
+  return Math.min(1, Math.max(0, x))
+}
+
+/** True if (px,py) is inside a rounded rectangle centered at (cx,cy). */
+function inRoundRect(px, py, cx, cy, hw, hh, r) {
+  const dx = Math.abs(px - cx)
+  const dy = Math.abs(py - cy)
+  if (dx > hw || dy > hh) return false
+  if (dx <= hw - r || dy <= hh - r) return true
+  const ex = dx - (hw - r)
+  const ey = dy - (hh - r)
+  return ex * ex + ey * ey <= r * r
+}
+
+/** Barycentric point-in-triangle. */
+function inTriangle(px, py, ax, ay, bx, by, cx, cy) {
+  const v0x = cx - ax
+  const v0y = cy - ay
+  const v1x = bx - ax
+  const v1y = by - ay
+  const v2x = px - ax
+  const v2y = py - ay
+  const dot00 = v0x * v0x + v0y * v0y
+  const dot01 = v0x * v1x + v0y * v1y
+  const dot02 = v0x * v2x + v0y * v2y
+  const dot11 = v1x * v1x + v1y * v1y
+  const dot12 = v1x * v2x + v1y * v2y
+  const inv = 1 / (dot00 * dot11 - dot01 * dot01)
+  const u = (dot11 * dot02 - dot01 * dot12) * inv
+  const v = (dot00 * dot12 - dot01 * dot02) * inv
+  return u >= 0 && v >= 0 && u + v < 1
+}
+
+function inCircle(px, py, cx, cy, r) {
+  const dx = px - cx
+  const dy = py - cy
+  return dx * dx + dy * dy <= r * r
+}
+
+/**
+ * Soft edge: sample 4 subpixels for AA.
+ * Primary bubble bottom-left, secondary top-right — WeChat dual-chat mark.
+ */
+function sampleMark(nx, ny) {
+  // Primary (larger) bubble
+  const pBody = { cx: 0.4, cy: 0.56, hw: 0.28, hh: 0.22, r: 0.11 }
+  const pTail = { ax: 0.2, ay: 0.72, bx: 0.34, by: 0.78, tx: 0.12, ty: 0.9 }
+
+  // Secondary (smaller) bubble
+  const sBody = { cx: 0.68, cy: 0.34, hw: 0.18, hh: 0.14, r: 0.08 }
+  const sTail = { ax: 0.74, ay: 0.46, bx: 0.82, by: 0.48, tx: 0.9, ty: 0.58 }
+
+  const eyes = [
+    [0.3, 0.54, 0.032],
+    [0.46, 0.54, 0.032],
+    [0.62, 0.33, 0.026],
+    [0.74, 0.33, 0.026]
+  ]
+
+  let inside =
+    inRoundRect(nx, ny, pBody.cx, pBody.cy, pBody.hw, pBody.hh, pBody.r) ||
+    inTriangle(nx, ny, pTail.ax, pTail.ay, pTail.bx, pTail.by, pTail.tx, pTail.ty) ||
+    inRoundRect(nx, ny, sBody.cx, sBody.cy, sBody.hw, sBody.hh, sBody.r) ||
+    inTriangle(nx, ny, sTail.ax, sTail.ay, sTail.bx, sTail.by, sTail.tx, sTail.ty)
+
+  if (!inside) return 0
+
+  // Eye cutouts
+  for (const [ex, ey, er] of eyes) {
+    if (inCircle(nx, ny, ex, ey, er)) return 0
+  }
+  return 1
+}
+
 function createPng(size) {
   const width = size
   const height = size
   const raw = Buffer.alloc((width * 4 + 1) * height)
-
-  const white = [255, 255, 255, 255]
-  const smoothstep = (e0, e1, x) => {
-    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
-    return t * t * (3 - 2 * t)
-  }
-
-  const pad = 0.075
-  const ring = 0.085
+  // 2x2 supersampling for smoother edges at small sizes
+  const ss = size <= 48 ? 2 : 1
 
   for (let y = 0; y < height; y++) {
     const row = y * (width * 4 + 1)
     raw[row] = 0
     for (let x = 0; x < width; x++) {
-      const i = row + 1 + x * 4
-      const nx = (x + 0.5) / width
-      const ny = (y + 0.5) / height
-
-      // Distance to the rounded-square plate edge (positive = inside plate)
-      const dx = Math.max(nx - pad, pad + 1 - nx, 0)
-      const dy = Math.max(ny - pad, pad + 1 - ny, 0)
-      const edgeDist = Math.max(dx, dy)
-
-      let alpha = 0
-
-      // White ring: plate border band
-      if (edgeDist >= -ring && edgeDist <= 0.012) {
-        const t = 1 - Math.abs(edgeDist) / ring
-        alpha = Math.max(alpha, smoothstep(0, 0.5, t))
-      }
-
-      // Three signal bars + signal square (white)
-      const bars = [
-        [0.34, 0.42, 0.26, 0.76],
-        [0.48, 0.56, 0.26, 0.62],
-        [0.62, 0.7, 0.26, 0.72]
-      ]
-      for (const [y0, y1, x0, x1] of bars) {
-        if (ny >= y0 && ny <= y1 && nx >= x0 && nx <= x1) {
-          alpha = 1
+      let acc = 0
+      for (let sy = 0; sy < ss; sy++) {
+        for (let sx = 0; sx < ss; sx++) {
+          const nx = (x + (sx + 0.5) / ss) / width
+          const ny = (y + (sy + 0.5) / ss) / height
+          acc += sampleMark(nx, ny)
         }
       }
-      if (nx >= 0.72 && nx <= 0.82 && ny >= 0.48 && ny <= 0.58) {
-        alpha = 1
-      }
-
-      // Soft AA on the ring
-      if (alpha > 0 && alpha < 1) {
-        // keep fractional ring alpha as-is
-      }
-
-      raw[i] = white[0]
-      raw[i + 1] = white[1]
-      raw[i + 2] = white[2]
-      raw[i + 3] = Math.round(255 * Math.min(1, alpha))
+      const a = clamp01(acc / (ss * ss))
+      const i = row + 1 + x * 4
+      raw[i] = 255
+      raw[i + 1] = 255
+      raw[i + 2] = 255
+      raw[i + 3] = Math.round(255 * a)
     }
   }
 
@@ -148,20 +189,20 @@ function createIco(sizes) {
   return Buffer.concat([header, ...entries, ...blobs])
 }
 
+const png16 = createPng(16)
 const png32 = createPng(32)
+const png48 = createPng(48)
+const png64 = createPng(64)
 const png128 = createPng(128)
 const png256 = createPng(256)
 const png512 = createPng(512)
 const ico = createIco([16, 32, 48, 64, 128, 256])
 
-// Tauri bundle icons
 fs.writeFileSync(path.join(iconsDir, '32x32.png'), png32)
 fs.writeFileSync(path.join(iconsDir, '128x128.png'), png128)
 fs.writeFileSync(path.join(iconsDir, '128x128@2x.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.ico'), ico)
-
-// Universal window-icon copy (embedded by gui.rs)
 fs.writeFileSync(path.join(assetsDir, 'icon.png'), png512)
 
 function createIcns() {
@@ -169,7 +210,7 @@ function createIcns() {
     { type: 'ic07', data: png128 },
     { type: 'ic08', data: png256 },
     { type: 'ic09', data: png512 },
-    { type: 'ic12', data: createPng(64) },
+    { type: 'ic12', data: png64 },
     { type: 'ic13', data: png256 }
   ]
   const chunks = []
@@ -187,5 +228,8 @@ function createIcns() {
 }
 
 fs.writeFileSync(path.join(iconsDir, 'icon.icns'), createIcns())
-console.log('White icons written to', iconsDir)
+fs.writeFileSync(path.join(iconsDir, '16x16.png'), png16)
+fs.writeFileSync(path.join(iconsDir, '48x48.png'), png48)
+
+console.log('White WeChat-style icons written to', iconsDir)
 console.log('Universal window icon written to', assetsDir)

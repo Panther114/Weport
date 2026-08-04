@@ -24,10 +24,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub account_keys: HashMap<String, String>,
     /// Launch Weport at Windows login (registry Run key).
-    #[serde(default)]
+    /// Defaults to true so first-run installs always auto-start.
+    #[serde(default = "default_true")]
     pub launch_at_startup: bool,
     /// Start hidden in the background (tray) instead of showing the window.
-    #[serde(default)]
+    /// Defaults to true: tray-only until the user opens the main window.
+    #[serde(default = "default_true")]
     pub start_in_background: bool,
     /// Keep running in the tray when the window is closed.
     #[serde(default = "default_true")]

@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.1"
+$version = "0.6.2"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -67,6 +67,8 @@ Section "Install"
   CreateDirectory "`$SMPROGRAMS\Weport"
   CreateShortCut "`$SMPROGRAMS\Weport\Weport.lnk" "`$INSTDIR\weport.exe"
   CreateShortCut "`$DESKTOP\Weport.lnk" "`$INSTDIR\weport.exe"
+  ; Always register login auto-start (tray-only by default in-app).
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Weport" '"`$INSTDIR\weport.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -78,6 +80,7 @@ Section "Uninstall"
   Delete "`$SMPROGRAMS\Weport\Weport.lnk"
   RMDir "`$SMPROGRAMS\Weport"
   Delete "`$DESKTOP\Weport.lnk"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Weport"
   DeleteRegKey HKCU "Software\Weport"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport"
 SectionEnd
@@ -124,7 +127,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.1: four-mode navigation, home-page anti-recall and message reminder controls, expanded native layout, tray/startup settings, and GitHub update controls."
+  notes = "v0.6.2: fix close hang, tray-only auto-start by default, white WeChat-style app icon everywhere, layout margins + real toolbar icons, single-instance + quit reliability."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

@@ -90,11 +90,29 @@ impl NotifyService {
     }
 }
 
+impl NotifyService {
+    /// Signal the watcher to stop without joining (safe to call before process exit).
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
 impl Drop for NotifyService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            // WCDB sync can block; never freeze process exit waiting on it.
+            let deadline = std::time::Instant::now() + Duration::from_millis(350);
+            loop {
+                if join.is_finished() {
+                    let _ = join.join();
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }

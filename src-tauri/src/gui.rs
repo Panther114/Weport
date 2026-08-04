@@ -219,44 +219,288 @@ fn setup_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-/// Small native GitHub mark, kept inline so the top bar does not depend on an
-/// additional icon crate or a network-loaded asset.
-fn github_icon(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-    let center = rect.center();
-    let painter = ui.painter();
-    painter.circle_filled(center + Vec2::new(0.0, 1.5), 6.3, color);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            center + Vec2::new(-5.8, -1.0),
-            center + Vec2::new(-4.4, -7.2),
-            center + Vec2::new(-1.8, -4.8),
-            center + Vec2::new(1.8, -4.8),
-            center + Vec2::new(4.4, -7.2),
-            center + Vec2::new(5.8, -1.0),
-        ],
-        color,
-        Stroke::NONE,
-    ));
-    painter.circle_filled(center + Vec2::new(-2.3, 0.1), 1.0, BG);
-    painter.circle_filled(center + Vec2::new(2.3, 0.1), 1.0, BG);
-}
+/// Compact vector icons drawn with egui painter (no external asset deps).
+mod icons {
+    use super::{BG, ELEVATED, LINE, TEXT_DIM, R};
+    use eframe::egui::{
+        self, Color32, CornerRadius, Frame, Margin, Pos2, RichText, Sense, Stroke, StrokeKind, Vec2,
+    };
 
-fn github_button(ui: &mut egui::Ui) -> egui::Response {
-    Frame::new()
-        .fill(ELEVATED)
-        .stroke(Stroke::new(1.0, LINE))
-        .corner_radius(CornerRadius::same(R))
-        .inner_margin(Margin::symmetric(10, 5))
-        .show(ui, |ui| {
-            ui.set_min_size(Vec2::new(108.0, 38.0));
-            ui.horizontal_centered(|ui| {
-                github_icon(ui, TEXT_DIM);
-                ui.label(RichText::new("GitHub").size(14.0).color(TEXT_DIM));
-            });
-        })
-        .response
-        .interact(Sense::click())
+    fn icon_rect(ui: &mut egui::Ui, size: f32) -> egui::Rect {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        rect
+    }
+
+    fn dir(angle: f32) -> Vec2 {
+        Vec2::new(angle.cos(), angle.sin())
+    }
+
+    /// GitHub-style cat mark (simplified, readable at toolbar sizes).
+    pub fn github(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let s = size / 18.0;
+        let painter = ui.painter();
+        painter.circle_filled(c + Vec2::new(0.0, 1.0 * s), 6.2 * s, color);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(-5.6 * s, -1.2 * s),
+                c + Vec2::new(-4.2 * s, -7.4 * s),
+                c + Vec2::new(-1.2 * s, -4.2 * s),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(5.6 * s, -1.2 * s),
+                c + Vec2::new(4.2 * s, -7.4 * s),
+                c + Vec2::new(1.2 * s, -4.2 * s),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        let eye = if color.r() > 100 {
+            BG
+        } else {
+            Color32::from_rgb(20, 20, 20)
+        };
+        painter.circle_filled(c + Vec2::new(-2.2 * s, 0.4 * s), 1.05 * s, eye);
+        painter.circle_filled(c + Vec2::new(2.2 * s, 0.4 * s), 1.05 * s, eye);
+        painter.line_segment(
+            [c + Vec2::new(-3.5 * s, 5.5 * s), c + Vec2::new(-4.2 * s, 8.0 * s)],
+            Stroke::new(1.4 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(3.5 * s, 5.5 * s), c + Vec2::new(4.2 * s, 8.0 * s)],
+            Stroke::new(1.4 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(0.0, 6.0 * s), c + Vec2::new(0.0, 8.2 * s)],
+            Stroke::new(1.4 * s, color),
+        );
+    }
+
+    pub fn gear(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let r_outer = size * 0.34;
+        painter.circle_stroke(c, r_outer, Stroke::new(size * 0.14, color));
+        for i in 0..6 {
+            let a = (i as f32) * std::f32::consts::TAU / 6.0 - std::f32::consts::FRAC_PI_2;
+            let p = c + dir(a) * (r_outer + size * 0.02);
+            painter.rect_filled(
+                egui::Rect::from_center_size(p, Vec2::splat(size * 0.15)),
+                CornerRadius::same(2),
+                color,
+            );
+        }
+        painter.circle_filled(c, size * 0.1, color);
+        painter.circle_filled(c, size * 0.05, BG);
+    }
+
+    pub fn folder(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let painter = ui.painter();
+        let r = rect.shrink(size * 0.12);
+        let tab = egui::Rect::from_min_max(
+            Pos2::new(r.left(), r.top()),
+            Pos2::new(r.left() + r.width() * 0.42, r.top() + r.height() * 0.28),
+        );
+        painter.rect_filled(tab, CornerRadius::same(2), color);
+        painter.rect_stroke(
+            egui::Rect::from_min_max(
+                Pos2::new(r.left(), r.top() + r.height() * 0.2),
+                r.right_bottom(),
+            ),
+            CornerRadius::same(3),
+            Stroke::new(1.5, color),
+            StrokeKind::Middle,
+        );
+    }
+
+    pub fn key(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        painter.circle_stroke(c + Vec2::new(-3.5 * s, 0.0), 4.0 * s, Stroke::new(1.6 * s, color));
+        painter.line_segment(
+            [c + Vec2::new(0.2 * s, 0.0), c + Vec2::new(7.0 * s, 0.0)],
+            Stroke::new(1.8 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(5.2 * s, 0.0), c + Vec2::new(5.2 * s, 3.2 * s)],
+            Stroke::new(1.6 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(7.0 * s, 0.0), c + Vec2::new(7.0 * s, 2.4 * s)],
+            Stroke::new(1.6 * s, color),
+        );
+    }
+
+    pub fn database(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        let w = 6.0 * s;
+        // Stacked discs (reads as a DB cylinder at small sizes)
+        for (dy, rx) in [(-4.0, w), (0.0, w), (4.0, w)] {
+            painter.circle_stroke(c + Vec2::new(0.0, dy * s * 0.7), rx * 0.55, Stroke::new(1.4 * s, color));
+        }
+        painter.line_segment(
+            [c + Vec2::new(-w * 0.55, -2.8 * s), c + Vec2::new(-w * 0.55, 2.8 * s)],
+            Stroke::new(1.4 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(w * 0.55, -2.8 * s), c + Vec2::new(w * 0.55, 2.8 * s)],
+            Stroke::new(1.4 * s, color),
+        );
+    }
+
+    pub fn export_arrow(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        painter.line_segment(
+            [c + Vec2::new(0.0, -6.0 * s), c + Vec2::new(0.0, 4.0 * s)],
+            Stroke::new(1.8 * s, color),
+        );
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(0.0, 6.5 * s),
+                c + Vec2::new(-3.8 * s, 2.2 * s),
+                c + Vec2::new(3.8 * s, 2.2 * s),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        painter.line_segment(
+            [c + Vec2::new(-5.5 * s, 6.5 * s), c + Vec2::new(5.5 * s, 6.5 * s)],
+            Stroke::new(1.6 * s, color),
+        );
+    }
+
+    pub fn shield(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        let pts = [
+            c + Vec2::new(0.0, -7.0 * s),
+            c + Vec2::new(6.2 * s, -4.0 * s),
+            c + Vec2::new(5.4 * s, 2.5 * s),
+            c + Vec2::new(0.0, 7.2 * s),
+            c + Vec2::new(-5.4 * s, 2.5 * s),
+            c + Vec2::new(-6.2 * s, -4.0 * s),
+            c + Vec2::new(0.0, -7.0 * s),
+        ];
+        for i in 0..pts.len() - 1 {
+            painter.line_segment([pts[i], pts[i + 1]], Stroke::new(1.6 * s, color));
+        }
+        painter.line_segment(
+            [c + Vec2::new(-2.5 * s, 0.2 * s), c + Vec2::new(-0.5 * s, 2.4 * s)],
+            Stroke::new(1.6 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(-0.5 * s, 2.4 * s), c + Vec2::new(3.2 * s, -2.2 * s)],
+            Stroke::new(1.6 * s, color),
+        );
+    }
+
+    pub fn bell(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        painter.circle_stroke(c + Vec2::new(0.0, -1.2 * s), 4.5 * s, Stroke::new(1.5 * s, color));
+        painter.line_segment(
+            [c + Vec2::new(-5.5 * s, 3.2 * s), c + Vec2::new(5.5 * s, 3.2 * s)],
+            Stroke::new(1.5 * s, color),
+        );
+        painter.circle_filled(c + Vec2::new(0.0, 5.4 * s), 1.3 * s, color);
+        painter.circle_stroke(c + Vec2::new(0.0, -5.8 * s), 1.2 * s, Stroke::new(1.2 * s, color));
+    }
+
+    pub fn refresh(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        painter.circle_stroke(c, 5.5 * s, Stroke::new(1.5 * s, color));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(5.5 * s, -1.0 * s),
+                c + Vec2::new(8.0 * s, 1.5 * s),
+                c + Vec2::new(3.0 * s, 2.0 * s),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+    }
+
+    pub fn check(ui: &mut egui::Ui, color: Color32, size: f32) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        painter.line_segment(
+            [c + Vec2::new(-4.5 * s, 0.2 * s), c + Vec2::new(-1.2 * s, 3.5 * s)],
+            Stroke::new(2.0 * s, color),
+        );
+        painter.line_segment(
+            [c + Vec2::new(-1.2 * s, 3.5 * s), c + Vec2::new(5.0 * s, -3.5 * s)],
+            Stroke::new(2.0 * s, color),
+        );
+    }
+
+    pub fn eye(ui: &mut egui::Ui, color: Color32, size: f32, open: bool) {
+        let rect = icon_rect(ui, size);
+        let c = rect.center();
+        let painter = ui.painter();
+        let s = size / 18.0;
+        // Almond outline via two arcs approximated with a diamond + circle
+        painter.circle_stroke(c, 5.5 * s, Stroke::new(1.3 * s, color));
+        if open {
+            painter.circle_filled(c, 2.0 * s, color);
+            painter.circle_filled(c + Vec2::new(0.5 * s, -0.4 * s), 0.7 * s, BG);
+        } else {
+            painter.line_segment(
+                [c + Vec2::new(-5.5 * s, 5.0 * s), c + Vec2::new(5.5 * s, -5.0 * s)],
+                Stroke::new(1.4 * s, color),
+            );
+        }
+    }
+
+    pub fn github_button(ui: &mut egui::Ui) -> egui::Response {
+        Frame::new()
+            .fill(ELEVATED)
+            .stroke(Stroke::new(1.0, LINE))
+            .corner_radius(CornerRadius::same(R))
+            .inner_margin(Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.set_min_size(Vec2::new(118.0, 40.0));
+                ui.horizontal_centered(|ui| {
+                    github(ui, TEXT_DIM, 18.0);
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("GitHub").size(14.0).color(TEXT_DIM));
+                });
+            })
+            .response
+            .interact(Sense::click())
+    }
+
+    pub fn mode_icon(ui: &mut egui::Ui, mode: super::AppMode, color: Color32) {
+        match mode {
+            super::AppMode::Connect => database(ui, color, 16.0),
+            super::AppMode::Export => export_arrow(ui, color, 16.0),
+            super::AppMode::AntiRecall => shield(ui, color, 16.0),
+            super::AppMode::Notifications => bell(ui, color, 16.0),
+        }
+    }
 }
 
 struct Toast {
@@ -294,6 +538,8 @@ struct WeportApp {
     notifications_enabled: bool,
     tray: Option<crate::tray::Tray>,
     quit_requested: bool,
+    /// Wall-clock deadline after which we hard-exit if Close hung.
+    force_exit_at: Option<std::time::Instant>,
     main_visible: bool,
     pending_start_hidden: bool,
     // anti-recall
@@ -332,9 +578,13 @@ impl WeportApp {
 
         let notify = NotifyService::start();
 
-        let start_hidden = s.start_in_background;
-        // Reconcile the stored preference with the actual Windows Run key.
-        let launch_at_startup = startup::is_run_at_startup() || s.launch_at_startup;
+        // Prefer tray-only launch when a tray icon is available.
+        let start_hidden = s.start_in_background && tray.is_some();
+        // Default ON: enable login auto-start unless the user previously disabled it.
+        let launch_at_startup = s.launch_at_startup;
+        if launch_at_startup && !startup::is_run_at_startup() {
+            let _ = startup::set_run_at_startup(true);
+        }
         let mut app = Self {
             db_path: s.db_path,
             mode: AppMode::Connect,
@@ -366,7 +616,8 @@ impl WeportApp {
             notifications_enabled: s.notifications_enabled,
             tray,
             quit_requested: false,
-            main_visible: true,
+            force_exit_at: None,
+            main_visible: !start_hidden,
             pending_start_hidden: start_hidden,
             anti_install: None,
             anti_state: None,
@@ -974,7 +1225,7 @@ impl WeportApp {
             .fill(PANEL)
             .stroke(Stroke::new(1.0_f32, LINE))
             .corner_radius(CornerRadius::same(12))
-            .inner_margin(Margin::symmetric(22, 18))
+            .inner_margin(Margin::symmetric(28, 20))
     }
 }
 
@@ -1033,52 +1284,128 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+impl WeportApp {
+    /// Tear down tray + notify and ask eframe to exit (with a hard-exit fallback).
+    fn begin_quit(&mut self, ctx: &egui::Context) {
+        if self.quit_requested {
+            return;
+        }
+        self.quit_requested = true;
+        self.force_exit_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+        // Close the secondary toast viewport first so the event loop can exit.
+        ctx.send_viewport_cmd_to(toast_vp_id(), egui::ViewportCommand::Close);
+        ctx.send_viewport_cmd_to(toast_vp_id(), egui::ViewportCommand::Visible(false));
+        if let Some(mut tray) = self.tray.take() {
+            tray.request_shutdown();
+            // Drop joins with a short timeout (see tray.rs).
+            drop(tray);
+        }
+        if let Some(notify) = self.notify.take() {
+            notify.request_stop();
+            drop(notify);
+        }
+        // Make the main window visible so Close is processed (some backends
+        // ignore Close on a hidden window, which left the process hung).
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.main_visible = false;
+    }
+}
+
 impl eframe::App for WeportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_bg(ctx);
         self.sync_notify_config();
 
         // --- Tray events (show / toggle / quit) ---
+        // Drain first so we don't hold a borrow on `self.tray` across `begin_quit`.
+        let mut tray_events = Vec::new();
         if let Some(tray) = &mut self.tray {
             while let Some(ev) = tray.poll() {
-                match ev {
-                    crate::tray::TrayEvent::ShowMainWindow => {
+                tray_events.push(ev);
+            }
+        }
+        for ev in tray_events {
+            match ev {
+                crate::tray::TrayEvent::ShowMainWindow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                    self.main_visible = true;
+                }
+                crate::tray::TrayEvent::ToggleMainWindow => {
+                    if self.main_visible {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        self.main_visible = false;
+                    } else {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         self.main_visible = true;
                     }
-                    crate::tray::TrayEvent::ToggleMainWindow => {
-                        if self.main_visible {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                            self.main_visible = false;
-                        } else {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                            self.main_visible = true;
-                        }
-                    }
-                    crate::tray::TrayEvent::Quit => {
-                        self.quit_requested = true;
-                    }
+                }
+                crate::tray::TrayEvent::Quit => {
+                    self.begin_quit(ctx);
                 }
             }
         }
 
-        // Close-to-tray: veto window close and hide instead (unless quitting).
-        if !self.quit_requested && self.tray.is_some() && self.close_to_tray {
+        // Close button: hide to tray by default; otherwise fully quit.
+        if !self.quit_requested {
             if ctx.input(|i| i.viewport().close_requested()) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.main_visible = false;
+                if self.tray.is_some() && self.close_to_tray {
+                    // CancelClose must be sent the same frame the OS requests close,
+                    // otherwise the window enters a half-destroyed / frozen state.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.main_visible = false;
+                } else {
+                    // User wants a real quit — tear down tray/notify cleanly.
+                    self.begin_quit(ctx);
+                }
             }
         }
+
         if self.quit_requested {
+            // Keep asking the main viewport to close until we exit.
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if let Some(deadline) = self.force_exit_at {
+                if std::time::Instant::now() >= deadline {
+                    // Last resort: eframe/winit sometimes stalls on multi-viewport close.
+                    std::process::exit(0);
+                }
+            }
+            // While quitting, skip painting heavy UI so Drop runs sooner.
+            ctx.request_repaint();
+            return;
         }
+
         if self.pending_start_hidden && self.tray.is_some() {
             self.pending_start_hidden = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.main_visible = false;
+        }
+
+        // When hidden in the tray, throttle paints — still poll tray + notify.
+        if !self.main_visible {
+            self.poll_bg(ctx);
+            self.sync_notify_config();
+            if let Some(notify) = &self.notify {
+                while let Some(ev) = notify.poll() {
+                    self.toast_queue.push_back(ev);
+                }
+            }
+            let now = now_secs();
+            if self.current_toast.is_none() && !self.toast_queue.is_empty() {
+                self.advance_toast();
+            }
+            if let Some(_t) = &self.current_toast {
+                if now - self.toast_shown_at > TOAST_DURATION {
+                    self.dismiss_current_toast();
+                }
+            }
+            self.render_toast_viewport(ctx);
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+            return;
         }
 
         // --- Notification toasts from the watcher ---
@@ -1130,17 +1457,17 @@ impl eframe::App for WeportApp {
             });
 
         egui::TopBottomPanel::top("top")
-            .exact_height(72.0)
+            .exact_height(76.0)
             .frame(
                 Frame::new()
                     .fill(BG)
-                    .inner_margin(Margin::symmetric(22, 10))
+                    .inner_margin(Margin::symmetric(36, 12))
                     .stroke(Stroke::new(1.0_f32, LINE)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.vertical(|ui| {
-                        ui.set_min_width(142.0);
+                        ui.set_min_width(150.0);
                         ui.label(
                             RichText::new("WEPORT")
                                 .size(17.0)
@@ -1154,7 +1481,7 @@ impl eframe::App for WeportApp {
                                 .color(TEXT_FAINT),
                         );
                     });
-                    ui.add_space(18.0);
+                    ui.add_space(22.0);
                     for mode in [
                         AppMode::Connect,
                         AppMode::Export,
@@ -1164,33 +1491,47 @@ impl eframe::App for WeportApp {
                         let selected = self.mode == mode;
                         let fill = if selected { TEXT } else { ELEVATED };
                         let fg = if selected { BG } else { TEXT_DIM };
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(mode.label()).size(14.0).color(fg))
-                                    .fill(fill)
-                                    .stroke(Stroke::new(1.0, if selected { TEXT } else { LINE }))
-                                    .corner_radius(R)
-                                    .min_size(Vec2::new(104.0, 42.0)),
-                            )
-                            .clicked()
-                        {
+                        let resp = Frame::new()
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0, if selected { TEXT } else { LINE }))
+                            .corner_radius(CornerRadius::same(R))
+                            .inner_margin(Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.set_min_size(Vec2::new(118.0, 42.0));
+                                ui.horizontal_centered(|ui| {
+                                    icons::mode_icon(ui, mode, fg);
+                                    ui.add_space(6.0);
+                                    ui.label(RichText::new(mode.label()).size(14.0).color(fg));
+                                });
+                            })
+                            .response
+                            .interact(Sense::click());
+                        if resp.clicked() {
                             self.mode = mode;
                         }
+                        ui.add_space(6.0);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("设置").size(14.0))
-                                    .fill(ELEVATED)
-                                    .stroke(Stroke::new(1.0, LINE))
-                                    .corner_radius(R)
-                                    .min_size(Vec2::new(76.0, 38.0)),
-                            )
-                            .clicked()
-                        {
+                        let settings_resp = Frame::new()
+                            .fill(ELEVATED)
+                            .stroke(Stroke::new(1.0, LINE))
+                            .corner_radius(CornerRadius::same(R))
+                            .inner_margin(Margin::symmetric(12, 6))
+                            .show(ui, |ui| {
+                                ui.set_min_size(Vec2::new(96.0, 40.0));
+                                ui.horizontal_centered(|ui| {
+                                    icons::gear(ui, TEXT_DIM, 16.0);
+                                    ui.add_space(6.0);
+                                    ui.label(RichText::new("设置").size(14.0).color(TEXT_DIM));
+                                });
+                            })
+                            .response
+                            .interact(Sense::click());
+                        if settings_resp.clicked() {
                             self.settings_open = true;
                         }
-                        if github_button(ui).clicked() {
+                        ui.add_space(8.0);
+                        if icons::github_button(ui).clicked() {
                             if let Err(e) = open::that(GITHUB_URL) {
                                 self.push_toast(1, "无法打开 GitHub", e.to_string(), 6.0);
                             }
@@ -1242,7 +1583,7 @@ impl eframe::App for WeportApp {
         }
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(28, 22)))
+            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(40, 26)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1392,13 +1733,15 @@ impl WeportApp {
         WeportApp::panel_frame().show(ui, |ui| {
             self.section_title(ui, "数据位置", "xwechat_files");
             ui.horizontal(|ui| {
+                icons::folder(ui, TEXT_FAINT, 16.0);
+                ui.add_space(6.0);
                 ui.label(RichText::new("数据文件夹").size(12.5).color(TEXT_FAINT));
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.db_path)
-                        .desired_width(ui.available_width() - 70.0)
+                        .desired_width(ui.available_width() - 88.0)
                         .font(FontId::new(14.0, FontFamily::Monospace))
                         .hint_text(r"C:\Users\…\xwechat_files")
-                        .margin(Margin::symmetric(8, 6)),
+                        .margin(Margin::symmetric(10, 7)),
                 );
                 if resp.lost_focus() {
                     self.persist();
@@ -1409,7 +1752,7 @@ impl WeportApp {
                         !self.busy,
                         egui::Button::new(RichText::new("浏览").size(14.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(64.0, 36.0)),
+                            .min_size(Vec2::new(72.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -1423,28 +1766,47 @@ impl WeportApp {
                     }
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Button::new(RichText::new("重新扫描").size(14.0))
-                            .corner_radius(R)
-                            .min_size(Vec2::new(0.0, 36.0)),
-                    )
-                    .clicked()
-                {
+                let scan_resp = Frame::new()
+                    .fill(ELEVATED)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .corner_radius(CornerRadius::same(R))
+                    .inner_margin(Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(120.0, 36.0));
+                        ui.add_enabled_ui(!self.busy, |ui| {
+                            ui.horizontal_centered(|ui| {
+                                icons::refresh(ui, TEXT_DIM, 15.0);
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("重新扫描").size(14.0).color(TEXT_DIM));
+                            });
+                        });
+                    })
+                    .response
+                    .interact(Sense::click());
+                if scan_resp.clicked() && !self.busy {
                     self.spawn_detect();
                 }
-                if ui
-                    .add_enabled(
-                        !self.busy && !self.db_path.trim().is_empty(),
-                        egui::Button::new(RichText::new("刷新账号").size(14.0))
-                            .corner_radius(R)
-                            .min_size(Vec2::new(0.0, 36.0)),
-                    )
-                    .clicked()
-                {
+                ui.add_space(8.0);
+                let refresh_resp = Frame::new()
+                    .fill(ELEVATED)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .corner_radius(CornerRadius::same(R))
+                    .inner_margin(Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(120.0, 36.0));
+                        ui.add_enabled_ui(!self.busy && !self.db_path.trim().is_empty(), |ui| {
+                            ui.horizontal_centered(|ui| {
+                                icons::database(ui, TEXT_DIM, 15.0);
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("刷新账号").size(14.0).color(TEXT_DIM));
+                            });
+                        });
+                    })
+                    .response
+                    .interact(Sense::click());
+                if refresh_resp.clicked() && !self.busy && !self.db_path.trim().is_empty() {
                     self.spawn_scan_accounts();
                 }
             });
@@ -1574,33 +1936,38 @@ impl WeportApp {
                         );
                     });
             }
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
+                icons::key(ui, TEXT_FAINT, 15.0);
+                ui.add_space(6.0);
                 ui.label(RichText::new("密钥").size(12.5).color(TEXT_FAINT));
                 let mut te = egui::TextEdit::singleline(&mut self.decrypt_key)
-                    .desired_width(ui.available_width() - 64.0)
+                    .desired_width(ui.available_width() - 80.0)
                     .font(FontId::new(13.0, FontFamily::Monospace))
                     .hint_text("64 位十六进制…")
-                    .margin(Margin::symmetric(6, 4));
+                    .margin(Margin::symmetric(8, 5));
                 if !self.show_key {
                     te = te.password(true);
                 }
                 if ui.add(te).changed() {
                     self.persist();
                 }
-                let lab = if self.show_key { "隐藏" } else { "显示" };
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(lab).size(13.0))
-                            .corner_radius(R)
-                            .min_size(Vec2::new(52.0, 28.0)),
-                    )
-                    .clicked()
-                {
+                let eye_resp = Frame::new()
+                    .fill(ELEVATED)
+                    .stroke(Stroke::new(1.0, LINE))
+                    .corner_radius(CornerRadius::same(R))
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(36.0, 28.0));
+                        icons::eye(ui, TEXT_DIM, 16.0, self.show_key);
+                    })
+                    .response
+                    .interact(Sense::click());
+                if eye_resp.clicked() {
                     self.show_key = !self.show_key;
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             if ui
                 .add_enabled(
                     !self.busy,
@@ -1608,13 +1975,13 @@ impl WeportApp {
                         RichText::new(if self.busy && self.progress.is_none() {
                             "提取中…"
                         } else {
-                            "提取密钥"
+                            "  提取密钥"
                         })
                         .size(14.0)
                         .color(BG),
                     )
                     .corner_radius(R)
-                    .min_size(Vec2::new(ui.available_width(), 34.0))
+                    .min_size(Vec2::new(ui.available_width(), 38.0))
                     .fill(TEXT)
                     .stroke(Stroke::new(1.0_f32, TEXT)),
                 )
@@ -1664,16 +2031,18 @@ impl WeportApp {
                 }
             });
 
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
+                icons::folder(ui, TEXT_FAINT, 15.0);
+                ui.add_space(6.0);
                 ui.label(RichText::new("输出").size(12.5).color(TEXT_FAINT));
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut self.export_path)
-                            .desired_width(ui.available_width() - 70.0)
+                            .desired_width(ui.available_width() - 88.0)
                             .font(FontId::new(13.0, FontFamily::Monospace))
                             .hint_text("导出根目录…")
-                            .margin(Margin::symmetric(6, 4)),
+                            .margin(Margin::symmetric(8, 5)),
                     )
                     .changed()
                 {
@@ -1685,7 +2054,7 @@ impl WeportApp {
                         !self.busy,
                         egui::Button::new(RichText::new("浏览").size(13.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(56.0, 28.0)),
+                            .min_size(Vec2::new(72.0, 32.0)),
                     )
                     .clicked()
                 {
@@ -1974,17 +2343,23 @@ impl WeportApp {
                         ("解密密钥", key_ready, if key_ready { "已就绪" } else { "待提取" }),
                     ] {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(if ok { "✓" } else { "—" })
-                                    .size(16.0)
-                                    .strong()
-                                    .color(if ok { TEXT } else { TEXT_FAINT }),
-                            );
+                            if ok {
+                                icons::check(ui, TEXT, 16.0);
+                            } else {
+                                ui.label(
+                                    RichText::new("—")
+                                        .size(16.0)
+                                        .strong()
+                                        .color(TEXT_FAINT),
+                                );
+                            }
+                            ui.add_space(4.0);
                             ui.label(RichText::new(label).size(15.0).color(TEXT_DIM));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(RichText::new(detail).size(14.0).color(if ok { TEXT } else { TEXT_FAINT }));
                             });
                         });
+                        ui.add_space(4.0);
                     }
                 });
 

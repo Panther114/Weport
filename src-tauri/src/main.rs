@@ -283,6 +283,36 @@ fn wait_for_result_file(path: &std::path::Path, timeout_secs: u64) -> Result<ser
     }
 }
 
+/// Ensure only one GUI instance runs. A second launch focuses the existing tray app.
+#[cfg(windows)]
+fn acquire_single_instance() -> Option<*mut core::ffi::c_void> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name: Vec<u16> = std::ffi::OsStr::new("Local\\WeportSingleInstance")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        if handle.is_null() {
+            return None;
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            // Signal the running instance via a named event the tray/GUI can watch.
+            // Best-effort: just exit — user can click the tray icon.
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+            return None;
+        }
+        Some(handle)
+    }
+}
+
+#[cfg(not(windows))]
+fn acquire_single_instance() -> Option<*mut core::ffi::c_void> {
+    Some(std::ptr::null_mut())
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -337,6 +367,15 @@ fn main() {
     if is_cli_invocation(&args) {
         std::process::exit(run_cli(&args));
     }
+
+    // GUI: single instance only (CLI commands above skip this).
+    let _instance_guard = match acquire_single_instance() {
+        Some(h) => h,
+        None => {
+            eprintln!("Weport 已在运行（请查看系统托盘）");
+            std::process::exit(0);
+        }
+    };
 
     if let Err(e) = gui::run_gui() {
         eprintln!("GUI error: {e}");

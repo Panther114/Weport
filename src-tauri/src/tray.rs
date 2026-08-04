@@ -4,11 +4,15 @@
 //! interferes with the egui/winit event loop. Events (left-click, context
 //! menu) are surfaced through a shared `TrayEvent` channel; the GUI polls it
 //! every frame via [`poll`]. A right-click menu offers 显示主窗口 / 退出.
+//!
+//! Shutdown is non-blocking on the UI thread: Drop posts a quit message and
+//! joins with a short timeout so a stuck tray thread cannot freeze close.
 #![cfg(windows)]
 
 use egui::Context;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayEvent {
@@ -21,6 +25,7 @@ pub struct Tray {
     rx: Receiver<TrayEvent>,
     join: Option<JoinHandle<()>>,
     hwnd: *mut core::ffi::c_void,
+    thread_id: u32,
 }
 
 unsafe impl Send for Tray {}
@@ -56,7 +61,7 @@ unsafe extern "system" fn wnd_proc(
                 let _ = state.tx.send(TrayEvent::ToggleMainWindow);
                 state.ctx.request_repaint();
             }
-            WM_RBUTTONUP | WM_RBUTTONDBLCLK => {
+            WM_RBUTTONUP | WM_CONTEXTMENU => {
                 show_menu(hwnd, &state.tx, &state.ctx);
             }
             _ => {}
@@ -69,6 +74,9 @@ unsafe extern "system" fn wnd_proc(
         if id == ID_SHOW as usize {
             let state = unsafe {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                if ptr == 0 {
+                    return 0;
+                }
                 &*(ptr as *const TrayThreadState)
             };
             let _ = state.tx.send(TrayEvent::ShowMainWindow);
@@ -78,6 +86,9 @@ unsafe extern "system" fn wnd_proc(
         if id == ID_QUIT as usize {
             let state = unsafe {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                if ptr == 0 {
+                    return 0;
+                }
                 &*(ptr as *const TrayThreadState)
             };
             let _ = state.tx.send(TrayEvent::Quit);
@@ -88,6 +99,12 @@ unsafe extern "system" fn wnd_proc(
 
     if msg == WM_DESTROY {
         PostQuitMessage(0);
+        return 0;
+    }
+
+    // Custom quit from the UI thread (PostThreadMessage / PostMessage).
+    if msg == WM_CLOSE {
+        DestroyWindow(hwnd);
         return 0;
     }
 
@@ -113,7 +130,7 @@ fn show_menu(hwnd: *mut core::ffi::c_void, tx: &Sender<TrayEvent>, ctx: &Context
         GetCursorPos(&mut pt);
         let cmd = TrackPopupMenu(
             menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
             pt.x,
             pt.y,
             0,
@@ -121,6 +138,8 @@ fn show_menu(hwnd: *mut core::ffi::c_void, tx: &Sender<TrayEvent>, ctx: &Context
             std::ptr::null(),
         );
         DestroyMenu(menu);
+        // Required so the menu dismisses correctly on Windows.
+        PostMessageW(hwnd, WM_NULL, 0, 0);
 
         if cmd as usize == ID_SHOW {
             let _ = tx.send(TrayEvent::ShowMainWindow);
@@ -142,10 +161,9 @@ fn to_wide(s: &str) -> Vec<u16> {
 
 fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
     use windows_sys::Win32::UI::WindowsAndMessaging::CreateIconFromResourceEx;
-    // Embed the same white icon.ico used for the exe resource.
+    // Embed the same white WeChat-style icon.ico used for the exe resource.
     const ICO: &[u8] = include_bytes!("../icons/icon.ico");
     unsafe {
-        // Parse the ICO directory, prefer a 32x32 PNG-compressed entry.
         if ICO.len() < 6 {
             return std::ptr::null_mut();
         }
@@ -162,7 +180,8 @@ fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
             let w = ICO[e] as usize; // 0 means 256
             let h = ICO[e + 1] as usize;
             let size = u32::from_le_bytes([ICO[e + 8], ICO[e + 9], ICO[e + 10], ICO[e + 11]]) as usize;
-            let offset = u32::from_le_bytes([ICO[e + 12], ICO[e + 13], ICO[e + 14], ICO[e + 15]]) as usize;
+            let offset =
+                u32::from_le_bytes([ICO[e + 12], ICO[e + 13], ICO[e + 14], ICO[e + 15]]) as usize;
             if offset + size > ICO.len() {
                 continue;
             }
@@ -190,7 +209,7 @@ fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
                 0x0003_0000,
                 0,
                 0,
-                0, // LR_DEFAULTCOLOR
+                0,
             );
             if !icon.is_null() {
                 return icon;
@@ -203,7 +222,7 @@ fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
 impl Tray {
     /// Spawn the tray thread. Returns `Ok(None)` if the tray cannot be created
     /// (e.g. Windows Explorer not running).
-    pub     fn spawn(ctx: Context) -> Result<Option<Self>, String> {
+    pub fn spawn(ctx: Context) -> Result<Option<Self>, String> {
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::Shell::*;
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -211,7 +230,9 @@ impl Tray {
         let (tx, rx) = mpsc::channel::<TrayEvent>();
         let thread_tx = tx.clone();
 
-        let class = to_wide("WeportTrayClass");
+        // Unique class per process so restarts after a crash still work.
+        let class_name = format!("WeportTrayClass-{}", std::process::id());
+        let class = to_wide(&class_name);
         let class_ptr: *const u16 = class.as_ptr();
 
         unsafe {
@@ -227,9 +248,8 @@ impl Tray {
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: class_ptr,
             };
-            if RegisterClassW(&wc) == 0 {
-                return Err("注册托盘窗口类失败".into());
-            }
+            // Ignore "already registered" (class still valid for this process).
+            let _ = RegisterClassW(&wc);
 
             let hwnd = CreateWindowExW(
                 0,
@@ -251,11 +271,10 @@ impl Tray {
 
             let icon = load_tray_icon();
             if icon.is_null() {
+                let _ = DestroyWindow(hwnd);
                 return Err("加载托盘图标失败".into());
             }
 
-            // Ownership of the thread state lives in the thread; the window
-            // proc dereferences it via GWLP_USERDATA.
             let state = Box::into_raw(Box::new(TrayThreadState {
                 tx: thread_tx,
                 ctx: ctx.clone(),
@@ -279,44 +298,51 @@ impl Tray {
                 let _ = Box::from_raw(state);
                 return Ok(None);
             }
+            // Prefer modern tray behavior (Win7+).
+            let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
 
-            // Raw pointers are not Send; carry them as usize and cast back in
-            // the thread.
             let hwnd_send = hwnd as usize;
             let state_send = state as usize;
+            let (tid_tx, tid_rx) = mpsc::channel::<u32>();
             let join = std::thread::Builder::new()
                 .name("weport-tray".into())
                 .spawn(move || {
                     let hwnd = hwnd_send as *mut core::ffi::c_void;
                     let state = state_send as *mut TrayThreadState;
-                    // Closure body runs inside the outer unsafe block (spawn's
-                    // caller is unsafe) — keep an explicit block for clarity.
-                    {
-                        loop {
-                            let mut msg: MSG = std::mem::zeroed();
-                            let r = GetMessageW(&mut msg, HWND::default(), 0, 0);
-                            if r <= 0 {
-                                break;
-                            }
-                            TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
+                    let tid = windows_sys::Win32::System::Threading::GetCurrentThreadId();
+                    let _ = tid_tx.send(tid);
+                    loop {
+                        let mut msg: MSG = std::mem::zeroed();
+                        let r = GetMessageW(&mut msg, HWND::default(), 0, 0);
+                        if r <= 0 {
+                            break;
                         }
-                        // Cleanup: remove icon, destroy window, free thread state.
-                        let mut nid2: NOTIFYICONDATAW = std::mem::zeroed();
-                        nid2.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-                        nid2.hWnd = hwnd;
-                        nid2.uID = TRAY_ID;
-                        Shell_NotifyIconW(NIM_DELETE, &nid2);
-                        DestroyWindow(hwnd);
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    // Cleanup: remove icon, destroy window, free thread state.
+                    let mut nid2: NOTIFYICONDATAW = std::mem::zeroed();
+                    nid2.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+                    nid2.hWnd = hwnd;
+                    nid2.uID = TRAY_ID;
+                    Shell_NotifyIconW(NIM_DELETE, &nid2);
+                    // Window may already be destroyed via WM_CLOSE.
+                    let _ = DestroyWindow(hwnd);
+                    if !state.is_null() {
                         let _ = Box::from_raw(state);
                     }
                 })
                 .map_err(|e| format!("启动托盘线程失败: {e}"))?;
 
+            let thread_id = tid_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or(0);
+
             Ok(Some(Self {
                 rx,
                 join: Some(join),
                 hwnd,
+                thread_id,
             }))
         }
     }
@@ -325,23 +351,44 @@ impl Tray {
     pub fn poll(&mut self) -> Option<TrayEvent> {
         self.rx.try_recv().ok()
     }
-}
 
-impl Drop for Tray {
-    fn drop(&mut self) {
-        use windows_sys::Win32::UI::Shell::*;
-        use windows_sys::Win32::UI::WindowsAndMessaging::*;
-        // Post WM_QUIT to the tray thread so it cleans up and exits.
+    /// Ask the tray thread to exit without blocking the caller for long.
+    pub fn request_shutdown(&mut self) {
+        use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NOTIFYICONDATAW, NIM_DELETE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, PostThreadMessageW, WM_CLOSE, WM_QUIT};
         unsafe {
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = self.hwnd;
             nid.uID = TRAY_ID;
             Shell_NotifyIconW(NIM_DELETE, &nid);
-            PostMessageW(self.hwnd, WM_DESTROY, 0, 0);
+            if !self.hwnd.is_null() {
+                PostMessageW(self.hwnd, WM_CLOSE, 0, 0);
+            }
+            if self.thread_id != 0 {
+                let _ = PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
+            }
         }
+    }
+}
+
+impl Drop for Tray {
+    fn drop(&mut self) {
+        self.request_shutdown();
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            // Never block the UI / process exit for more than a moment.
+            let deadline = std::time::Instant::now() + Duration::from_millis(400);
+            loop {
+                if join.is_finished() {
+                    let _ = join.join();
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    // Detach: OS cleans the thread on process exit.
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }
