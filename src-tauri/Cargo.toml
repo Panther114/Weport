@@ -1,10 +1,11 @@
 [package]
 name = "weport"
-version = "0.6.3"
+version = "0.6.4"
 description = "Weport — lightweight WeChat chat history exporter (native egui)"
 authors = ["Panther114"]
 edition = "2021"
 rust-version = "1.77"
+license = "MIT"
 default-run = "weport"
 autoexamples = false
 autotests = false

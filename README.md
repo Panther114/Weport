@@ -101,4 +101,4 @@ Runs entirely on your machine. Uses your local WeChat data directory and a decry
 
 ## License
 
-See [LICENSE](./LICENSE).
+[MIT](./LICENSE) — free to use, modify, and redistribute.

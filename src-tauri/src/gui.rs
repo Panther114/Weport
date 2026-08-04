@@ -103,8 +103,8 @@ fn toast_vp_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("weport-toast")
 }
 
-const TOAST_W: f32 = 344.0;
-const TOAST_H: f32 = 96.0;
+const TOAST_W: f32 = 360.0;
+const TOAST_H: f32 = 110.0;
 const TOAST_DURATION: f64 = 6.0;
 
 pub fn run_gui() -> eframe::Result<()> {
@@ -590,6 +590,10 @@ struct WeportApp {
     toast_queue: VecDeque<NotifyEvent>,
     current_toast: Option<NotifyEvent>,
     toast_shown_at: f64,
+    /// True when the backend only supports embedded viewports (no real OS popup).
+    toast_viewport_embedded: bool,
+    /// Last debug / toast diagnostic line for the 消息提醒 page.
+    toast_debug_status: String,
     notify_cfg_sent: Option<NotifyConfig>,
     tx: Sender<BgMsg>,
     rx: Receiver<BgMsg>,
@@ -673,6 +677,8 @@ impl WeportApp {
             toast_queue: VecDeque::new(),
             current_toast: None,
             toast_shown_at: 0.0,
+            toast_viewport_embedded: false,
+            toast_debug_status: String::new(),
             notify_cfg_sent: None,
             tx,
             rx,
@@ -1067,14 +1073,83 @@ impl WeportApp {
     fn advance_toast(&mut self) {
         self.current_toast = self.toast_queue.pop_front();
         self.toast_shown_at = now_secs();
-        if self.current_toast.is_some() {
-            // Keep the toast viewport alive while a toast is up.
+        if let Some(t) = &self.current_toast {
+            self.toast_debug_status = format!(
+                "正在显示弹窗 · {} · {}",
+                match t.kind {
+                    NotifyKind::NewMessage => "新消息",
+                    NotifyKind::Recalled => "撤回",
+                },
+                t.title
+            );
         }
     }
 
     fn dismiss_current_toast(&mut self) {
         self.current_toast = None;
         self.advance_toast();
+        if self.current_toast.is_none() && self.toast_debug_status.starts_with("正在显示") {
+            self.toast_debug_status = "弹窗已关闭".into();
+        }
+    }
+
+    /// Inject a synthetic toast (display-path test — bypasses WeChat detection).
+    fn enqueue_debug_toast(&mut self) {
+        let n = now_secs() as i64;
+        self.toast_queue.push_back(NotifyEvent {
+            kind: NotifyKind::NewMessage,
+            session_id: format!("debug-{n}"),
+            title: "调试通知".into(),
+            content: "显示逻辑正常：若你看到右上角弹窗，说明弹窗 UI 可用；若没有，则是显示问题。".into(),
+            timestamp: n,
+        });
+        self.toast_debug_status = "已排队调试弹窗（仅测试显示，未读微信数据库）".into();
+        if self.current_toast.is_none() {
+            self.advance_toast();
+        }
+    }
+
+    fn paint_toast_card(ui: &mut egui::Ui, t: &NotifyEvent) -> egui::Response {
+        let accent = match t.kind {
+            NotifyKind::Recalled => Color32::from_rgb(255, 190, 120),
+            NotifyKind::NewMessage => TEXT,
+        };
+        let card = Frame::new()
+            .fill(PANEL)
+            .stroke(Stroke::new(1.0_f32, LINE_STRONG))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(14, 10));
+        card
+            .show(ui, |ui| {
+                ui.set_min_width(TOAST_W - 28.0);
+                ui.horizontal(|ui| {
+                    let kind_label = match t.kind {
+                        NotifyKind::NewMessage => "新消息",
+                        NotifyKind::Recalled => "撤回提醒",
+                    };
+                    ui.label(
+                        RichText::new(kind_label)
+                            .size(11.5)
+                            .strong()
+                            .color(accent),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("点击关闭").size(10.5).color(TEXT_FAINT));
+                    });
+                });
+                ui.add_space(2.0);
+                ui.label(RichText::new(&t.title).size(14.0).strong().color(TEXT));
+                ui.add_space(3.0);
+                let body = if t.content.chars().count() > 72 {
+                    let mut s: String = t.content.chars().take(72).collect();
+                    s.push('…');
+                    s
+                } else {
+                    t.content.clone()
+                };
+                ui.label(RichText::new(body).size(12.5).color(TEXT_DIM));
+            })
+            .response
     }
 
     fn poll_bg(&mut self, ctx: &egui::Context) {
@@ -1643,105 +1718,103 @@ impl eframe::App for WeportApp {
 }
 
 impl WeportApp {
-    /// Top-right always-on-top toast window (egui secondary viewport).
+    /// Top-right toast: solid secondary OS window when multi-viewport works,
+    /// otherwise an always-on-top Area on the main window (embedded fallback).
+    ///
+    /// Transparent secondary viewports often fail to paint on Windows — we use
+    /// a solid dark surface so the popup is always visible.
     fn render_toast_viewport(&mut self, ctx: &egui::Context) {
+        let toast = self.current_toast.clone();
+        let has = toast.is_some();
+        let mut dismiss = false;
+        let mut saw_embedded = false;
+        let (wx, wy, ww, _wh) = primary_work_area();
+        let pos = egui::Pos2::new(wx + ww - TOAST_W - 24.0, wy + 24.0);
+
         let builder = egui::ViewportBuilder::default()
-            .with_title("WeportToast")
+            .with_title("Weport 消息")
             .with_inner_size([TOAST_W, TOAST_H])
             .with_min_inner_size([TOAST_W, TOAST_H])
             .with_max_inner_size([TOAST_W, TOAST_H])
             .with_resizable(false)
             .with_decorations(false)
-            .with_transparent(true)
+            // Solid window — transparent popups frequently never appear on Win11.
+            .with_transparent(false)
             .with_always_on_top()
-            .with_taskbar(false);
-
-        let toast = self.current_toast.clone();
-        let mut dismiss = false;
-        let (wx, wy, ww, _wh) = primary_work_area();
-        let pos = [wx + ww - TOAST_W - 20.0, wy + 20.0];
+            .with_taskbar(false)
+            .with_visible(has)
+            .with_position(pos);
 
         ctx.show_viewport_immediate(toast_vp_id(), builder, |vctx, class| {
-            vctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
+            if class == egui::ViewportClass::Embedded {
+                saw_embedded = true;
+            }
             if let Some(t) = &toast {
-                vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
-                vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(
-                    pos[0],
-                    pos[1],
-                )));
-
+                if class != egui::ViewportClass::Embedded {
+                    vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                    vctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    vctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                        egui::WindowLevel::AlwaysOnTop,
+                    ));
+                }
                 egui::CentralPanel::default()
-                    .frame(Frame::NONE.fill(Color32::TRANSPARENT))
+                    .frame(Frame::NONE.fill(BG))
                     .show(vctx, |ui| {
-                        let accent = match t.kind {
-                            NotifyKind::Recalled => Color32::from_rgb(255, 190, 120),
-                            NotifyKind::NewMessage => TEXT,
-                        };
-                        let card = Frame::new()
-                            .fill(PANEL)
-                            .stroke(Stroke::new(1.0, LINE_STRONG))
-                            .corner_radius(CornerRadius::same(12))
-                            .inner_margin(Margin::symmetric(14, 10));
-                        let resp = card
-                            .show(ui, |ui| {
-                                ui.set_min_width(TOAST_W - 28.0);
-                                ui.horizontal(|ui| {
-                                    let kind_label = match t.kind {
-                                        NotifyKind::NewMessage => "新消息",
-                                        NotifyKind::Recalled => "撤回提醒",
-                                    };
-                                    ui.label(
-                                        RichText::new(kind_label)
-                                            .size(11.5)
-                                            .strong()
-                                            .color(accent),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                RichText::new("点击关闭")
-                                                    .size(10.5)
-                                                    .color(TEXT_FAINT),
-                                            );
-                                        },
-                                    );
-                                });
-                                ui.add_space(2.0);
-                                ui.label(
-                                    RichText::new(&t.title)
-                                        .size(14.5)
-                                        .strong()
-                                        .color(TEXT),
-                                );
-                                ui.add_space(3.0);
-                                let body = if t.content.chars().count() > 60 {
-                                    let mut s: String = t.content.chars().take(60).collect();
-                                    s.push('…');
-                                    s
-                                } else {
-                                    t.content.clone()
-                                };
-                                ui.label(
-                                    RichText::new(body).size(12.5).color(TEXT_DIM),
-                                );
-                            })
-                            .response;
+                        let resp = Self::paint_toast_card(ui, t);
                         if resp.clicked() {
                             dismiss = true;
                         }
                     });
-            } else {
+            } else if class != egui::ViewportClass::Embedded {
                 vctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
-                if class == egui::ViewportClass::Embedded {
-                    // Fallback (no multi-viewport backend): nothing to show.
-                }
             }
         });
+
+        self.toast_viewport_embedded = saw_embedded;
+
+        // Embedded fallback: paint over the main window (only when main is visible).
+        if saw_embedded {
+            if let Some(t) = &toast {
+                if self.main_visible {
+                    egui::Area::new(egui::Id::new("weport-toast-embedded"))
+                        .anchor(egui::Align2::RIGHT_TOP, [-16.0, 56.0])
+                        .order(egui::Order::Foreground)
+                        .interactable(true)
+                        .show(ctx, |ui| {
+                            let resp = Self::paint_toast_card(ui, t);
+                            if resp.clicked() {
+                                dismiss = true;
+                            }
+                        });
+                }
+            }
+        }
+
+        // When multi-viewport works, still mirror a small badge in-app so the
+        // user sees the toast even if the OS window is occluded.
+        if !saw_embedded {
+            if let Some(t) = &toast {
+                if self.main_visible {
+                    egui::Area::new(egui::Id::new("weport-toast-mirror"))
+                        .anchor(egui::Align2::RIGHT_TOP, [-16.0, 56.0])
+                        .order(egui::Order::Foreground)
+                        .interactable(true)
+                        .show(ctx, |ui| {
+                            let resp = Self::paint_toast_card(ui, t);
+                            if resp.clicked() {
+                                dismiss = true;
+                            }
+                        });
+                }
+            }
+        }
+
         if dismiss {
             self.dismiss_current_toast();
+        }
+        if has {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -2419,6 +2492,64 @@ impl WeportApp {
                     .size(12.0)
                     .color(TEXT_FAINT),
             );
+
+            ui.add_space(14.0);
+            Frame::new()
+                .fill(ELEVATED)
+                .stroke(Stroke::new(1.0_f32, LINE))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("调试弹窗显示").size(13.0).strong().color(TEXT));
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "点下面的按钮会立刻弹出一条测试通知（不读微信数据库）。\
+                             若弹窗出现 → 显示正常，问题在消息检测；\
+                             若没有 → 是弹窗显示逻辑问题。",
+                        )
+                        .size(12.0)
+                        .color(TEXT_DIM),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("显示测试通知").size(13.0).color(BG),
+                                )
+                                .fill(TEXT)
+                                .stroke(Stroke::new(1.0_f32, TEXT))
+                                .corner_radius(R)
+                                .min_size(Vec2::new(140.0, 32.0)),
+                            )
+                            .clicked()
+                        {
+                            self.enqueue_debug_toast();
+                            self.push_toast(
+                                2,
+                                "已触发测试通知",
+                                "请看屏幕右上角（主窗口打开时也会在应用内显示）",
+                                5.0,
+                            );
+                        }
+                        ui.add_space(8.0);
+                        let backend = if self.toast_viewport_embedded {
+                            "嵌入模式（主窗口内显示）"
+                        } else {
+                            "独立置顶窗口"
+                        };
+                        ui.label(RichText::new(backend).size(11.5).color(TEXT_FAINT));
+                    });
+                    if !self.toast_debug_status.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(&self.toast_debug_status)
+                                .size(12.0)
+                                .color(TEXT),
+                        );
+                    }
+                });
         });
 
         if toggled {
