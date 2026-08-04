@@ -35,6 +35,12 @@ pub fn is_run_at_startup() -> bool {
 
 #[cfg(windows)]
 pub fn set_run_at_startup(enabled: bool) -> Result<(), String> {
+    set_run_at_startup_ex(enabled, false)
+}
+
+/// `background`: append `--background` so login auto-start opens tray-only.
+#[cfg(windows)]
+pub fn set_run_at_startup_ex(enabled: bool, background: bool) -> Result<(), String> {
     use windows_sys::Win32::System::Registry::*;
     unsafe {
         let mut hkey: HKEY = std::ptr::null_mut();
@@ -54,8 +60,11 @@ pub fn set_run_at_startup(enabled: bool) -> Result<(), String> {
         }
         let result = if enabled {
             let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("weport.exe"));
-            // Quote the path so the shell launches it correctly.
-            let cmd = format!("\"{}\"", exe.display());
+            let cmd = if background {
+                format!("\"{}\" --background", exe.display())
+            } else {
+                format!("\"{}\"", exe.display())
+            };
             let wide = to_wide(&cmd);
             RegSetValueExW(
                 hkey,
@@ -84,6 +93,11 @@ pub fn is_run_at_startup() -> bool {
 
 #[cfg(not(windows))]
 pub fn set_run_at_startup(_enabled: bool) -> Result<(), String> {
+    Err("仅 Windows 支持开机自启动".into())
+}
+
+#[cfg(not(windows))]
+pub fn set_run_at_startup_ex(_enabled: bool, _background: bool) -> Result<(), String> {
     Err("仅 Windows 支持开机自启动".into())
 }
 

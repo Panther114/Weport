@@ -27,9 +27,10 @@ pub struct AppSettings {
     /// Defaults to true so first-run installs always auto-start.
     #[serde(default = "default_true")]
     pub launch_at_startup: bool,
-    /// Start hidden in the background (tray) instead of showing the window.
-    /// Defaults to true: tray-only until the user opens the main window.
-    #[serde(default = "default_true")]
+    /// Start hidden in the tray instead of showing the window.
+    /// Only applies when launched with `--background` (login Run key).
+    /// Normal desktop / Start Menu launches always show the main window.
+    #[serde(default)]
     pub start_in_background: bool,
     /// Keep running in the tray when the window is closed.
     #[serde(default = "default_true")]

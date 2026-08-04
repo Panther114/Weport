@@ -16,6 +16,8 @@ mod tray;
 mod wcdb;
 mod wcdb_native;
 mod wcdb_worker;
+#[cfg(windows)]
+mod window_ctrl;
 
 use serde_json::json;
 use std::env;
@@ -283,7 +285,7 @@ fn wait_for_result_file(path: &std::path::Path, timeout_secs: u64) -> Result<ser
     }
 }
 
-/// Ensure only one GUI instance runs. A second launch focuses the existing tray app.
+/// Ensure only one GUI instance runs. A second launch asks the first to show.
 #[cfg(windows)]
 fn acquire_single_instance() -> Option<*mut core::ffi::c_void> {
     use std::os::windows::ffi::OsStrExt;
@@ -299,8 +301,9 @@ fn acquire_single_instance() -> Option<*mut core::ffi::c_void> {
             return None;
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            // Signal the running instance via a named event the tray/GUI can watch.
-            // Best-effort: just exit — user can click the tray icon.
+            // Wake the existing instance and bring its window forward.
+            window_ctrl::signal_show_event();
+            window_ctrl::force_show();
             windows_sys::Win32::Foundation::CloseHandle(handle);
             return None;
         }

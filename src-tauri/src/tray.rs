@@ -57,8 +57,10 @@ unsafe extern "system" fn wnd_proc(
             &*(ptr as *const TrayThreadState)
         };
         match (lparam as u32) & 0xFFFF {
+            // Left click always shows the main window (never toggle-hide).
+            // Hide is only via the window X button (close-to-tray).
             WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-                let _ = state.tx.send(TrayEvent::ToggleMainWindow);
+                let _ = state.tx.send(TrayEvent::ShowMainWindow);
                 state.ctx.request_repaint();
             }
             WM_RBUTTONUP | WM_CONTEXTMENU => {

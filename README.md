@@ -43,7 +43,7 @@ Same model as WeFlow: the key is captured **during WeChat login**, not from a fu
 
 - **安装防撤回**: patch WeChat's `Weixin.dll` so recalled messages stay visible inside WeChat. Requires WeChat 4 (Weixin.exe), admin elevation (UAC) and a fully closed WeChat. Re-apply after each WeChat update; restore via 还原补丁.
 - **消息提醒**: with the decrypt key available, Weport watches the account's local databases and shows a top-right, always-on-top, non-focusing toast for new incoming messages and recalls.
-- **Tray defaults**: installs enable login auto-start; the app starts in the tray and keeps running when the window is closed. Tray menu: 显示主窗口 / 退出. Single-instance (second launch exits quietly).
+- **Tray**: close-to-tray keeps the app running; tray click / second launch restores the main window. Login auto-start can optionally use `--background` for tray-only. Tray menu: 显示主窗口 / 退出.
 - **Icon**: white WeChat-style dual-bubble mark for exe, tray, installer, and taskbar.
 
 ## CLI

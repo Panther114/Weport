@@ -581,6 +581,12 @@ struct WeportApp {
     force_exit_at: Option<std::time::Instant>,
     main_visible: bool,
     pending_start_hidden: bool,
+    /// Named event signaled by a second process instance ("show me").
+    #[cfg(windows)]
+    show_event: Option<*mut core::ffi::c_void>,
+    /// Frames left where we force-show (defeats accidental hide on startup).
+    force_show_frames: u8,
+    hwnd_cached: bool,
     // anti-recall
     anti_install: Option<String>,
     anti_state: Option<String>, // human-readable status line
@@ -627,15 +633,21 @@ impl WeportApp {
 
         let notify = NotifyService::start();
 
-        // Prefer tray-only launch when a tray icon is available.
-        let start_hidden = s.start_in_background && tray.is_some();
+        // Only hide on launch when explicitly started with --background
+        // (login Run key). Normal desktop / Start Menu launches ALWAYS show.
+        let want_background = std::env::args().any(|a| a == "--background" || a == "-background");
+        let start_hidden = want_background && s.start_in_background && tray.is_some();
         // Default ON: enable login auto-start unless the user previously disabled it.
         let launch_at_startup = s.launch_at_startup;
         if launch_at_startup && !startup::is_run_at_startup() {
-            let _ = startup::set_run_at_startup(true);
+            let _ = startup::set_run_at_startup_ex(true, s.start_in_background);
         }
-        // Always keep close-to-tray on when tray works (X hides; tray menu quits).
+        // Close-to-tray when tray works (X hides; tray menu / 退出 fully quits).
         let close_to_tray = tray.is_some();
+
+        #[cfg(windows)]
+        let show_event = crate::window_ctrl::create_show_event();
+
         let mut app = Self {
             db_path: s.db_path,
             mode: AppMode::Connect,
@@ -670,6 +682,12 @@ impl WeportApp {
             force_exit_at: None,
             main_visible: !start_hidden,
             pending_start_hidden: start_hidden,
+            #[cfg(windows)]
+            show_event,
+            // Non-background launches: keep forcing the window visible for a
+            // few frames so nothing can leave us tray-only by accident.
+            force_show_frames: if start_hidden { 0 } else { 12 },
+            hwnd_cached: false,
             anti_install: None,
             anti_state: None,
             anti_busy: false,
@@ -1410,6 +1428,32 @@ fn now_secs() -> f64 {
 }
 
 impl WeportApp {
+    /// Bring the main window to the front (egui + native Win32).
+    fn show_main_window(&mut self, ctx: &egui::Context) {
+        self.main_visible = true;
+        self.pending_start_hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+        #[cfg(windows)]
+        {
+            crate::window_ctrl::force_show();
+            // Re-assert for a couple of frames — Windows often steals focus back.
+            self.force_show_frames = self.force_show_frames.max(4);
+        }
+    }
+
+    /// Hide main window into the tray (egui + native Win32).
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        self.main_visible = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        ctx.request_repaint();
+        #[cfg(windows)]
+        crate::window_ctrl::force_hide();
+    }
+
     /// Tear down tray + notify and ask eframe to exit (with a hard-exit fallback).
     fn begin_quit(&mut self, ctx: &egui::Context) {
         if self.quit_requested {
@@ -1442,6 +1486,22 @@ impl eframe::App for WeportApp {
         self.poll_bg(ctx);
         self.sync_notify_config();
 
+        // Cache main HWND once the OS window exists.
+        #[cfg(windows)]
+        if !self.hwnd_cached {
+            if crate::window_ctrl::find_weport_hwnd().is_some() {
+                self.hwnd_cached = true;
+            }
+        }
+
+        // Second instance asked us to show.
+        #[cfg(windows)]
+        if let Some(ev) = self.show_event {
+            if crate::window_ctrl::poll_show_event(ev) {
+                self.show_main_window(ctx);
+            }
+        }
+
         // --- Tray events (show / toggle / quit) ---
         // Drain first so we don't hold a borrow on `self.tray` across `begin_quit`.
         let mut tray_events = Vec::new();
@@ -1453,19 +1513,16 @@ impl eframe::App for WeportApp {
         for ev in tray_events {
             match ev {
                 crate::tray::TrayEvent::ShowMainWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-                    self.main_visible = true;
+                    self.show_main_window(ctx);
                 }
                 crate::tray::TrayEvent::ToggleMainWindow => {
+                    // Keep for API compat; prefer show when hidden, hide only if visible.
                     if self.main_visible {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                        self.main_visible = false;
+                        if self.tray.is_some() {
+                            self.hide_to_tray(ctx);
+                        }
                     } else {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                        self.main_visible = true;
+                        self.show_main_window(ctx);
                     }
                 }
                 crate::tray::TrayEvent::Quit => {
@@ -1474,25 +1531,18 @@ impl eframe::App for WeportApp {
             }
         }
 
-        // Close button: always hide to tray when a tray icon exists.
+        // Close button: hide to tray when a tray icon exists.
         // (Tray menu → 退出 is the only way to fully quit from the GUI.)
         if !self.quit_requested {
             if ctx.input(|i| i.viewport().close_requested()) {
-                let can_tray = self.tray.is_some() && self.close_to_tray;
-                if can_tray {
-                    // CancelClose MUST be sent the same frame, every time.
+                if self.tray.is_some() && self.close_to_tray {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    self.main_visible = false;
+                    self.hide_to_tray(ctx);
                 } else if self.tray.is_some() {
-                    // Setting says quit, but still prefer tray if tray is alive —
-                    // user asked for close-to-tray behavior as the default product path.
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    self.main_visible = false;
                     self.close_to_tray = true;
                     self.persist();
+                    self.hide_to_tray(ctx);
                 } else {
                     self.begin_quit(ctx);
                 }
@@ -1500,26 +1550,34 @@ impl eframe::App for WeportApp {
         }
 
         if self.quit_requested {
-            // Keep asking the main viewport to close until we exit.
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             if let Some(deadline) = self.force_exit_at {
                 if std::time::Instant::now() >= deadline {
-                    // Last resort: eframe/winit sometimes stalls on multi-viewport close.
                     std::process::exit(0);
                 }
             }
-            // While quitting, skip painting heavy UI so Drop runs sooner.
             ctx.request_repaint();
             return;
         }
 
+        // Explicit --background launch: hide once after the first frame.
         if self.pending_start_hidden && self.tray.is_some() {
             self.pending_start_hidden = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.main_visible = false;
+            self.hide_to_tray(ctx);
         }
 
-        // When hidden in the tray, throttle paints — still poll tray + notify.
+        // Defeat accidental hide / ensure first-open visibility.
+        if self.force_show_frames > 0 {
+            self.force_show_frames -= 1;
+            self.main_visible = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            #[cfg(windows)]
+            crate::window_ctrl::force_show();
+            ctx.request_repaint();
+        }
+
+        // When hidden in the tray, keep the event loop alive so tray clicks work.
         if !self.main_visible {
             self.poll_bg(ctx);
             self.sync_notify_config();
@@ -1538,7 +1596,8 @@ impl eframe::App for WeportApp {
                 }
             }
             self.render_toast_viewport(ctx);
-            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+            // Aggressive wake: winit sometimes starves hidden windows.
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
             return;
         }
 
@@ -2650,8 +2709,16 @@ impl WeportApp {
                         .color(TEXT_FAINT),
                 );
                 bg_toggled |= ui
-                    .checkbox(&mut self.start_in_background, "启动后隐藏到托盘（后台运行）")
+                    .checkbox(
+                        &mut self.start_in_background,
+                        "开机自启动时隐藏到托盘（需同时开启上方自启动）",
+                    )
                     .changed();
+                ui.label(
+                    RichText::new("普通双击 / 开始菜单启动始终显示主窗口；仅登录自启动可后台。")
+                        .size(11.5)
+                        .color(TEXT_FAINT),
+                );
                 tray_toggled |= ui
                     .checkbox(&mut self.close_to_tray, "关闭窗口时最小化到托盘而不是退出")
                     .changed();
@@ -2720,26 +2787,47 @@ impl WeportApp {
                 });
             });
 
-        if startup_toggled {
-            let enabled = self.launch_at_startup;
-            match startup::set_run_at_startup(enabled) {
-                Ok(()) => {
-                    self.launch_at_startup = enabled;
-                    self.push_toast(
-                        0,
-                        if enabled { "已设置开机自启动" } else { "已取消开机自启动" },
-                        "",
-                        4.0,
-                    );
-                }
-                Err(e) => {
-                    self.launch_at_startup = !enabled;
-                    self.push_toast(1, "设置开机自启动失败", e, 8.0);
+        if startup_toggled || bg_toggled {
+            if startup_toggled || self.launch_at_startup {
+                let enabled = self.launch_at_startup;
+                match startup::set_run_at_startup_ex(enabled, self.start_in_background) {
+                    Ok(()) => {
+                        if startup_toggled {
+                            self.push_toast(
+                                0,
+                                if enabled {
+                                    "已设置开机自启动"
+                                } else {
+                                    "已取消开机自启动"
+                                },
+                                if enabled && self.start_in_background {
+                                    "登录后将隐藏到托盘"
+                                } else {
+                                    ""
+                                },
+                                4.0,
+                            );
+                        } else if bg_toggled && enabled {
+                            self.push_toast(
+                                0,
+                                if self.start_in_background {
+                                    "开机启动将隐藏到托盘"
+                                } else {
+                                    "开机启动将显示主窗口"
+                                },
+                                "",
+                                4.0,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if startup_toggled {
+                            self.launch_at_startup = !enabled;
+                        }
+                        self.push_toast(1, "设置开机自启动失败", e, 8.0);
+                    }
                 }
             }
-            self.persist();
-        }
-        if bg_toggled {
             self.persist();
         }
         if tray_toggled {

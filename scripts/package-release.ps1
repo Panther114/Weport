@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.4"
+$version = "0.6.5"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -127,7 +127,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.4: MIT license, reliable message popups (solid secondary viewport + main fallback), debug test-notification button."
+  notes = "v0.6.5: fix window not opening / tray restore — show main window on launch, native ShowWindow+focus on tray click."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{
