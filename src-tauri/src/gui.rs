@@ -1092,7 +1092,13 @@ impl WeportApp {
 
     fn spawn_update_install(&mut self) {
         self.busy = true;
-        self.busy_label = "正在下载更新…".into();
+        self.busy_label = "正在下载更新，完成后将自动重启…".into();
+        self.push_toast(
+            2,
+            "正在下载更新",
+            "下载完成后 Weport 将退出、安装并自动重启",
+            8.0,
+        );
         let tx = self.tx.clone();
         thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -1224,7 +1230,7 @@ impl WeportApp {
                 NotifyKind::NewMessage => "新消息",
                 NotifyKind::Recalled => "撤回提醒",
             };
-            crate::toast_win::show(&t.title, &t.content, kind);
+            crate::toast_win::show_with_session(&t.title, &t.content, kind, &t.session_id);
         }
         // Bookkeeping only — native stack owns lifetime; do not gate later
         // toasts on this flag (that bug hid all messages after the first).
@@ -1250,11 +1256,21 @@ impl WeportApp {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-        let title = format!("测试联系人 {seq}");
+        let is_group = seq % 2 == 0;
+        let title = if is_group {
+            format!("测试群聊 {seq}")
+        } else {
+            format!("测试联系人 {seq}")
+        };
         let content = format!("这是第 {seq} 条调试消息 · 连点可堆叠多条");
+        let session_id = if is_group {
+            format!("debug-chatroom-{n}-{seq}@chatroom")
+        } else {
+            format!("debug-{n}-{seq}")
+        };
         let ev = NotifyEvent {
             kind: NotifyKind::NewMessage,
-            session_id: format!("debug-{n}-{seq}"),
+            session_id: session_id.clone(),
             title,
             content,
             timestamp: n,
@@ -1263,7 +1279,7 @@ impl WeportApp {
         self.push_native_toast(&ev);
     }
 
-    /// Poll watcher + flush every event into the multi-toast host (no gating).
+    /// Drain every pending event into the native multi-toast stack immediately.
     fn drain_notify_toasts(&mut self) {
         if let Some(notify) = &self.notify {
             while let Some(ev) = notify.poll() {
@@ -1272,7 +1288,7 @@ impl WeportApp {
         }
         self.flush_toast_queue();
         // Clear bookkeeping after native display window; native host times out.
-        if let Some(_) = &self.current_toast {
+        if self.current_toast.is_some() {
             if now_secs() - self.toast_shown_at > TOAST_DURATION {
                 self.current_toast = None;
             }
@@ -1836,10 +1852,10 @@ impl eframe::App for WeportApp {
                             if ui
                                 .add_enabled(
                                     !self.busy,
-                                    egui::Button::new(RichText::new("立即更新").size(13.0).color(BG))
+                                    egui::Button::new(RichText::new("立即更新").size(14.0).color(BG))
                                         .fill(TEXT)
                                         .corner_radius(R)
-                                        .min_size(Vec2::new(88.0, 30.0)),
+                                        .min_size(Vec2::new(96.0, 32.0)),
                                 )
                                 .clicked()
                             {
@@ -1877,7 +1893,7 @@ impl WeportApp {
     /// Native Win32 toast is primary (see toast_win). This only tracks lifetime.
     fn render_toast_viewport(&mut self, ctx: &egui::Context) {
         // Auto-dismiss bookkeeping when native toast times out (approx).
-        if let Some(_) = &self.current_toast {
+        if self.current_toast.is_some() {
             if now_secs() - self.toast_shown_at > TOAST_DURATION {
                 self.dismiss_current_toast();
             } else {
@@ -1939,7 +1955,7 @@ impl WeportApp {
                     if ui
                         .add_enabled(
                             !self.busy,
-                            egui::Button::new("浏览").corner_radius(R).min_size(Vec2::new(64.0, 30.0)),
+                            egui::Button::new("浏览").corner_radius(R).min_size(Vec2::new(72.0, 32.0)),
                         )
                         .clicked()
                     {
@@ -1955,7 +1971,7 @@ impl WeportApp {
                     if ui
                         .add_enabled(
                             !self.busy,
-                            egui::Button::new("扫描").corner_radius(R).min_size(Vec2::new(64.0, 30.0)),
+                            egui::Button::new("扫描").corner_radius(R).min_size(Vec2::new(72.0, 32.0)),
                         )
                         .clicked()
                     {
@@ -1966,7 +1982,7 @@ impl WeportApp {
                             !self.busy && !self.db_path.trim().is_empty(),
                             egui::Button::new("刷新账号")
                                 .corner_radius(R)
-                                .min_size(Vec2::new(80.0, 30.0)),
+                                .min_size(Vec2::new(88.0, 32.0)),
                         )
                         .clicked()
                     {
@@ -2010,7 +2026,7 @@ impl WeportApp {
                         .add(
                             egui::Button::new(if self.show_key { "隐" } else { "显" })
                                 .corner_radius(R)
-                                .min_size(Vec2::new(32.0, 28.0)),
+                                .min_size(Vec2::new(36.0, 30.0)),
                         )
                         .clicked()
                     {
@@ -2027,11 +2043,11 @@ impl WeportApp {
                             } else {
                                 "提取密钥"
                             })
-                            .size(13.5)
+                            .size(14.0)
                             .color(BG),
                         )
                         .corner_radius(R)
-                        .min_size(Vec2::new(ui.available_width(), 34.0))
+                        .min_size(Vec2::new(ui.available_width(), 36.0))
                         .fill(TEXT)
                         .stroke(Stroke::new(1.0_f32, TEXT)),
                     )
@@ -2184,7 +2200,7 @@ impl WeportApp {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if icons::button(ui, "浏览", false, !self.busy, Vec2::new(64.0, 30.0)).clicked()
+                    if icons::button(ui, "浏览", false, !self.busy, Vec2::new(72.0, 32.0)).clicked()
                     {
                         if let Some(p) = rfd::FileDialog::new()
                             .set_title("选择导出输出文件夹")
@@ -2278,7 +2294,7 @@ impl WeportApp {
                 "导出全部聊天记录"
             };
             let w = ui.available_width();
-            if icons::button(ui, export_label, true, !self.busy, Vec2::new(w, 36.0)).clicked() {
+            if icons::button(ui, export_label, true, !self.busy, Vec2::new(w, 38.0)).clicked() {
                 self.spawn_export();
             }
             ui.add_space(4.0);
@@ -2287,7 +2303,7 @@ impl WeportApp {
                 "清空导出库",
                 false,
                 !self.busy && !self.export_path.trim().is_empty(),
-                Vec2::new(w, 30.0),
+                Vec2::new(w, 32.0),
             )
             .clicked()
             {
@@ -2347,7 +2363,7 @@ impl WeportApp {
                                     !self.anti_busy,
                                     egui::Button::new("刷新")
                                         .corner_radius(R)
-                                        .min_size(Vec2::new(64.0, 28.0)),
+                                        .min_size(Vec2::new(72.0, 30.0)),
                                 )
                                 .clicked()
                             {
@@ -2373,13 +2389,13 @@ impl WeportApp {
                         !self.anti_busy && install.is_some(),
                         egui::Button::new(
                             RichText::new(if self.anti_busy { "处理中…" } else { "安装防撤回补丁" })
-                                .size(13.5)
+                                .size(14.0)
                                 .color(BG),
                         )
                         .fill(TEXT)
                         .stroke(Stroke::new(1.0_f32, TEXT))
                         .corner_radius(R)
-                        .min_size(Vec2::new(150.0, 34.0)),
+                        .min_size(Vec2::new(160.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -2390,9 +2406,9 @@ impl WeportApp {
                 if ui
                     .add_enabled(
                         !self.anti_busy && install.is_some(),
-                        egui::Button::new(RichText::new("还原补丁").size(13.0))
+                        egui::Button::new(RichText::new("还原补丁").size(14.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(100.0, 34.0)),
+                            .min_size(Vec2::new(110.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -2613,7 +2629,7 @@ impl WeportApp {
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .add(egui::Button::new("取消").corner_radius(R).min_size(Vec2::new(100.0, 38.0)))
+                            .add(egui::Button::new("取消").corner_radius(R).min_size(Vec2::new(100.0, 36.0)))
                             .clicked()
                         {
                             self.clear_open = false;
@@ -2623,7 +2639,7 @@ impl WeportApp {
                                 !self.busy,
                                 egui::Button::new(if self.busy { "清空中…" } else { "确认清空" })
                                     .corner_radius(R)
-                                    .min_size(Vec2::new(120.0, 38.0))
+                                    .min_size(Vec2::new(120.0, 36.0))
                                     .fill(TEXT)
                                     .stroke(Stroke::new(1.0, TEXT)),
                             )
@@ -2707,7 +2723,7 @@ impl WeportApp {
                             !self.busy,
                             egui::Button::new("检查更新")
                                 .corner_radius(R)
-                                .min_size(Vec2::new(120.0, 38.0)),
+                                .min_size(Vec2::new(110.0, 36.0)),
                         )
                         .clicked()
                     {
@@ -2721,7 +2737,7 @@ impl WeportApp {
                                     .corner_radius(R)
                                     .fill(TEXT)
                                     .stroke(Stroke::new(1.0, TEXT))
-                                    .min_size(Vec2::new(140.0, 38.0)),
+                                    .min_size(Vec2::new(130.0, 36.0)),
                             )
                             .clicked()
                         {
@@ -2739,7 +2755,7 @@ impl WeportApp {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new("关闭").corner_radius(R).min_size(Vec2::new(90.0, 34.0)))
+                            .add(egui::Button::new("关闭").corner_radius(R).min_size(Vec2::new(90.0, 36.0)))
                             .clicked()
                         {
                             self.settings_open = false;

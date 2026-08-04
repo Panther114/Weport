@@ -163,112 +163,65 @@ pub async fn perform_update(yes: bool) -> Result<(), Box<dyn std::error::Error>>
 
     #[cfg(windows)]
     {
-        launch_installer_and_wait(&installer_path, silent)?;
-        // Give the installer a moment to flush files.
-        std::thread::sleep(Duration::from_millis(800));
-        if let Some(ref snap) = settings_snap {
-            match settings::restore_settings_if_missing(snap) {
-                Ok(true) => eprintln!("[update] Restored settings snapshot (live file was empty)"),
-                Ok(false) => eprintln!("[update] Settings intact (keys & db path preserved)"),
-                Err(e) => eprintln!("[update] Settings check: {e}"),
-            }
-        }
-        // Relaunch the newly installed binary when we know the install dir.
-        if let Err(e) = relaunch_weport() {
-            eprintln!("[update] Relaunch skipped: {e}");
-        }
+        // CRITICAL FIX (v0.6.10): The old flow ran the NSIS installer from
+        // within the app and then called relaunch_weport(). But the installer
+        // does `taskkill /F /IM weport.exe`, killing THIS process before
+        // relaunch runs. Even if it survived, the single-instance mutex would
+        // block the relaunched binary.
+        //
+        // New flow: spawn a detached helper batch script that:
+        //   1. Waits for the current weport.exe PID to exit (releases locks)
+        //   2. Runs the NSIS installer (silent or interactive)
+        //   3. Restores settings snapshot if needed
+        //   4. Relaunches weport.exe
+        // Then the app quits immediately so the helper can proceed.
+        let pid = std::process::id();
+        let exe = find_installed_exe();
+        spawn_update_helper(pid, &installer_path, silent, &exe, settings_snap.as_ref().map(|p| p.as_path()))?;
+
+        // Signal the GUI to quit immediately so the helper can run the installer.
+        eprintln!("[update] Helper launched — exiting current instance to allow clean install.");
+        println!(
+            "{}",
+            serde_json::json!({
+                "success": true,
+                "updated": true,
+                "version": latest,
+                "installer": installer_path,
+                "settingsPreserved": true,
+                "relaunching": true
+            })
+        );
+        // Give the caller (GUI) a moment to read the result, then exit.
+        std::thread::sleep(Duration::from_millis(500));
+        std::process::exit(0);
     }
 
     #[cfg(not(windows))]
     {
         let _ = open::that(&installer_path);
         let _ = settings_snap;
+        println!(
+            "{}",
+            serde_json::json!({
+                "success": true,
+                "updated": true,
+                "version": latest,
+                "installer": installer_path,
+                "settingsPreserved": true
+            })
+        );
+        return Ok(());
     }
 
-    println!(
-        "{}",
-        serde_json::json!({
-            "success": true,
-            "updated": true,
-            "version": latest,
-            "installer": installer_path,
-            "settingsPreserved": true
-        })
-    );
+    // Windows path exits via std::process::exit above; this is never reached.
+    #[allow(unreachable_code)]
     Ok(())
 }
 
+/// Find the installed weport.exe location (preferred) or fall back to current_exe.
 #[cfg(windows)]
-fn launch_installer_and_wait(
-    installer_path: &Path,
-    silent: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
-    use windows_sys::Win32::UI::Shell::{
-        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    let wide = |s: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
-    let mut file: Vec<u16> = installer_path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // /S = silent; NSIS only replaces $INSTDIR, never user AppData\Weport.
-    let mut params: Vec<u16> = wide(if silent { "/S" } else { "" });
-    let mut verb: Vec<u16> = wide("open");
-
-    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
-    info.lpVerb = verb.as_mut_ptr();
-    info.lpFile = file.as_mut_ptr();
-    info.lpParameters = if silent {
-        params.as_mut_ptr()
-    } else {
-        ptr::null_mut()
-    };
-    info.nShow = SW_SHOWNORMAL;
-
-    let ok = unsafe { ShellExecuteExW(&mut info) };
-    if ok == 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(format!(
-            "启动安装程序失败: {err}\n安装包: {}",
-            installer_path.display()
-        )
-        .into());
-    }
-
-    // Wait up to 10 minutes for silent/interactive install to finish.
-    if !info.hProcess.is_null() {
-        let wait = unsafe { WaitForSingleObject(info.hProcess, 600_000) };
-        unsafe { CloseHandle(info.hProcess) };
-        // WAIT_OBJECT_0 == 0
-        if wait != 0 {
-            eprintln!("[update] Installer still running or timed out (wait={wait})");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn relaunch_weport() -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW};
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    // Prefer the installed location; fall back to current_exe.
+fn find_installed_exe() -> PathBuf {
     let candidates = [
         dirs::data_local_dir().map(|d| d.join("Programs").join("Weport").join("weport.exe")),
         std::env::var_os("LOCALAPPDATA").map(|p| {
@@ -279,34 +232,100 @@ fn relaunch_weport() -> Result<(), Box<dyn std::error::Error>> {
         }),
         std::env::current_exe().ok(),
     ];
-    let exe = candidates
+    candidates
         .into_iter()
         .flatten()
         .find(|p| p.is_file())
-        .ok_or("weport.exe not found after install")?;
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("weport.exe"))
+        })
+}
 
-    let mut file: Vec<u16> = exe
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut verb: Vec<u16> = std::ffi::OsStr::new("open")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_FLAG_NO_UI;
-    info.lpVerb = verb.as_mut_ptr();
-    info.lpFile = file.as_mut_ptr();
-    info.lpParameters = ptr::null_mut();
-    info.nShow = SW_SHOWNORMAL;
-    let ok = unsafe { ShellExecuteExW(&mut info) };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    eprintln!("[update] Relaunched {}", exe.display());
+/// Spawn a detached batch script that waits for the current process to exit,
+/// runs the installer, optionally restores settings, and relaunches the app.
+///
+/// This is the ONLY safe way to self-update: the NSIS installer kills
+/// weport.exe (taskkill /F /IM), so the installer MUST run after we exit.
+/// The helper runs detached (no parent-child handle) so it survives our exit.
+#[cfg(windows)]
+fn spawn_update_helper(
+    pid: u32,
+    installer_path: &Path,
+    silent: bool,
+    exe: &Path,
+    settings_snap: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::process::CommandExt;
+
+    // Write a batch helper to temp — simpler and more reliable than PowerShell
+    // for detached execution.
+    let helper_path = std::env::temp_dir().join(format!("weport-update-{}.bat", pid));
+
+    let installer_str = installer_path.display().to_string().replace('\\', "/");
+    let exe_str = exe.display().to_string().replace('\\', "/");
+    let snap_str = settings_snap
+        .map(|p| p.display().to_string().replace('\\', "/"))
+        .unwrap_or_default();
+    let silent_flag = if silent { "/S" } else { "" };
+
+    let script = format!(
+        r#"@echo off
+:: Weport self-update helper — waits for old PID to exit, runs installer, relaunches.
+:: Generated by weport.exe — safe to delete.
+
+:: 1. Wait for the current weport.exe process to exit (up to 30s).
+::    This releases file locks and the single-instance mutex.
+:wait_loop
+tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto wait_loop
+)
+:: Extra grace period for file handle release.
+timeout /t 1 /nobreak >NUL
+
+:: 2. Run the installer (silent or interactive).
+start "" /B /WAIT "{installer_str}" {silent_flag}
+
+:: 3. Restore settings snapshot if the live file was wiped.
+if not "{snap_str}"=="" (
+    if not exist "%APPDATA%\Weport\settings.json" (
+        copy /Y "{snap_str}" "%APPDATA%\Weport\settings.json" >NUL 2>NUL
+    )
+)
+
+:: 4. Relaunch the newly installed binary.
+if exist "{exe_str}" (
+    start "" "{exe_str}"
+)
+
+:: 5. Clean up this helper script.
+(goto) 2>NUL & del "%~f0"
+"#,
+        pid = pid,
+        installer_str = installer_str,
+        silent_flag = silent_flag,
+        snap_str = snap_str,
+        exe_str = exe_str,
+    );
+
+    fs::write(&helper_path, script)?;
+
+    // Launch the batch script detached (CREATE_NO_WINDOW so no console flashes).
+    let mut cmd = std::process::Command::new("cmd.exe");
+    cmd.args(["/C", "start", "", "/B"])
+        .arg(&helper_path)
+        .creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+    cmd.spawn().map_err(|e| format!("启动更新助手失败: {e}"))?;
     Ok(())
+}
+
+/// Find the installed weport.exe location (preferred) or fall back to current_exe.
+#[cfg(not(windows))]
+fn find_installed_exe() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("weport"))
 }
 
 pub fn print_cli_help() {

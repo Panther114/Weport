@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "private": true,
   "description": "Weport — lightweight WeChat chat history exporter for Windows (native egui, no WebView)",
   "author": {

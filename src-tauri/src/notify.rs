@@ -282,9 +282,14 @@ fn sync_once(
 
     let mut events: Vec<NotifyEvent> = Vec::new();
     let mut next_baseline: HashMap<String, SessionBaseline> = HashMap::new();
-    let mut candidates: Vec<Value> = Vec::new();
+    // Sessions where unread grew (incoming messages only — self-sent messages
+    // advance lastTimestamp but never increase unreadCount).
+    let mut new_msg_candidates: Vec<Value> = Vec::new();
+    // Sessions with any timestamp activity (for revoke scanning — revokes can
+    // arrive without growing unread, e.g. the other side recalls a message).
+    let mut revoke_candidates: Vec<Value> = Vec::new();
     // First successful sync only seeds the baseline — avoids a flood of
-    // "historical unread" toasts, and ensures subsequent last_ts bumps fire.
+    // "historical unread" toasts, and ensures subsequent unread bumps fire.
     let seeding = baseline.is_empty();
 
     for row in &sessions {
@@ -320,24 +325,43 @@ fn sync_once(
             continue;
         }
 
-        // New activity: timestamp advanced OR unread grew (either signal alone).
-        // Requiring both (old logic) missed many WeChat 4 updates where unread
-        // stayed flat while lastTimestamp moved.
-        let candidate = if let Some(p) = prev {
-            last_ts > p.last_timestamp || unread > p.unread_count
-        } else {
-            false
+        let Some(p) = prev else {
+            continue;
         };
-        if !candidate {
+
+        // Any timestamp advance → revoke scan candidate (revokes may not grow
+        // unread). We'll dedupe revoke rows by message key below.
+        if last_ts > p.last_timestamp {
+            revoke_candidates.push(row.clone());
+        }
+
+        // New-message detection (WeFlow GlobalSessionMonitor / messagePushService
+        // approach): require unread to STRICTLY increase. Sending a message
+        // advances lastTimestamp but leaves unreadCount unchanged, so this
+        // filters self-sent messages for both private and group chats.
+        if unread <= p.unread_count {
             continue;
         }
 
-        // Skip self-sent messages for all session types (private and group).
+        // Secondary filter: if lastMsgSender is populated and matches self,
+        // skip (covers group chats where sender info is reliable).
         let sender = field_str(row, &["lastMsgSender", "last_msg_sender", "lastSender"]);
         if !sender.is_empty() && sender_wxid_equal(&sender, &wxid) {
             continue;
         }
-        candidates.push(row.clone());
+
+        new_msg_candidates.push(row.clone());
+    }
+
+    // Merge for name resolution (dedup by username).
+    let mut candidates: Vec<Value> = new_msg_candidates.clone();
+    for row in &revoke_candidates {
+        let u = field_str(row, &["username", "userName", "sessionId", "user_name"]);
+        if !candidates.iter().any(|c| {
+            field_str(c, &["username", "userName", "sessionId", "user_name"]) == u
+        }) {
+            candidates.push(row.clone());
+        }
     }
 
     // Resolve display names in one batch.
@@ -358,8 +382,8 @@ fn sync_once(
         }
     }
 
-    // New-message toasts.
-    for row in &candidates {
+    // New-message toasts (only sessions where unread strictly increased).
+    for row in &new_msg_candidates {
         let username = field_str(row, &["username", "userName", "sessionId", "user_name"]);
         let summary = field_str(row, &["summary", "lastMsg", "last_message"]);
         if summary.is_empty() {
@@ -403,8 +427,9 @@ fn sync_once(
         });
     }
 
-    // Recall toasts: scan recent messages of candidate sessions for revoke rows.
-    for row in &candidates {
+    // Recall toasts: scan recent messages of revoke-candidate sessions.
+    // (Sessions with any timestamp advance — revokes may not grow unread.)
+    for row in &revoke_candidates {
         let username = field_str(row, &["username", "userName", "sessionId", "user_name"]);
         let Ok(msgs) = handle.messages(&username, 60, 0) else {
             continue;
