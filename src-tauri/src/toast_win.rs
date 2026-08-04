@@ -11,14 +11,14 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TOAST_W: i32 = 340;
-const TOAST_H: i32 = 86;
-const GAP: i32 = 10;
+const TOAST_W: i32 = 370;
+const TOAST_H: i32 = 100;
+const GAP: i32 = 12;
 const MARGIN: i32 = 20;
 const MAX_VISIBLE: usize = 4;
-const LIFE_MS: u64 = 5200;
-const FADE_MS: f32 = 240.0;
-const SLIDE_MS: f32 = 220.0;
+const LIFE_MS: u64 = 6000;
+const FADE_MS: f32 = 280.0;
+const SLIDE_MS: f32 = 240.0;
 
 #[derive(Clone)]
 struct ToastItem {
@@ -366,13 +366,28 @@ unsafe fn paint_card(
     use windows_sys::Win32::Graphics::Gdi::*;
 
     // App monochrome style: near-black panel, white/grey text.
-    let bg = fade_rgb(14, 14, 14, opacity.max(0.15));
-    let line = fade_rgb(48, 48, 48, opacity.max(0.2));
+    let bg = fade_rgb(18, 18, 18, opacity.max(0.15));
+    let line = fade_rgb(60, 60, 60, opacity.max(0.2));
     let text = fade_rgb(255, 255, 255, opacity.max(0.25));
-    let dim = fade_rgb(170, 170, 170, opacity.max(0.2));
-    let faint = fade_rgb(110, 110, 110, opacity.max(0.2));
-    let avatar_bg = fade_rgb(22, 22, 22, opacity.max(0.15));
+    let dim = fade_rgb(180, 180, 180, opacity.max(0.2));
+    let faint = fade_rgb(120, 120, 120, opacity.max(0.2));
+    let avatar_bg = fade_rgb(30, 30, 30, opacity.max(0.15));
 
+    // Drop shadow: draw slightly offset dark rects behind the card
+    for i in 1..4 {
+        let shadow = fade_rgb(0, 0, 0, (0.08 * (4 - i) as f32 * opacity).max(0.01));
+        let sbrush = CreateSolidBrush(shadow);
+        let mut srect = RECT {
+            left: x + i,
+            top: y + i + 2,
+            right: x + TOAST_W - i,
+            bottom: y + TOAST_H + i + 2,
+        };
+        FillRect(hdc, &srect, sbrush);
+        DeleteObject(sbrush as _);
+    }
+
+    // Card background
     let brush = CreateSolidBrush(bg);
     let mut rc = RECT {
         left: x,
@@ -394,10 +409,19 @@ unsafe fn paint_card(
 
     // Avatar circle (left)
     let ax = x + 14;
-    let ay = y + 20;
-    let asz = 46;
-    let abr = CreateSolidBrush(avatar_bg);
-    let apen = CreatePen(PS_SOLID, 1, line);
+    let ay = y + 18;
+    let asz = 50;
+    let is_group = item.kind.contains("群") || item.title.contains("群");
+    let abr = CreateSolidBrush(if is_group {
+        fade_rgb(60, 60, 60, opacity.max(0.2))
+    } else {
+        avatar_bg
+    });
+    let apen = CreatePen(PS_SOLID, 1, if is_group {
+        fade_rgb(80, 80, 80, opacity.max(0.2))
+    } else {
+        line
+    });
     let ob = SelectObject(hdc, abr as _);
     let op = SelectObject(hdc, apen as _);
     Ellipse(hdc, ax, ay, ax + asz, ay + asz);
@@ -408,86 +432,104 @@ unsafe fn paint_card(
 
     SetBkMode(hdc, 1); // TRANSPARENT
 
-    // CreateFontW(height, width, esc, orient, weight, italic, underline, strike,
-    //             charset, out, clip, quality, pitch, face)
+    // Use Microsoft YaHei for CJK support (falls back gracefully on English systems)
+    let face = to_wide("Microsoft YaHei");
     let mk_font = |height: i32, weight: i32| -> windows_sys::Win32::Graphics::Gdi::HFONT {
         CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            weight,
-            0,
-            0,
-            0,
+            height, 0, 0, 0, weight, 0, 0, 0,
             1u32, // DEFAULT_CHARSET
-            0,
-            0,
+            0, 0,
             5u32, // CLEARTYPE_QUALITY
             0,
-            to_wide("Segoe UI").as_ptr(),
+            face.as_ptr(),
         )
     };
-    let font_initial = mk_font(20, 600);
-    let font_kind = mk_font(11, 400);
-    let font_title = mk_font(14, 600);
-    // Body: moderately smaller than app body text
-    let font_body = mk_font(12, 400);
+    let font_initial = mk_font(22, 700);
+    let font_kind = mk_font(13, 500);
+    let font_title = mk_font(16, 600);
+    let font_body = mk_font(13, 400);
 
     let old_font = SelectObject(hdc, font_initial as _);
     SetTextColor(hdc, text);
-    let ch = item
-        .title
-        .chars()
-        .find(|c| !c.is_whitespace())
-        .unwrap_or('W')
-        .to_string();
-    let cw = to_wide(&ch);
-    let mut arc = RECT {
-        left: ax,
-        top: ay,
-        right: ax + asz,
-        bottom: ay + asz,
-    };
-    // DT_* flags
-    const DT_LEFT: u32 = 0x0000;
-    const DT_CENTER: u32 = 0x0001;
-    const DT_VCENTER: u32 = 0x0004;
-    const DT_SINGLELINE: u32 = 0x0020;
-    const DT_WORDBREAK: u32 = 0x0010;
-    const DT_END_ELLIPSIS: u32 = 0x8000;
 
-    DrawTextW(
-        hdc,
-        cw.as_ptr(),
-        -1,
-        &mut arc,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
+    // Group chat icon: two small overlapping circles + body
+    if is_group {
+        let s = asz as f32 / 50.0;
+        let cx = (ax + asz / 2) as f32;
+        let cy = (ay + asz / 2) as f32;
+        let gpen = CreatePen(PS_SOLID, (1.5 * s).max(1.0) as i32, fade_rgb(200, 200, 200, opacity.max(0.3)));
+        let golden = SelectObject(hdc, gpen as _);
+        let old_brush2 = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        // Left head
+        Ellipse(hdc,
+            (cx - 9.0 * s) as i32, (cy - 7.0 * s) as i32,
+            (cx - 1.0 * s) as i32, (cy + 1.0 * s) as i32);
+        // Right head
+        Ellipse(hdc,
+            (cx + 1.0 * s) as i32, (cy - 7.0 * s) as i32,
+            (cx + 9.0 * s) as i32, (cy + 1.0 * s) as i32);
+        // Bodies - two vertical lines from under heads
+        MoveToEx(hdc, (cx - 5.0 * s) as i32, (cy + 2.0 * s) as i32, std::ptr::null_mut());
+        LineTo(hdc, (cx - 5.0 * s) as i32, (cy + 12.0 * s) as i32);
+        MoveToEx(hdc, (cx + 5.0 * s) as i32, (cy + 2.0 * s) as i32, std::ptr::null_mut());
+        LineTo(hdc, (cx + 5.0 * s) as i32, (cy + 12.0 * s) as i32);
+        SelectObject(hdc, golden);
+        SelectObject(hdc, old_brush2);
+        DeleteObject(gpen as _);
+    } else {
+        // Single initial character
+        let ch = item
+            .title
+            .chars()
+            .find(|c| !c.is_whitespace())
+            .unwrap_or('W')
+            .to_string();
+        let cw = to_wide(&ch);
+        let mut arc = RECT {
+            left: ax,
+            top: ay,
+            right: ax + asz,
+            bottom: ay + asz,
+        };
+        const DT_LEFT: u32 = 0x0000;
+        const DT_CENTER: u32 = 0x0001;
+        const DT_VCENTER: u32 = 0x0004;
+        const DT_SINGLELINE: u32 = 0x0020;
+        DrawTextW(
+            hdc,
+            cw.as_ptr(),
+            -1,
+            &mut arc,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
 
     // Kind (small, top-right of text block)
     SelectObject(hdc, font_kind as _);
     SetTextColor(hdc, faint);
     let kw = to_wide(&item.kind);
     let mut krc = RECT {
-        left: x + 72,
+        left: x + 76,
         top: y + 10,
         right: x + TOAST_W - 14,
-        bottom: y + 24,
+        bottom: y + 26,
     };
+    const DT_LEFT: u32 = 0x0000;
+    const DT_SINGLELINE: u32 = 0x0020;
     DrawTextW(hdc, kw.as_ptr(), -1, &mut krc, DT_LEFT | DT_SINGLELINE);
 
     // Title (contact name)
     SelectObject(hdc, font_title as _);
     SetTextColor(hdc, text);
-    let ts = truncate(&item.title, 22);
+    let ts = truncate(&item.title, 24);
     let tw = to_wide(&ts);
     let mut trc = RECT {
-        left: x + 72,
-        top: y + 26,
+        left: x + 76,
+        top: y + 28,
         right: x + TOAST_W - 14,
-        bottom: y + 46,
+        bottom: y + 50,
     };
+    const DT_END_ELLIPSIS: u32 = 0x8000;
     DrawTextW(
         hdc,
         tw.as_ptr(),
@@ -496,17 +538,18 @@ unsafe fn paint_card(
         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
 
-    // Body (smaller message preview)
+    // Body (message preview)
     SelectObject(hdc, font_body as _);
     SetTextColor(hdc, dim);
-    let bs = truncate(&item.body, 52);
+    let bs = truncate(&item.body, 56);
     let bw = to_wide(&bs);
     let mut brc = RECT {
-        left: x + 72,
-        top: y + 48,
+        left: x + 76,
+        top: y + 52,
         right: x + TOAST_W - 14,
         bottom: y + TOAST_H - 10,
     };
+    const DT_WORDBREAK: u32 = 0x0010;
     DrawTextW(
         hdc,
         bw.as_ptr(),

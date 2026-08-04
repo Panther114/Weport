@@ -2,11 +2,20 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $srcTauri = Join-Path $root "src-tauri"
+
+# Derive version from Cargo.toml
+$cargoToml = Join-Path $srcTauri "Cargo.toml"
+$version = if (Test-Path $cargoToml) {
+    $content = Get-Content $cargoToml -Raw
+    if ($content -match 'version\s*=\s*"([^"]+)"') {
+        $matches[1]
+    } else { "0.6.9" }
+} else { "0.6.9" }
+
 $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.8"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -54,8 +63,11 @@ Section "Install"
   ; Clean binary replace only. NEVER touch %APPDATA%\Weport or %LOCALAPPDATA%\Weport
   ; user settings (decrypt keys, xwechat_files path, account keys live there).
   SetOutPath "`$INSTDIR"
+  ; Kill any running weport.exe with retry
   nsExec::Exec "taskkill /F /IM weport.exe"
   Sleep 500
+  nsExec::Exec "taskkill /F /IM weport.exe"
+  Sleep 300
   SetOverwrite on
   File "weport.exe"
   SetOutPath "`$INSTDIR\resources"
@@ -70,7 +82,6 @@ Section "Install"
   CreateDirectory "`$SMPROGRAMS\Weport"
   CreateShortCut "`$SMPROGRAMS\Weport\Weport.lnk" "`$INSTDIR\weport.exe"
   CreateShortCut "`$DESKTOP\Weport.lnk" "`$INSTDIR\weport.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Weport" '"`$INSTDIR\weport.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -130,7 +141,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.8: multi-toast stack + detection fix; monochrome cards; connect two-column; Lucide icons + hover lerp."
+  notes = "v0.6.9: layout polish, notification fixes, improved toasts, crash logging, NSIS fixes."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

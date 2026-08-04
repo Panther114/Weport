@@ -319,6 +319,19 @@ fn acquire_single_instance() -> Option<*mut core::ffi::c_void> {
 }
 
 fn main() {
+    // Custom panic hook: log crashes to %TEMP%\weport-crash.log
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("[Weport panic] {info}\n");
+        let _ = std::fs::write(
+            std::env::temp_dir().join("weport-crash.log"),
+            &msg,
+        );
+        // Also write to stderr (visible if launched from terminal)
+        eprintln!("{}", msg.trim());
+        orig_hook(info);
+    }));
+
     let args: Vec<String> = env::args().collect();
 
     if args.iter().any(|a| a == "--wcdb-worker") {

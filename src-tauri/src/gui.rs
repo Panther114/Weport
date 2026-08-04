@@ -110,8 +110,8 @@ const TOAST_DURATION: f64 = 6.0;
 pub fn run_gui() -> eframe::Result<()> {
     let icon = load_app_icon();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([960.0, 640.0])
-        .with_min_inner_size([780.0, 520.0])
+        .with_inner_size([1080.0, 720.0])
+        .with_min_inner_size([920.0, 600.0])
         .with_title(format!("Weport v{APP_VERSION}"))
         .with_decorations(true);
 
@@ -168,10 +168,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
 fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(6.0, 5.0);
-    style.spacing.button_padding = Vec2::new(8.0, 4.0);
-    style.spacing.indent = 8.0;
-    style.spacing.window_margin = Margin::same(10);
+    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+    style.spacing.button_padding = Vec2::new(12.0, 6.0);
+    style.spacing.indent = 12.0;
+    style.spacing.window_margin = Margin::same(12);
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.panel_fill = BG;
@@ -200,23 +200,23 @@ fn setup_style(ctx: &egui::Context) {
     style.visuals.widgets.active.corner_radius = CornerRadius::same(R);
     style.text_styles.insert(
         egui::TextStyle::Body,
-        FontId::new(13.5, FontFamily::Proportional),
+        FontId::new(14.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Button,
-        FontId::new(13.0, FontFamily::Proportional),
+        FontId::new(14.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Heading,
-        FontId::new(16.0, FontFamily::Proportional),
+        FontId::new(17.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Small,
-        FontId::new(11.5, FontFamily::Proportional),
+        FontId::new(12.5, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Monospace,
-        FontId::new(12.0, FontFamily::Monospace),
+        FontId::new(13.0, FontFamily::Monospace),
     );
     ctx.set_style(style);
 }
@@ -554,14 +554,14 @@ mod icons {
             .fill(fill)
             .stroke(Stroke::new(1.0_f32, stroke_c))
             .corner_radius(CornerRadius::same(R))
-            .inner_margin(Margin::symmetric(10, 0))
+            .inner_margin(Margin::symmetric(12, 0))
             .show(ui, |ui| {
                 ui.set_min_size(min);
                 ui.horizontal_centered(|ui| {
                     ui.set_height(min.y);
                     icon(ui, fg);
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(label).size(12.5).color(fg));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(label).size(13.0).color(fg));
                 });
             });
         let resp = ui.interact(inner.response.rect, id, Sense::click());
@@ -581,48 +581,48 @@ mod icons {
         min: Vec2,
     ) -> egui::Response {
         let id = ui.next_auto_id();
-        let prev = ui.ctx().read_response(id);
-        let hovered = prev.as_ref().is_some_and(|r| r.hovered()) && enabled;
-        let t = ui.ctx().animate_bool_with_time(id.with("hov"), hovered, 0.15);
+        let mut animate = false;
 
-        let (fill0, fg0, stroke0) = if primary {
-            (TEXT, BG, TEXT)
-        } else {
-            (ELEVATED, TEXT_DIM, LINE)
-        };
-        let (fill1, fg1, stroke1) = if primary {
-            (Color32::from_rgb(230, 230, 230), BG, Color32::from_rgb(230, 230, 230))
-        } else {
-            (HOVER_BG, TEXT, HOVER_LINE)
-        };
-        let fill = lerp_c(fill0, fill1, t);
-        let fg = lerp_c(fg0, fg1, t);
-        let stroke_c = lerp_c(stroke0, stroke1, t);
-        let (fill, fg, stroke_c) = if enabled {
-            (fill, fg, stroke_c)
-        } else {
+        let (fill, fg, stroke_c) = if !enabled {
             (
                 Color32::from_rgb(30, 30, 30),
                 Color32::from_rgb(90, 90, 90),
                 LINE,
             )
+        } else {
+            let prev = ui.ctx().read_response(id);
+            let hovered = prev.as_ref().is_some_and(|r| r.hovered()) && enabled;
+            let t = ui.ctx().animate_bool_with_time(id.with("hov"), hovered, 0.15);
+            animate = t > 0.0 && t < 1.0;
+
+            let (fill0, fg0, stroke0) = if primary {
+                (TEXT, BG, TEXT)
+            } else {
+                (ELEVATED, TEXT_DIM, LINE)
+            };
+            let (fill1, fg1, stroke1) = if primary {
+                (Color32::from_rgb(230, 230, 230), BG, Color32::from_rgb(230, 230, 230))
+            } else {
+                (HOVER_BG, TEXT, HOVER_LINE)
+            };
+            (lerp_c(fill0, fill1, t), lerp_c(fg0, fg1, t), lerp_c(stroke0, stroke1, t))
         };
 
         let inner = Frame::new()
             .fill(fill)
             .stroke(Stroke::new(1.0_f32, stroke_c))
             .corner_radius(CornerRadius::same(R))
-            .inner_margin(Margin::symmetric(10, 0))
+            .inner_margin(Margin::symmetric(12, 0))
             .show(ui, |ui| {
                 ui.set_min_size(min);
                 ui.horizontal_centered(|ui| {
                     ui.set_height(min.y);
-                    ui.label(RichText::new(label).size(13.0).color(fg));
+                    ui.label(RichText::new(label).size(14.0).color(fg));
                 });
             });
         let sense = if enabled { Sense::click() } else { Sense::hover() };
         let resp = ui.interact(inner.response.rect, id, sense);
-        if t > 0.0 && t < 1.0 {
+        if animate {
             ui.ctx().request_repaint();
         }
         resp
@@ -990,7 +990,7 @@ impl WeportApp {
             return;
         }
 
-        let mut key = self.decrypt_key.trim().to_string();
+        let key = self.decrypt_key.trim().to_string();
         if key.len() != 64 {
             // auto key first
             self.busy = true;
@@ -1247,11 +1247,9 @@ impl WeportApp {
     /// Inject a synthetic toast (stacks with any currently showing cards).
     fn enqueue_debug_toast(&mut self) {
         let n = now_secs() as i64;
-        static mut SEQ: u32 = 0;
-        let seq = unsafe {
-            SEQ += 1;
-            SEQ
-        };
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::SeqCst);
         let title = format!("测试联系人 {seq}");
         let content = format!("这是第 {seq} 条调试消息 · 连点可堆叠多条");
         let ev = NotifyEvent {
@@ -1681,17 +1679,21 @@ impl eframe::App for WeportApp {
         if self.pending_start_hidden && self.tray.is_some() {
             self.pending_start_hidden = false;
             self.hide_to_tray(ctx);
+            // Still force-show for a few frames so the window is created before hiding
+            self.force_show_frames = self.force_show_frames.max(2);
         }
 
         // Defeat accidental hide / ensure first-open visibility.
         if self.force_show_frames > 0 {
             self.force_show_frames -= 1;
-            self.main_visible = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            #[cfg(windows)]
-            crate::window_ctrl::force_show();
-            ctx.request_repaint();
+            if !self.pending_start_hidden {
+                self.main_visible = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                #[cfg(windows)]
+                crate::window_ctrl::force_show();
+                ctx.request_repaint();
+            }
         }
 
         // When hidden in the tray, keep the event loop alive so tray clicks work.
@@ -1775,7 +1777,7 @@ impl eframe::App for WeportApp {
                             mode.label(),
                             selected,
                             |ui, c| icons::mode_icon(ui, mode, c),
-                            Vec2::new(88.0, 28.0),
+                            Vec2::new(96.0, 32.0),
                         )
                         .clicked()
                         {
@@ -1790,7 +1792,7 @@ impl eframe::App for WeportApp {
                             "设置",
                             false,
                             |ui, c| icons::gear(ui, c, 15.0),
-                            Vec2::new(72.0, 28.0),
+                            Vec2::new(80.0, 32.0),
                         )
                         .clicked()
                         {

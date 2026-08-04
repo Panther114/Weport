@@ -254,7 +254,7 @@ fn db_fingerprint(root: &Path) -> Vec<(PathBuf, u64)> {
 
 fn sync_once(
     cfg: &NotifyConfig,
-    db_root: &Path,
+    _db_root: &Path,
     account_dir: &Path,
     baseline: &mut HashMap<String, SessionBaseline>,
     revoke_seen: &mut HashSet<(String, String)>,
@@ -332,12 +332,10 @@ fn sync_once(
             continue;
         }
 
-        // Skip self-sent group messages when we can identify the sender.
-        if username.ends_with(GROUP_SUFFIX) {
-            let sender = field_str(row, &["lastMsgSender", "last_msg_sender", "lastSender"]);
-            if !sender.is_empty() && sender_wxid_equal(&sender, &wxid) {
-                continue;
-            }
+        // Skip self-sent messages for all session types (private and group).
+        let sender = field_str(row, &["lastMsgSender", "last_msg_sender", "lastSender"]);
+        if !sender.is_empty() && sender_wxid_equal(&sender, &wxid) {
+            continue;
         }
         candidates.push(row.clone());
     }
