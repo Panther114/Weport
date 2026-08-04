@@ -36,6 +36,10 @@ jobs:
       - name: Generate icons
         run: node scripts/generate-icons.mjs
 
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+
       - name: Build native Weport
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
