@@ -1,22 +1,97 @@
-//! Standalone Windows notification popup (WeFlow-inspired card).
+//! Multi-toast host: modern monochrome cards at screen top-right.
 //!
-//! Completely independent of the egui event loop so toasts still appear when
-//! the main window is hidden in the tray. Uses a topmost, non-activating
-//! tool window at the primary work-area top-right (like WeFlow's notification
-//! window), with avatar circle + title + time + body + close.
+//! - Independent of egui (works while main window is tray-hidden)
+//! - Stacks multiple cards with fade-in / fade-out
+//! - When a card dismisses, remaining cards smoothly slide into its slot
+//! - Non-activating topmost tool window (no focus steal)
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TOAST_W: i32 = 360;
-const TOAST_H: i32 = 96;
+const TOAST_W: i32 = 340;
+const TOAST_H: i32 = 86;
+const GAP: i32 = 10;
 const MARGIN: i32 = 20;
-const CORNER: i32 = 16;
-const DEFAULT_MS: u64 = 5500;
+const MAX_VISIBLE: usize = 4;
+const LIFE_MS: u64 = 5200;
+const FADE_MS: f32 = 240.0;
+const SLIDE_MS: f32 = 220.0;
 
-static SHOWING: AtomicBool = AtomicBool::new(false);
+#[derive(Clone)]
+struct ToastItem {
+    id: u64,
+    title: String,
+    body: String,
+    kind: String,
+    born: Instant,
+    /// When set, fade-out has started.
+    dying: Option<Instant>,
+    /// Animated vertical position (pixels from top of host).
+    display_y: f32,
+    /// Target slot index (0 = top).
+    target_slot: usize,
+    /// Whether display_y has been initialized.
+    y_init: bool,
+}
+
+struct Host {
+    items: VecDeque<ToastItem>,
+    next_id: u64,
+    gen: u64,
+}
+
+static HOST: Mutex<Option<Host>> = Mutex::new(None);
+static HOST_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn host_mut() -> std::sync::MutexGuard<'static, Option<Host>> {
+    HOST.lock().unwrap()
+}
+
+fn ensure_host() {
+    let mut g = host_mut();
+    if g.is_none() {
+        *g = Some(Host {
+            items: VecDeque::new(),
+            next_id: 1,
+            gen: 0,
+        });
+    }
+    drop(g);
+    if !HOST_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        thread::Builder::new()
+            .name("weport-toast-host".into())
+            .spawn(run_host)
+            .ok();
+    }
+}
+
+/// Push a toast onto the stack (non-blocking). Multiple can be visible.
+pub fn show(title: &str, body: &str, kind_label: &str) {
+    ensure_host();
+    let mut g = host_mut();
+    let h = g.as_mut().unwrap();
+    let id = h.next_id;
+    h.next_id += 1;
+    h.items.push_back(ToastItem {
+        id,
+        title: title.to_string(),
+        body: body.to_string(),
+        kind: kind_label.to_string(),
+        born: Instant::now(),
+        dying: None,
+        display_y: 0.0,
+        target_slot: 0,
+        y_init: false,
+    });
+    // Cap queue
+    while h.items.len() > MAX_VISIBLE + 2 {
+        h.items.pop_front();
+    }
+    h.gen += 1;
+}
 
 fn to_wide(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
@@ -38,30 +113,86 @@ fn work_area() -> (i32, i32, i32, i32) {
     (0, 0, 1920, 1080)
 }
 
-/// Show a WeFlow-style toast at the screen top-right. Non-blocking.
-/// Replaces any currently showing toast.
-pub fn show(title: &str, body: &str, kind_label: &str) {
-    let title = title.to_string();
-    let body = body.to_string();
-    let kind = kind_label.to_string();
-    // Drop previous by flipping the flag; new thread owns display.
-    SHOWING.store(false, Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(30));
-    SHOWING.store(true, Ordering::SeqCst);
-    let token = Instant::now();
-    thread::Builder::new()
-        .name("weport-toast".into())
-        .spawn(move || run_toast_window(title, body, kind, token))
-        .ok();
+fn clamp01(x: f32) -> f32 {
+    x.clamp(0.0, 1.0)
 }
 
-fn run_toast_window(title: String, body: String, kind: String, token: Instant) {
+fn ease_out(t: f32) -> f32 {
+    let t = clamp01(t);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
+/// Snapshot of live toasts with computed opacity + display Y.
+struct LiveCard {
+    item: ToastItem,
+    opacity: f32,
+    y: i32,
+}
+
+fn snapshot_live(dt: f32) -> Vec<LiveCard> {
+    let mut g = host_mut();
+    let Some(h) = g.as_mut() else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+
+    // Start fade-out for expired items
+    for it in h.items.iter_mut() {
+        if it.dying.is_none() && now.duration_since(it.born).as_millis() as u64 >= LIFE_MS {
+            it.dying = Some(now);
+        }
+    }
+    // Drop fully faded
+    h.items.retain(|it| match it.dying {
+        Some(d) => now.duration_since(d).as_millis() < FADE_MS as u128 + 40,
+        None => true,
+    });
+
+    // Assign target slots (alive items only, order preserved)
+    let mut slot = 0usize;
+    for it in h.items.iter_mut() {
+        it.target_slot = slot.min(MAX_VISIBLE.saturating_sub(1));
+        let target_y = it.target_slot as f32 * (TOAST_H + GAP) as f32;
+        if !it.y_init {
+            // Enter from slightly below its target so stack feels stacked.
+            it.display_y = target_y + 14.0;
+            it.y_init = true;
+        }
+        // Smooth slide toward target (independent of OS animation prefs).
+        let speed = 1.0 - (-dt * 1000.0 / SLIDE_MS).exp();
+        it.display_y += (target_y - it.display_y) * speed.clamp(0.08, 1.0);
+        if (it.display_y - target_y).abs() < 0.4 {
+            it.display_y = target_y;
+        }
+        if slot < MAX_VISIBLE {
+            slot += 1;
+        }
+    }
+
+    let mut out = Vec::new();
+    for it in h.items.iter().take(MAX_VISIBLE) {
+        let opacity = if let Some(d) = it.dying {
+            let t = now.duration_since(d).as_millis() as f32 / FADE_MS;
+            1.0 - ease_out(t)
+        } else {
+            let t = now.duration_since(it.born).as_millis() as f32 / FADE_MS;
+            ease_out(t)
+        };
+        out.push(LiveCard {
+            item: it.clone(),
+            opacity: clamp01(opacity),
+            y: it.display_y.round() as i32,
+        });
+    }
+    out
+}
+
+fn run_host() {
     use windows_sys::Win32::Foundation::*;
-    use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    let class = to_wide(&format!("WeportToastWin-{}", std::process::id()));
-    let title_w = to_wide("WeportToast");
+    let host_h = (TOAST_H + GAP) * MAX_VISIBLE as i32 + MARGIN;
+    let class = to_wide(&format!("WeportToastHost-{}", std::process::id()));
 
     unsafe extern "system" fn wnd_proc(
         hwnd: HWND,
@@ -71,13 +202,31 @@ fn run_toast_window(title: String, body: String, kind: String, token: Instant) {
     ) -> LRESULT {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
         match msg {
-            WM_NCHITTEST => {
-                // Allow click-through on empty chrome; client hits close / body.
-                HTCLIENT as LRESULT
-            }
             WM_LBUTTONUP => {
-                // Any click dismisses (WeFlow: click opens chat; we dismiss).
-                DestroyWindow(hwnd);
+                // Dismiss the card under the cursor (by Y), else topmost.
+                let y = ((lparam as u32) >> 16) as i16 as i32;
+                let mut g = HOST.lock().unwrap();
+                if let Some(h) = g.as_mut() {
+                    let mut hit: Option<u64> = None;
+                    for it in h.items.iter() {
+                        let top = it.display_y as i32;
+                        if y >= top && y < top + TOAST_H {
+                            hit = Some(it.id);
+                            break;
+                        }
+                    }
+                    if hit.is_none() {
+                        hit = h.items.front().map(|i| i.id);
+                    }
+                    if let Some(id) = hit {
+                        if let Some(it) = h.items.iter_mut().find(|i| i.id == id) {
+                            if it.dying.is_none() {
+                                it.dying = Some(Instant::now());
+                            }
+                        }
+                    }
+                    h.gen += 1;
+                }
                 0
             }
             WM_DESTROY => {
@@ -107,212 +256,270 @@ fn run_toast_window(title: String, body: String, kind: String, token: Instant) {
         let x = wx + ww - TOAST_W - MARGIN;
         let y = wy + MARGIN;
 
-        // Topmost tool window that does NOT activate (won't steal focus).
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             class.as_ptr(),
-            title_w.as_ptr(),
+            to_wide("WeportToastHost").as_ptr(),
             WS_POPUP,
             x,
             y,
             TOAST_W,
-            TOAST_H,
+            host_h,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
         if hwnd.is_null() {
+            HOST_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
 
-        // Soft opacity ~96%
-        SetLayeredWindowAttributes(hwnd, 0, 245, LWA_ALPHA);
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        UpdateWindow(hwnd);
+        // Pure black = transparent (void); cards use near-black fills so they stay visible.
+        SetLayeredWindowAttributes(hwnd, rgb(0, 0, 0), 255, LWA_COLORKEY);
 
-        // Paint card (WeFlow layout: avatar | title+time / body | close).
-        paint_card(hwnd, &title, &body, &kind);
-
-        let deadline = Instant::now() + Duration::from_millis(DEFAULT_MS);
+        let mut last = Instant::now();
         loop {
-            if !SHOWING.load(Ordering::SeqCst) {
-                // Superseded by a newer toast.
-                DestroyWindow(hwnd);
-                break;
+            let now = Instant::now();
+            let dt = now.duration_since(last).as_secs_f32().clamp(0.001, 0.05);
+            last = now;
+
+            let live = snapshot_live(dt);
+            if live.is_empty() {
+                ShowWindow(hwnd, SW_HIDE);
+            } else {
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                // Keep topmost without activating
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                paint_stack(hwnd, &live);
             }
-            if Instant::now() >= deadline {
-                DestroyWindow(hwnd);
-                break;
-            }
+
             let mut msg: MSG = std::mem::zeroed();
-            let r = PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE);
-            if r != 0 {
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 if msg.message == WM_QUIT {
-                    break;
+                    HOST_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
                 }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
-            } else {
-                // Keep painting responsive without busy-spinning.
-                std::thread::sleep(Duration::from_millis(16));
-                // Repaint occasionally in case of DWM glitches.
-                if token.elapsed().as_millis() % 500 < 20 {
-                    paint_card(hwnd, &title, &body, &kind);
-                }
             }
+            thread::sleep(Duration::from_millis(16));
         }
-        SHOWING.store(false, Ordering::SeqCst);
     }
 }
 
-unsafe fn paint_card(hwnd: windows_sys::Win32::Foundation::HWND, title: &str, body: &str, kind: &str) {
+unsafe fn paint_stack(hwnd: windows_sys::Win32::Foundation::HWND, live: &[LiveCard]) {
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Graphics::Gdi::*;
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     let hdc = GetDC(hwnd);
     if hdc.is_null() {
         return;
     }
+    let host_h = (TOAST_H + GAP) * MAX_VISIBLE as i32 + MARGIN;
 
-    // Colors (WeFlow light card defaults)
-    let bg = RGB(250, 250, 252);
-    let border = RGB(220, 220, 225);
-    let title_c = RGB(44, 44, 44);
-    let body_c = RGB(60, 60, 60);
-    let muted = RGB(122, 122, 122);
-    let avatar_bg = RGB(34, 34, 34);
-    let accent = RGB(7, 193, 96); // WeChat green ring
-
-    let brush_bg = CreateSolidBrush(bg);
-    let brush_border = CreateSolidBrush(border);
-    let brush_avatar = CreateSolidBrush(avatar_bg);
-
-    // Fill background
-    let mut rc = RECT {
+    // Clear with pure black → color-keyed transparent.
+    let void_brush = CreateSolidBrush(rgb(0, 0, 0));
+    let mut full = RECT {
         left: 0,
         top: 0,
         right: TOAST_W,
-        bottom: TOAST_H,
+        bottom: host_h,
     };
-    FillRect(hdc, &rc, brush_bg);
+    FillRect(hdc, &full, void_brush);
+    DeleteObject(void_brush as _);
 
-    // Border rectangle (simple; rounded would need RoundRect)
-    let pen = CreatePen(PS_SOLID, 1, border);
+    for card in live {
+        paint_card(hdc, 0, card.y, &card.item, card.opacity);
+    }
+
+    ReleaseDC(hwnd, hdc);
+    let _ = full;
+}
+
+/// Lerp a channel toward black by (1 - opacity) for fade effect without window alpha.
+fn fade_rgb(r: u8, g: u8, b: u8, opacity: f32) -> u32 {
+    let o = opacity.clamp(0.0, 1.0);
+    // Keep pure black only for void; card pixels must stay non-zero so color-key doesn't eat them.
+    let fr = ((r as f32) * o).round().max(if r > 0 { 1.0 } else { 0.0 }) as u8;
+    let fg = ((g as f32) * o).round().max(if g > 0 { 1.0 } else { 0.0 }) as u8;
+    let fb = ((b as f32) * o).round().max(if b > 0 { 1.0 } else { 0.0 }) as u8;
+    rgb(fr, fg, fb)
+}
+
+unsafe fn paint_card(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    x: i32,
+    y: i32,
+    item: &ToastItem,
+    opacity: f32,
+) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::*;
+
+    // App monochrome style: near-black panel, white/grey text.
+    let bg = fade_rgb(14, 14, 14, opacity.max(0.15));
+    let line = fade_rgb(48, 48, 48, opacity.max(0.2));
+    let text = fade_rgb(255, 255, 255, opacity.max(0.25));
+    let dim = fade_rgb(170, 170, 170, opacity.max(0.2));
+    let faint = fade_rgb(110, 110, 110, opacity.max(0.2));
+    let avatar_bg = fade_rgb(22, 22, 22, opacity.max(0.15));
+
+    let brush = CreateSolidBrush(bg);
+    let mut rc = RECT {
+        left: x,
+        top: y,
+        right: x + TOAST_W,
+        bottom: y + TOAST_H,
+    };
+    FillRect(hdc, &rc, brush);
+    DeleteObject(brush as _);
+
+    // Border
+    let pen = CreatePen(PS_SOLID, 1, line);
     let old_pen = SelectObject(hdc, pen as _);
-    let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    RoundRect(hdc, 1, 1, TOAST_W - 1, TOAST_H - 1, CORNER * 2, CORNER * 2);
+    let old_br = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, x + 1, y + 1, x + TOAST_W - 1, y + TOAST_H - 1);
     SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_br);
     DeleteObject(pen as _);
 
     // Avatar circle (left)
-    let ax = 16;
-    let ay = 20;
-    let asz = 40;
-    let old_b = SelectObject(hdc, brush_avatar as _);
-    let pen_a = CreatePen(PS_SOLID, 2, accent);
-    let old_p = SelectObject(hdc, pen_a as _);
+    let ax = x + 14;
+    let ay = y + 20;
+    let asz = 46;
+    let abr = CreateSolidBrush(avatar_bg);
+    let apen = CreatePen(PS_SOLID, 1, line);
+    let ob = SelectObject(hdc, abr as _);
+    let op = SelectObject(hdc, apen as _);
     Ellipse(hdc, ax, ay, ax + asz, ay + asz);
-    SelectObject(hdc, old_b);
-    SelectObject(hdc, old_p);
-    DeleteObject(pen_a as _);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(abr as _);
+    DeleteObject(apen as _);
 
-    // Avatar initial
-    SetBkMode(hdc, TRANSPARENT as i32);
-    SetTextColor(hdc, RGB(255, 255, 255));
-    let initial = title.chars().next().unwrap_or('W').to_string();
-    let init_w = to_wide(&initial);
+    SetBkMode(hdc, 1); // TRANSPARENT
+
+    // CreateFontW(height, width, esc, orient, weight, italic, underline, strike,
+    //             charset, out, clip, quality, pitch, face)
+    let mk_font = |height: i32, weight: i32| -> windows_sys::Win32::Graphics::Gdi::HFONT {
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            1u32, // DEFAULT_CHARSET
+            0,
+            0,
+            5u32, // CLEARTYPE_QUALITY
+            0,
+            to_wide("Segoe UI").as_ptr(),
+        )
+    };
+    let font_initial = mk_font(20, 600);
+    let font_kind = mk_font(11, 400);
+    let font_title = mk_font(14, 600);
+    // Body: moderately smaller than app body text
+    let font_body = mk_font(12, 400);
+
+    let old_font = SelectObject(hdc, font_initial as _);
+    SetTextColor(hdc, text);
+    let ch = item
+        .title
+        .chars()
+        .find(|c| !c.is_whitespace())
+        .unwrap_or('W')
+        .to_string();
+    let cw = to_wide(&ch);
     let mut arc = RECT {
         left: ax,
-        top: ay + 8,
+        top: ay,
         right: ax + asz,
         bottom: ay + asz,
     };
+    // DT_* flags
+    const DT_LEFT: u32 = 0x0000;
+    const DT_CENTER: u32 = 0x0001;
+    const DT_VCENTER: u32 = 0x0004;
+    const DT_SINGLELINE: u32 = 0x0020;
+    const DT_WORDBREAK: u32 = 0x0010;
+    const DT_END_ELLIPSIS: u32 = 0x8000;
+
     DrawTextW(
         hdc,
-        init_w.as_ptr(),
+        cw.as_ptr(),
         -1,
         &mut arc,
-        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
 
-    // Kind pill (top, small)
-    SetTextColor(hdc, muted);
-    let kind_w = to_wide(kind);
+    // Kind (small, top-right of text block)
+    SelectObject(hdc, font_kind as _);
+    SetTextColor(hdc, faint);
+    let kw = to_wide(&item.kind);
     let mut krc = RECT {
-        left: 68,
-        top: 10,
-        right: TOAST_W - 48,
-        bottom: 26,
+        left: x + 72,
+        top: y + 10,
+        right: x + TOAST_W - 14,
+        bottom: y + 24,
     };
-    DrawTextW(hdc, kind_w.as_ptr(), -1, &mut krc, DT_LEFT | DT_SINGLELINE);
+    DrawTextW(hdc, kw.as_ptr(), -1, &mut krc, DT_LEFT | DT_SINGLELINE);
 
-    // Title
-    SetTextColor(hdc, title_c);
-    let title_s = truncate(title, 22);
-    let title_w = to_wide(&title_s);
+    // Title (contact name)
+    SelectObject(hdc, font_title as _);
+    SetTextColor(hdc, text);
+    let ts = truncate(&item.title, 22);
+    let tw = to_wide(&ts);
     let mut trc = RECT {
-        left: 68,
-        top: 28,
-        right: TOAST_W - 48,
-        bottom: 50,
+        left: x + 72,
+        top: y + 26,
+        right: x + TOAST_W - 14,
+        bottom: y + 46,
     };
     DrawTextW(
         hdc,
-        title_w.as_ptr(),
+        tw.as_ptr(),
         -1,
         &mut trc,
         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
 
-    // Body (2 lines)
-    SetTextColor(hdc, body_c);
-    let body_s = truncate(body, 56);
-    let body_w = to_wide(&body_s);
+    // Body (smaller message preview)
+    SelectObject(hdc, font_body as _);
+    SetTextColor(hdc, dim);
+    let bs = truncate(&item.body, 52);
+    let bw = to_wide(&bs);
     let mut brc = RECT {
-        left: 68,
-        top: 52,
-        right: TOAST_W - 20,
-        bottom: TOAST_H - 12,
+        left: x + 72,
+        top: y + 48,
+        right: x + TOAST_W - 14,
+        bottom: y + TOAST_H - 10,
     };
     DrawTextW(
         hdc,
-        body_w.as_ptr(),
+        bw.as_ptr(),
         -1,
         &mut brc,
         DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS,
     );
 
-    // Close "×" top-right
-    SetTextColor(hdc, muted);
-    let xw = to_wide("×");
-    let mut xrc = RECT {
-        left: TOAST_W - 28,
-        top: 8,
-        right: TOAST_W - 10,
-        bottom: 28,
-    };
-    DrawTextW(hdc, xw.as_ptr(), -1, &mut xrc, DT_CENTER | DT_SINGLELINE);
-
-    // Time (right of title row)
-    let time = chrono::Local::now().format("%H:%M").to_string();
-    let tw = to_wide(&time);
-    SetTextColor(hdc, muted);
-    let mut timer = RECT {
-        left: TOAST_W - 72,
-        top: 28,
-        right: TOAST_W - 32,
-        bottom: 48,
-    };
-    DrawTextW(hdc, tw.as_ptr(), -1, &mut timer, DT_RIGHT | DT_SINGLELINE);
-
-    DeleteObject(brush_bg as _);
-    DeleteObject(brush_border as _);
-    DeleteObject(brush_avatar as _);
-    ReleaseDC(hwnd, hdc);
-    let _ = rc;
+    SelectObject(hdc, old_font);
+    DeleteObject(font_initial as _);
+    DeleteObject(font_kind as _);
+    DeleteObject(font_title as _);
+    DeleteObject(font_body as _);
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -323,8 +530,13 @@ fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
-// RGB helper (windows-sys uses COLORREF = u32)
 #[allow(non_snake_case)]
-fn RGB(r: u8, g: u8, b: u8) -> u32 {
+fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
+
+const LWA_COLORKEY: u32 = 0x00000001;
+const HWND_TOPMOST: windows_sys::Win32::Foundation::HWND = -1isize as _;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOACTIVATE: u32 = 0x0010;

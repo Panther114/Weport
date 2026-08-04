@@ -131,6 +131,7 @@ fn run_loop(
     let mut pending_sync = false;
     let mut changed_at: Option<SystemTime> = None;
     let mut names_cache: HashMap<String, String> = HashMap::new();
+    let mut last_heartbeat: Option<SystemTime> = None;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -173,6 +174,17 @@ fn run_loop(
                     pending_sync = true;
                     changed_at = None;
                 }
+            }
+            // Heartbeat: even if mtime fingerprint stalls (some WCDB writes
+            // reuse mtime), re-check sessions periodically so new messages
+            // still surface after the first toast.
+            let hb_due = match last_heartbeat {
+                None => true,
+                Some(t) => t.elapsed().unwrap_or(Duration::ZERO) >= Duration::from_secs(3),
+            };
+            if hb_due {
+                pending_sync = true;
+                last_heartbeat = Some(SystemTime::now());
             }
             if pending_sync {
                 pending_sync = false;
@@ -271,24 +283,30 @@ fn sync_once(
     let mut events: Vec<NotifyEvent> = Vec::new();
     let mut next_baseline: HashMap<String, SessionBaseline> = HashMap::new();
     let mut candidates: Vec<Value> = Vec::new();
+    // First successful sync only seeds the baseline — avoids a flood of
+    // "historical unread" toasts, and ensures subsequent last_ts bumps fire.
+    let seeding = baseline.is_empty();
 
     for row in &sessions {
         let username = field_str(row, &["username", "userName", "sessionId", "user_name"]);
         if username.is_empty() || username.to_lowercase().contains("placeholder_foldgroup") {
             continue;
         }
-        let last_ts = field_i64(row, &["lastTimestamp", "last_timestamp", "lastMsgTime"], 0);
+        let last_ts = field_i64(
+            row,
+            &[
+                "lastTimestamp",
+                "last_timestamp",
+                "lastMsgTime",
+                "sortTimestamp",
+                "sort_timestamp",
+            ],
+            0,
+        );
         let unread = field_i64(row, &["unreadCount", "unread_count"], 0);
         let prev = baseline.get(&username);
         let is_muted = field_bool(row, &["isMuted", "muted", "mute"]);
         let is_folded = field_bool(row, &["isFolded", "folded"]);
-
-        let candidate = if let Some(p) = prev {
-            (last_ts > p.last_timestamp && unread > p.unread_count)
-                || (last_ts > p.last_timestamp && p.last_timestamp == 0)
-        } else {
-            unread > 0 && last_ts > 0
-        };
 
         next_baseline.insert(
             username.clone(),
@@ -298,20 +316,28 @@ fn sync_once(
             },
         );
 
-        if !candidate || is_muted || is_folded {
+        if seeding || is_muted || is_folded {
             continue;
         }
-        // Skip self-sent group messages.
+
+        // New activity: timestamp advanced OR unread grew (either signal alone).
+        // Requiring both (old logic) missed many WeChat 4 updates where unread
+        // stayed flat while lastTimestamp moved.
+        let candidate = if let Some(p) = prev {
+            last_ts > p.last_timestamp || unread > p.unread_count
+        } else {
+            false
+        };
+        if !candidate {
+            continue;
+        }
+
+        // Skip self-sent group messages when we can identify the sender.
         if username.ends_with(GROUP_SUFFIX) {
             let sender = field_str(row, &["lastMsgSender", "last_msg_sender", "lastSender"]);
             if !sender.is_empty() && sender_wxid_equal(&sender, &wxid) {
                 continue;
             }
-        }
-        // Skip a pure timestamp advance with no unread growth (own messages,
-        // other-device sync) unless this is a first sighting.
-        if prev.is_some() && unread <= prev.unwrap().unread_count && last_ts > prev.unwrap().last_timestamp {
-            continue;
         }
         candidates.push(row.clone());
     }

@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.7"
+$version = "0.6.8"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -130,7 +130,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.7: fix dead tray menu/clicks; WeFlow-style screen toasts; layout polish."
+  notes = "v0.6.8: multi-toast stack + detection fix; monochrome cards; connect two-column; Lucide icons + hover lerp."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{
