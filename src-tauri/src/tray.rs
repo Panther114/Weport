@@ -57,9 +57,9 @@ unsafe extern "system" fn wnd_proc(
             &*(ptr as *const TrayThreadState)
         };
         match (lparam as u32) & 0xFFFF {
-            // Left click always shows the main window (never toggle-hide).
-            // Hide is only via the window X button (close-to-tray).
+            // Act in this thread first — the egui loop may be asleep while hidden.
             WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+                crate::window_ctrl::force_show();
                 let _ = state.tx.send(TrayEvent::ShowMainWindow);
                 state.ctx.request_repaint();
             }
@@ -74,6 +74,7 @@ unsafe extern "system" fn wnd_proc(
     if msg == WM_COMMAND {
         let id = wparam & 0xFFFF;
         if id == ID_SHOW as usize {
+            crate::window_ctrl::force_show();
             let state = unsafe {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
                 if ptr == 0 {
@@ -86,15 +87,8 @@ unsafe extern "system" fn wnd_proc(
             return 0;
         }
         if id == ID_QUIT as usize {
-            let state = unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-                if ptr == 0 {
-                    return 0;
-                }
-                &*(ptr as *const TrayThreadState)
-            };
-            let _ = state.tx.send(TrayEvent::Quit);
-            state.ctx.request_repaint();
+            let st = state_from_hwnd(hwnd);
+            tray_quit_now(&st);
             return 0;
         }
     }
@@ -142,13 +136,53 @@ fn show_menu(hwnd: *mut core::ffi::c_void, tx: &Sender<TrayEvent>, ctx: &Context
         PostMessageW(hwnd, WM_NULL, 0, 0);
 
         if cmd as usize == ID_SHOW {
+            // Native show first (works even if egui update is frozen).
+            crate::window_ctrl::force_show();
             let _ = tx.send(TrayEvent::ShowMainWindow);
             ctx.request_repaint();
         } else if cmd as usize == ID_QUIT {
+            crate::window_ctrl::request_quit_flag();
+            crate::window_ctrl::force_show();
+            crate::window_ctrl::post_close_main();
             let _ = tx.send(TrayEvent::Quit);
             ctx.request_repaint();
+            // Hard exit fallback if the UI thread never wakes.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+                std::process::exit(0);
+            });
         }
     }
+}
+
+fn state_from_hwnd(hwnd: *mut core::ffi::c_void) -> Option<*const TrayThreadState> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
+    unsafe {
+        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        if ptr == 0 {
+            None
+        } else {
+            Some(ptr as *const TrayThreadState)
+        }
+    }
+}
+
+fn tray_quit_now(state: &Option<*const TrayThreadState>) {
+    crate::window_ctrl::request_quit_flag();
+    crate::window_ctrl::force_show();
+    crate::window_ctrl::post_close_main();
+    if let Some(ptr) = state {
+        unsafe {
+            let s = &**ptr;
+            let _ = s.tx.send(TrayEvent::Quit);
+            s.ctx.request_repaint();
+        }
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        std::process::exit(0);
+    });
 }
 
 fn to_wide(s: &str) -> Vec<u16> {

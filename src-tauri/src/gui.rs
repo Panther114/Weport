@@ -529,7 +529,7 @@ mod icons {
             "GitHub",
             false,
             |ui, c| github(ui, c, 14.0),
-            Vec2::new(86.0, 28.0),
+            Vec2::new(92.0, 32.0),
         )
     }
 
@@ -716,6 +716,21 @@ impl WeportApp {
         if let Some(err) = tray_err {
             app.push_toast(1, "托盘启动失败", format!("{err}（关闭窗口将直接退出）"), 10.0);
         }
+
+        // Keep the egui loop alive while the main window is tray-hidden so
+        // channel events and quit flags are still processed. Tray Show/Quit
+        // also act natively (window_ctrl) without waiting for this loop.
+        let wake_ctx = cc.egui_ctx.clone();
+        thread::Builder::new()
+            .name("weport-wake".into())
+            .spawn(move || {
+                loop {
+                    wake_ctx.request_repaint();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            })
+            .ok();
+
         app
     }
 
@@ -1101,6 +1116,16 @@ impl WeportApp {
                 },
                 t.title
             );
+            // Native OS toast — works even when main window is tray-hidden.
+            // Style/placement modeled after WeFlow's screen top-right card.
+            #[cfg(windows)]
+            {
+                let kind = match t.kind {
+                    NotifyKind::NewMessage => "新消息",
+                    NotifyKind::Recalled => "撤回提醒",
+                };
+                crate::toast_win::show(&t.title, &t.content, kind);
+            }
         }
     }
 
@@ -1119,56 +1144,13 @@ impl WeportApp {
             kind: NotifyKind::NewMessage,
             session_id: format!("debug-{n}"),
             title: "调试通知".into(),
-            content: "显示逻辑正常：若你看到右上角弹窗，说明弹窗 UI 可用；若没有，则是显示问题。".into(),
+            content: "若屏幕右上角出现卡片弹窗，显示逻辑正常（不读微信库）。".into(),
             timestamp: n,
         });
-        self.toast_debug_status = "已排队调试弹窗（仅测试显示，未读微信数据库）".into();
+        self.toast_debug_status = "已触发调试弹窗（屏幕右上角，与主窗口无关）".into();
         if self.current_toast.is_none() {
             self.advance_toast();
         }
-    }
-
-    fn paint_toast_card(ui: &mut egui::Ui, t: &NotifyEvent) -> egui::Response {
-        let accent = match t.kind {
-            NotifyKind::Recalled => Color32::from_rgb(255, 190, 120),
-            NotifyKind::NewMessage => TEXT,
-        };
-        let card = Frame::new()
-            .fill(PANEL)
-            .stroke(Stroke::new(1.0_f32, LINE_STRONG))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::symmetric(14, 10));
-        card
-            .show(ui, |ui| {
-                ui.set_min_width(TOAST_W - 28.0);
-                ui.horizontal(|ui| {
-                    let kind_label = match t.kind {
-                        NotifyKind::NewMessage => "新消息",
-                        NotifyKind::Recalled => "撤回提醒",
-                    };
-                    ui.label(
-                        RichText::new(kind_label)
-                            .size(11.5)
-                            .strong()
-                            .color(accent),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("点击关闭").size(10.5).color(TEXT_FAINT));
-                    });
-                });
-                ui.add_space(2.0);
-                ui.label(RichText::new(&t.title).size(14.0).strong().color(TEXT));
-                ui.add_space(3.0);
-                let body = if t.content.chars().count() > 72 {
-                    let mut s: String = t.content.chars().take(72).collect();
-                    s.push('…');
-                    s
-                } else {
-                    t.content.clone()
-                };
-                ui.label(RichText::new(body).size(12.5).color(TEXT_DIM));
-            })
-            .response
     }
 
     fn poll_bg(&mut self, ctx: &egui::Context) {
@@ -1368,8 +1350,8 @@ impl WeportApp {
         Frame::new()
             .fill(PANEL)
             .stroke(Stroke::new(1.0_f32, LINE))
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::symmetric(14, 12))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(18, 14))
     }
 }
 
@@ -1493,6 +1475,12 @@ impl eframe::App for WeportApp {
             if crate::window_ctrl::find_weport_hwnd().is_some() {
                 self.hwnd_cached = true;
             }
+        }
+
+        // Tray Quit flag (set from tray thread without waiting for channel).
+        #[cfg(windows)]
+        if crate::window_ctrl::take_quit_flag() {
+            self.begin_quit(ctx);
         }
 
         // Second instance asked us to show.
@@ -1651,28 +1639,31 @@ impl eframe::App for WeportApp {
             });
 
         egui::TopBottomPanel::top("top")
-            .exact_height(44.0)
+            .exact_height(52.0)
             .frame(
                 Frame::new()
                     .fill(BG)
-                    .inner_margin(Margin::symmetric(14, 6))
+                    .inner_margin(Margin::symmetric(16, 8))
                     .stroke(Stroke::new(1.0_f32, LINE)),
             )
             .show(ctx, |ui| {
+                ui.set_min_height(36.0);
                 ui.horizontal_centered(|ui| {
-                    ui.label(
-                        RichText::new("WEPORT")
-                            .size(13.5)
-                            .strong()
-                            .color(TEXT)
-                            .extra_letter_spacing(1.2),
-                    );
-                    ui.label(
-                        RichText::new(format!("v{APP_VERSION}"))
-                            .size(11.0)
-                            .color(TEXT_FAINT),
-                    );
-                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("WEPORT")
+                                .size(14.0)
+                                .strong()
+                                .color(TEXT)
+                                .extra_letter_spacing(1.2),
+                        );
+                        ui.label(
+                            RichText::new(format!("v{APP_VERSION}"))
+                                .size(11.0)
+                                .color(TEXT_FAINT),
+                        );
+                    });
+                    ui.add_space(14.0);
                     for mode in [
                         AppMode::Connect,
                         AppMode::Export,
@@ -1685,27 +1676,27 @@ impl eframe::App for WeportApp {
                             mode.label(),
                             selected,
                             |ui, c| icons::mode_icon(ui, mode, c),
-                            Vec2::new(72.0, 28.0),
+                            Vec2::new(86.0, 32.0),
                         )
                         .clicked()
                         {
                             self.mode = mode;
                         }
-                        ui.add_space(3.0);
+                        ui.add_space(4.0);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::chip(
                             ui,
                             "设置",
                             false,
-                            |ui, c| icons::gear(ui, c, 13.0),
-                            Vec2::new(64.0, 28.0),
+                            |ui, c| icons::gear(ui, c, 14.0),
+                            Vec2::new(72.0, 32.0),
                         )
                         .clicked()
                         {
                             self.settings_open = true;
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                         if icons::github_button(ui).clicked() {
                             if let Err(e) = open::that(GITHUB_URL) {
                                 self.push_toast(1, "无法打开 GitHub", e.to_string(), 6.0);
@@ -1758,10 +1749,12 @@ impl eframe::App for WeportApp {
         }
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(16, 12)))
+            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(20, 14)))
             .show(ctx, |ui| {
+                // Extra bottom padding so primary action buttons aren't clipped.
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .id_salt("main_scroll")
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.mode {
@@ -1770,6 +1763,7 @@ impl eframe::App for WeportApp {
                             AppMode::AntiRecall => self.ui_antirecall(ui),
                             AppMode::Notifications => self.ui_notifications(ui),
                         }
+                        ui.add_space(28.0);
                     });
             });
 
@@ -1778,104 +1772,17 @@ impl eframe::App for WeportApp {
 }
 
 impl WeportApp {
-    /// Top-right toast: solid secondary OS window when multi-viewport works,
-    /// otherwise an always-on-top Area on the main window (embedded fallback).
-    ///
-    /// Transparent secondary viewports often fail to paint on Windows — we use
-    /// a solid dark surface so the popup is always visible.
+    /// Native Win32 toast is primary (see toast_win). This only tracks lifetime.
     fn render_toast_viewport(&mut self, ctx: &egui::Context) {
-        let toast = self.current_toast.clone();
-        let has = toast.is_some();
-        let mut dismiss = false;
-        let mut saw_embedded = false;
-        let (wx, wy, ww, _wh) = primary_work_area();
-        let pos = egui::Pos2::new(wx + ww - TOAST_W - 24.0, wy + 24.0);
-
-        let builder = egui::ViewportBuilder::default()
-            .with_title("Weport 消息")
-            .with_inner_size([TOAST_W, TOAST_H])
-            .with_min_inner_size([TOAST_W, TOAST_H])
-            .with_max_inner_size([TOAST_W, TOAST_H])
-            .with_resizable(false)
-            .with_decorations(false)
-            // Solid window — transparent popups frequently never appear on Win11.
-            .with_transparent(false)
-            .with_always_on_top()
-            .with_taskbar(false)
-            .with_visible(has)
-            .with_position(pos);
-
-        ctx.show_viewport_immediate(toast_vp_id(), builder, |vctx, class| {
-            if class == egui::ViewportClass::Embedded {
-                saw_embedded = true;
-            }
-            if let Some(t) = &toast {
-                if class != egui::ViewportClass::Embedded {
-                    vctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                    vctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    vctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                        egui::WindowLevel::AlwaysOnTop,
-                    ));
-                }
-                egui::CentralPanel::default()
-                    .frame(Frame::NONE.fill(BG))
-                    .show(vctx, |ui| {
-                        let resp = Self::paint_toast_card(ui, t);
-                        if resp.clicked() {
-                            dismiss = true;
-                        }
-                    });
-            } else if class != egui::ViewportClass::Embedded {
-                vctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
-        });
-
-        self.toast_viewport_embedded = saw_embedded;
-
-        // Embedded fallback: paint over the main window (only when main is visible).
-        if saw_embedded {
-            if let Some(t) = &toast {
-                if self.main_visible {
-                    egui::Area::new(egui::Id::new("weport-toast-embedded"))
-                        .anchor(egui::Align2::RIGHT_TOP, [-16.0, 56.0])
-                        .order(egui::Order::Foreground)
-                        .interactable(true)
-                        .show(ctx, |ui| {
-                            let resp = Self::paint_toast_card(ui, t);
-                            if resp.clicked() {
-                                dismiss = true;
-                            }
-                        });
-                }
+        // Auto-dismiss bookkeeping when native toast times out (approx).
+        if let Some(_) = &self.current_toast {
+            if now_secs() - self.toast_shown_at > TOAST_DURATION {
+                self.dismiss_current_toast();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
         }
-
-        // When multi-viewport works, still mirror a small badge in-app so the
-        // user sees the toast even if the OS window is occluded.
-        if !saw_embedded {
-            if let Some(t) = &toast {
-                if self.main_visible {
-                    egui::Area::new(egui::Id::new("weport-toast-mirror"))
-                        .anchor(egui::Align2::RIGHT_TOP, [-16.0, 56.0])
-                        .order(egui::Order::Foreground)
-                        .interactable(true)
-                        .show(ctx, |ui| {
-                            let resp = Self::paint_toast_card(ui, t);
-                            if resp.clicked() {
-                                dismiss = true;
-                            }
-                        });
-                }
-            }
-        }
-
-        if dismiss {
-            self.dismiss_current_toast();
-        }
-        if has {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
+        self.toast_viewport_embedded = false;
     }
 
     fn section_title(&self, ui: &mut egui::Ui, title: &str, right: &str) {

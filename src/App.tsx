@@ -47,7 +47,7 @@ function MarkIcon() {
 }
 
 export default function App() {
-  const [version, setVersion] = useState('0.6.6')
+  const [version, setVersion] = useState('0.6.7')
   const [dbPath, setDbPath] = useState('')
   const [exportPath, setExportPath] = useState('')
   const [format, setFormat] = useState<Format>('txt')

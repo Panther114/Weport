@@ -1,15 +1,16 @@
 //! Reliable Windows main-window show/hide for tray mode.
 //!
-//! egui/winit `ViewportCommand::Visible` alone is not enough on Windows:
-//! after `Visible(false)`, tray restore often does nothing without a native
-//! `ShowWindow` + `SetForegroundWindow` (with the usual thread-attach dance).
-
+//! Critical design: tray Show/Quit must work **without** the egui event loop.
+//! When the main window is SW_HIDE'd, winit often stops pumping `App::update`,
+//! so channel-only tray handling silently dies. Callers in the tray thread
+//! invoke `force_show` / `post_close` directly.
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 /// Cached main window HWND (set from the GUI thread when available).
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_main_hwnd(hwnd: isize) {
     if hwnd != 0 {
@@ -25,6 +26,14 @@ pub fn main_hwnd() -> isize {
     find_weport_hwnd().unwrap_or(0)
 }
 
+pub fn request_quit_flag() {
+    QUIT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn take_quit_flag() -> bool {
+    QUIT_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
 fn to_wide(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     std::ffi::OsStr::new(s)
@@ -33,18 +42,25 @@ fn to_wide(s: &str) -> Vec<u16> {
         .collect()
 }
 
-/// Find a top-level window whose title starts with "Weport".
+/// Find our main window by **current process id** (most reliable when hidden).
 pub fn find_weport_hwnd() -> Option<isize> {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, IsWindow, IsWindowVisible,
+        EnumWindows, GetWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindow, GWL_STYLE, GW_OWNER, WS_VISIBLE,
     };
 
     struct State {
+        pid: u32,
         found: HWND,
+        found_any: HWND,
     }
+
     let mut state = State {
+        pid: unsafe { GetCurrentProcessId() },
         found: std::ptr::null_mut(),
+        found_any: std::ptr::null_mut(),
     };
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -52,26 +68,49 @@ pub fn find_weport_hwnd() -> Option<isize> {
         if hwnd.is_null() {
             return TRUE;
         }
-        let mut buf = [0u16; 256];
-        let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-        if n <= 0 {
+        let mut wpid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut wpid);
+        if wpid != state.pid {
             return TRUE;
         }
-        let title = String::from_utf16_lossy(&buf[..n as usize]);
-        // Main window title is "Weport vX.Y.Z"; toast is "Weport 消息".
-        if title.starts_with("Weport v") || title == "Weport" {
-            // Prefer a real frame window; skip tool windows if needed later.
-            state.found = hwnd;
-            return 0; // stop
+        // Skip owned popups (tool windows / toast).
+        if !GetWindow(hwnd, GW_OWNER).is_null() {
+            return TRUE;
         }
-        let _ = IsWindowVisible(hwnd);
+        let mut buf = [0u16; 256];
+        let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        let title = if n > 0 {
+            String::from_utf16_lossy(&buf[..n as usize])
+        } else {
+            String::new()
+        };
+        // Prefer titled main frame; accept empty title if it's our only top-level.
+        if title.starts_with("Weport v") || title == "Weport" {
+            state.found = hwnd;
+            return 0;
+        }
+        if title.starts_with("Weport") && !title.contains("Toast") && !title.contains("消息") {
+            if state.found.is_null() {
+                state.found = hwnd;
+            }
+        }
+        if state.found_any.is_null() && !title.contains("Toast") {
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let _ = style & WS_VISIBLE;
+            state.found_any = hwnd;
+        }
         TRUE
     }
 
     unsafe {
         let _ = EnumWindows(Some(enum_proc), &mut state as *mut State as LPARAM);
-        if !state.found.is_null() && IsWindow(state.found) != 0 {
-            let h = state.found as isize;
+        let pick = if !state.found.is_null() {
+            state.found
+        } else {
+            state.found_any
+        };
+        if !pick.is_null() && IsWindow(pick) != 0 {
+            let h = pick as isize;
             MAIN_HWND.store(h, Ordering::SeqCst);
             return Some(h);
         }
@@ -80,17 +119,13 @@ pub fn find_weport_hwnd() -> Option<isize> {
 }
 
 /// Force the main Weport window visible, restored, and focused.
+/// Safe to call from the tray thread.
 pub fn force_show() {
     use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::System::Threading::{
-        AttachThreadInput, GetCurrentThreadId,
-    };
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    let hwnd = main_hwnd();
-    if hwnd == 0 {
-        let _ = find_weport_hwnd();
-    }
+    let _ = find_weport_hwnd();
     let hwnd = main_hwnd();
     if hwnd == 0 {
         return;
@@ -98,15 +133,14 @@ pub fn force_show() {
     let hwnd = hwnd as HWND;
 
     unsafe {
-        // If minimized or hidden, restore first.
+        // SW_SHOW + restore covers SW_HIDE and minimized cases.
+        ShowWindow(hwnd, SW_SHOW);
         if IsIconic(hwnd) != 0 {
             ShowWindow(hwnd, SW_RESTORE);
         } else {
-            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_SHOWNORMAL);
         }
-        ShowWindow(hwnd, SW_SHOWNORMAL);
 
-        // Classic "steal focus" pattern used by tray apps.
         let fg = GetForegroundWindow();
         let fg_tid = if !fg.is_null() {
             GetWindowThreadProcessId(fg, std::ptr::null_mut())
@@ -123,28 +157,19 @@ pub fn force_show() {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
         }
-        // Flash once if still not foreground (user attention).
-        if GetForegroundWindow() != hwnd {
-            let mut fi: FLASHWINFO = std::mem::zeroed();
-            fi.cbSize = std::mem::size_of::<FLASHWINFO>() as u32;
-            fi.hwnd = hwnd;
-            fi.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
-            fi.uCount = 3;
-            fi.dwTimeout = 0;
-            let _ = FlashWindowEx(&fi);
-        }
+        // Nudge: allow set foreground for this process.
+        // ASFW_ANY = (DWORD)-1
+        let _ = AllowSetForegroundWindow(0xFFFFFFFFu32);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 
-/// Hide the main window for tray mode (native hide — reliable with Show later).
+/// Hide the main window for tray mode.
 pub fn force_hide() {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, ShowWindow, SW_HIDE};
 
-    let hwnd = main_hwnd();
-    if hwnd == 0 {
-        let _ = find_weport_hwnd();
-    }
+    let _ = find_weport_hwnd();
     let hwnd = main_hwnd();
     if hwnd == 0 {
         return;
@@ -157,13 +182,22 @@ pub fn force_hide() {
     }
 }
 
-/// Capture HWND for a title we just set (call after first frame).
-pub fn cache_from_title_prefix(_prefix: &str) {
+/// Post WM_CLOSE to the main window (tray Quit path).
+pub fn post_close_main() {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
     let _ = find_weport_hwnd();
+    let hwnd = main_hwnd();
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        PostMessageW(hwnd as HWND, WM_CLOSE, 0, 0);
+    }
 }
 
 /// Allow other processes (second instance) to request "show main".
-/// Uses a named event the GUI polls each frame.
 const SHOW_EVENT_NAME: &str = "Local\\WeportShowMainWindow";
 
 pub fn create_show_event() -> Option<*mut core::ffi::c_void> {
@@ -189,6 +223,8 @@ pub fn signal_show_event() {
             let _ = SetEvent(h);
             CloseHandle(h);
         }
+        // Also try native show from the second process (helps even if first is stuck).
+        force_show();
     }
 }
 
@@ -197,6 +233,5 @@ pub fn poll_show_event(handle: *mut core::ffi::c_void) -> bool {
     if handle.is_null() {
         return false;
     }
-    // WAIT_OBJECT_0 == 0
     unsafe { WaitForSingleObject(handle, 0) == 0 }
 }
