@@ -39,11 +39,11 @@ Same model as WeFlow: the key is captured **during WeChat login**, not from a fu
 3. When status says **已准备就绪**, log in / re-login WeChat (confirm on phone if asked)
 4. Key fills in (or paste a known 64-char hex key manually)
 
-## Anti-recall & popup (v0.6.0)
+## Anti-recall & popup (v0.6.1)
 
-- **设置 → 防撤回（微信 4）**: patch WeChat's `Weixin.dll` so recalled messages stay visible inside WeChat. Requires WeChat 4 (Weixin.exe), admin elevation (UAC) and a fully closed WeChat. Re-apply after each WeChat update; restore via 还原补丁.
-- **设置 → 消息弹窗提醒**: with the decrypt key available, Weport watches the account's local databases and shows a top-right, always-on-top, non-focusing toast for new incoming messages and recalls. Recalled-message detection works independently of the patch (reads the `revokemsg` rows WeChat writes).
-- **设置 → 启动与托盘**: launch at Windows login (HKCU Run key), silent background start, close-to-tray. Tray menu: 显示主窗口 / 退出.
+- **首页 → 安装防撤回**: patch WeChat's `Weixin.dll` so recalled messages stay visible inside WeChat. Requires WeChat 4 (Weixin.exe), admin elevation (UAC) and a fully closed WeChat. Re-apply after each WeChat update; restore via 还原补丁.
+- **首页 → 消息提醒**: with the decrypt key available, Weport watches the account's local databases and shows a top-right, always-on-top, non-focusing toast for new incoming messages and recalls. Recalled-message detection works independently of the patch (reads the `revokemsg` rows WeChat writes).
+- **设置**: launch at Windows login (HKCU Run key), silent background start, close-to-tray, and GitHub release update checks. Tray menu: 显示主窗口 / 退出.
 
 ## CLI
 

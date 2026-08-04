@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.0"
+$version = "0.6.1"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -110,9 +110,11 @@ if (-not (Test-Path $outSetup)) { throw "Installer not produced at $outSetup" }
 $sigPath = "$outSetup.sig"
 $key = Join-Path $srcTauri "weport.key"
 if (Test-Path $key) {
+  $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw $key
+  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+}
+if ($env:TAURI_SIGNING_PRIVATE_KEY) {
   try {
-    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw $key
-    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
     npx --yes @tauri-apps/cli signer sign $outSetup 2>&1 | Out-Host
   } catch {
     Write-Host "Signing skipped: $_"
@@ -122,7 +124,7 @@ if (Test-Path $key) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.0: anti-recall for WeChat 4 (Weixin.dll patch, admin required), top-right message/recall popups, tray + background mode, launch at login, white icon, settings panel."
+  notes = "v0.6.1: four-mode navigation, home-page anti-recall and message reminder controls, expanded native layout, tray/startup settings, and GitHub update controls."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

@@ -26,8 +26,28 @@ const LINE_STRONG: Color32 = Color32::from_rgb(90, 90, 90);
 const TEXT: Color32 = Color32::from_rgb(255, 255, 255);
 const TEXT_DIM: Color32 = Color32::from_rgb(170, 170, 170);
 const TEXT_FAINT: Color32 = Color32::from_rgb(110, 110, 110);
+const GITHUB_URL: &str = "https://github.com/Panther114/Weport";
 
 const R: u8 = 10;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    Connect,
+    Export,
+    AntiRecall,
+    Notifications,
+}
+
+impl AppMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "连接数据库",
+            Self::Export => "导出聊天",
+            Self::AntiRecall => "安装防撤回",
+            Self::Notifications => "消息提醒",
+        }
+    }
+}
 
 enum BgMsg {
     Status(String),
@@ -145,10 +165,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
 fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(10.0, 5.0);
-    style.spacing.indent = 10.0;
-    style.spacing.window_margin = Margin::same(12);
+    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+    style.spacing.button_padding = Vec2::new(12.0, 7.0);
+    style.spacing.indent = 12.0;
+    style.spacing.window_margin = Margin::same(16);
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.panel_fill = BG;
@@ -178,25 +198,65 @@ fn setup_style(ctx: &egui::Context) {
     // f32 stroke widths
     style.text_styles.insert(
         egui::TextStyle::Body,
-        FontId::new(15.0, FontFamily::Proportional),
+        FontId::new(16.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Button,
-        FontId::new(14.0, FontFamily::Proportional),
+        FontId::new(15.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Heading,
-        FontId::new(18.0, FontFamily::Proportional),
+        FontId::new(20.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Small,
-        FontId::new(13.0, FontFamily::Proportional),
+        FontId::new(14.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Monospace,
-        FontId::new(13.5, FontFamily::Monospace),
+        FontId::new(14.0, FontFamily::Monospace),
     );
     ctx.set_style(style);
+}
+
+/// Small native GitHub mark, kept inline so the top bar does not depend on an
+/// additional icon crate or a network-loaded asset.
+fn github_icon(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(center + Vec2::new(0.0, 1.5), 6.3, color);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + Vec2::new(-5.8, -1.0),
+            center + Vec2::new(-4.4, -7.2),
+            center + Vec2::new(-1.8, -4.8),
+            center + Vec2::new(1.8, -4.8),
+            center + Vec2::new(4.4, -7.2),
+            center + Vec2::new(5.8, -1.0),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    painter.circle_filled(center + Vec2::new(-2.3, 0.1), 1.0, BG);
+    painter.circle_filled(center + Vec2::new(2.3, 0.1), 1.0, BG);
+}
+
+fn github_button(ui: &mut egui::Ui) -> egui::Response {
+    Frame::new()
+        .fill(ELEVATED)
+        .stroke(Stroke::new(1.0, LINE))
+        .corner_radius(CornerRadius::same(R))
+        .inner_margin(Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.set_min_size(Vec2::new(108.0, 38.0));
+            ui.horizontal_centered(|ui| {
+                github_icon(ui, TEXT_DIM);
+                ui.label(RichText::new("GitHub").size(14.0).color(TEXT_DIM));
+            });
+        })
+        .response
+        .interact(Sense::click())
 }
 
 struct Toast {
@@ -207,6 +267,7 @@ struct Toast {
 }
 
 struct WeportApp {
+    mode: AppMode,
     db_path: String,
     export_path: String,
     format: String, // txt | json
@@ -219,14 +280,13 @@ struct WeportApp {
     busy_label: String,
     progress: Option<(f64, f64, String, String)>,
     toasts: Vec<Toast>,
-    about_open: bool,
     clear_open: bool,
     settings_open: bool,
     key_ready_hint: bool,
     export_log_txt: Option<String>,
     export_log_json: Option<String>,
     update_info: Option<(String, String)>,
-    // --- v0.6.0: background / tray / settings ---
+    // --- v0.6.1: background / tray / settings ---
     launch_at_startup: bool,
     start_in_background: bool,
     close_to_tray: bool,
@@ -277,6 +337,7 @@ impl WeportApp {
         let launch_at_startup = startup::is_run_at_startup() || s.launch_at_startup;
         let mut app = Self {
             db_path: s.db_path,
+            mode: AppMode::Connect,
             export_path: s.export_path,
             format: if s.format == "json" {
                 "json".into()
@@ -292,7 +353,6 @@ impl WeportApp {
             busy_label: String::new(),
             progress: None,
             toasts: Vec::new(),
-            about_open: false,
             clear_open: false,
             settings_open: false,
             key_ready_hint: false,
@@ -831,15 +891,15 @@ impl WeportApp {
                 }
                 BgMsg::UpdateCheck(Ok(Some((ver, notes)))) => {
                     self.update_info = Some((ver.clone(), notes));
-                    self.push_toast(2, format!("发现新版本 v{ver}"), "可在关于中安装", 6.0);
+                    self.push_toast(2, format!("发现新版本 v{ver}"), "可在设置中安装", 6.0);
                 }
                 BgMsg::UpdateCheck(Ok(None)) => {
-                    if self.about_open {
+                    if self.settings_open {
                         self.push_toast(0, "已是最新版本", format!("当前 v{APP_VERSION}"), 4.0);
                     }
                 }
                 BgMsg::UpdateCheck(Err(e)) => {
-                    if self.about_open {
+                    if self.settings_open {
                         self.push_toast(1, "检查更新失败", e, 6.0);
                     }
                 }
@@ -870,7 +930,7 @@ impl WeportApp {
                     self.anti_install = Some(install);
                     self.anti_state = Some(label.clone());
                     if self.anti_recall_enabled && label == "未安装" {
-                        self.push_toast(2, "防撤回未生效", "微信 4 的防撤回补丁尚未安装，可在设置中启用", 8.0);
+                        self.push_toast(2, "防撤回未生效", "微信 4 的防撤回补丁尚未安装，可切换到“安装防撤回”处理", 8.0);
                     } else if self.anti_recall_enabled && label == "微信正在运行（需退出后操作）" {
                         self.push_toast(2, "微信正在运行", "防撤回补丁需要退出微信后安装", 6.0);
                     }
@@ -913,8 +973,8 @@ impl WeportApp {
         Frame::new()
             .fill(PANEL)
             .stroke(Stroke::new(1.0_f32, LINE))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::symmetric(16, 12))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(Margin::symmetric(22, 18))
     }
 }
 
@@ -1070,51 +1130,70 @@ impl eframe::App for WeportApp {
             });
 
         egui::TopBottomPanel::top("top")
-            .exact_height(36.0)
+            .exact_height(72.0)
             .frame(
                 Frame::new()
                     .fill(BG)
-                    .inner_margin(Margin::symmetric(10, 4))
+                    .inner_margin(Margin::symmetric(22, 10))
                     .stroke(Stroke::new(1.0_f32, LINE)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(
-                        RichText::new("WEPORT")
-                            .size(15.0)
-                            .strong()
-                            .color(TEXT)
-                            .extra_letter_spacing(1.5),
-                    );
-                    ui.label(
-                        RichText::new(format!("v{APP_VERSION}"))
-                            .size(12.5)
-                            .color(TEXT_FAINT),
-                    );
-                    if !self.busy_label.is_empty() {
-                        ui.separator();
-                        ui.label(RichText::new(&self.busy_label).size(12.5).color(TEXT_DIM));
+                    ui.vertical(|ui| {
+                        ui.set_min_width(142.0);
+                        ui.label(
+                            RichText::new("WEPORT")
+                                .size(17.0)
+                                .strong()
+                                .color(TEXT)
+                                .extra_letter_spacing(1.5),
+                        );
+                        ui.label(
+                            RichText::new(format!("v{APP_VERSION}"))
+                                .size(12.5)
+                                .color(TEXT_FAINT),
+                        );
+                    });
+                    ui.add_space(18.0);
+                    for mode in [
+                        AppMode::Connect,
+                        AppMode::Export,
+                        AppMode::AntiRecall,
+                        AppMode::Notifications,
+                    ] {
+                        let selected = self.mode == mode;
+                        let fill = if selected { TEXT } else { ELEVATED };
+                        let fg = if selected { BG } else { TEXT_DIM };
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new(mode.label()).size(14.0).color(fg))
+                                    .fill(fill)
+                                    .stroke(Stroke::new(1.0, if selected { TEXT } else { LINE }))
+                                    .corner_radius(R)
+                                    .min_size(Vec2::new(104.0, 42.0)),
+                            )
+                            .clicked()
+                        {
+                            self.mode = mode;
+                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("设置").size(13.0))
+                                egui::Button::new(RichText::new("设置").size(14.0))
+                                    .fill(ELEVATED)
+                                    .stroke(Stroke::new(1.0, LINE))
                                     .corner_radius(R)
-                                    .min_size(Vec2::new(0.0, 26.0)),
+                                    .min_size(Vec2::new(76.0, 38.0)),
                             )
                             .clicked()
                         {
                             self.settings_open = true;
                         }
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("关于").size(13.0))
-                                    .corner_radius(R)
-                                    .min_size(Vec2::new(0.0, 26.0)),
-                            )
-                            .clicked()
-                        {
-                            self.about_open = true;
+                        if github_button(ui).clicked() {
+                            if let Err(e) = open::that(GITHUB_URL) {
+                                self.push_toast(1, "无法打开 GitHub", e.to_string(), 6.0);
+                            }
                         }
                     });
                 });
@@ -1163,31 +1242,19 @@ impl eframe::App for WeportApp {
         }
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(40, 14)))
+            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(28, 22)))
             .show(ctx, |ui| {
-                let full = ui.available_size();
-                let gap = 12.0;
-                let col_w = (full.x - gap) * 0.5;
-
-                ui.horizontal_top(|ui| {
-                    // LEFT
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(col_w, full.y),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            self.ui_left(ui);
-                        },
-                    );
-                    ui.add_space(gap);
-                    // RIGHT
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(col_w, full.y),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            self.ui_right(ui);
-                        },
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        match self.mode {
+                            AppMode::Connect => self.ui_connect(ui),
+                            AppMode::Export => self.ui_export(ui),
+                            AppMode::AntiRecall => self.ui_antirecall(ui),
+                            AppMode::Notifications => self.ui_notifications(ui),
+                        }
+                    });
             });
 
         self.ui_modals(ctx);
@@ -1301,7 +1368,7 @@ impl WeportApp {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(title)
-                    .size(12.5)
+                    .size(14.0)
                     .strong()
                     .color(TEXT)
                     .extra_letter_spacing(0.8),
@@ -1310,18 +1377,18 @@ impl WeportApp {
                 ui.label(RichText::new(right).size(12.0).color(TEXT_FAINT));
             });
         });
-        ui.add_space(5.0);
+        ui.add_space(7.0);
         let y = ui.cursor().top();
         ui.painter().hline(
             ui.max_rect().x_range(),
             y,
             Stroke::new(1.0_f32, LINE),
         );
-        ui.add_space(9.0);
+        ui.add_space(13.0);
     }
 
-    fn ui_left(&mut self, ui: &mut egui::Ui) {
-        // Data path — compact
+    fn ui_connect(&mut self, ui: &mut egui::Ui) {
+        // Data path and account/key setup share the connection workspace.
         WeportApp::panel_frame().show(ui, |ui| {
             self.section_title(ui, "数据位置", "xwechat_files");
             ui.horizontal(|ui| {
@@ -1329,9 +1396,9 @@ impl WeportApp {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.db_path)
                         .desired_width(ui.available_width() - 70.0)
-                        .font(FontId::new(13.0, FontFamily::Monospace))
+                        .font(FontId::new(14.0, FontFamily::Monospace))
                         .hint_text(r"C:\Users\…\xwechat_files")
-                        .margin(Margin::symmetric(6, 4)),
+                        .margin(Margin::symmetric(8, 6)),
                 );
                 if resp.lost_focus() {
                     self.persist();
@@ -1340,9 +1407,9 @@ impl WeportApp {
                 if ui
                     .add_enabled(
                         !self.busy,
-                        egui::Button::new(RichText::new("浏览").size(13.0))
+                        egui::Button::new(RichText::new("浏览").size(14.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(56.0, 28.0)),
+                            .min_size(Vec2::new(64.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -1356,14 +1423,14 @@ impl WeportApp {
                     }
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
                         !self.busy,
-                        egui::Button::new(RichText::new("重新扫描").size(13.0))
+                        egui::Button::new(RichText::new("重新扫描").size(14.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(0.0, 28.0)),
+                            .min_size(Vec2::new(0.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -1372,9 +1439,9 @@ impl WeportApp {
                 if ui
                     .add_enabled(
                         !self.busy && !self.db_path.trim().is_empty(),
-                        egui::Button::new(RichText::new("刷新账号").size(13.0))
+                        egui::Button::new(RichText::new("刷新账号").size(14.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(0.0, 28.0)),
+                            .min_size(Vec2::new(0.0, 36.0)),
                     )
                     .clicked()
                 {
@@ -1383,7 +1450,7 @@ impl WeportApp {
             });
         });
 
-        ui.add_space(12.0);
+        ui.add_space(18.0);
 
         // Accounts — name + wxid on one line
         WeportApp::panel_frame().show(ui, |ui| {
@@ -1406,9 +1473,9 @@ impl WeportApp {
                 );
             } else {
                 egui::ScrollArea::vertical()
-                    .max_height(140.0)
+                    .max_height(220.0)
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 3.0;
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         for acc in self.accounts.clone() {
                             let active = acc.wxid == self.selected_wxid;
                             let fill = if active { TEXT } else { ELEVATED };
@@ -1430,7 +1497,7 @@ impl WeportApp {
                                     if active { TEXT } else { LINE },
                                 ))
                                 .corner_radius(CornerRadius::same(8))
-                                .inner_margin(Margin::symmetric(8, 5))
+                                .inner_margin(Margin::symmetric(10, 7))
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
@@ -1442,7 +1509,7 @@ impl WeportApp {
                                         );
                                         ui.label(
                                             RichText::new(&acc.wxid)
-                                                .size(12.0)
+                                                .size(13.0)
                                                 .color(dim)
                                                 .family(FontFamily::Monospace),
                                         );
@@ -1468,7 +1535,7 @@ impl WeportApp {
             }
         });
 
-        ui.add_space(12.0);
+        ui.add_space(18.0);
 
         // Key — compact steps
         WeportApp::panel_frame().show(ui, |ui| {
@@ -1568,8 +1635,10 @@ impl WeportApp {
         });
     }
 
-    fn ui_right(&mut self, ui: &mut egui::Ui) {
+    fn ui_export(&mut self, ui: &mut egui::Ui) {
+        let min_height = ui.available_height().max(460.0);
         WeportApp::panel_frame().show(ui, |ui| {
+            ui.set_min_height(min_height - 48.0);
             self.section_title(ui, "导出", "全部联系人 + 群聊");
 
             ui.horizontal(|ui| {
@@ -1732,6 +1801,223 @@ impl WeportApp {
         });
     }
 
+    fn ui_antirecall(&mut self, ui: &mut egui::Ui) {
+        let status = self
+            .anti_state
+            .clone()
+            .unwrap_or_else(|| "检测中…".to_string());
+        let status_color = if status.contains("已安装") {
+            Color32::from_rgb(160, 255, 170)
+        } else if status == "未安装" {
+            Color32::from_rgb(255, 210, 130)
+        } else {
+            TEXT_DIM
+        };
+        let install = self.anti_install.clone();
+        let min_height = ui.available_height().max(460.0);
+
+        WeportApp::panel_frame().show(ui, |ui| {
+            ui.set_min_height(min_height - 48.0);
+            self.section_title(ui, "安装防撤回", "微信 4");
+            ui.label(
+                RichText::new("让撤回的消息继续保留在微信聊天窗口中")
+                    .size(21.0)
+                    .strong()
+                    .color(TEXT),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("补丁只修改微信 4 的 Weixin.dll，不会读取或上传聊天内容。")
+                    .size(15.0)
+                    .color(TEXT_DIM),
+            );
+            ui.add_space(22.0);
+
+            Frame::new()
+                .fill(ELEVATED)
+                .stroke(Stroke::new(1.0, LINE))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::symmetric(16, 14))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("当前状态").size(15.0).color(TEXT_DIM));
+                        ui.label(RichText::new(&status).size(16.0).strong().color(status_color));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(
+                                    !self.anti_busy,
+                                    egui::Button::new("刷新状态")
+                                        .corner_radius(R)
+                                        .min_size(Vec2::new(100.0, 34.0)),
+                                )
+                                .clicked()
+                            {
+                                self.spawn_antirecall_status();
+                            }
+                        });
+                    });
+                    if let Some(path) = &install {
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(format!("微信安装目录：{path}"))
+                                .size(13.5)
+                                .color(TEXT_FAINT)
+                                .family(FontFamily::Monospace),
+                        );
+                    }
+                });
+
+            ui.add_space(24.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.anti_busy && install.is_some(),
+                        egui::Button::new(
+                            RichText::new(if self.anti_busy { "处理中…" } else { "安装防撤回补丁" })
+                                .size(16.0)
+                                .color(BG),
+                        )
+                        .fill(TEXT)
+                        .stroke(Stroke::new(1.0, TEXT))
+                        .corner_radius(R)
+                        .min_size(Vec2::new(190.0, 48.0)),
+                    )
+                    .clicked()
+                {
+                    self.anti_recall_enabled = true;
+                    self.spawn_antirecall_action(true);
+                    self.persist();
+                }
+                if ui
+                    .add_enabled(
+                        !self.anti_busy && install.is_some(),
+                        egui::Button::new(RichText::new("还原补丁").size(15.0))
+                            .corner_radius(R)
+                            .min_size(Vec2::new(140.0, 48.0)),
+                    )
+                    .clicked()
+                {
+                    self.anti_recall_enabled = false;
+                    self.spawn_antirecall_action(false);
+                    self.persist();
+                }
+            });
+
+            ui.add_space(22.0);
+            Frame::new()
+                .fill(PANEL)
+                .stroke(Stroke::new(1.0, LINE))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::symmetric(16, 14))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("使用前请注意").size(15.0).strong().color(TEXT));
+                    ui.add_space(8.0);
+                    for line in [
+                        "安装和还原需要管理员权限（UAC）。",
+                        "操作前请完全退出微信；微信运行时补丁不会执行。",
+                        "微信更新后可能需要重新安装补丁。",
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("•").size(16.0).color(TEXT_DIM));
+                            ui.label(RichText::new(line).size(14.0).color(TEXT_DIM));
+                        });
+                    }
+                });
+        });
+    }
+
+    fn ui_notifications(&mut self, ui: &mut egui::Ui) {
+        let db_ready = !self.db_path.trim().is_empty();
+        let account_ready = !self.selected_wxid.is_empty();
+        let key_ready = self.decrypt_key.trim().len() == 64;
+        let all_ready = db_ready && account_ready && key_ready;
+        let mut toggled = false;
+        let min_height = ui.available_height().max(460.0);
+
+        WeportApp::panel_frame().show(ui, |ui| {
+            ui.set_min_height(min_height - 48.0);
+            self.section_title(ui, "消息提醒", "屏幕右上角");
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new("及时看到新消息与撤回提醒")
+                            .size(21.0)
+                            .strong()
+                            .color(TEXT),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("提醒不会抢焦点；消息内容只在本机解密和显示。")
+                            .size(15.0)
+                            .color(TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    toggled |= ui
+                        .checkbox(&mut self.notifications_enabled, "启用消息提醒")
+                        .changed();
+                });
+            });
+
+            ui.add_space(24.0);
+            Frame::new()
+                .fill(ELEVATED)
+                .stroke(Stroke::new(1.0, LINE))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::symmetric(16, 14))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("提醒条件").size(15.0).strong().color(TEXT));
+                    ui.add_space(10.0);
+                    for (label, ok, detail) in [
+                        ("数据目录", db_ready, if db_ready { "已连接" } else { "未选择" }),
+                        ("微信账号", account_ready, if account_ready { "已选择" } else { "未选择" }),
+                        ("解密密钥", key_ready, if key_ready { "已就绪" } else { "待提取" }),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(if ok { "✓" } else { "—" })
+                                    .size(16.0)
+                                    .strong()
+                                    .color(if ok { TEXT } else { TEXT_FAINT }),
+                            );
+                            ui.label(RichText::new(label).size(15.0).color(TEXT_DIM));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(detail).size(14.0).color(if ok { TEXT } else { TEXT_FAINT }));
+                            });
+                        });
+                    }
+                });
+
+            ui.add_space(24.0);
+            let state = if !self.notifications_enabled {
+                "消息提醒已关闭"
+            } else if all_ready {
+                "正在监听当前账号的新消息和撤回事件"
+            } else {
+                "已开启，完成上面的准备条件后开始监听"
+            };
+            let state_color = if self.notifications_enabled && all_ready {
+                Color32::from_rgb(160, 255, 170)
+            } else if self.notifications_enabled {
+                Color32::from_rgb(255, 210, 130)
+            } else {
+                TEXT_DIM
+            };
+            ui.label(RichText::new(state).size(16.0).strong().color(state_color));
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("撤回提醒即使没有安装防撤回补丁也可以检测；安装补丁后，撤回的原消息也会继续留在微信里。")
+                    .size(14.0)
+                    .color(TEXT_FAINT),
+            );
+        });
+
+        if toggled {
+            self.persist();
+            self.sync_notify_config();
+        }
+    }
+
     fn ui_modals(&mut self, ctx: &egui::Context) {
         if self.settings_open {
             self.ui_settings(ctx);
@@ -1789,84 +2075,15 @@ impl WeportApp {
                 });
         }
 
-        if self.about_open {
-            egui::Window::new(format!("Weport v{APP_VERSION}"))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .frame(
-                    Frame::new()
-                        .fill(PANEL)
-                        .stroke(Stroke::new(1.0, LINE_STRONG))
-                        .corner_radius(CornerRadius::same(14))
-                        .inner_margin(Margin::same(18)),
-                )
-                .show(ctx, |ui| {
-                    ui.set_min_width(400.0);
-                    ui.label(
-                        RichText::new(
-                            "轻量原生 WeChat 聊天记录导出。egui 界面，无 WebView。导出 TXT/JSON 至子目录。",
-                        )
-                        .size(14.0)
-                        .color(TEXT_DIM),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("数据仅本地处理。路径与密钥保存在本机。")
-                            .size(13.5)
-                            .color(TEXT_FAINT),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("更新：GitHub Releases (Panther114/Weport)")
-                            .size(12.5)
-                            .color(TEXT_FAINT),
-                    );
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new("检查更新").corner_radius(R).min_size(Vec2::new(110.0, 38.0)),
-                            )
-                            .clicked()
-                        {
-                            self.spawn_update_check(true);
-                        }
-                        if let Some((ver, _)) = &self.update_info {
-                            if ui
-                                .add_enabled(
-                                    !self.busy,
-                                    egui::Button::new(format!("安装 v{ver}"))
-                                        .corner_radius(R)
-                                        .fill(TEXT)
-                                        .min_size(Vec2::new(120.0, 38.0)),
-                                )
-                                .clicked()
-                            {
-                                self.spawn_update_install();
-                            }
-                        }
-                        if ui
-                            .add(egui::Button::new("关闭").corner_radius(R).min_size(Vec2::new(90.0, 38.0)))
-                            .clicked()
-                        {
-                            self.about_open = false;
-                        }
-                    });
-                });
-        }
     }
 }
 
 impl WeportApp {
-    /// Settings modal: startup / tray behavior / anti-recall / notifications.
+    /// Settings modal: startup / tray behavior and application updates.
     fn ui_settings(&mut self, ctx: &egui::Context) {
         let mut startup_toggled = false;
         let mut bg_toggled = false;
         let mut tray_toggled = false;
-        let mut notify_toggled = false;
-        let mut anti_toggled: Option<bool> = None; // Some(apply) to run
 
         egui::Window::new("设置")
             .collapsible(false)
@@ -1880,7 +2097,7 @@ impl WeportApp {
                     .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(460.0);
+                ui.set_min_width(520.0);
 
                 // --- Startup & tray ---
                 WeportApp::settings_section(ui, "启动与托盘");
@@ -1906,107 +2123,51 @@ impl WeportApp {
                     );
                 }
 
-                ui.add_space(10.0);
-
-                // --- Anti-recall ---
-                WeportApp::settings_section(ui, "防撤回（微信 4）");
-                let ar_checked = ui
-                    .checkbox(&mut self.anti_recall_enabled, "启用防撤回：撤回的消息在微信内保留")
-                    .changed();
-                if ar_checked {
-                    if self.anti_recall_enabled {
-                        anti_toggled = Some(true);
-                    } else {
-                        anti_toggled = Some(false);
-                    }
-                }
-                if let Some(install) = &self.anti_install {
-                    ui.label(
-                        RichText::new(format!("安装目录：{install}"))
-                            .size(11.5)
-                            .color(TEXT_FAINT)
-                            .family(FontFamily::Monospace),
-                    );
-                }
-                let status = self.anti_state.clone().unwrap_or_else(|| "检测中…".to_string());
+                ui.add_space(20.0);
+                WeportApp::settings_section(ui, "版本与更新");
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("状态").size(12.5).color(TEXT_DIM));
-                    let color = if status.contains("已安装") {
-                        Color32::from_rgb(160, 255, 170)
-                    } else if status == "未安装" {
-                        Color32::from_rgb(255, 210, 130)
-                    } else {
-                        TEXT_DIM
-                    };
-                    ui.label(RichText::new(&status).size(12.5).color(color));
-                    if ui
-                        .add_enabled(!self.anti_busy, egui::Button::new("刷新").corner_radius(R).min_size(Vec2::new(56.0, 24.0)))
-                        .clicked()
-                    {
-                        self.spawn_antirecall_status();
-                    }
+                    ui.label(RichText::new("当前版本").size(15.0).color(TEXT_DIM));
+                    ui.label(RichText::new(format!("v{APP_VERSION}")).size(15.0).strong().color(TEXT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("GitHub Releases").size(13.0).color(TEXT_FAINT));
+                    });
                 });
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            !self.anti_busy && self.anti_install.is_some(),
-                            egui::Button::new(
-                                RichText::new(if self.anti_busy { "处理中…" } else { "安装补丁" })
-                                    .size(13.0)
-                                    .color(BG),
+                            !self.busy,
+                            egui::Button::new("检查更新")
+                                .corner_radius(R)
+                                .min_size(Vec2::new(120.0, 38.0)),
+                        )
+                        .clicked()
+                    {
+                        self.spawn_update_check(true);
+                    }
+                    if let Some((ver, _)) = &self.update_info {
+                        if ui
+                            .add_enabled(
+                                !self.busy,
+                                egui::Button::new(format!("安装 v{ver}"))
+                                    .corner_radius(R)
+                                    .fill(TEXT)
+                                    .stroke(Stroke::new(1.0, TEXT))
+                                    .min_size(Vec2::new(140.0, 38.0)),
                             )
-                            .fill(TEXT)
-                            .stroke(Stroke::new(1.0, TEXT))
-                            .corner_radius(R)
-                            .min_size(Vec2::new(110.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        anti_toggled = Some(true);
-                        self.anti_recall_enabled = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.anti_busy && self.anti_install.is_some(),
-                            egui::Button::new("还原补丁").corner_radius(R).min_size(Vec2::new(96.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        anti_toggled = Some(false);
-                        self.anti_recall_enabled = false;
+                            .clicked()
+                        {
+                            self.spawn_update_install();
+                        }
                     }
                 });
                 ui.label(
-                    RichText::new("安装/还原需要管理员权限（UAC），并要求微信已完全退出。微信更新后需重新安装。")
-                        .size(11.5)
+                    RichText::new("版本检查和安装通过 GitHub Releases 完成。")
+                        .size(13.0)
                         .color(TEXT_FAINT),
                 );
 
-                ui.add_space(10.0);
-
-                // --- Notifications ---
-                WeportApp::settings_section(ui, "消息弹窗提醒");
-                notify_toggled |= ui
-                    .checkbox(&mut self.notifications_enabled, "收到新消息/撤回时，在屏幕右上角弹窗")
-                    .changed();
-                ui.label(
-                    RichText::new("需要已提取解密密钥；弹窗不聚焦、不抢输入。撤回内容在补丁未安装时也能检测。")
-                        .size(11.5)
-                        .color(TEXT_FAINT),
-                );
-                if self.notifications_enabled
-                    && (self.db_path.trim().is_empty()
-                        || self.selected_wxid.is_empty()
-                        || self.decrypt_key.trim().len() != 64)
-                {
-                    ui.label(
-                        RichText::new("提示：请先选择数据目录、账号并提取密钥。")
-                            .size(11.5)
-                            .color(Color32::from_rgb(255, 210, 130)),
-                    );
-                }
-
-                ui.add_space(14.0);
+                ui.add_space(20.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
@@ -2042,14 +2203,6 @@ impl WeportApp {
             self.persist();
         }
         if tray_toggled {
-            self.persist();
-        }
-        if notify_toggled {
-            self.persist();
-            self.sync_notify_config();
-        }
-        if let Some(apply) = anti_toggled {
-            self.spawn_antirecall_action(apply);
             self.persist();
         }
     }

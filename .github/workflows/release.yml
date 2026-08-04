@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Version tag (e.g. v0.0.1)'
         required: true
-        default: 'v0.0.1'
+        default: 'v0.6.1'
 
 permissions:
   contents: write
@@ -36,28 +36,18 @@ jobs:
       - name: Generate icons
         run: node scripts/generate-icons.mjs
 
-      - name: Build extraction engine
-        run: npm run build:engine:pack
-
-      - name: Stage engine resources
-        run: node scripts/prepare-engine-resources.cjs
-
-      - name: Import updater private key
-        shell: bash
+      - name: Build native Weport
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY not set — updater signatures will be skipped"
-          fi
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
-      - name: Build Tauri (NSIS)
-        shell: bash
+      - name: Package NSIS installer and updater metadata
+        shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri:build
+        run: ./scripts/package-release.ps1
 
       - name: Collect artifacts
         shell: bash
