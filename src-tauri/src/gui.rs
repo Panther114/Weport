@@ -28,7 +28,9 @@ const TEXT_DIM: Color32 = Color32::from_rgb(170, 170, 170);
 const TEXT_FAINT: Color32 = Color32::from_rgb(110, 110, 110);
 const GITHUB_URL: &str = "https://github.com/Panther114/Weport";
 
-const R: u8 = 10;
+const R: u8 = 6;
+const HOVER_BG: Color32 = Color32::from_rgb(40, 40, 40);
+const HOVER_LINE: Color32 = Color32::from_rgb(140, 140, 140);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppMode {
@@ -41,10 +43,10 @@ enum AppMode {
 impl AppMode {
     fn label(self) -> &'static str {
         match self {
-            Self::Connect => "连接数据库",
-            Self::Export => "导出聊天",
-            Self::AntiRecall => "安装防撤回",
-            Self::Notifications => "消息提醒",
+            Self::Connect => "连接",
+            Self::Export => "导出",
+            Self::AntiRecall => "防撤回",
+            Self::Notifications => "提醒",
         }
     }
 }
@@ -108,8 +110,8 @@ const TOAST_DURATION: f64 = 6.0;
 pub fn run_gui() -> eframe::Result<()> {
     let icon = load_app_icon();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1080.0, 720.0])
-        .with_min_inner_size([900.0, 580.0])
+        .with_inner_size([960.0, 640.0])
+        .with_min_inner_size([780.0, 520.0])
         .with_title(format!("Weport v{APP_VERSION}"))
         .with_decorations(true);
 
@@ -165,10 +167,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
 fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-    style.spacing.button_padding = Vec2::new(12.0, 7.0);
-    style.spacing.indent = 12.0;
-    style.spacing.window_margin = Margin::same(16);
+    style.spacing.item_spacing = Vec2::new(6.0, 5.0);
+    style.spacing.button_padding = Vec2::new(8.0, 4.0);
+    style.spacing.indent = 8.0;
+    style.spacing.window_margin = Margin::same(10);
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.panel_fill = BG;
@@ -177,51 +179,50 @@ fn setup_style(ctx: &egui::Context) {
     style.visuals.faint_bg_color = ELEVATED;
     style.visuals.widgets.noninteractive.bg_fill = PANEL;
     style.visuals.widgets.inactive.bg_fill = ELEVATED;
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(36, 36, 36);
+    style.visuals.widgets.hovered.bg_fill = HOVER_BG;
     style.visuals.widgets.active.bg_fill = TEXT;
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, BG);
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, BG);
     style.visuals.selection.bg_fill = TEXT;
-    style.visuals.selection.stroke = Stroke::new(1.0, TEXT);
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, LINE_STRONG);
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, TEXT);
-    style.visuals.window_stroke = Stroke::new(1.0, LINE_STRONG);
-    style.visuals.window_corner_radius = CornerRadius::same(12);
-    style.visuals.menu_corner_radius = CornerRadius::same(10);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, TEXT);
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_DIM);
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_DIM);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, LINE);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, HOVER_LINE);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, TEXT);
+    style.visuals.window_stroke = Stroke::new(1.0_f32, LINE_STRONG);
+    style.visuals.window_corner_radius = CornerRadius::same(8);
+    style.visuals.menu_corner_radius = CornerRadius::same(6);
     style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(R);
     style.visuals.widgets.inactive.corner_radius = CornerRadius::same(R);
     style.visuals.widgets.hovered.corner_radius = CornerRadius::same(R);
     style.visuals.widgets.active.corner_radius = CornerRadius::same(R);
-    // f32 stroke widths
     style.text_styles.insert(
         egui::TextStyle::Body,
-        FontId::new(16.0, FontFamily::Proportional),
+        FontId::new(13.5, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Button,
-        FontId::new(15.0, FontFamily::Proportional),
+        FontId::new(13.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Heading,
-        FontId::new(20.0, FontFamily::Proportional),
+        FontId::new(16.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Small,
-        FontId::new(14.0, FontFamily::Proportional),
+        FontId::new(11.5, FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Monospace,
-        FontId::new(14.0, FontFamily::Monospace),
+        FontId::new(12.0, FontFamily::Monospace),
     );
     ctx.set_style(style);
 }
 
 /// Compact vector icons drawn with egui painter (no external asset deps).
 mod icons {
-    use super::{BG, ELEVATED, LINE, TEXT_DIM, R};
+    use super::{BG, ELEVATED, HOVER_BG, HOVER_LINE, LINE, TEXT, TEXT_DIM, R};
     use eframe::egui::{
         self, Color32, CornerRadius, Frame, Margin, Pos2, RichText, Sense, Stroke, StrokeKind, Vec2,
     };
@@ -235,50 +236,57 @@ mod icons {
         Vec2::new(angle.cos(), angle.sin())
     }
 
-    /// GitHub-style cat mark (simplified, readable at toolbar sizes).
+    /// Official-style GitHub Octocat mark (silhouette based on the public mark).
     pub fn github(ui: &mut egui::Ui, color: Color32, size: f32) {
         let rect = icon_rect(ui, size);
         let c = rect.center();
-        let s = size / 18.0;
+        let s = size / 16.0;
         let painter = ui.painter();
-        painter.circle_filled(c + Vec2::new(0.0, 1.0 * s), 6.2 * s, color);
+        // Head body
+        painter.circle_filled(c + Vec2::new(0.0, 0.6 * s), 5.6 * s, color);
+        // Ears (pointed triangles sitting on the head)
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(-5.6 * s, -1.2 * s),
-                c + Vec2::new(-4.2 * s, -7.4 * s),
-                c + Vec2::new(-1.2 * s, -4.2 * s),
+                c + Vec2::new(-5.0 * s, -1.5 * s),
+                c + Vec2::new(-3.8 * s, -6.8 * s),
+                c + Vec2::new(-1.0 * s, -3.8 * s),
             ],
             color,
             Stroke::NONE,
         ));
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(5.6 * s, -1.2 * s),
-                c + Vec2::new(4.2 * s, -7.4 * s),
-                c + Vec2::new(1.2 * s, -4.2 * s),
+                c + Vec2::new(5.0 * s, -1.5 * s),
+                c + Vec2::new(3.8 * s, -6.8 * s),
+                c + Vec2::new(1.0 * s, -3.8 * s),
             ],
             color,
             Stroke::NONE,
         ));
-        let eye = if color.r() > 100 {
-            BG
-        } else {
-            Color32::from_rgb(20, 20, 20)
-        };
-        painter.circle_filled(c + Vec2::new(-2.2 * s, 0.4 * s), 1.05 * s, eye);
-        painter.circle_filled(c + Vec2::new(2.2 * s, 0.4 * s), 1.05 * s, eye);
-        painter.line_segment(
-            [c + Vec2::new(-3.5 * s, 5.5 * s), c + Vec2::new(-4.2 * s, 8.0 * s)],
-            Stroke::new(1.4 * s, color),
-        );
-        painter.line_segment(
-            [c + Vec2::new(3.5 * s, 5.5 * s), c + Vec2::new(4.2 * s, 8.0 * s)],
-            Stroke::new(1.4 * s, color),
-        );
-        painter.line_segment(
-            [c + Vec2::new(0.0, 6.0 * s), c + Vec2::new(0.0, 8.2 * s)],
-            Stroke::new(1.4 * s, color),
-        );
+        // Snout
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(-2.6 * s, 2.2 * s),
+                c + Vec2::new(2.6 * s, 2.2 * s),
+                c + Vec2::new(0.0, 5.0 * s),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        // Eyes (cutouts)
+        let eye = if color.r() > 120 { BG } else { Color32::from_rgb(18, 18, 18) };
+        painter.circle_filled(c + Vec2::new(-2.0 * s, 0.2 * s), 1.05 * s, eye);
+        painter.circle_filled(c + Vec2::new(2.0 * s, 0.2 * s), 1.05 * s, eye);
+        // Tentacle feet
+        for dx in [-3.2_f32, 0.0, 3.2] {
+            painter.line_segment(
+                [
+                    c + Vec2::new(dx * s, 5.2 * s),
+                    c + Vec2::new(dx * s * 1.15, 7.4 * s),
+                ],
+                Stroke::new(1.35 * s, color),
+            );
+        }
     }
 
     pub fn gear(ui: &mut egui::Ui, color: Color32, size: f32) {
@@ -475,30 +483,61 @@ mod icons {
         }
     }
 
-    pub fn github_button(ui: &mut egui::Ui) -> egui::Response {
-        Frame::new()
-            .fill(ELEVATED)
-            .stroke(Stroke::new(1.0, LINE))
+    /// Compact interactive chip with hover fill/stroke feedback.
+    pub fn chip(
+        ui: &mut egui::Ui,
+        label: &str,
+        selected: bool,
+        icon: impl FnOnce(&mut egui::Ui, Color32),
+        min: Vec2,
+    ) -> egui::Response {
+        let id = ui.next_auto_id();
+        // Sense first so hover is known this frame (uses previous-frame geometry).
+        let prev = ui.ctx().read_response(id);
+        let hovered = prev.as_ref().is_some_and(|r| r.hovered());
+        let (fill, fg, stroke) = if selected {
+            (TEXT, BG, TEXT)
+        } else if hovered {
+            (HOVER_BG, TEXT, HOVER_LINE)
+        } else {
+            (ELEVATED, TEXT_DIM, LINE)
+        };
+        let inner = Frame::new()
+            .fill(fill)
+            .stroke(Stroke::new(1.0_f32, stroke))
             .corner_radius(CornerRadius::same(R))
-            .inner_margin(Margin::symmetric(12, 6))
+            .inner_margin(Margin::symmetric(8, 4))
             .show(ui, |ui| {
-                ui.set_min_size(Vec2::new(118.0, 40.0));
+                ui.set_min_size(min);
                 ui.horizontal_centered(|ui| {
-                    github(ui, TEXT_DIM, 18.0);
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("GitHub").size(14.0).color(TEXT_DIM));
+                    icon(ui, fg);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(label).size(12.5).color(fg));
                 });
-            })
-            .response
-            .interact(Sense::click())
+            });
+        let resp = ui.interact(inner.response.rect, id, Sense::click());
+        if resp.hovered() {
+            ui.ctx().request_repaint();
+        }
+        resp
+    }
+
+    pub fn github_button(ui: &mut egui::Ui) -> egui::Response {
+        chip(
+            ui,
+            "GitHub",
+            false,
+            |ui, c| github(ui, c, 14.0),
+            Vec2::new(86.0, 28.0),
+        )
     }
 
     pub fn mode_icon(ui: &mut egui::Ui, mode: super::AppMode, color: Color32) {
         match mode {
-            super::AppMode::Connect => database(ui, color, 16.0),
-            super::AppMode::Export => export_arrow(ui, color, 16.0),
-            super::AppMode::AntiRecall => shield(ui, color, 16.0),
-            super::AppMode::Notifications => bell(ui, color, 16.0),
+            super::AppMode::Connect => database(ui, color, 13.0),
+            super::AppMode::Export => export_arrow(ui, color, 13.0),
+            super::AppMode::AntiRecall => shield(ui, color, 13.0),
+            super::AppMode::Notifications => bell(ui, color, 13.0),
         }
     }
 }
@@ -570,11 +609,17 @@ impl WeportApp {
             .filter(|k| !k.is_empty())
             .unwrap_or_else(|| s.decrypt_key.clone());
 
-        // Tray (Windows only; harmless to skip elsewhere).
+        // Tray (Windows only). Close-to-tray requires this to be Some.
         #[cfg(windows)]
-        let tray = crate::tray::Tray::spawn(cc.egui_ctx.clone()).ok().flatten();
+        let (tray, tray_err) = match crate::tray::Tray::spawn(cc.egui_ctx.clone()) {
+            Ok(Some(t)) => (Some(t), None),
+            Ok(None) => (None, Some("系统托盘不可用".into())),
+            Err(e) => (None, Some(e)),
+        };
         #[cfg(not(windows))]
         let tray = None;
+        #[cfg(not(windows))]
+        let tray_err: Option<String> = None;
 
         let notify = NotifyService::start();
 
@@ -585,6 +630,8 @@ impl WeportApp {
         if launch_at_startup && !startup::is_run_at_startup() {
             let _ = startup::set_run_at_startup(true);
         }
+        // Always keep close-to-tray on when tray works (X hides; tray menu quits).
+        let close_to_tray = tray.is_some();
         let mut app = Self {
             db_path: s.db_path,
             mode: AppMode::Connect,
@@ -611,7 +658,7 @@ impl WeportApp {
             update_info: None,
             launch_at_startup,
             start_in_background: s.start_in_background,
-            close_to_tray: s.close_to_tray,
+            close_to_tray,
             anti_recall_enabled: s.anti_recall_enabled,
             notifications_enabled: s.notifications_enabled,
             tray,
@@ -641,6 +688,9 @@ impl WeportApp {
         app.spawn_update_check(false);
         // Startup anti-recall sanity check (status only, never patches by itself).
         app.spawn_antirecall_status();
+        if let Some(err) = tray_err {
+            app.push_toast(1, "托盘启动失败", format!("{err}（关闭窗口将直接退出）"), 10.0);
+        }
         app
     }
 
@@ -1224,8 +1274,8 @@ impl WeportApp {
         Frame::new()
             .fill(PANEL)
             .stroke(Stroke::new(1.0_f32, LINE))
-            .corner_radius(CornerRadius::same(12))
-            .inner_margin(Margin::symmetric(28, 20))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(14, 12))
     }
 }
 
@@ -1349,17 +1399,26 @@ impl eframe::App for WeportApp {
             }
         }
 
-        // Close button: hide to tray by default; otherwise fully quit.
+        // Close button: always hide to tray when a tray icon exists.
+        // (Tray menu → 退出 is the only way to fully quit from the GUI.)
         if !self.quit_requested {
             if ctx.input(|i| i.viewport().close_requested()) {
-                if self.tray.is_some() && self.close_to_tray {
-                    // CancelClose must be sent the same frame the OS requests close,
-                    // otherwise the window enters a half-destroyed / frozen state.
+                let can_tray = self.tray.is_some() && self.close_to_tray;
+                if can_tray {
+                    // CancelClose MUST be sent the same frame, every time.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    self.main_visible = false;
+                } else if self.tray.is_some() {
+                    // Setting says quit, but still prefer tray if tray is alive —
+                    // user asked for close-to-tray behavior as the default product path.
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     self.main_visible = false;
+                    self.close_to_tray = true;
+                    self.persist();
                 } else {
-                    // User wants a real quit — tear down tray/notify cleanly.
                     self.begin_quit(ctx);
                 }
             }
@@ -1457,31 +1516,28 @@ impl eframe::App for WeportApp {
             });
 
         egui::TopBottomPanel::top("top")
-            .exact_height(76.0)
+            .exact_height(44.0)
             .frame(
                 Frame::new()
                     .fill(BG)
-                    .inner_margin(Margin::symmetric(36, 12))
+                    .inner_margin(Margin::symmetric(14, 6))
                     .stroke(Stroke::new(1.0_f32, LINE)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_min_width(150.0);
-                        ui.label(
-                            RichText::new("WEPORT")
-                                .size(17.0)
-                                .strong()
-                                .color(TEXT)
-                                .extra_letter_spacing(1.5),
-                        );
-                        ui.label(
-                            RichText::new(format!("v{APP_VERSION}"))
-                                .size(12.5)
-                                .color(TEXT_FAINT),
-                        );
-                    });
-                    ui.add_space(22.0);
+                    ui.label(
+                        RichText::new("WEPORT")
+                            .size(13.5)
+                            .strong()
+                            .color(TEXT)
+                            .extra_letter_spacing(1.2),
+                    );
+                    ui.label(
+                        RichText::new(format!("v{APP_VERSION}"))
+                            .size(11.0)
+                            .color(TEXT_FAINT),
+                    );
+                    ui.add_space(10.0);
                     for mode in [
                         AppMode::Connect,
                         AppMode::Export,
@@ -1489,48 +1545,32 @@ impl eframe::App for WeportApp {
                         AppMode::Notifications,
                     ] {
                         let selected = self.mode == mode;
-                        let fill = if selected { TEXT } else { ELEVATED };
-                        let fg = if selected { BG } else { TEXT_DIM };
-                        let resp = Frame::new()
-                            .fill(fill)
-                            .stroke(Stroke::new(1.0, if selected { TEXT } else { LINE }))
-                            .corner_radius(CornerRadius::same(R))
-                            .inner_margin(Margin::symmetric(12, 8))
-                            .show(ui, |ui| {
-                                ui.set_min_size(Vec2::new(118.0, 42.0));
-                                ui.horizontal_centered(|ui| {
-                                    icons::mode_icon(ui, mode, fg);
-                                    ui.add_space(6.0);
-                                    ui.label(RichText::new(mode.label()).size(14.0).color(fg));
-                                });
-                            })
-                            .response
-                            .interact(Sense::click());
-                        if resp.clicked() {
+                        if icons::chip(
+                            ui,
+                            mode.label(),
+                            selected,
+                            |ui, c| icons::mode_icon(ui, mode, c),
+                            Vec2::new(72.0, 28.0),
+                        )
+                        .clicked()
+                        {
                             self.mode = mode;
                         }
-                        ui.add_space(6.0);
+                        ui.add_space(3.0);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let settings_resp = Frame::new()
-                            .fill(ELEVATED)
-                            .stroke(Stroke::new(1.0, LINE))
-                            .corner_radius(CornerRadius::same(R))
-                            .inner_margin(Margin::symmetric(12, 6))
-                            .show(ui, |ui| {
-                                ui.set_min_size(Vec2::new(96.0, 40.0));
-                                ui.horizontal_centered(|ui| {
-                                    icons::gear(ui, TEXT_DIM, 16.0);
-                                    ui.add_space(6.0);
-                                    ui.label(RichText::new("设置").size(14.0).color(TEXT_DIM));
-                                });
-                            })
-                            .response
-                            .interact(Sense::click());
-                        if settings_resp.clicked() {
+                        if icons::chip(
+                            ui,
+                            "设置",
+                            false,
+                            |ui, c| icons::gear(ui, c, 13.0),
+                            Vec2::new(64.0, 28.0),
+                        )
+                        .clicked()
+                        {
                             self.settings_open = true;
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
                         if icons::github_button(ui).clicked() {
                             if let Err(e) = open::that(GITHUB_URL) {
                                 self.push_toast(1, "无法打开 GitHub", e.to_string(), 6.0);
@@ -1583,7 +1623,7 @@ impl eframe::App for WeportApp {
         }
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(40, 26)))
+            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(16, 12)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1812,7 +1852,7 @@ impl WeportApp {
             });
         });
 
-        ui.add_space(18.0);
+        ui.add_space(10.0);
 
         // Accounts — name + wxid on one line
         WeportApp::panel_frame().show(ui, |ui| {
@@ -1897,7 +1937,7 @@ impl WeportApp {
             }
         });
 
-        ui.add_space(18.0);
+        ui.add_space(10.0);
 
         // Key — compact steps
         WeportApp::panel_frame().show(ui, |ui| {
@@ -2003,9 +2043,7 @@ impl WeportApp {
     }
 
     fn ui_export(&mut self, ui: &mut egui::Ui) {
-        let min_height = ui.available_height().max(460.0);
         WeportApp::panel_frame().show(ui, |ui| {
-            ui.set_min_height(min_height - 48.0);
             self.section_title(ui, "导出", "全部联系人 + 群聊");
 
             ui.horizontal(|ui| {
@@ -2183,24 +2221,22 @@ impl WeportApp {
             TEXT_DIM
         };
         let install = self.anti_install.clone();
-        let min_height = ui.available_height().max(460.0);
 
         WeportApp::panel_frame().show(ui, |ui| {
-            ui.set_min_height(min_height - 48.0);
             self.section_title(ui, "安装防撤回", "微信 4");
             ui.label(
                 RichText::new("让撤回的消息继续保留在微信聊天窗口中")
-                    .size(21.0)
+                    .size(15.0)
                     .strong()
                     .color(TEXT),
             );
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             ui.label(
                 RichText::new("补丁只修改微信 4 的 Weixin.dll，不会读取或上传聊天内容。")
-                    .size(15.0)
+                    .size(12.5)
                     .color(TEXT_DIM),
             );
-            ui.add_space(22.0);
+            ui.add_space(10.0);
 
             Frame::new()
                 .fill(ELEVATED)
@@ -2209,15 +2245,15 @@ impl WeportApp {
                 .inner_margin(Margin::symmetric(16, 14))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("当前状态").size(15.0).color(TEXT_DIM));
-                        ui.label(RichText::new(&status).size(16.0).strong().color(status_color));
+                        ui.label(RichText::new("当前状态").size(13.0).color(TEXT_DIM));
+                        ui.label(RichText::new(&status).size(13.5).strong().color(status_color));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .add_enabled(
                                     !self.anti_busy,
-                                    egui::Button::new("刷新状态")
+                                    egui::Button::new("刷新")
                                         .corner_radius(R)
-                                        .min_size(Vec2::new(100.0, 34.0)),
+                                        .min_size(Vec2::new(64.0, 28.0)),
                                 )
                                 .clicked()
                             {
@@ -2226,30 +2262,30 @@ impl WeportApp {
                         });
                     });
                     if let Some(path) = &install {
-                        ui.add_space(10.0);
+                        ui.add_space(6.0);
                         ui.label(
                             RichText::new(format!("微信安装目录：{path}"))
-                                .size(13.5)
+                                .size(11.5)
                                 .color(TEXT_FAINT)
                                 .family(FontFamily::Monospace),
                         );
                     }
                 });
 
-            ui.add_space(24.0);
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
                         !self.anti_busy && install.is_some(),
                         egui::Button::new(
                             RichText::new(if self.anti_busy { "处理中…" } else { "安装防撤回补丁" })
-                                .size(16.0)
+                                .size(13.5)
                                 .color(BG),
                         )
                         .fill(TEXT)
-                        .stroke(Stroke::new(1.0, TEXT))
+                        .stroke(Stroke::new(1.0_f32, TEXT))
                         .corner_radius(R)
-                        .min_size(Vec2::new(190.0, 48.0)),
+                        .min_size(Vec2::new(150.0, 34.0)),
                     )
                     .clicked()
                 {
@@ -2260,9 +2296,9 @@ impl WeportApp {
                 if ui
                     .add_enabled(
                         !self.anti_busy && install.is_some(),
-                        egui::Button::new(RichText::new("还原补丁").size(15.0))
+                        egui::Button::new(RichText::new("还原补丁").size(13.0))
                             .corner_radius(R)
-                            .min_size(Vec2::new(140.0, 48.0)),
+                            .min_size(Vec2::new(100.0, 34.0)),
                     )
                     .clicked()
                 {
@@ -2272,23 +2308,23 @@ impl WeportApp {
                 }
             });
 
-            ui.add_space(22.0);
+            ui.add_space(12.0);
             Frame::new()
                 .fill(PANEL)
-                .stroke(Stroke::new(1.0, LINE))
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::symmetric(16, 14))
+                .stroke(Stroke::new(1.0_f32, LINE))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(12, 10))
                 .show(ui, |ui| {
-                    ui.label(RichText::new("使用前请注意").size(15.0).strong().color(TEXT));
-                    ui.add_space(8.0);
+                    ui.label(RichText::new("使用前请注意").size(13.0).strong().color(TEXT));
+                    ui.add_space(4.0);
                     for line in [
                         "安装和还原需要管理员权限（UAC）。",
                         "操作前请完全退出微信；微信运行时补丁不会执行。",
                         "微信更新后可能需要重新安装补丁。",
                     ] {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("•").size(16.0).color(TEXT_DIM));
-                            ui.label(RichText::new(line).size(14.0).color(TEXT_DIM));
+                            ui.label(RichText::new("•").size(13.0).color(TEXT_DIM));
+                            ui.label(RichText::new(line).size(12.5).color(TEXT_DIM));
                         });
                     }
                 });
@@ -2301,23 +2337,21 @@ impl WeportApp {
         let key_ready = self.decrypt_key.trim().len() == 64;
         let all_ready = db_ready && account_ready && key_ready;
         let mut toggled = false;
-        let min_height = ui.available_height().max(460.0);
 
         WeportApp::panel_frame().show(ui, |ui| {
-            ui.set_min_height(min_height - 48.0);
             self.section_title(ui, "消息提醒", "屏幕右上角");
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
                         RichText::new("及时看到新消息与撤回提醒")
-                            .size(21.0)
+                            .size(15.0)
                             .strong()
                             .color(TEXT),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(3.0);
                     ui.label(
                         RichText::new("提醒不会抢焦点；消息内容只在本机解密和显示。")
-                            .size(15.0)
+                            .size(12.5)
                             .color(TEXT_DIM),
                     );
                 });
@@ -2328,15 +2362,15 @@ impl WeportApp {
                 });
             });
 
-            ui.add_space(24.0);
+            ui.add_space(12.0);
             Frame::new()
                 .fill(ELEVATED)
-                .stroke(Stroke::new(1.0, LINE))
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::symmetric(16, 14))
+                .stroke(Stroke::new(1.0_f32, LINE))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(12, 10))
                 .show(ui, |ui| {
-                    ui.label(RichText::new("提醒条件").size(15.0).strong().color(TEXT));
-                    ui.add_space(10.0);
+                    ui.label(RichText::new("提醒条件").size(13.0).strong().color(TEXT));
+                    ui.add_space(6.0);
                     for (label, ok, detail) in [
                         ("数据目录", db_ready, if db_ready { "已连接" } else { "未选择" }),
                         ("微信账号", account_ready, if account_ready { "已选择" } else { "未选择" }),
@@ -2344,26 +2378,26 @@ impl WeportApp {
                     ] {
                         ui.horizontal(|ui| {
                             if ok {
-                                icons::check(ui, TEXT, 16.0);
+                                icons::check(ui, TEXT, 14.0);
                             } else {
                                 ui.label(
                                     RichText::new("—")
-                                        .size(16.0)
+                                        .size(14.0)
                                         .strong()
                                         .color(TEXT_FAINT),
                                 );
                             }
                             ui.add_space(4.0);
-                            ui.label(RichText::new(label).size(15.0).color(TEXT_DIM));
+                            ui.label(RichText::new(label).size(13.0).color(TEXT_DIM));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(detail).size(14.0).color(if ok { TEXT } else { TEXT_FAINT }));
+                                ui.label(RichText::new(detail).size(12.5).color(if ok { TEXT } else { TEXT_FAINT }));
                             });
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(2.0);
                     }
                 });
 
-            ui.add_space(24.0);
+            ui.add_space(12.0);
             let state = if !self.notifications_enabled {
                 "消息提醒已关闭"
             } else if all_ready {
@@ -2378,11 +2412,11 @@ impl WeportApp {
             } else {
                 TEXT_DIM
             };
-            ui.label(RichText::new(state).size(16.0).strong().color(state_color));
-            ui.add_space(8.0);
+            ui.label(RichText::new(state).size(13.5).strong().color(state_color));
+            ui.add_space(4.0);
             ui.label(
                 RichText::new("撤回提醒即使没有安装防撤回补丁也可以检测；安装补丁后，撤回的原消息也会继续留在微信里。")
-                    .size(14.0)
+                    .size(12.0)
                     .color(TEXT_FAINT),
             );
         });

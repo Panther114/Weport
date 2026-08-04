@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.2"
+$version = "0.6.3"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -127,7 +127,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.2: fix close hang, tray-only auto-start by default, white WeChat-style app icon everywhere, layout margins + real toolbar icons, single-instance + quit reliability."
+  notes = "v0.6.3: compact UI + thin navbar, reliable close-to-tray, fixed tray/GitHub icons, hover chips, content fits viewport."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

@@ -189,6 +189,68 @@ function createIco(sizes) {
   return Buffer.concat([header, ...entries, ...blobs])
 }
 
+/** Black rounded plate + white WeChat mark — always visible in the system tray. */
+function createTrayPng(size) {
+  const width = size
+  const height = size
+  const raw = Buffer.alloc((width * 4 + 1) * height)
+  const ss = 2
+  const pad = 0.04
+  const radius = 0.18
+
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 4 + 1)
+    raw[row] = 0
+    for (let x = 0; x < width; x++) {
+      let plate = 0
+      let mark = 0
+      for (let sy = 0; sy < ss; sy++) {
+        for (let sx = 0; sx < ss; sx++) {
+          const nx = (x + (sx + 0.5) / ss) / width
+          const ny = (y + (sy + 0.5) / ss) / height
+          if (inRoundRect(nx, ny, 0.5, 0.5, 0.5 - pad, 0.5 - pad, radius)) {
+            plate += 1
+            mark += sampleMark(nx, ny)
+          }
+        }
+      }
+      const p = clamp01(plate / (ss * ss))
+      const m = clamp01(mark / (ss * ss))
+      // White mark on black plate; transparent outside plate.
+      const i = row + 1 + x * 4
+      if (p <= 0) {
+        raw[i] = 0
+        raw[i + 1] = 0
+        raw[i + 2] = 0
+        raw[i + 3] = 0
+      } else {
+        const w = Math.round(255 * m)
+        raw[i] = w
+        raw[i + 1] = w
+        raw[i + 2] = w
+        raw[i + 3] = Math.round(255 * p)
+      }
+    }
+  }
+
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8
+  ihdr[9] = 6
+  ihdr[10] = 0
+  ihdr[11] = 0
+  ihdr[12] = 0
+  const compressed = zlib.deflateSync(raw, { level: 9 })
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+  return Buffer.concat([
+    signature,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', compressed),
+    chunk('IEND', Buffer.alloc(0))
+  ])
+}
+
 const png16 = createPng(16)
 const png32 = createPng(32)
 const png48 = createPng(48)
@@ -196,6 +258,8 @@ const png64 = createPng(64)
 const png128 = createPng(128)
 const png256 = createPng(256)
 const png512 = createPng(512)
+const tray16 = createTrayPng(16)
+const tray32 = createTrayPng(32)
 const ico = createIco([16, 32, 48, 64, 128, 256])
 
 fs.writeFileSync(path.join(iconsDir, '32x32.png'), png32)
@@ -204,6 +268,8 @@ fs.writeFileSync(path.join(iconsDir, '128x128@2x.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.png'), png256)
 fs.writeFileSync(path.join(iconsDir, 'icon.ico'), ico)
 fs.writeFileSync(path.join(assetsDir, 'icon.png'), png512)
+fs.writeFileSync(path.join(iconsDir, 'tray-16.png'), tray16)
+fs.writeFileSync(path.join(iconsDir, 'tray-32.png'), tray32)
 
 function createIcns() {
   const entries = [
@@ -232,4 +298,5 @@ fs.writeFileSync(path.join(iconsDir, '16x16.png'), png16)
 fs.writeFileSync(path.join(iconsDir, '48x48.png'), png48)
 
 console.log('White WeChat-style icons written to', iconsDir)
+console.log('Tray plate icons written (tray-16/32.png)')
 console.log('Universal window icon written to', assetsDir)

@@ -5,8 +5,8 @@
 //! menu) are surfaced through a shared `TrayEvent` channel; the GUI polls it
 //! every frame via [`poll`]. A right-click menu offers 显示主窗口 / 退出.
 //!
-//! Shutdown is non-blocking on the UI thread: Drop posts a quit message and
-//! joins with a short timeout so a stuck tray thread cannot freeze close.
+//! Icon loading builds an HICON from RGBA PNG pixels (GDI CreateIconIndirect)
+//! so PNG-compressed .ico entries cannot fail silently and kill tray support.
 #![cfg(windows)]
 
 use egui::Context;
@@ -102,7 +102,6 @@ unsafe extern "system" fn wnd_proc(
         return 0;
     }
 
-    // Custom quit from the UI thread (PostThreadMessage / PostMessage).
     if msg == WM_CLOSE {
         DestroyWindow(hwnd);
         return 0;
@@ -138,7 +137,6 @@ fn show_menu(hwnd: *mut core::ffi::c_void, tx: &Sender<TrayEvent>, ctx: &Context
             std::ptr::null(),
         );
         DestroyMenu(menu);
-        // Required so the menu dismisses correctly on Windows.
         PostMessageW(hwnd, WM_NULL, 0, 0);
 
         if cmd as usize == ID_SHOW {
@@ -159,69 +157,173 @@ fn to_wide(s: &str) -> Vec<u16> {
         .collect()
 }
 
-fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
-    use windows_sys::Win32::UI::WindowsAndMessaging::CreateIconFromResourceEx;
-    // Embed the same white WeChat-style icon.ico used for the exe resource.
-    const ICO: &[u8] = include_bytes!("../icons/icon.ico");
+/// Build an HICON from raw RGBA (top-down). Uses GDI so tray never depends on
+/// CreateIconFromResourceEx PNG support.
+fn hicon_from_rgba(width: i32, height: i32, rgba: &[u8]) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    if width <= 0 || height <= 0 {
+        return std::ptr::null_mut();
+    }
+    let expected = (width as usize) * (height as usize) * 4;
+    if rgba.len() < expected {
+        return std::ptr::null_mut();
+    }
+
     unsafe {
-        if ICO.len() < 6 {
+        // BGRA bottom-up DIB for the color bitmap.
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hdc = GetDC(std::ptr::null_mut());
+        let color = CreateDIBSection(
+            hdc,
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        ReleaseDC(std::ptr::null_mut(), hdc);
+        if color.is_null() || bits.is_null() {
             return std::ptr::null_mut();
         }
-        let count = u16::from_le_bytes([ICO[4], ICO[5]]) as usize;
-        if ICO.len() < 6 + count * 16 {
+
+        // RGBA → BGRA, keep alpha in high byte.
+        let dst = std::slice::from_raw_parts_mut(bits as *mut u8, expected);
+        for i in 0..(width as usize * height as usize) {
+            let r = rgba[i * 4];
+            let g = rgba[i * 4 + 1];
+            let b = rgba[i * 4 + 2];
+            let a = rgba[i * 4 + 3];
+            dst[i * 4] = b;
+            dst[i * 4 + 1] = g;
+            dst[i * 4 + 2] = r;
+            dst[i * 4 + 3] = a;
+        }
+
+        // 1-bit AND mask (all zero = use alpha channel on modern Windows).
+        let mask_stride = ((width + 31) / 32) * 4;
+        let mask_bytes = (mask_stride as usize) * (height as usize);
+        let mask_buf = vec![0u8; mask_bytes];
+        let mask = CreateBitmap(width, height, 1, 1, mask_buf.as_ptr() as *const _);
+        if mask.is_null() {
+            DeleteObject(color);
             return std::ptr::null_mut();
         }
-        let mut best: Option<(isize, usize, usize)> = None; // (score, offset, size)
-        for i in 0..count {
-            let e = 6 + i * 16;
-            if e + 16 > ICO.len() {
-                break;
-            }
-            let w = ICO[e] as usize; // 0 means 256
-            let h = ICO[e + 1] as usize;
-            let size = u32::from_le_bytes([ICO[e + 8], ICO[e + 9], ICO[e + 10], ICO[e + 11]]) as usize;
-            let offset =
-                u32::from_le_bytes([ICO[e + 12], ICO[e + 13], ICO[e + 14], ICO[e + 15]]) as usize;
-            if offset + size > ICO.len() {
-                continue;
-            }
-            let score = match (w, h) {
-                (32, 32) => 0,
-                (16, 16) => 1,
-                (48, 48) => 2,
-                (0, 0) => 3,
-                _ => 4,
-            };
-            let better = match best {
-                Some((bs, _, _)) => score < bs,
-                None => true,
-            };
-            if better {
-                best = Some((score, offset, size));
+
+        let mut ii: ICONINFO = std::mem::zeroed();
+        ii.fIcon = 1;
+        ii.hbmMask = mask;
+        ii.hbmColor = color;
+        let icon = CreateIconIndirect(&ii);
+        DeleteObject(mask);
+        DeleteObject(color);
+        icon
+    }
+}
+
+/// Composite white WeChat mark onto a solid black rounded plate so the tray
+/// icon is always visible on light and dark taskbars.
+fn compose_tray_rgba(size: u32) -> Option<Vec<u8>> {
+    // Prefer dedicated tray asset; fall back to main mark PNG.
+    const TRAY_PNG: &[u8] = include_bytes!("../icons/tray-32.png");
+    const MARK_PNG: &[u8] = include_bytes!("../icons/32x32.png");
+
+    let mark = image::load_from_memory(if !TRAY_PNG.is_empty() { TRAY_PNG } else { MARK_PNG })
+        .ok()?
+        .to_rgba8();
+
+    // If tray-32.png already has an opaque plate, use as-is (resized).
+    let mark = image::imageops::resize(
+        &mark,
+        size,
+        size,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Detect if the source already has a filled background (avg alpha high).
+    let mut opaque = 0u32;
+    for p in mark.pixels() {
+        if p.0[3] > 200 {
+            opaque += 1;
+        }
+    }
+    let coverage = opaque as f32 / (size * size) as f32;
+    if coverage > 0.55 {
+        return Some(mark.into_raw());
+    }
+
+    // Otherwise paint a black rounded square and composite the white mark.
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    let s = size as f32;
+    let pad = s * 0.06;
+    let radius = s * 0.18;
+    for y in 0..size {
+        for x in 0..size {
+            let i = ((y * size + x) * 4) as usize;
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            // Rounded rect distance
+            let cx = (s * 0.5).max(1.0);
+            let cy = cx;
+            let hw = s * 0.5 - pad;
+            let hh = hw;
+            let dx = (px - cx).abs() - (hw - radius);
+            let dy = (py - cy).abs() - (hh - radius);
+            let odx = dx.max(0.0);
+            let ody = dy.max(0.0);
+            let outside = (odx * odx + ody * ody).sqrt() + dx.min(0.0).max(dy.min(0.0)) - radius;
+            if outside <= 0.5 {
+                out[i] = 0;
+                out[i + 1] = 0;
+                out[i + 2] = 0;
+                out[i + 3] = 255;
+                // Composite mark
+                let m = mark.get_pixel(x, y).0;
+                let a = m[3] as f32 / 255.0;
+                out[i] = (m[0] as f32 * a) as u8;
+                out[i + 1] = (m[1] as f32 * a) as u8;
+                out[i + 2] = (m[2] as f32 * a) as u8;
+                out[i + 3] = 255;
             }
         }
-        if let Some((_, offset, size)) = best {
-            let png = &ICO[offset..offset + size];
-            let icon = CreateIconFromResourceEx(
-                png.as_ptr(),
-                png.len() as u32,
-                1,
-                0x0003_0000,
-                0,
-                0,
-                0,
-            );
+    }
+    Some(out)
+}
+
+fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    // 16 and 32 are common tray sizes; 32 is preferred on modern DPI.
+    for size in [32u32, 16] {
+        if let Some(rgba) = compose_tray_rgba(size) {
+            let icon = hicon_from_rgba(size as i32, size as i32, &rgba);
             if !icon.is_null() {
                 return icon;
             }
+        }
+    }
+    // Last resort: decode the main 32x32 mark as-is.
+    if let Ok(img) = image::load_from_memory(include_bytes!("../icons/32x32.png")) {
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let icon = hicon_from_rgba(w as i32, h as i32, &rgba);
+        if !icon.is_null() {
+            return icon;
         }
     }
     std::ptr::null_mut()
 }
 
 impl Tray {
-    /// Spawn the tray thread. Returns `Ok(None)` if the tray cannot be created
-    /// (e.g. Windows Explorer not running).
+    /// Spawn the tray thread. Returns `Ok(None)` if Shell_NotifyIcon fails
+    /// (e.g. Explorer not running). Returns `Err` only for hard failures.
     pub fn spawn(ctx: Context) -> Result<Option<Self>, String> {
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::Shell::*;
@@ -230,7 +332,6 @@ impl Tray {
         let (tx, rx) = mpsc::channel::<TrayEvent>();
         let thread_tx = tx.clone();
 
-        // Unique class per process so restarts after a crash still work.
         let class_name = format!("WeportTrayClass-{}", std::process::id());
         let class = to_wide(&class_name);
         let class_ptr: *const u16 = class.as_ptr();
@@ -248,7 +349,6 @@ impl Tray {
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: class_ptr,
             };
-            // Ignore "already registered" (class still valid for this process).
             let _ = RegisterClassW(&wc);
 
             let hwnd = CreateWindowExW(
@@ -294,21 +394,26 @@ impl Tray {
             nid.szTip[copy_len] = 0;
 
             if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
-                let _ = DestroyWindow(hwnd);
-                let _ = Box::from_raw(state);
-                return Ok(None);
+                // Retry once after a short delay (Explorer may not be ready).
+                std::thread::sleep(Duration::from_millis(250));
+                if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
+                    let _ = DestroyWindow(hwnd);
+                    let _ = Box::from_raw(state);
+                    DestroyIcon(icon);
+                    return Ok(None);
+                }
             }
-            // Prefer modern tray behavior (Win7+).
-            let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
 
             let hwnd_send = hwnd as usize;
             let state_send = state as usize;
+            let icon_send = icon as usize;
             let (tid_tx, tid_rx) = mpsc::channel::<u32>();
             let join = std::thread::Builder::new()
                 .name("weport-tray".into())
                 .spawn(move || {
                     let hwnd = hwnd_send as *mut core::ffi::c_void;
                     let state = state_send as *mut TrayThreadState;
+                    let icon = icon_send as windows_sys::Win32::UI::WindowsAndMessaging::HICON;
                     let tid = windows_sys::Win32::System::Threading::GetCurrentThreadId();
                     let _ = tid_tx.send(tid);
                     loop {
@@ -320,23 +425,22 @@ impl Tray {
                         TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
-                    // Cleanup: remove icon, destroy window, free thread state.
                     let mut nid2: NOTIFYICONDATAW = std::mem::zeroed();
                     nid2.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
                     nid2.hWnd = hwnd;
                     nid2.uID = TRAY_ID;
                     Shell_NotifyIconW(NIM_DELETE, &nid2);
-                    // Window may already be destroyed via WM_CLOSE.
                     let _ = DestroyWindow(hwnd);
+                    if !icon.is_null() {
+                        DestroyIcon(icon);
+                    }
                     if !state.is_null() {
                         let _ = Box::from_raw(state);
                     }
                 })
                 .map_err(|e| format!("启动托盘线程失败: {e}"))?;
 
-            let thread_id = tid_rx
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap_or(0);
+            let thread_id = tid_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(0);
 
             Ok(Some(Self {
                 rx,
@@ -347,15 +451,15 @@ impl Tray {
         }
     }
 
-    /// Non-blocking poll for tray events (call every frame).
     pub fn poll(&mut self) -> Option<TrayEvent> {
         self.rx.try_recv().ok()
     }
 
-    /// Ask the tray thread to exit without blocking the caller for long.
     pub fn request_shutdown(&mut self) {
         use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NOTIFYICONDATAW, NIM_DELETE};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, PostThreadMessageW, WM_CLOSE, WM_QUIT};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            PostMessageW, PostThreadMessageW, WM_CLOSE, WM_QUIT,
+        };
         unsafe {
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -376,7 +480,6 @@ impl Drop for Tray {
     fn drop(&mut self) {
         self.request_shutdown();
         if let Some(join) = self.join.take() {
-            // Never block the UI / process exit for more than a moment.
             let deadline = std::time::Instant::now() + Duration::from_millis(400);
             loop {
                 if join.is_finished() {
@@ -384,7 +487,6 @@ impl Drop for Tray {
                     break;
                 }
                 if std::time::Instant::now() >= deadline {
-                    // Detach: OS cleans the thread on process exit.
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(20));
