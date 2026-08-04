@@ -232,93 +232,23 @@ fn hicon_from_rgba(width: i32, height: i32, rgba: &[u8]) -> windows_sys::Win32::
     }
 }
 
-/// Composite white WeChat mark onto a solid black rounded plate so the tray
-/// icon is always visible on light and dark taskbars.
-fn compose_tray_rgba(size: u32) -> Option<Vec<u8>> {
-    // Prefer dedicated tray asset; fall back to main mark PNG.
-    const TRAY_PNG: &[u8] = include_bytes!("../icons/tray-32.png");
-    const MARK_PNG: &[u8] = include_bytes!("../icons/32x32.png");
-
-    let mark = image::load_from_memory(if !TRAY_PNG.is_empty() { TRAY_PNG } else { MARK_PNG })
-        .ok()?
-        .to_rgba8();
-
-    // If tray-32.png already has an opaque plate, use as-is (resized).
-    let mark = image::imageops::resize(
-        &mark,
-        size,
-        size,
-        image::imageops::FilterType::Lanczos3,
-    );
-
-    // Detect if the source already has a filled background (avg alpha high).
-    let mut opaque = 0u32;
-    for p in mark.pixels() {
-        if p.0[3] > 200 {
-            opaque += 1;
-        }
-    }
-    let coverage = opaque as f32 / (size * size) as f32;
-    if coverage > 0.55 {
-        return Some(mark.into_raw());
-    }
-
-    // Otherwise paint a black rounded square and composite the white mark.
-    let mut out = vec![0u8; (size * size * 4) as usize];
-    let s = size as f32;
-    let pad = s * 0.06;
-    let radius = s * 0.18;
-    for y in 0..size {
-        for x in 0..size {
-            let i = ((y * size + x) * 4) as usize;
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            // Rounded rect distance
-            let cx = (s * 0.5).max(1.0);
-            let cy = cx;
-            let hw = s * 0.5 - pad;
-            let hh = hw;
-            let dx = (px - cx).abs() - (hw - radius);
-            let dy = (py - cy).abs() - (hh - radius);
-            let odx = dx.max(0.0);
-            let ody = dy.max(0.0);
-            let outside = (odx * odx + ody * ody).sqrt() + dx.min(0.0).max(dy.min(0.0)) - radius;
-            if outside <= 0.5 {
-                out[i] = 0;
-                out[i + 1] = 0;
-                out[i + 2] = 0;
-                out[i + 3] = 255;
-                // Composite mark
-                let m = mark.get_pixel(x, y).0;
-                let a = m[3] as f32 / 255.0;
-                out[i] = (m[0] as f32 * a) as u8;
-                out[i + 1] = (m[1] as f32 * a) as u8;
-                out[i + 2] = (m[2] as f32 * a) as u8;
-                out[i + 3] = 255;
-            }
-        }
-    }
-    Some(out)
-}
-
+/// Tray icon from the sole branding source (build.rs → OUT_DIR/tray-32.png).
 fn load_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
-    // 16 and 32 are common tray sizes; 32 is preferred on modern DPI.
-    for size in [32u32, 16] {
-        if let Some(rgba) = compose_tray_rgba(size) {
-            let icon = hicon_from_rgba(size as i32, size as i32, &rgba);
-            if !icon.is_null() {
-                return icon;
-            }
-        }
-    }
-    // Last resort: decode the main 32x32 mark as-is.
-    if let Ok(img) = image::load_from_memory(include_bytes!("../icons/32x32.png")) {
-        let rgba = img.to_rgba8();
-        let (w, h) = rgba.dimensions();
-        let icon = hicon_from_rgba(w as i32, h as i32, &rgba);
-        if !icon.is_null() {
-            return icon;
-        }
+    const TRAY_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray-32.png"));
+    let Ok(img) = image::load_from_memory(TRAY_PNG) else {
+        return std::ptr::null_mut();
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    // Prefer 32×32; resize if build output ever differs.
+    let rgba = if w != 32 || h != 32 {
+        image::imageops::resize(&rgba, 32, 32, image::imageops::FilterType::Lanczos3)
+    } else {
+        rgba
+    };
+    let icon = hicon_from_rgba(32, 32, &rgba);
+    if !icon.is_null() {
+        return icon;
     }
     std::ptr::null_mut()
 }

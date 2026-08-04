@@ -1,6 +1,6 @@
 [package]
 name = "weport"
-version = "0.6.5"
+version = "0.6.6"
 description = "Weport — lightweight WeChat chat history exporter (native egui)"
 authors = ["Panther114"]
 edition = "2021"
@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [build-dependencies]
 winresource = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -39,7 +40,7 @@ once_cell = "1"
 eframe = { version = "0.31", default-features = true, features = ["default_fonts", "glow"] }
 egui = "0.31"
 rfd = "0.15"
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

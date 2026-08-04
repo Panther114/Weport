@@ -6,7 +6,7 @@ $release = Join-Path $srcTauri "target\release"
 $exe = Join-Path $release "weport.exe"
 $stage = Join-Path $release "package"
 $bundle = Join-Path $release "bundle\nsis"
-$version = "0.6.5"
+$version = "0.6.6"
 
 if (-not (Test-Path $exe)) {
   throw "Missing weport.exe - build release first"
@@ -51,9 +51,12 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Section "Install"
+  ; Clean binary replace only. NEVER touch %APPDATA%\Weport or %LOCALAPPDATA%\Weport
+  ; user settings (decrypt keys, xwechat_files path, account keys live there).
   SetOutPath "`$INSTDIR"
   nsExec::Exec "taskkill /F /IM weport.exe"
   Sleep 500
+  SetOverwrite on
   File "weport.exe"
   SetOutPath "`$INSTDIR\resources"
   File /r "resources\*.*"
@@ -61,17 +64,17 @@ Section "Install"
   WriteRegStr HKCU "Software\Weport" "InstallDir" "`$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayName" "Weport"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayVersion" "$version"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayIcon" "`$INSTDIR\weport.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "DisplayIcon" "`$INSTDIR\weport.exe,0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "UninstallString" "`$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Weport" "QuietUninstallString" "`$INSTDIR\Uninstall.exe /S"
   CreateDirectory "`$SMPROGRAMS\Weport"
   CreateShortCut "`$SMPROGRAMS\Weport\Weport.lnk" "`$INSTDIR\weport.exe"
   CreateShortCut "`$DESKTOP\Weport.lnk" "`$INSTDIR\weport.exe"
-  ; Always register login auto-start (tray-only by default in-app).
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Weport" '"`$INSTDIR\weport.exe"'
 SectionEnd
 
 Section "Uninstall"
+  ; Remove install files only — leave user settings/keys intact.
   nsExec::Exec "taskkill /F /IM weport.exe"
   Delete "`$INSTDIR\weport.exe"
   Delete "`$INSTDIR\Uninstall.exe"
@@ -127,7 +130,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v0.6.5: fix window not opening / tray restore — show main window on launch, native ShowWindow+focus on tray click."
+  notes = "v0.6.6: branding icon from assets/branding/weport-icon.jpg only; stronger auto-update that preserves keys and db path."
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

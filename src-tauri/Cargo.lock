@@ -1795,6 +1795,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -4216,7 +4218,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "weport"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "aes",
  "cfb-mode",

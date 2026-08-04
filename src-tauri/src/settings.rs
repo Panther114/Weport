@@ -47,7 +47,9 @@ fn default_true() -> bool {
     true
 }
 
-fn settings_dir() -> Result<PathBuf, String> {
+/// User data directory (settings, keys). Lives under the OS app-data folder,
+/// never inside the install directory — so NSIS updates cannot wipe it.
+pub fn settings_dir() -> Result<PathBuf, String> {
     // Test hook: WEPORT_SETTINGS_DIR redirects the config folder.
     if let Ok(override_dir) = std::env::var("WEPORT_SETTINGS_DIR") {
         let dir = PathBuf::from(override_dir);
@@ -62,8 +64,52 @@ fn settings_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn settings_path() -> Result<PathBuf, String> {
+pub fn settings_path() -> Result<PathBuf, String> {
     Ok(settings_dir()?.join("settings.json"))
+}
+
+/// Snapshot settings.json (+ .bak) to a temp folder before an update install.
+/// Returns the snapshot directory.
+pub fn backup_settings_for_update() -> Result<PathBuf, String> {
+    let src_dir = settings_dir()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let snap = std::env::temp_dir().join(format!("weport-settings-backup-{stamp}"));
+    fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
+    for name in ["settings.json", "settings.json.bak"] {
+        let src = src_dir.join(name);
+        if src.is_file() {
+            fs::copy(&src, snap.join(name)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(snap)
+}
+
+/// If live settings vanished after an install, restore from a pre-update snapshot.
+/// Never overwrites a non-empty live settings file (keys stay put).
+pub fn restore_settings_if_missing(snapshot_dir: &Path) -> Result<bool, String> {
+    let live = settings_path()?;
+    let live_ok = parse_file(&live)
+        .map(|s| !s.decrypt_key.is_empty() || !s.db_path.is_empty() || !s.account_keys.is_empty())
+        .unwrap_or(false);
+    if live_ok {
+        return Ok(false);
+    }
+    let snap = snapshot_dir.join("settings.json");
+    if !snap.is_file() {
+        return Ok(false);
+    }
+    // Prefer full live replacement only when missing/empty.
+    let dir = settings_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::copy(&snap, &live).map_err(|e| e.to_string())?;
+    let bak = snapshot_dir.join("settings.json.bak");
+    if bak.is_file() {
+        let _ = fs::copy(&bak, dir.join("settings.json.bak"));
+    }
+    Ok(true)
 }
 
 fn parse_file(path: &Path) -> Option<AppSettings> {

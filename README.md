@@ -75,7 +75,7 @@ cargo run --manifest-path src-tauri/Cargo.toml -- detect
 ### Release build
 
 ```bash
-npm run icons                     # regenerate the white icon set
+# Icon sole source: assets/branding/weport-icon.jpg (build.rs expands all sizes)
 cargo build --release --manifest-path src-tauri/Cargo.toml
 # ensure src-tauri/resources/native/win32/x64 has WCDB + wx_key DLLs
 powershell -File scripts/package-release.ps1   # NSIS installer + signed latest.json
@@ -90,8 +90,8 @@ Artifacts: `src-tauri/target/release/bundle/nsis/` (`Weport_<version>_x64-setup.
 | `src-tauri/src/gui.rs` | Native egui GUI (main window, settings, toast viewport) |
 | `src-tauri/src/` | CLI + WCDB worker + export engine + anti-recall + notify watcher + tray |
 | `src-tauri/resources/` | WCDB + key DLLs + anti-recall patch data |
-| `scripts/generate-icons.mjs` | White icon generator (single source of truth) |
-| `assets/icons/icon.png` | App window icon (embedded) |
+| `assets/branding/weport-icon.jpg` | **Sole** app icon source (installer / tray / taskbar / exe) |
+| `src-tauri/build.rs` | Derives ico/png sizes from branding jpg at compile time |
 
 No Node/Electron/WebView2 runtime is shipped in the product binary.
 

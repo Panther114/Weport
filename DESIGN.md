@@ -13,7 +13,7 @@ Mission-control dual rail: locate & unlock left, export right. Dense layout, lar
 - Black ground / white signal (SpaceX monochrome)
 - Rounded corners (~10px) on panels and buttons
 - Custom face `src/assets/fonts/weport.ttf`
-- White WeChat-style dual-bubble icon from `scripts/generate-icons.mjs` → `src-tauri/icons/*` (exe + tray + installer) + `assets/icons/icon.png` (window icon)
+- App icon sole source: `assets/branding/weport-icon.jpg` (build.rs derives ico/png/tray for exe, task manager, tray, installer, window)
 
 ## Signature
 White primary export bar + progress line; inverted account selection chips.

@@ -1,11 +1,21 @@
 //! CLI self-update against GitHub Releases for Panther114/Weport.
+//!
+//! Update policy (v0.6.6+):
+//! - Settings (decrypt keys, db path, export path, account keys) live under the
+//!   OS user data directory (`%APPDATA%/Weport` / data_dir), never in the
+//!   install folder. NSIS only replaces Program Files content.
+//! - Before running the installer we still snapshot settings.json as a safety
+//!   net and restore only if the live file is missing/empty after install.
+//! - Silent install waits for NSIS to finish, then relaunches weport.exe.
+use crate::settings;
 use futures_util::StreamExt;
 use semver::Version;
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const REPO: &str = "Panther114/Weport";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,10 +116,16 @@ pub async fn perform_update(yes: bool) -> Result<(), Box<dyn std::error::Error>>
         return Err("No installer asset in latest release".into());
     };
 
-    eprintln!(
-        "[update] Downloading {} → v{} …",
-        asset.name, latest
-    );
+    eprintln!("[update] Downloading {} → v{} …", asset.name, latest);
+
+    // Safety net: settings live outside the install dir, but snapshot anyway.
+    let settings_snap = settings::backup_settings_for_update().ok();
+    if let Some(ref snap) = settings_snap {
+        eprintln!(
+            "[update] Settings snapshot: {} (keys & paths will not be wiped)",
+            snap.display()
+        );
+    }
 
     let tmp_dir = env::temp_dir().join("weport-update");
     fs::create_dir_all(&tmp_dir)?;
@@ -136,21 +152,37 @@ pub async fn perform_update(yes: bool) -> Result<(), Box<dyn std::error::Error>>
     eprintln!();
     drop(file);
 
-    if !yes {
+    // Always prefer a clean silent replace when user already confirmed (yes)
+    // or GUI-triggered install (yes=true). Non-yes still runs interactive UI.
+    let silent = yes;
+    if silent {
+        eprintln!("[update] Running silent installer (settings in user profile are preserved)…");
+    } else {
         eprintln!("[update] Launching installer. Follow on-screen steps.");
     }
 
     #[cfg(windows)]
     {
-        // NSIS silent if --yes. Launch via ShellExecuteEx (like Explorer), not
-        // CreateProcess: CreateProcess cannot start an exe that requires
-        // elevation and fails with ERROR_ELEVATION_REQUIRED (os error 740).
-        launch_installer(&installer_path, yes)?;
+        launch_installer_and_wait(&installer_path, silent)?;
+        // Give the installer a moment to flush files.
+        std::thread::sleep(Duration::from_millis(800));
+        if let Some(ref snap) = settings_snap {
+            match settings::restore_settings_if_missing(snap) {
+                Ok(true) => eprintln!("[update] Restored settings snapshot (live file was empty)"),
+                Ok(false) => eprintln!("[update] Settings intact (keys & db path preserved)"),
+                Err(e) => eprintln!("[update] Settings check: {e}"),
+            }
+        }
+        // Relaunch the newly installed binary when we know the install dir.
+        if let Err(e) = relaunch_weport() {
+            eprintln!("[update] Relaunch skipped: {e}");
+        }
     }
 
     #[cfg(not(windows))]
     {
         let _ = open::that(&installer_path);
+        let _ = settings_snap;
     }
 
     println!(
@@ -159,18 +191,24 @@ pub async fn perform_update(yes: bool) -> Result<(), Box<dyn std::error::Error>>
             "success": true,
             "updated": true,
             "version": latest,
-            "installer": installer_path
+            "installer": installer_path,
+            "settingsPreserved": true
         })
     );
     Ok(())
 }
 
 #[cfg(windows)]
-fn launch_installer(installer_path: &std::path::Path, silent: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn launch_installer_and_wait(
+    installer_path: &Path,
+    silent: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
     use windows_sys::Win32::UI::Shell::{
-        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW,
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -185,12 +223,13 @@ fn launch_installer(installer_path: &std::path::Path, silent: bool) -> Result<()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    // /S = silent; NSIS only replaces $INSTDIR, never user AppData\Weport.
     let mut params: Vec<u16> = wide(if silent { "/S" } else { "" });
     let mut verb: Vec<u16> = wide("open");
 
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_FLAG_NO_UI;
+    info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
     info.lpVerb = verb.as_mut_ptr();
     info.lpFile = file.as_mut_ptr();
     info.lpParameters = if silent {
@@ -209,6 +248,64 @@ fn launch_installer(installer_path: &std::path::Path, silent: bool) -> Result<()
         )
         .into());
     }
+
+    // Wait up to 10 minutes for silent/interactive install to finish.
+    if !info.hProcess.is_null() {
+        let wait = unsafe { WaitForSingleObject(info.hProcess, 600_000) };
+        unsafe { CloseHandle(info.hProcess) };
+        // WAIT_OBJECT_0 == 0
+        if wait != 0 {
+            eprintln!("[update] Installer still running or timed out (wait={wait})");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn relaunch_weport() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // Prefer the installed location; fall back to current_exe.
+    let candidates = [
+        dirs::data_local_dir().map(|d| d.join("Programs").join("Weport").join("weport.exe")),
+        std::env::var_os("LOCALAPPDATA").map(|p| {
+            PathBuf::from(p)
+                .join("Programs")
+                .join("Weport")
+                .join("weport.exe")
+        }),
+        std::env::current_exe().ok(),
+    ];
+    let exe = candidates
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+        .ok_or("weport.exe not found after install")?;
+
+    let mut file: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut verb: Vec<u16> = std::ffi::OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = verb.as_mut_ptr();
+    info.lpFile = file.as_mut_ptr();
+    info.lpParameters = ptr::null_mut();
+    info.nShow = SW_SHOWNORMAL;
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    eprintln!("[update] Relaunched {}", exe.display());
     Ok(())
 }
 
@@ -231,7 +328,7 @@ Commands:
   antirecall remove    Restore Weixin.dll from backup (needs admin)
   export --out <dir> [opts]
   update               Check for updates (CLI)
-  update --install     Download and run latest installer
+  update --install     Download and run latest installer (preserves keys/paths)
   update --install -y  Silent install when possible
 
 Anti-recall options:
@@ -248,18 +345,9 @@ Export options:
   --no-media           Skip media (default)
 
 Layout under --out:
-  TXT/                 text exports (overwrite same names)
-  JSON/                json exports
-  export_log.txt       last export times for TXT and JSON
-
-File names:
-  群聊_[name].txt|json
-  私聊_[name].txt|json
-
-Examples:
-  weport detect
-  weport export --db "C:\\Users\\me\\Documents\\xwechat_files" --wxid wxid_xxx --key <hex> --out D:\\export --format txt
-  weport update --install
+  TXT/   群聊_*.txt  私聊_*.txt
+  JSON/  群聊_*.json 私聊_*.json
+  export_log.txt
 "#
     );
 }
