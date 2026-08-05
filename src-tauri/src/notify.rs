@@ -34,6 +34,10 @@ pub struct NotifyEvent {
     pub content: String,
     #[allow(dead_code)] // unix seconds; used for ordering/dedup in future versions
     pub timestamp: i64,
+    /// Encoded local/remote avatar image for the sender, when available.
+    /// The GUI decodes this into an egui texture; no network work happens on
+    /// the render thread.
+    pub avatar_png: Option<Vec<u8>>,
 }
 
 /// Runtime configuration pushed to the watcher thread.
@@ -117,11 +121,7 @@ impl Drop for NotifyService {
     }
 }
 
-fn run_loop(
-    cfg_rx: Receiver<NotifyConfig>,
-    ev_tx: Sender<NotifyEvent>,
-    stop: Arc<AtomicBool>,
-) {
+fn run_loop(cfg_rx: Receiver<NotifyConfig>, ev_tx: Sender<NotifyEvent>, stop: Arc<AtomicBool>) {
     let mut cfg = NotifyConfig::default();
     let mut db_root: PathBuf = PathBuf::new();
     let mut account_dir: PathBuf = PathBuf::new();
@@ -236,8 +236,7 @@ fn db_fingerprint(root: &Path) -> Vec<(PathBuf, u64)> {
                 stack.push(p);
             } else if meta.is_file() {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.ends_with(".db") || name.ends_with(".db-wal") || name.ends_with(".db-shm")
-                {
+                if name.ends_with(".db") || name.ends_with(".db-wal") || name.ends_with(".db-shm") {
                     if let Ok(m) = meta.modified() {
                         if let Ok(d) = m.duration_since(SystemTime::UNIX_EPOCH) {
                             out.push((p, d.as_nanos() as u64));
@@ -282,8 +281,8 @@ fn sync_once(
 
     let mut events: Vec<NotifyEvent> = Vec::new();
     let mut next_baseline: HashMap<String, SessionBaseline> = HashMap::new();
-    // Sessions where unread grew (incoming messages only — self-sent messages
-    // advance lastTimestamp but never increase unreadCount).
+    // Sessions with activity. Direction is checked against the newest message
+    // below; unreadCount is only a wake-up hint and is not authoritative.
     let mut new_msg_candidates: Vec<Value> = Vec::new();
     // Sessions with any timestamp activity (for revoke scanning — revokes can
     // arrive without growing unread, e.g. the other side recalls a message).
@@ -335,21 +334,9 @@ fn sync_once(
             revoke_candidates.push(row.clone());
         }
 
-        // New-message detection (WeFlow GlobalSessionMonitor / messagePushService
-        // approach): require unread to STRICTLY increase. Sending a message
-        // advances lastTimestamp but leaves unreadCount unchanged, so this
-        // filters self-sent messages for both private and group chats.
-        if unread <= p.unread_count {
+        if unread <= p.unread_count && last_ts <= p.last_timestamp {
             continue;
         }
-
-        // Secondary filter: if lastMsgSender is populated and matches self,
-        // skip (covers group chats where sender info is reliable).
-        let sender = field_str(row, &["lastMsgSender", "last_msg_sender", "lastSender"]);
-        if !sender.is_empty() && sender_wxid_equal(&sender, &wxid) {
-            continue;
-        }
-
         new_msg_candidates.push(row.clone());
     }
 
@@ -357,9 +344,10 @@ fn sync_once(
     let mut candidates: Vec<Value> = new_msg_candidates.clone();
     for row in &revoke_candidates {
         let u = field_str(row, &["username", "userName", "sessionId", "user_name"]);
-        if !candidates.iter().any(|c| {
-            field_str(c, &["username", "userName", "sessionId", "user_name"]) == u
-        }) {
+        if !candidates
+            .iter()
+            .any(|c| field_str(c, &["username", "userName", "sessionId", "user_name"]) == u)
+        {
             candidates.push(row.clone());
         }
     }
@@ -382,14 +370,37 @@ fn sync_once(
         }
     }
 
-    // New-message toasts (only sessions where unread strictly increased).
+    // New-message toasts are based on the newest message's direction, never
+    // on session summary text or sender heuristics.
+    let mut message_seen: HashSet<(String, String)> = HashSet::new();
     for row in &new_msg_candidates {
         let username = field_str(row, &["username", "userName", "sessionId", "user_name"]);
-        let summary = field_str(row, &["summary", "lastMsg", "last_message"]);
-        if summary.is_empty() {
+        let Ok(msgs) = handle.messages(&username, 30, 0) else {
+            continue;
+        };
+        let Some(latest) = newest_message(&msgs) else {
+            continue;
+        };
+        if is_system_row(latest) || msg_direction(latest, &wxid) != Some(false) {
             continue;
         }
-        let content = summarize_content(&summary);
+        let message_key = field_str(
+            latest,
+            &["messageKey", "message_key", "localId", "local_id"],
+        );
+        let dedupe_key = if message_key.is_empty() {
+            format!(
+                "{}:{}",
+                username,
+                field_i64(latest, &["createTime", "create_time"], 0)
+            )
+        } else {
+            message_key
+        };
+        if !message_seen.insert((username.clone(), dedupe_key)) {
+            continue;
+        }
+        let content = summarize_content(&message_display(latest));
         if content.is_empty() {
             continue;
         }
@@ -400,7 +411,15 @@ fn sync_once(
             .filter(|s| !s.is_empty() && !s.starts_with("wxid_"))
             .unwrap_or_else(|| username.clone());
         let title = if username.ends_with(GROUP_SUFFIX) {
-            let sender = field_str(row, &["lastMsgSender", "last_msg_sender", "lastSender"]);
+            let sender = field_str(
+                latest,
+                &[
+                    "senderUsername",
+                    "sender_username",
+                    "talker",
+                    "fromUserName",
+                ],
+            );
             let sender_name = if !sender.is_empty() {
                 names
                     .get(&sender)
@@ -424,6 +443,22 @@ fn sync_once(
             title,
             content,
             timestamp: field_i64(row, &["lastTimestamp", "last_timestamp"], 0),
+            avatar_png: avatar_png_for(
+                &handle,
+                if username.ends_with(GROUP_SUFFIX) {
+                    field_str(
+                        latest,
+                        &[
+                            "senderUsername",
+                            "sender_username",
+                            "talker",
+                            "fromUserName",
+                        ],
+                    )
+                } else {
+                    username.clone()
+                },
+            ),
         });
     }
 
@@ -487,6 +522,7 @@ fn sync_once(
                 title,
                 content,
                 timestamp: field_i64(rev, &["createTime", "create_time"], 0),
+                avatar_png: avatar_png_for(&handle, username.clone()),
             });
         }
     }
@@ -509,6 +545,88 @@ fn is_system_row(m: &Value) -> bool {
     t == 10000 || t == 10002
 }
 
+fn newest_message<'a>(messages: &'a [Value]) -> Option<&'a Value> {
+    messages
+        .iter()
+        .filter(|m| !is_system_row(m))
+        .max_by_key(|m| field_i64(m, &["createTime", "create_time", "timestamp"], 0))
+}
+
+/// WCDB has used all of these names across WeChat builds. A missing direction
+/// is treated as unknown and therefore does not produce a new-message toast.
+fn msg_direction(m: &Value, wxid: &str) -> Option<bool> {
+    for key in ["isSend", "is_send", "computed_is_send"] {
+        if let Some(v) = m.get(key) {
+            if let Some(b) = v.as_bool() {
+                return Some(b);
+            }
+            if let Some(n) = v.as_i64() {
+                return Some(n != 0);
+            }
+            if let Some(s) = v.as_str() {
+                let normalized = s.trim().to_ascii_lowercase();
+                if ["1", "true", "yes", "sent"].contains(&normalized.as_str()) {
+                    return Some(true);
+                }
+                if ["0", "false", "no", "received"].contains(&normalized.as_str()) {
+                    return Some(false);
+                }
+            }
+        }
+    }
+    let sender = field_str(
+        m,
+        &[
+            "senderUsername",
+            "sender_username",
+            "talker",
+            "fromUserName",
+        ],
+    );
+    if sender.is_empty() { None } else { Some(sender_wxid_equal(&sender, wxid)) }
+}
+
+fn avatar_png_for(handle: &WcdbHandle, username: String) -> Option<Vec<u8>> {
+    if username.trim().is_empty() {
+        return None;
+    }
+    let contact = handle.contact(&username).ok()?;
+    let url = field_str(
+        &contact,
+        &[
+            "smallHeadImgUrl",
+            "smallheadimgurl",
+            "headImgUrl",
+            "headimgurl",
+            "avatarUrl",
+            "avatar_url",
+            "sourceHeadUrl",
+            "sourceheadurl",
+        ],
+    );
+    if url.is_empty() {
+        return None;
+    }
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path).ok();
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return std::fs::read(&url).ok();
+    }
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()?
+        .get(url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .bytes()
+        .ok()
+        .map(|b| b.to_vec())
+}
+
 fn raw_content(m: &Value) -> String {
     field_str(
         m,
@@ -518,12 +636,18 @@ fn raw_content(m: &Value) -> String {
 
 fn message_display(m: &Value) -> String {
     let t = field_i64(m, &["localType", "local_type", "msgType"], 0);
-    let text = field_str(m, &["parsedContent", "parsed_content", "rawContent", "raw_content", "content"]);
+    let text = field_str(
+        m,
+        &[
+            "parsedContent",
+            "parsed_content",
+            "rawContent",
+            "raw_content",
+            "content",
+        ],
+    );
     let normalized = text
-        .replace(
-            |c: char| c == '\n' || c == '\r',
-            "",
-        )
+        .replace(|c: char| c == '\n' || c == '\r', "")
         .trim()
         .to_string();
     match t {
@@ -622,4 +746,38 @@ fn field_bool(v: &Value, keys: &[&str]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{msg_direction, newest_message};
+    use serde_json::json;
+
+    #[test]
+    fn direction_uses_authoritative_send_flag() {
+        assert_eq!(msg_direction(&json!({"isSend": 0}), "me"), Some(false));
+        assert_eq!(msg_direction(&json!({"is_send": true}), "me"), Some(true));
+    }
+
+    #[test]
+    fn direction_falls_back_to_sender_identity() {
+        assert_eq!(msg_direction(&json!({"senderUsername": "me"}), "me"), Some(true));
+        assert_eq!(msg_direction(&json!({"senderUsername": "other"}), "me"), Some(false));
+        assert_eq!(msg_direction(&json!({}), "me"), None);
+    }
+
+    #[test]
+    fn newest_message_ignores_system_rows() {
+        let rows = vec![
+            json!({"createTime": 10, "localType": 1}),
+            json!({"createTime": 20, "localType": 10000}),
+            json!({"createTime": 15, "localType": 1}),
+        ];
+        assert_eq!(
+            newest_message(&rows)
+                .and_then(|m| m.get("createTime"))
+                .and_then(|v| v.as_i64()),
+            Some(15)
+        );
+    }
 }

@@ -6,6 +6,14 @@ const VALUE_NAME: &str = "Weport";
 
 #[cfg(windows)]
 pub fn is_run_at_startup() -> bool {
+    is_run_at_startup_ex(false)
+}
+
+/// Validate both the executable path and the login visibility argument. A
+/// registry value can exist while still pointing at an old install, which was
+/// the reason previous updates left startup behavior stale.
+#[cfg(windows)]
+pub fn is_run_at_startup_ex(background: bool) -> bool {
     use windows_sys::Win32::System::Registry::*;
     unsafe {
         let mut hkey: HKEY = std::ptr::null_mut();
@@ -20,16 +28,35 @@ pub fn is_run_at_startup() -> bool {
             return false;
         }
         let mut size: u32 = 0;
+        let mut ty: u32 = 0;
+        let mut data = vec![0u8; 2048];
         let status = RegQueryValueExW(
             hkey,
             to_wide(VALUE_NAME).as_ptr(),
             std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut ty,
+            data.as_mut_ptr(),
             &mut size,
         );
         RegCloseKey(hkey);
-        status == 0 && size > 0
+        if status != 0 || size < 2 || ty != REG_SZ {
+            return false;
+        }
+        let units = size as usize / 2;
+        let value = String::from_utf16_lossy(std::slice::from_raw_parts(
+            data.as_ptr() as *const u16,
+            units,
+        ))
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("weport.exe"));
+        let expected = if background {
+            format!("\"{}\" --background", exe.display())
+        } else {
+            format!("\"{}\"", exe.display())
+        };
+        value.eq_ignore_ascii_case(&expected)
     }
 }
 
@@ -88,6 +115,11 @@ pub fn set_run_at_startup_ex(enabled: bool, background: bool) -> Result<(), Stri
 
 #[cfg(not(windows))]
 pub fn is_run_at_startup() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_run_at_startup_ex(_background: bool) -> bool {
     false
 }
 

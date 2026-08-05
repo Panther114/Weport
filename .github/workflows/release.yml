@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Version tag (e.g. v0.0.1)'
         required: true
-        default: 'v0.6.1'
+        default: 'v0.6.11'
 
 permissions:
   contents: write
@@ -20,6 +20,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          $cargo = Get-Content src-tauri/Cargo.toml -Raw
+          if ($cargo -notmatch 'version\s*=\s*"([^"]+)"') { throw 'Cargo version missing' }
+          $cargoVersion = $Matches[1]
+          $refName = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ inputs.tag }}' }
+          $tagVersion = $refName.TrimStart('v')
+          if ($cargoVersion -ne $tagVersion) { throw "Tag $tagVersion does not match Cargo version $cargoVersion" }
 
       - name: Setup Node
         uses: actions/setup-node@v4
