@@ -4,6 +4,14 @@
 //! - Stacks multiple cards with fade-in / fade-out
 //! - When a card dismisses, remaining cards smoothly slide into its slot
 //! - Non-activating topmost tool window (no focus steal)
+//!
+//! Wiring contract: on Windows this module MUST be called from
+//! `gui::WeportApp::push_native_toast` (which `drain_notify_toasts` and
+//! `enqueue_debug_toast` feed). If nothing calls `show_with_session`, the host
+//! thread never starts and popups silently disappear — that is exactly the
+//! v0.6.11 regression (the module existed but was never referenced). The QA
+//! harness (`scripts/capture-ui.ps1`) asserts the host window paints content,
+//! so a silent unwiring fails the build rather than shipping.
 #![cfg(windows)]
 
 use std::collections::VecDeque;
@@ -20,6 +28,16 @@ const LIFE_MS: u64 = 6000;
 const FADE_MS: f32 = 280.0;
 const SLIDE_MS: f32 = 240.0;
 
+/// Decoded avatar, computed once when the toast is pushed (not every frame).
+/// v0.6.12 decoded the PNG inside `paint_card` on every 16 ms tick — wasteful
+/// and a source of stutter when several cards stack.
+#[derive(Clone)]
+struct AvatarRgba {
+    rgba: Vec<u8>,
+    w: i32,
+    h: i32,
+}
+
 #[derive(Clone)]
 struct ToastItem {
     id: u64,
@@ -27,7 +45,7 @@ struct ToastItem {
     body: String,
     kind: String,
     session_id: String,
-    avatar_data: Option<Vec<u8>>,
+    avatar_rgba: Option<AvatarRgba>,
     born: Instant,
     /// When set, fade-out has started.
     dying: Option<Instant>,
@@ -77,8 +95,22 @@ pub fn show(title: &str, body: &str, kind_label: &str) {
 }
 
 /// Push a toast with session_id (used for group-chat avatar detection).
+/// `avatar_data` is a PNG byte buffer; it is decoded to RGBA exactly once here
+/// so `paint_card` never pays for `image::load_from_memory` on a 60 fps tick.
 pub fn show_with_session(title: &str, body: &str, kind_label: &str, session_id: &str, avatar_data: Option<Vec<u8>>) {
     ensure_host();
+    let avatar_rgba = avatar_data
+        .as_ref()
+        .and_then(|b| image::load_from_memory(b).ok())
+        .map(|img| {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            AvatarRgba {
+                rgba: rgba.into_raw(),
+                w: w as i32,
+                h: h as i32,
+            }
+        });
     let mut g = host_mut();
     let h = g.as_mut().unwrap();
     let id = h.next_id;
@@ -89,7 +121,7 @@ pub fn show_with_session(title: &str, body: &str, kind_label: &str, session_id: 
         body: body.to_string(),
         kind: kind_label.to_string(),
         session_id: session_id.to_string(),
-        avatar_data,
+        avatar_rgba,
         born: Instant::now(),
         dying: None,
         display_y: 0.0,
@@ -436,57 +468,56 @@ unsafe fn paint_card(
     DeleteObject(pen as _);
 
     // Avatar (left): 48px circle with rounded plate.
-    // If avatar_data (PNG) is provided, decode and paint the image clipped to a circle.
+    // If avatar_rgba (decoded at push time) is present, paint it clipped to a
+    // circle. We do NOT call image::load_from_memory here — that was the
+    // v0.6.12 per-frame hot path; the bytes are decoded once in
+    // show_with_session and cached on the ToastItem.
     let ax = x + 16;
     let ay = y + (TOAST_H - 48) / 2;
     let asz = 48;
     let is_group = item.kind.contains("群") || item.title.contains("群")
         || item.session_id.ends_with("@chatroom");
 
-    if let Some(png_bytes) = &item.avatar_data {
-        if let Ok(img) = image::load_from_memory(png_bytes) {
-            let rgba = img.to_rgba8();
-            let (iw, ih) = rgba.dimensions();
-            let img_w = iw as i32;
-            let img_h = ih as i32;
-            let raw = rgba.into_raw();
-            let bmi_size = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            let mut bmi: BITMAPINFO = unsafe { std::mem::zeroed() };
-            bmi.bmiHeader.biSize = bmi_size;
-            bmi.bmiHeader.biWidth = img_w;
-            bmi.bmiHeader.biHeight = -img_h;
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
+    if let Some(av) = &item.avatar_rgba {
+        let img_w = av.w;
+        let img_h = av.h;
+        let raw = &av.rgba;
+        let bmi_size = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        let mut bmi: BITMAPINFO = unsafe { std::mem::zeroed() };
+        bmi.bmiHeader.biSize = bmi_size;
+        bmi.bmiHeader.biWidth = img_w;
+        bmi.bmiHeader.biHeight = -img_h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
 
-            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let tmp_dc = GetDC(hwnd);
-            let color = CreateDIBSection(tmp_dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
-            ReleaseDC(hwnd, tmp_dc);
-            if !color.is_null() && !bits.is_null() {
-                let expected = (img_w as usize) * (img_h as usize) * 4;
-                let dst = std::slice::from_raw_parts_mut(bits as *mut u8, expected);
-                for i in 0..(img_w as usize * img_h as usize) {
-                    let si = i * 4;
-                    dst[si] = raw[si + 2];     // B = R
-                    dst[si + 1] = raw[si + 1]; // G = G
-                    dst[si + 2] = raw[si];     // R = B
-                    dst[si + 3] = raw[si + 3]; // A = A
-                }
-                let mem_dc = CreateCompatibleDC(hdc);
-                let old_bitmap = SelectObject(mem_dc, color as _);
-                let hrgn = CreateEllipticRgn(0, 0, asz, asz);
-                SelectClipRgn(mem_dc, hrgn);
-                SetStretchBltMode(mem_dc, HALFTONE);
-                StretchBlt(hdc, ax, ay, asz, asz, mem_dc, 0, 0, img_w, img_h, SRCCOPY);
-                SelectClipRgn(mem_dc, std::ptr::null_mut());
-                DeleteObject(hrgn as _);
-                SelectObject(mem_dc, old_bitmap);
-                DeleteDC(mem_dc);
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let tmp_dc = GetDC(hwnd);
+        let color = CreateDIBSection(tmp_dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        ReleaseDC(hwnd, tmp_dc);
+        if !color.is_null() && !bits.is_null() {
+            let expected = (img_w as usize) * (img_h as usize) * 4;
+            let dst = std::slice::from_raw_parts_mut(bits as *mut u8, expected);
+            for i in 0..(img_w as usize * img_h as usize) {
+                let si = i * 4;
+                dst[si] = raw[si + 2];     // B = R
+                dst[si + 1] = raw[si + 1]; // G = G
+                dst[si + 2] = raw[si];     // R = B
+                dst[si + 3] = raw[si + 3]; // A = A
             }
-            if !color.is_null() {
-                DeleteObject(color as _);
-            }
+            let mem_dc = CreateCompatibleDC(hdc);
+            let old_bitmap = SelectObject(mem_dc, color as _);
+            let hrgn = CreateEllipticRgn(0, 0, asz, asz);
+            SelectClipRgn(mem_dc, hrgn);
+            SetStretchBltMode(mem_dc, HALFTONE);
+            StretchBlt(hdc, ax, ay, asz, asz, mem_dc, 0, 0, img_w, img_h, SRCCOPY);
+            SelectClipRgn(mem_dc, std::ptr::null_mut());
+            DeleteObject(hrgn as _);
+            SelectObject(mem_dc, old_bitmap);
+            DeleteDC(mem_dc);
+        }
+        if !color.is_null() {
+            DeleteObject(color as _);
         }
         let border = fade_rgb(60, 60, 60, opacity.max(0.2));
         let bpen = CreatePen(PS_SOLID, 1, border);
@@ -567,7 +598,6 @@ unsafe fn paint_card(
                 right: ax + asz,
                 bottom: ay + asz,
             };
-            const DT_LEFT: u32 = 0x0000;
             const DT_CENTER: u32 = 0x0001;
             const DT_VCENTER: u32 = 0x0004;
             const DT_SINGLELINE: u32 = 0x0020;
@@ -674,8 +704,7 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
-const LWA_COLORKEY: u32 = 0x00000001;
-const HWND_TOPMOST: windows_sys::Win32::Foundation::HWND = -1isize as _;
-const SWP_NOMOVE: u32 = 0x0002;
-const SWP_NOSIZE: u32 = 0x0001;
-const SWP_NOACTIVATE: u32 = 0x0010;
+// LWA_COLORKEY, HWND_TOPMOST and the SWP_* flags are provided by the
+// `windows_sys` glob imports inside `run_host` — they must NOT be redefined
+// here, otherwise the locals silently shadow the real ones and become dead
+// code (the v0.6.12 dead-const warnings).

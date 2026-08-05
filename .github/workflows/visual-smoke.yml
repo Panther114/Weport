@@ -1,0 +1,30 @@
+name: visual-smoke
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  toast-popup:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build (release)
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Run capture-ui harness (asserts toast paints)
+        shell: pwsh
+        run: |
+          # capture-ui.ps1 finds the WeportToastHost window, captures the first
+          # card, and throws if the capture is blank (Assert-ImageHasContent).
+          # This is the guard against the v0.6.11/v0.6.12 class of regression
+          # where toast_win existed but was unwired, or painted nothing.
+          ./scripts/capture-ui.ps1 -Executable "$PWD/src-tauri/target/release/weport.exe" -OutputDir "$env:TEMP/weport-smoke"
+      - name: Upload popup artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weport-popup-smoke
+          path: ${{ runner.temp }}/weport-smoke/popup.png
