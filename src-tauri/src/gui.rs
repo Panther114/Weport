@@ -246,7 +246,7 @@ mod icons {
         )
     }
 
-    /// Official GitHub mark (filled circle + octocat silhouette approximation).
+    /// Official GitHub mark (filled circle + octocat silhouette).
     /// Based on the public GitHub logo geometry — not a random face doodle.
     pub fn github(ui: &mut egui::Ui, color: Color32, size: f32) {
         let rect = icon_rect(ui, size);
@@ -262,35 +262,45 @@ mod icons {
         };
         // Head
         painter.circle_filled(c + Vec2::new(0.0, -1.2 * s), 5.4 * s, cut);
-        // Ears
+        // Ears — sharpened to match the real octocat
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(-4.8 * s, -3.2 * s),
-                c + Vec2::new(-6.4 * s, -8.6 * s),
-                c + Vec2::new(-1.6 * s, -5.0 * s),
+                c + Vec2::new(-4.8 * s, -2.6 * s),
+                c + Vec2::new(-6.6 * s, -8.6 * s),
+                c + Vec2::new(-1.6 * s, -4.8 * s),
             ],
             cut,
             Stroke::NONE,
         ));
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(4.8 * s, -3.2 * s),
-                c + Vec2::new(6.4 * s, -8.6 * s),
-                c + Vec2::new(1.6 * s, -5.0 * s),
+                c + Vec2::new(4.8 * s, -2.6 * s),
+                c + Vec2::new(6.6 * s, -8.6 * s),
+                c + Vec2::new(1.6 * s, -4.8 * s),
             ],
             cut,
             Stroke::NONE,
         ));
-        // Body / tentacles simplified
+        // Body / tentacles — three visible legs for a cleaner silhouette
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(-4.6 * s, 2.0 * s),
-                c + Vec2::new(4.6 * s, 2.0 * s),
-                c + Vec2::new(5.2 * s, 8.2 * s),
-                c + Vec2::new(2.0 * s, 6.8 * s),
-                c + Vec2::new(0.0 * s, 9.0 * s),
-                c + Vec2::new(-2.0 * s, 6.8 * s),
-                c + Vec2::new(-5.2 * s, 8.2 * s),
+                c + Vec2::new(-4.6 * s, 1.6 * s),
+                c + Vec2::new(4.6 * s, 1.6 * s),
+                c + Vec2::new(5.0 * s, 8.4 * s),
+                c + Vec2::new(1.8 * s, 6.6 * s),
+                c + Vec2::new(0.0 * s, 9.2 * s),
+                c + Vec2::new(-1.8 * s, 6.6 * s),
+                c + Vec2::new(-5.0 * s, 8.4 * s),
+            ],
+            cut,
+            Stroke::NONE,
+        ));
+        // Chin notch
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(-1.6 * s, 2.6 * s),
+                c + Vec2::new(1.6 * s, 2.6 * s),
+                c + Vec2::new(0.0 * s, 4.6 * s),
             ],
             cut,
             Stroke::NONE,
@@ -300,17 +310,17 @@ mod icons {
         painter.circle_filled(c + Vec2::new(2.0 * s, -1.4 * s), 0.95 * s, color);
     }
 
-    /// Lucide-style settings (cog) — stroke ring + 6 teeth.
+    /// Lucide-style settings (cog) — stroke ring + 8 teeth.
     pub fn gear(ui: &mut egui::Ui, color: Color32, size: f32) {
         let rect = icon_rect(ui, size);
         let c = rect.center();
         let painter = ui.painter();
         let sw = (size * 0.09).max(1.4);
         painter.circle_stroke(c, size * 0.22, Stroke::new(sw, color));
-        for i in 0..6 {
-            let a = (i as f32) * std::f32::consts::TAU / 6.0;
+        for i in 0..8 {
+            let a = (i as f32) * std::f32::consts::TAU / 8.0;
             let dir = Vec2::new(a.cos(), a.sin());
-            let p0 = c + dir * (size * 0.28);
+            let p0 = c + dir * (size * 0.27);
             let p1 = c + dir * (size * 0.42);
             painter.line_segment([p0, p1], Stroke::new(sw * 1.35, color));
         }
@@ -383,42 +393,34 @@ mod icons {
         );
     }
 
-    /// Lucide database (cylinder).
-    pub fn database(ui: &mut egui::Ui, color: Color32, size: f32) {
+    /// Lucide plug / cable — the act of connecting Weport to WeChat data.
+    pub fn plug(ui: &mut egui::Ui, color: Color32, size: f32) {
         let rect = icon_rect(ui, size);
         let c = rect.center();
         let p = ui.painter();
-        let sw = (size * 0.09).max(1.4);
+        let sw = (size * 0.1).max(1.5);
         let s = size / 18.0;
-        let w = 5.5 * s;
-        p.circle_stroke(
-            c + Vec2::new(0.0, -4.2 * s),
-            w * 0.55,
-            Stroke::new(sw, color),
-        );
+        // Vertical prongs
+        let prong_w = 1.6 * s;
+        let left = c + Vec2::new(-2.6 * s, -6.0 * s);
+        for (dx, h) in [(-0.8 * s, 8.0 * s), (0.8 * s, 8.0 * s)] {
+            let x = left.x + dx - prong_w / 2.0;
+            p.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x, left.y),
+                    egui::pos2(x + prong_w, left.y + h),
+                ),
+                1.0,
+                color,
+            );
+        }
+        // Cable arch above the prongs
+        let arc_c = c + Vec2::new(0.0, -6.5 * s);
+        p.circle_stroke(arc_c, 3.4 * s, Stroke::new(sw, color));
+        // Cable exiting to the right
         p.line_segment(
-            [
-                c + Vec2::new(-w * 0.55, -4.2 * s),
-                c + Vec2::new(-w * 0.55, 4.0 * s),
-            ],
+            [arc_c + Vec2::new(3.4 * s, 0.0), arc_c + Vec2::new(6.4 * s, 0.0)],
             Stroke::new(sw, color),
-        );
-        p.line_segment(
-            [
-                c + Vec2::new(w * 0.55, -4.2 * s),
-                c + Vec2::new(w * 0.55, 4.0 * s),
-            ],
-            Stroke::new(sw, color),
-        );
-        p.circle_stroke(
-            c + Vec2::new(0.0, 4.0 * s),
-            w * 0.55,
-            Stroke::new(sw, color),
-        );
-        // middle ellipse hint
-        p.line_segment(
-            [c + Vec2::new(-w * 0.5, 0.0), c + Vec2::new(w * 0.5, 0.0)],
-            Stroke::new(sw * 0.7, color),
         );
     }
 
@@ -453,7 +455,7 @@ mod icons {
         );
     }
 
-    /// Lucide shield-check.
+    /// Lucide shield-check — cleaner polygon with taller profile.
     pub fn shield(ui: &mut egui::Ui, color: Color32, size: f32) {
         let rect = icon_rect(ui, size);
         let c = rect.center();
@@ -461,57 +463,86 @@ mod icons {
         let sw = (size * 0.09).max(1.4);
         let s = size / 18.0;
         let pts = [
-            c + Vec2::new(0.0, -7.0 * s),
-            c + Vec2::new(6.0 * s, -4.2 * s),
-            c + Vec2::new(5.2 * s, 2.2 * s),
-            c + Vec2::new(0.0, 7.0 * s),
-            c + Vec2::new(-5.2 * s, 2.2 * s),
-            c + Vec2::new(-6.0 * s, -4.2 * s),
-            c + Vec2::new(0.0, -7.0 * s),
+            c + Vec2::new(0.0, -7.4 * s),
+            c + Vec2::new(6.4 * s, -4.2 * s),
+            c + Vec2::new(5.6 * s, 2.4 * s),
+            c + Vec2::new(0.0, 7.4 * s),
+            c + Vec2::new(-5.6 * s, 2.4 * s),
+            c + Vec2::new(-6.4 * s, -4.2 * s),
+            c + Vec2::new(0.0, -7.4 * s),
         ];
         for i in 0..pts.len() - 1 {
             p.line_segment([pts[i], pts[i + 1]], Stroke::new(sw, color));
         }
+        // Checkmark
         p.line_segment(
             [
-                c + Vec2::new(-2.4 * s, 0.4 * s),
-                c + Vec2::new(-0.4 * s, 2.4 * s),
+                c + Vec2::new(-2.8 * s, 0.2 * s),
+                c + Vec2::new(-0.6 * s, 2.6 * s),
             ],
             Stroke::new(sw, color),
         );
         p.line_segment(
             [
-                c + Vec2::new(-0.4 * s, 2.4 * s),
-                c + Vec2::new(3.2 * s, -2.0 * s),
+                c + Vec2::new(-0.6 * s, 2.6 * s),
+                c + Vec2::new(3.6 * s, -2.2 * s),
             ],
             Stroke::new(sw, color),
         );
     }
 
-    /// Lucide bell.
+    /// Lucide bell — cleaner bell shape with clapper.
     pub fn bell(ui: &mut egui::Ui, color: Color32, size: f32) {
         let rect = icon_rect(ui, size);
         let c = rect.center();
         let p = ui.painter();
         let sw = (size * 0.09).max(1.4);
         let s = size / 18.0;
-        p.circle_stroke(
-            c + Vec2::new(0.0, -1.0 * s),
-            4.2 * s,
-            Stroke::new(sw, color),
-        );
+        // Bell body (arc + bottom)
+        let bell_top = c + Vec2::new(0.0, -5.4 * s);
+        let bell_r = 4.6 * s;
+        // Left side
         p.line_segment(
             [
-                c + Vec2::new(-5.2 * s, 3.4 * s),
-                c + Vec2::new(5.2 * s, 3.4 * s),
+                bell_top + Vec2::new(-bell_r, 0.8 * s),
+                bell_top + Vec2::new(-bell_r * 0.85, 3.8 * s),
             ],
             Stroke::new(sw, color),
         );
-        p.circle_filled(c + Vec2::new(0.0, 5.5 * s), 1.15 * s, color);
-        p.circle_stroke(
-            c + Vec2::new(0.0, -5.5 * s),
-            1.1 * s,
-            Stroke::new(sw * 0.9, color),
+        // Right side
+        p.line_segment(
+            [
+                bell_top + Vec2::new(bell_r, 0.8 * s),
+                bell_top + Vec2::new(bell_r * 0.85, 3.8 * s),
+            ],
+            Stroke::new(sw, color),
+        );
+        // Bottom rim
+        p.line_segment(
+            [
+                c + Vec2::new(-5.4 * s, 3.8 * s),
+                c + Vec2::new(5.4 * s, 3.8 * s),
+            ],
+            Stroke::new(sw, color),
+        );
+        // Clapper
+        p.circle_filled(c + Vec2::new(0.0, 5.6 * s), 1.2 * s, color);
+        // Top nub
+        p.circle_filled(bell_top, 1.0 * s, color);
+        // Sound arcs (ringing)
+        p.line_segment(
+            [
+                c + Vec2::new(5.8 * s, -1.6 * s),
+                c + Vec2::new(7.2 * s, -2.8 * s),
+            ],
+            Stroke::new(sw * 0.7, color),
+        );
+        p.line_segment(
+            [
+                c + Vec2::new(6.2 * s, 0.8 * s),
+                c + Vec2::new(7.8 * s, 0.4 * s),
+            ],
+            Stroke::new(sw * 0.7, color),
         );
     }
 
@@ -729,7 +760,7 @@ mod icons {
 
     pub fn mode_icon(ui: &mut egui::Ui, mode: super::AppMode, color: Color32) {
         match mode {
-            super::AppMode::Connect => database(ui, color, 15.0),
+            super::AppMode::Connect => plug(ui, color, 15.0),
             super::AppMode::Export => export_arrow(ui, color, 15.0),
             super::AppMode::AntiRecall => shield(ui, color, 15.0),
             super::AppMode::Notifications => bell(ui, color, 15.0),
@@ -1324,9 +1355,24 @@ impl WeportApp {
             },
             t.title
         );
-        // The popup is rendered by the same egui stack as the main window.
-        // Keeping only bookkeeping here means tray-hidden launches still get
-        // a secondary egui viewport without a second GDI design system.
+        // Native Windows toast host: a true topmost overlay window that is
+        // independent of the main window (keeps showing when minimized to tray,
+        // and when the main window is out of focus). Non-Windows builds fall
+        // back to the egui viewport below.
+        #[cfg(windows)]
+        {
+            let kind_label = match t.kind {
+                NotifyKind::NewMessage => "新消息",
+                NotifyKind::Recalled => "撤回提醒",
+            };
+            crate::toast_win::show_with_session(
+                &t.title,
+                &t.content,
+                kind_label,
+                &t.session_id,
+                t.avatar_png.clone(),
+            );
+        }
         self.current_toast = Some(t.clone());
         self.toast_shown_at = now_secs();
     }
@@ -2009,6 +2055,9 @@ impl eframe::App for WeportApp {
             });
 
         self.ui_modals(ctx);
+        // On Windows the native toast host owns popup rendering; the inline
+        // fallback is for non-Windows platforms only.
+        #[cfg(not(windows))]
         if let Some(toast) = self.current_toast.clone() {
             // Draw the fallback after the central panel so it cannot be
             // covered by a later panel paint operation.
@@ -2019,7 +2068,7 @@ impl eframe::App for WeportApp {
 
 impl WeportApp {
     fn render_toast_viewport(&mut self, ctx: &egui::Context) {
-        // Auto-dismiss bookkeeping.
+        // Auto-dismiss bookkeeping (needed on all platforms).
         if self.current_toast.is_some() {
             if now_secs() - self.toast_shown_at > TOAST_DURATION {
                 self.dismiss_current_toast();
@@ -2027,6 +2076,15 @@ impl WeportApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
         }
+        // On Windows the native toast host (toast_win) paints the popup as a
+        // real topmost overlay; the egui viewport is only a fallback for
+        // non-Windows platforms.
+        #[cfg(not(windows))]
+        self.render_egui_toast_viewport(ctx);
+    }
+
+    #[cfg(not(windows))]
+    fn render_egui_toast_viewport(&mut self, ctx: &egui::Context) {
         let Some(toast) = self.current_toast.clone() else {
             self.toast_viewport_embedded = false;
             return;
@@ -2178,11 +2236,11 @@ impl WeportApp {
         ui.columns(2, |cols| {
             // —— Left: data location ——
             WeportApp::panel_frame().show(&mut cols[0], |ui| {
-                self.section_title(ui, "数据位置", "xwechat_files");
+                self.section_title(ui, "微信聊天记录数据位置", "xwechat_files");
                 ui.horizontal(|ui| {
                     icons::folder(ui, TEXT_FAINT, 16.0);
                     ui.add_space(4.0);
-                    ui.label(RichText::new("文件夹").size(12.0).color(TEXT_FAINT));
+                    ui.label(RichText::new("微信数据根目录").size(12.0).color(TEXT_FAINT));
                 });
                 ui.add_space(4.0);
                 let resp = ui.add(
@@ -2244,16 +2302,15 @@ impl WeportApp {
             // —— Right: decrypt key ——
             WeportApp::panel_frame().show(&mut cols[1], |ui| {
                 self.section_title(ui, "解密密钥", if key_ok { "已就绪" } else { "待提取" });
-                ui.label(
-                    RichText::new("关自动登录 → 提取密钥 → 重新登录微信")
-                        .size(12.0)
-                        .color(TEXT_DIM),
-                );
+                // Three-step guide with larger type and concrete wording.
+                key_step(ui, 1, "关闭微信「自动登录」", "在微信设置里关掉自动登录，否则密钥不会在登录时出现。");
+                key_step(ui, 2, "点击下方「提取密钥」", "保持 Weport 窗口在前台，然后点击下方的提取密钥按钮。");
+                key_step(ui, 3, "登录或重新登录微信", "看到「已就绪」提示后，扫码登录或退出账号重新登录即可。");
                 if self.key_ready_hint && self.busy {
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new("Hook 已就绪 — 请现在登录微信")
-                            .size(12.0)
+                        RichText::new("✓ Hook 已就绪 — 请现在登录微信")
+                            .size(13.0)
                             .color(TEXT),
                     );
                 }
@@ -2262,7 +2319,7 @@ impl WeportApp {
                     icons::key(ui, TEXT_FAINT, 15.0);
                     ui.add_space(4.0);
                     let mut te = egui::TextEdit::singleline(&mut self.decrypt_key)
-                        .desired_width(ui.available_width() - 48.0)
+                        .desired_width(ui.available_width() - 96.0)
                         .font(FontId::new(12.0, FontFamily::Monospace))
                         .hint_text("64 位 hex…")
                         .margin(Margin::symmetric(6, 5));
@@ -2274,9 +2331,13 @@ impl WeportApp {
                     }
                     if ui
                         .add(
-                            egui::Button::new(if self.show_key { "隐" } else { "显" })
-                                .corner_radius(R)
-                                .min_size(Vec2::new(36.0, 30.0)),
+                            egui::Button::new(
+                                RichText::new(if self.show_key { "隐藏密钥" } else { "显示密钥" })
+                                    .size(12.5)
+                                    .color(TEXT_DIM),
+                            )
+                            .corner_radius(R)
+                            .min_size(Vec2::new(88.0, 30.0)),
                         )
                         .clicked()
                     {
@@ -2325,7 +2386,7 @@ impl WeportApp {
             let n = self.accounts.len();
             self.section_title(
                 ui,
-                "账号",
+                "微信账号",
                 if n > 0 {
                     format!("{n} 个")
                 } else {
@@ -2406,9 +2467,9 @@ impl WeportApp {
         // Two-column: format + output path | last-run meta
         ui.columns(2, |cols| {
             WeportApp::panel_frame().show(&mut cols[0], |ui| {
-                self.section_title(ui, "导出", "全部联系人 + 群聊");
+                self.section_title(ui, "导出设置", "全部联系人 + 群聊");
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("格式").size(12.5).color(TEXT_FAINT));
+                    ui.label(RichText::new("导出格式").size(12.5).color(TEXT_FAINT));
                     for (id, lab) in [("txt", "TXT"), ("json", "JSON")] {
                         let active = self.format == id;
                         if icons::chip(ui, lab, active, |_ui, _c| {}, Vec2::new(56.0, 28.0))
@@ -2424,7 +2485,7 @@ impl WeportApp {
                 ui.horizontal(|ui| {
                     icons::folder(ui, TEXT_FAINT, 15.0);
                     ui.add_space(4.0);
-                    ui.label(RichText::new("输出").size(12.0).color(TEXT_FAINT));
+                    ui.label(RichText::new("导出输出目录").size(12.0).color(TEXT_FAINT));
                 });
                 ui.add_space(4.0);
                 if ui
@@ -2464,7 +2525,7 @@ impl WeportApp {
             });
 
             WeportApp::panel_frame().show(&mut cols[1], |ui| {
-                self.section_title(ui, "记录", "export_log");
+                self.section_title(ui, "上次导出记录", "export_log");
                 Frame::new()
                     .fill(ELEVATED)
                     .stroke(Stroke::new(1.0_f32, LINE))
@@ -2577,7 +2638,7 @@ impl WeportApp {
         let install = self.anti_install.clone();
 
         WeportApp::panel_frame().show(ui, |ui| {
-            self.section_title(ui, "安装防撤回", "微信 4");
+            self.section_title(ui, "防撤回补丁", "微信 4");
             ui.label(
                 RichText::new("让撤回的消息继续保留在微信聊天窗口中")
                     .size(15.0)
@@ -2610,9 +2671,9 @@ impl WeportApp {
                             if ui
                                 .add_enabled(
                                     !self.anti_busy,
-                                    egui::Button::new("刷新")
+                                    egui::Button::new("重新检测")
                                         .corner_radius(R)
-                                        .min_size(Vec2::new(72.0, 30.0)),
+                                        .min_size(Vec2::new(88.0, 30.0)),
                                 )
                                 .clicked()
                             {
@@ -2707,7 +2768,7 @@ impl WeportApp {
         let mut toggled = false;
 
         WeportApp::panel_frame().show(ui, |ui| {
-            self.section_title(ui, "消息提醒", "屏幕右上角");
+            self.section_title(ui, "微信消息与撤回提醒", "屏幕右上角");
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
@@ -2739,10 +2800,10 @@ impl WeportApp {
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(&mut cols[0], |ui| {
-                        ui.label(RichText::new("提醒条件").size(13.0).strong().color(TEXT));
+                        ui.label(RichText::new("提醒的前置条件").size(13.0).strong().color(TEXT));
                         ui.add_space(6.0);
                         for (label, ok, detail) in [
-                            ("数据目录", db_ready, if db_ready { "已连接" } else { "未选择" }),
+                            ("微信数据目录", db_ready, if db_ready { "已连接" } else { "未选择" }),
                             (
                                 "微信账号",
                                 account_ready,
@@ -2784,10 +2845,10 @@ impl WeportApp {
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::symmetric(12, 10))
                     .show(&mut cols[1], |ui| {
-                        ui.label(RichText::new("调试弹窗").size(13.0).strong().color(TEXT));
+                        ui.label(RichText::new("测试通知弹窗").size(13.0).strong().color(TEXT));
                         ui.add_space(4.0);
                         ui.label(
-                            RichText::new("每点一次追加一条（可连点堆叠，观察淡入/上移）。")
+                            RichText::new("每点一次创建一个独立置顶通知弹窗，可连点堆叠。")
                                 .size(11.5)
                                 .color(TEXT_DIM),
                         );
@@ -3113,4 +3174,27 @@ fn row_meta(ui: &mut egui::Ui, left: &str, right: &str) {
             ui.label(RichText::new(right).size(12.5).color(TEXT));
         });
     });
+}
+
+fn key_step(ui: &mut egui::Ui, num: usize, title: &str, detail: &str) {
+    ui.horizontal(|ui| {
+        ui.set_height(28.0);
+        ui.label(
+            RichText::new(format!("{num}."))
+                .size(15.0)
+                .strong()
+                .color(TEXT),
+        );
+        ui.add_space(4.0);
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(title).size(15.0).strong().color(TEXT),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(detail).size(12.0).color(TEXT_DIM),
+            );
+        });
+    });
+    ui.add_space(6.0);
 }

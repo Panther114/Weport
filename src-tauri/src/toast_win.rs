@@ -27,6 +27,7 @@ struct ToastItem {
     body: String,
     kind: String,
     session_id: String,
+    avatar_data: Option<Vec<u8>>,
     born: Instant,
     /// When set, fade-out has started.
     dying: Option<Instant>,
@@ -72,11 +73,11 @@ fn ensure_host() {
 /// Push a toast onto the stack (non-blocking). Multiple can be visible.
 #[allow(dead_code)]
 pub fn show(title: &str, body: &str, kind_label: &str) {
-    show_with_session(title, body, kind_label, "");
+    show_with_session(title, body, kind_label, "", None);
 }
 
 /// Push a toast with session_id (used for group-chat avatar detection).
-pub fn show_with_session(title: &str, body: &str, kind_label: &str, session_id: &str) {
+pub fn show_with_session(title: &str, body: &str, kind_label: &str, session_id: &str, avatar_data: Option<Vec<u8>>) {
     ensure_host();
     let mut g = host_mut();
     let h = g.as_mut().unwrap();
@@ -88,6 +89,7 @@ pub fn show_with_session(title: &str, body: &str, kind_label: &str, session_id: 
         body: body.to_string(),
         kind: kind_label.to_string(),
         session_id: session_id.to_string(),
+        avatar_data,
         born: Instant::now(),
         dying: None,
         display_y: 0.0,
@@ -346,7 +348,7 @@ unsafe fn paint_stack(hwnd: windows_sys::Win32::Foundation::HWND, live: &[LiveCa
     DeleteObject(void_brush as _);
 
     for card in live {
-        paint_card(hdc, 0, card.y, &card.item, card.opacity);
+        paint_card(hwnd, hdc, 0, card.y, &card.item, card.opacity);
     }
 
     ReleaseDC(hwnd, hdc);
@@ -364,6 +366,7 @@ fn fade_rgb(r: u8, g: u8, b: u8, opacity: f32) -> u32 {
 }
 
 unsafe fn paint_card(
+    hwnd: windows_sys::Win32::Foundation::HWND,
     hdc: windows_sys::Win32::Graphics::Gdi::HDC,
     x: i32,
     y: i32,
@@ -432,130 +435,174 @@ unsafe fn paint_card(
     SelectObject(hdc, old_br);
     DeleteObject(pen as _);
 
-    // Avatar (left): 48px circle with rounded plate, matching WeFlow's 40px+ avatar.
+    // Avatar (left): 48px circle with rounded plate.
+    // If avatar_data (PNG) is provided, decode and paint the image clipped to a circle.
     let ax = x + 16;
     let ay = y + (TOAST_H - 48) / 2;
     let asz = 48;
     let is_group = item.kind.contains("群") || item.title.contains("群")
         || item.session_id.ends_with("@chatroom");
-    let abr = CreateSolidBrush(if is_group {
-        fade_rgb(30, 30, 30, opacity.max(0.2))
-    } else {
-        avatar_bg
-    });
-    let apen = CreatePen(PS_SOLID, 1, if is_group {
-        fade_rgb(60, 60, 60, opacity.max(0.2))
-    } else {
-        line
-    });
-    let ob = SelectObject(hdc, abr as _);
-    let op = SelectObject(hdc, apen as _);
-    Ellipse(hdc, ax, ay, ax + asz, ay + asz);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, op);
-    DeleteObject(abr as _);
-    DeleteObject(apen as _);
 
-    SetBkMode(hdc, 1); // TRANSPARENT
+    if let Some(png_bytes) = &item.avatar_data {
+        if let Ok(img) = image::load_from_memory(png_bytes) {
+            let rgba = img.to_rgba8();
+            let (iw, ih) = rgba.dimensions();
+            let img_w = iw as i32;
+            let img_h = ih as i32;
+            let raw = rgba.into_raw();
+            let bmi_size = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            let mut bmi: BITMAPINFO = unsafe { std::mem::zeroed() };
+            bmi.bmiHeader.biSize = bmi_size;
+            bmi.bmiHeader.biWidth = img_w;
+            bmi.bmiHeader.biHeight = -img_h;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
 
-    // Microsoft YaHei for CJK (falls back gracefully on English systems).
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let tmp_dc = GetDC(hwnd);
+            let color = CreateDIBSection(tmp_dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            ReleaseDC(hwnd, tmp_dc);
+            if !color.is_null() && !bits.is_null() {
+                let expected = (img_w as usize) * (img_h as usize) * 4;
+                let dst = std::slice::from_raw_parts_mut(bits as *mut u8, expected);
+                for i in 0..(img_w as usize * img_h as usize) {
+                    let si = i * 4;
+                    dst[si] = raw[si + 2];     // B = R
+                    dst[si + 1] = raw[si + 1]; // G = G
+                    dst[si + 2] = raw[si];     // R = B
+                    dst[si + 3] = raw[si + 3]; // A = A
+                }
+                let mem_dc = CreateCompatibleDC(hdc);
+                let old_bitmap = SelectObject(mem_dc, color as _);
+                let hrgn = CreateEllipticRgn(0, 0, asz, asz);
+                SelectClipRgn(mem_dc, hrgn);
+                SetStretchBltMode(mem_dc, HALFTONE);
+                StretchBlt(hdc, ax, ay, asz, asz, mem_dc, 0, 0, img_w, img_h, SRCCOPY);
+                SelectClipRgn(mem_dc, std::ptr::null_mut());
+                DeleteObject(hrgn as _);
+                SelectObject(mem_dc, old_bitmap);
+                DeleteDC(mem_dc);
+            }
+            if !color.is_null() {
+                DeleteObject(color as _);
+            }
+        }
+        let border = fade_rgb(60, 60, 60, opacity.max(0.2));
+        let bpen = CreatePen(PS_SOLID, 1, border);
+        let old_bpen = SelectObject(hdc, bpen as _);
+        let old_bbr = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        Ellipse(hdc, ax, ay, ax + asz, ay + asz);
+        SelectObject(hdc, old_bpen);
+        SelectObject(hdc, old_bbr);
+        DeleteObject(bpen as _);
+    } else {
+        let abr = CreateSolidBrush(if is_group {
+            fade_rgb(30, 30, 30, opacity.max(0.2))
+        } else {
+            avatar_bg
+        });
+        let apen = CreatePen(PS_SOLID, 1, if is_group {
+            fade_rgb(60, 60, 60, opacity.max(0.2))
+        } else {
+            line
+        });
+        let ob = SelectObject(hdc, abr as _);
+        let op = SelectObject(hdc, apen as _);
+        Ellipse(hdc, ax, ay, ax + asz, ay + asz);
+        SelectObject(hdc, ob);
+        SelectObject(hdc, op);
+        DeleteObject(abr as _);
+        DeleteObject(apen as _);
+
+        SetBkMode(hdc, 1);
+
+        if is_group {
+            let s = asz as f32 / 48.0;
+            let cx = (ax + asz / 2) as f32;
+            let cy = (ay + asz / 2) as f32;
+            let icon_color = fade_rgb(200, 200, 200, opacity.max(0.3));
+            let gpen = CreatePen(PS_SOLID, (2.0 * s).max(1.5) as i32, icon_color);
+            let gfill = CreateSolidBrush(icon_color);
+            let golden = SelectObject(hdc, gpen as _);
+            let old_brush2 = SelectObject(hdc, gfill as _);
+
+            let ch_r = 5.0 * s;
+            Ellipse(hdc,
+                (cx - ch_r) as i32, (cy - 9.0 * s) as i32,
+                (cx + ch_r) as i32, (cy - 9.0 * s + ch_r * 2.0) as i32);
+
+            let lh_r = 4.0 * s;
+            Ellipse(hdc,
+                (cx - 10.0 * s) as i32, (cy - 4.0 * s) as i32,
+                (cx - 10.0 * s + lh_r * 2.0) as i32, (cy - 4.0 * s + lh_r * 2.0) as i32);
+
+            Ellipse(hdc,
+                (cx + 6.0 * s) as i32, (cy - 4.0 * s) as i32,
+                (cx + 6.0 * s + lh_r * 2.0) as i32, (cy - 4.0 * s + lh_r * 2.0) as i32);
+
+            let cb = RECT {
+                left: (cx - 7.0 * s) as i32,
+                top: (cy + 1.0 * s) as i32,
+                right: (cx + 7.0 * s) as i32,
+                bottom: (cy + 9.0 * s) as i32,
+            };
+            Ellipse(hdc, cb.left, cb.top, cb.right, cb.bottom);
+
+            SelectObject(hdc, golden);
+            SelectObject(hdc, old_brush2);
+            DeleteObject(gpen as _);
+            DeleteObject(gfill as _);
+        } else {
+            let ch = item
+                .title
+                .chars()
+                .find(|c| !c.is_whitespace())
+                .unwrap_or('W')
+                .to_string();
+            let cw = to_wide(&ch);
+            let mut arc = RECT {
+                left: ax,
+                top: ay,
+                right: ax + asz,
+                bottom: ay + asz,
+            };
+            const DT_LEFT: u32 = 0x0000;
+            const DT_CENTER: u32 = 0x0001;
+            const DT_VCENTER: u32 = 0x0004;
+            const DT_SINGLELINE: u32 = 0x0020;
+            DrawTextW(
+                hdc,
+                cw.as_ptr(),
+                -1,
+                &mut arc,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+    }
+
+    // Fonts for text layout — created once, used by both branches.
     let face = to_wide("Microsoft YaHei");
     let mk_font = |height: i32, weight: i32| -> windows_sys::Win32::Graphics::Gdi::HFONT {
         CreateFontW(
             height, 0, 0, 0, weight, 0, 0, 0,
-            1u32, // DEFAULT_CHARSET
+            1u32,
             0, 0,
-            5u32, // CLEARTYPE_QUALITY
+            5u32,
             0,
             face.as_ptr(),
         )
     };
-    // Bigger, more readable fonts synced to the app's text styles.
-    let font_initial = mk_font(26, 700);
     let font_kind = mk_font(15, 500);
     let font_title = mk_font(19, 600);
     let font_body = mk_font(16, 400);
-
-    let old_font = SelectObject(hdc, font_initial as _);
-    SetTextColor(hdc, text);
-
-    // Group chat icon: draw a clean WeChat-style group avatar — three person
-    // silhouettes in a circle, inspired by WeChat's own group chat placeholder.
-    if is_group {
-        let s = asz as f32 / 48.0;
-        let cx = (ax + asz / 2) as f32;
-        let cy = (ay + asz / 2) as f32;
-        let icon_color = fade_rgb(200, 200, 200, opacity.max(0.3));
-        let gpen = CreatePen(PS_SOLID, (2.0 * s).max(1.5) as i32, icon_color);
-        let gfill = CreateSolidBrush(icon_color);
-        let golden = SelectObject(hdc, gpen as _);
-        let old_brush2 = SelectObject(hdc, gfill as _);
-
-        // Center head (slightly higher)
-        let ch_r = 5.0 * s;
-        Ellipse(hdc,
-            (cx - ch_r) as i32, (cy - 9.0 * s) as i32,
-            (cx + ch_r) as i32, (cy - 9.0 * s + ch_r * 2.0) as i32);
-
-        // Left head
-        let lh_r = 4.0 * s;
-        Ellipse(hdc,
-            (cx - 10.0 * s) as i32, (cy - 4.0 * s) as i32,
-            (cx - 10.0 * s + lh_r * 2.0) as i32, (cy - 4.0 * s + lh_r * 2.0) as i32);
-
-        // Right head
-        Ellipse(hdc,
-            (cx + 6.0 * s) as i32, (cy - 4.0 * s) as i32,
-            (cx + 6.0 * s + lh_r * 2.0) as i32, (cy - 4.0 * s + lh_r * 2.0) as i32);
-
-        // Bodies: rounded shoulders under each head
-        // Center body
-        let cb = RECT {
-            left: (cx - 7.0 * s) as i32,
-            top: (cy + 1.0 * s) as i32,
-            right: (cx + 7.0 * s) as i32,
-            bottom: (cy + 9.0 * s) as i32,
-        };
-        Ellipse(hdc, cb.left, cb.top, cb.right, cb.bottom);
-
-        SelectObject(hdc, golden);
-        SelectObject(hdc, old_brush2);
-        DeleteObject(gpen as _);
-        DeleteObject(gfill as _);
-    } else {
-        // Single initial character (centered in avatar circle)
-        let ch = item
-            .title
-            .chars()
-            .find(|c| !c.is_whitespace())
-            .unwrap_or('W')
-            .to_string();
-        let cw = to_wide(&ch);
-        let mut arc = RECT {
-            left: ax,
-            top: ay,
-            right: ax + asz,
-            bottom: ay + asz,
-        };
-        const DT_LEFT: u32 = 0x0000;
-        const DT_CENTER: u32 = 0x0001;
-        const DT_VCENTER: u32 = 0x0004;
-        const DT_SINGLELINE: u32 = 0x0020;
-        DrawTextW(
-            hdc,
-            cw.as_ptr(),
-            -1,
-            &mut arc,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-    }
+    let old_font = SelectObject(hdc, font_kind as _);
 
     // Layout: text block starts after avatar + gap.
-    let text_x = x + 16 + asz + 14; // avatar_x + avatar_size + gap
+    let text_x = x + 16 + asz + 14;
     let text_right = x + TOAST_W - 16;
 
     // Kind label (small, top of text block)
-    SelectObject(hdc, font_kind as _);
     SetTextColor(hdc, faint);
     let kw = to_wide(&item.kind);
     let mut krc = RECT {
@@ -568,16 +615,16 @@ unsafe fn paint_card(
     const DT_SINGLELINE: u32 = 0x0020;
     DrawTextW(hdc, kw.as_ptr(), -1, &mut krc, DT_LEFT | DT_SINGLELINE);
 
-    // Title (contact/group name)
+    // Title (contact/group name) — tighter spacing to body
     SelectObject(hdc, font_title as _);
     SetTextColor(hdc, text);
     let ts = truncate(&item.title, 26);
     let tw = to_wide(&ts);
     let mut trc = RECT {
         left: text_x,
-        top: y + 30,
+        top: y + 28,
         right: text_right,
-        bottom: y + 56,
+        bottom: y + 52,
     };
     const DT_END_ELLIPSIS: u32 = 0x8000;
     DrawTextW(
@@ -588,14 +635,14 @@ unsafe fn paint_card(
         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
 
-    // Body (message preview) — bigger, 2-line wrap for readability.
+    // Body (message preview) — closer to title for more message space.
     SelectObject(hdc, font_body as _);
     SetTextColor(hdc, dim);
     let bs = truncate(&item.body, 72);
     let bw = to_wide(&bs);
     let mut brc = RECT {
         left: text_x,
-        top: y + 56,
+        top: y + 50,
         right: text_right,
         bottom: y + TOAST_H - 12,
     };
@@ -609,7 +656,6 @@ unsafe fn paint_card(
     );
 
     SelectObject(hdc, old_font);
-    DeleteObject(font_initial as _);
     DeleteObject(font_kind as _);
     DeleteObject(font_title as _);
     DeleteObject(font_body as _);

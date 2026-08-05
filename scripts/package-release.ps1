@@ -141,7 +141,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v${version}: native UI layout repair, received-message-only notifications, avatar popups, and reliable visible post-update relaunch."
+  notes = "v${version}: UI redesign — better nav icons, user-oriented labels, 3-step key guide, native Win32 test popup with real avatars, fixed sender name display"
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

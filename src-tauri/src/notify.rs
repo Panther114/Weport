@@ -352,11 +352,40 @@ fn sync_once(
         }
     }
 
-    // Resolve display names in one batch.
-    let ids: Vec<String> = candidates
+    // Resolve display names in one batch. Session ids alone are not enough:
+    // group-chat toasts also need the *sender's* display name, so collect the
+    // sender wxids from group message rows and add them to the lookup set
+    // (matches WeFlow: display name is resolved for both session and sender).
+    let mut ids: Vec<String> = candidates
         .iter()
         .map(|row| field_str(row, &["username", "userName", "sessionId", "user_name"]))
+        .filter(|s| !s.is_empty())
         .collect();
+    for row in &new_msg_candidates {
+        let username = field_str(row, &["username", "userName", "sessionId", "user_name"]);
+        if username.ends_with(GROUP_SUFFIX) {
+            let Ok(msgs) = handle.messages(&username, 30, 0) else {
+                continue;
+            };
+            let Some(latest) = newest_message(&msgs) else {
+                continue;
+            };
+            let sender = field_str(
+                latest,
+                &[
+                    "senderUsername",
+                    "sender_username",
+                    "talker",
+                    "fromUserName",
+                ],
+            );
+            if !sender.is_empty() {
+                ids.push(sender);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
     let mut names: HashMap<String, String> = HashMap::new();
     if !ids.is_empty() {
         if let Ok(map) = handle.display_names(&ids) {
@@ -443,22 +472,10 @@ fn sync_once(
             title,
             content,
             timestamp: field_i64(row, &["lastTimestamp", "last_timestamp"], 0),
-            avatar_png: avatar_png_for(
-                &handle,
-                if username.ends_with(GROUP_SUFFIX) {
-                    field_str(
-                        latest,
-                        &[
-                            "senderUsername",
-                            "sender_username",
-                            "talker",
-                            "fromUserName",
-                        ],
-                    )
-                } else {
-                    username.clone()
-                },
-            ),
+            // Group chat → the group's avatar; private chat → the sender's avatar.
+            // WeChat stores group avatars in the contact table keyed by the
+            // chatroom id, so resolving by the session id is correct for both.
+            avatar_png: avatar_png_for(&handle, username.clone()),
         });
     }
 
