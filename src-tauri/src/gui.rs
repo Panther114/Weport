@@ -106,6 +106,13 @@ fn toast_vp_id() -> egui::ViewportId {
 const TOAST_W: f32 = 360.0;
 const TOAST_H: f32 = 110.0;
 const TOAST_DURATION: f64 = 6.0;
+const TOAST_GAP: f32 = 12.0;
+const TOAST_MAX_VISIBLE: usize = 4;
+
+struct ToastEntry {
+    toast: NotifyEvent,
+    shown_at: f64,
+}
 
 pub fn run_gui() -> eframe::Result<()> {
     let icon = load_app_icon();
@@ -819,11 +826,7 @@ struct WeportApp {
     anti_busy: bool,
     // notifications
     notify: Option<NotifyService>,
-    toast_queue: VecDeque<NotifyEvent>,
-    current_toast: Option<NotifyEvent>,
-    toast_shown_at: f64,
-    /// True when the backend only supports embedded viewports (no real OS popup).
-    toast_viewport_embedded: bool,
+    notify_toasts: VecDeque<ToastEntry>,
     /// Last debug / toast diagnostic line for the 消息提醒 page.
     toast_debug_status: String,
     notify_cfg_sent: Option<NotifyConfig>,
@@ -923,10 +926,7 @@ impl WeportApp {
             anti_state: None,
             anti_busy: false,
             notify: Some(notify),
-            toast_queue: VecDeque::new(),
-            current_toast: None,
-            toast_shown_at: 0.0,
-            toast_viewport_embedded: false,
+            notify_toasts: VecDeque::new(),
             toast_debug_status: String::new(),
             notify_cfg_sent: None,
             tx,
@@ -1355,23 +1355,13 @@ impl WeportApp {
             },
             t.title
         );
-        // Toasts are rendered by the egui viewport in render_toast_viewport
-        // (called from update). This is the permanent rendering stack —
-        // see AGENTS.md. Do NOT introduce a native Win32/GDI overlay here.
-        self.current_toast = Some(t.clone());
-        self.toast_shown_at = now_secs();
-    }
-
-    /// Drain every pending event into the native multi-toast stack immediately.
-    fn flush_toast_queue(&mut self) {
-        while let Some(t) = self.toast_queue.pop_front() {
-            self.push_native_toast(&t);
+        self.notify_toasts.push_back(ToastEntry {
+            toast: t.clone(),
+            shown_at: now_secs(),
+        });
+        while self.notify_toasts.len() > TOAST_MAX_VISIBLE + 2 {
+            self.notify_toasts.pop_front();
         }
-    }
-
-    fn dismiss_current_toast(&mut self) {
-        self.current_toast = None;
-        self.flush_toast_queue();
     }
 
     /// Inject a synthetic toast (stacks with any currently showing cards).
@@ -1404,19 +1394,19 @@ impl WeportApp {
         self.push_native_toast(&ev);
     }
 
-    /// Drain every pending event into the native multi-toast stack immediately.
+    /// Drain every pending event into the toast stack immediately.
     fn drain_notify_toasts(&mut self) {
-        if let Some(notify) = &self.notify {
+        let events: Vec<NotifyEvent> = if let Some(notify) = &self.notify {
+            let mut out = Vec::new();
             while let Some(ev) = notify.poll() {
-                self.toast_queue.push_back(ev);
+                out.push(ev);
             }
-        }
-        self.flush_toast_queue();
-        // Clear bookkeeping after native display window; native host times out.
-        if self.current_toast.is_some() {
-            if now_secs() - self.toast_shown_at > TOAST_DURATION {
-                self.current_toast = None;
-            }
+            out
+        } else {
+            Vec::new()
+        };
+        for ev in events {
+            self.push_native_toast(&ev);
         }
     }
 
@@ -1763,7 +1753,7 @@ impl WeportApp {
 
 impl eframe::App for WeportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if std::env::var_os("WEPORT_SCREENSHOT_POPUP").is_some() && self.current_toast.is_none() {
+        if std::env::var_os("WEPORT_SCREENSHOT_POPUP").is_some() && self.notify_toasts.is_empty() {
             self.enqueue_debug_toast();
         }
         self.poll_bg(ctx);
@@ -2053,36 +2043,36 @@ impl eframe::App for WeportApp {
             });
 
         self.ui_modals(ctx);
-        // The egui toast viewport (render_toast_viewport) handles popup
-        // rendering on all platforms. When the main window is visible, also
-        // draw an inline fallback so the toast appears over the app content.
-        if let Some(toast) = self.current_toast.clone() {
-            if self.main_visible {
-                self.render_inline_toast(ctx, &toast);
-            }
-        }
     }
 }
 
 impl WeportApp {
     fn render_toast_viewport(&mut self, ctx: &egui::Context) {
-        // Auto-dismiss bookkeeping.
-        if self.current_toast.is_some() {
-            if now_secs() - self.toast_shown_at > TOAST_DURATION {
-                self.dismiss_current_toast();
-            } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
-            }
-        }
-        let Some(toast) = self.current_toast.clone() else {
-            self.toast_viewport_embedded = false;
+        // Auto-dismiss expired toasts (per-toast timer).
+        let now = now_secs();
+        self.notify_toasts
+            .retain(|e| now - e.shown_at < TOAST_DURATION);
+
+        if self.notify_toasts.is_empty() {
             return;
-        };
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+
+        // Clone visible toast data so the show_viewport_immediate closure
+        // doesn't borrow self.
+        let visible: Vec<NotifyEvent> = self
+            .notify_toasts
+            .iter()
+            .take(TOAST_MAX_VISIBLE)
+            .map(|e| e.toast.clone())
+            .collect();
+        let count = visible.len();
+        let vp_h = count as f32 * TOAST_H + (count as f32 - 1.0) * TOAST_GAP + TOAST_GAP;
 
         let builder = egui::ViewportBuilder::default()
-            .with_inner_size([TOAST_W, TOAST_H])
-            .with_min_inner_size([TOAST_W, TOAST_H])
-            .with_max_inner_size([TOAST_W, TOAST_H])
+            .with_inner_size([TOAST_W, vp_h])
+            .with_min_inner_size([TOAST_W, vp_h])
+            .with_max_inner_size([TOAST_W, vp_h])
             .with_decorations(false)
             .with_resizable(false)
             .with_always_on_top()
@@ -2092,95 +2082,72 @@ impl WeportApp {
                 primary_work_area().1 + 20.0,
             ));
 
-        ctx.show_viewport_immediate(toast_vp_id(), builder, |toast_ctx, class| {
-            if matches!(class, egui::ViewportClass::Embedded) {
-                self.toast_viewport_embedded = true;
-            }
+        ctx.show_viewport_immediate(toast_vp_id(), builder, move |toast_ctx, _class| {
             toast_ctx.set_visuals(egui::Visuals::dark());
             egui::CentralPanel::default()
                 .frame(Frame::NONE)
                 .show(toast_ctx, |ui| {
-                    let rect = ui.max_rect();
-                    let card = rect.shrink(2.0);
-                    ui.painter().rect(
-                        card,
-                        CornerRadius::same(14),
-                        PANEL,
-                        Stroke::new(1.0, LINE_STRONG),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.allocate_ui_at_rect(card.shrink2(Vec2::new(16.0, 12.0)), |ui| {
-                        ui.horizontal(|ui| {
-                            let avatar_rect = ui.allocate_space(Vec2::splat(48.0)).1;
-                            if let Some(bytes) = &toast.avatar_png {
-                                if let Ok(decoded) = image::load_from_memory(bytes) {
-                                    let rgba = decoded.to_rgba8();
-                                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                                        [rgba.width() as usize, rgba.height() as usize],
-                                        &rgba,
-                                    );
-                                    let texture = toast_ctx.load_texture(
-                                        format!("toast-avatar-{}", toast.timestamp),
-                                        image,
-                                        egui::TextureOptions::LINEAR,
-                                    );
-                                    ui.painter().image(
-                                        texture.id(),
-                                        avatar_rect,
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(0.0, 0.0),
-                                            egui::pos2(1.0, 1.0),
-                                        ),
-                                        Color32::WHITE,
-                                    );
+                    for (i, toast) in visible.iter().enumerate() {
+                        let y = i as f32 * (TOAST_H + TOAST_GAP);
+                        let card_rect = egui::Rect::from_min_size(
+                            egui::pos2(2.0, y + 2.0),
+                            egui::vec2(TOAST_W - 4.0, TOAST_H - 4.0),
+                        );
+                        ui.painter().rect(
+                            card_rect,
+                            CornerRadius::same(14),
+                            PANEL,
+                            Stroke::new(1.0, LINE_STRONG),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.allocate_ui_at_rect(card_rect.shrink2(Vec2::new(16.0, 12.0)), |ui| {
+                            ui.horizontal(|ui| {
+                                let avatar_rect = ui.allocate_space(Vec2::splat(48.0)).1;
+                                if let Some(bytes) = &toast.avatar_png {
+                                    if let Ok(decoded) = image::load_from_memory(bytes) {
+                                        let rgba = decoded.to_rgba8();
+                                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                                            [rgba.width() as usize, rgba.height() as usize],
+                                            &rgba,
+                                        );
+                                        let texture = toast_ctx.load_texture(
+                                            format!("toast-avatar-{}", toast.timestamp),
+                                            image,
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        ui.painter().image(
+                                            texture.id(),
+                                            avatar_rect,
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(0.0, 0.0),
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        Self::paint_avatar_fallback(ui, avatar_rect, &toast.title);
+                                    }
                                 } else {
                                     Self::paint_avatar_fallback(ui, avatar_rect, &toast.title);
                                 }
-                            } else {
-                                Self::paint_avatar_fallback(ui, avatar_rect, &toast.title);
-                            }
-                            ui.add_space(12.0);
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new(&toast.title).size(15.0).strong().color(TEXT),
-                                );
-                                ui.add_space(3.0);
-                                ui.label(RichText::new(&toast.content).size(14.0).color(TEXT_DIM));
+                                ui.add_space(12.0);
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new(&toast.title)
+                                            .size(15.0)
+                                            .strong()
+                                            .color(TEXT),
+                                    );
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        RichText::new(&toast.content).size(14.0).color(TEXT_DIM),
+                                    );
+                                });
                             });
                         });
-                    });
+                    }
                 });
         });
-        if self.main_visible {
-            self.render_inline_toast(ctx, &toast);
-        }
-    }
-
-    fn render_inline_toast(&self, ctx: &egui::Context, toast: &NotifyEvent) {
-        egui::Area::new(egui::Id::new("notification_popup_fallback"))
-            .anchor(egui::Align2::RIGHT_TOP, [-18.0, 18.0])
-            .order(egui::Order::Tooltip)
-            .show(ctx, |ui| {
-                ui.set_width(TOAST_W);
-                Frame::new()
-                    .fill(PANEL)
-                    .stroke(Stroke::new(1.0_f32, LINE_STRONG))
-                    .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::symmetric(16, 12))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (id, rect) = ui.allocate_space(Vec2::splat(48.0));
-                            let _ = id;
-                            Self::paint_avatar_fallback(ui, rect, &toast.title);
-                            ui.add_space(12.0);
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&toast.title).size(15.0).strong().color(TEXT));
-                                ui.add_space(3.0);
-                                ui.label(RichText::new(&toast.content).size(14.0).color(TEXT_DIM));
-                            });
-                        });
-                    });
-            });
     }
 
     fn paint_avatar_fallback(ui: &mut egui::Ui, rect: egui::Rect, title: &str) {

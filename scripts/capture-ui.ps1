@@ -1,6 +1,6 @@
 param(
   [string]$Executable = "$PSScriptRoot\..\src-tauri\target\release\weport.exe",
-  [string]$OutputDir = (Join-Path $env:TEMP "weport-v0.6.13-screenshots")
+  [string]$OutputDir = (Join-Path $env:TEMP "weport-v0.6.14-screenshots")
 )
 
 $ErrorActionPreference = 'Stop'

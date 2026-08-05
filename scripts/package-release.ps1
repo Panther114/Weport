@@ -86,7 +86,11 @@ SectionEnd
 
 Section "Uninstall"
   ; Remove install files only — leave user settings/keys intact.
+  ; Kill any running weport.exe with retry (matches Install section).
   nsExec::Exec "taskkill /F /IM weport.exe"
+  Sleep 500
+  nsExec::Exec "taskkill /F /IM weport.exe"
+  Sleep 300
   Delete "`$INSTDIR\weport.exe"
   Delete "`$INSTDIR\Uninstall.exe"
   RMDir /r "`$INSTDIR\resources"
@@ -141,7 +145,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v${version}: revert toast to egui rendering (GPU-accelerated, anti-aliased, rounded corners); fix tray-hidden toasts (minimize instead of SW_HIDE); fix self-sent messages triggering popups; fix auto-start after update (--background relaunch)"
+  notes = "v${version}: toast popups now render outside the app as separate egui viewport windows; multiple toasts stack vertically; fix uninstall not killing running processes"
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{
