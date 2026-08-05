@@ -141,7 +141,7 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY) {
 $sigText = if (Test-Path $sigPath) { (Get-Content -Raw $sigPath).Trim() } else { "" }
 $latest = [ordered]@{
   version = $version
-  notes = "v${version}: restore reliable native Win32 toast popups (cache avatar decode, fix QA capture of the toast HWND, fail-loud blank-popup guard), keep v0.6.12 UI redesign (nav icons, user labels, 3-step key guide, sender-name fix)"
+  notes = "v${version}: revert toast to egui rendering (GPU-accelerated, anti-aliased, rounded corners); fix tray-hidden toasts (minimize instead of SW_HIDE); fix self-sent messages triggering popups; fix auto-start after update (--background relaunch)"
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{

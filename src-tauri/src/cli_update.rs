@@ -286,6 +286,11 @@ fn spawn_update_helper(
         .map(|p| p.display().to_string().replace('\\', "/"))
         .unwrap_or_default();
     let silent_flag = if silent { "/S" } else { "" };
+    // Read start_in_background from settings so the relaunch matches the
+    // user's auto-start preference. Without this, the app relaunches visibly
+    // after an update even when the user configured it to start in the tray.
+    let start_in_background = settings::load_settings().start_in_background;
+    let bg_flag = if start_in_background { "--background" } else { "" };
 
     let script = format!(
         r#"@echo off
@@ -324,8 +329,8 @@ if not "{snap_str}"=="" (
 
 :: 4. Relaunch the newly installed binary.
 if exist "{exe_str}" (
-    echo [%DATE% %TIME%] relaunching visible app >> "%LOG%"
-    start "" "{exe_str}"
+    echo [%DATE% %TIME%] relaunching app {bg_flag} >> "%LOG%"
+    start "" "{exe_str}" {bg_flag}
 ) else (
     echo [%DATE% %TIME%] installed executable missing >> "%LOG%"
 )
@@ -336,7 +341,7 @@ exit /b 0
 
 :wait_timeout
 echo [%DATE% %TIME%] timed out waiting for old process >> "%LOG%"
-if exist "{exe_str}" start "" "{exe_str}"
+if exist "{exe_str}" start "" "{exe_str}" {bg_flag}
 (goto) 2>NUL & del "%~f0"
 "#,
         pid = pid,
@@ -344,6 +349,7 @@ if exist "{exe_str}" start "" "{exe_str}"
         silent_flag = silent_flag,
         snap_str = snap_str,
         exe_str = exe_str,
+        bg_flag = bg_flag,
     );
 
     fs::write(&helper_path, script)?;

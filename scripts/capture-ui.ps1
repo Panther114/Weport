@@ -25,7 +25,7 @@ public static class WeportCapture {
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int max);
-  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder s, int max);
+  [DllImport("user32.dll")] public static extern bool SystemParametersInfoW(uint action, uint param, out RECT rect, uint update);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
@@ -34,27 +34,8 @@ public static class WeportCapture {
 # The Weport process is DPI-aware (eframe manifest), so it sees physical
 # pixels. The harness MUST match, otherwise GetWindowRect/ClientToScreen return
 # DPI-virtualized (scaled) coordinates and CopyFromScreen captures the wrong
-# region — which is exactly why v0.6.12's popup.png came out blank.
+# region.
 [WeportCapture]::SetProcessDPIAware() | Out-Null
-
-function Find-ToastHost([int]$ProcessId) {
-  # The native toast host registers class "WeportToastHost-<pid>". If this
-  # window is missing, toast_win never started (silent unwiring regression).
-  $found = [IntPtr]::Zero
-  $cb = [WeportCapture+EnumWindowsProc] {
-    param($hWnd, $unused)
-    $owner = 0
-    [WeportCapture]::GetWindowThreadProcessId($hWnd, [ref]$owner) | Out-Null
-    if ($owner -eq $ProcessId -and [WeportCapture]::IsWindowVisible($hWnd)) {
-      $sb = New-Object System.Text.StringBuilder 256
-      [WeportCapture]::GetClassName($hWnd, $sb, 256) | Out-Null
-      if ($sb.ToString().StartsWith('WeportToastHost')) { $script:found = $hWnd }
-    }
-    return $true
-  }
-  [WeportCapture]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
-  return $script:found
-}
 
 function Assert-ImageHasContent([string]$Path, [string]$Label) {
   # Variance check: a blank/transparent capture is near-uniform (low stddev);
@@ -168,25 +149,19 @@ function Capture-Panel([string]$Panel, [bool]$WithPopup) {
 
     if ($WithPopup) {
       Start-Sleep -Seconds 1
-      # v0.6.11 captured a region of the MAIN window because the toast was an
-      # embedded egui viewport. v0.6.12 moved the toast into a separate native
-      # topmost window (class WeportToastHost-<pid>), so the old capture was
-      # blank. Find that host window and capture its first card directly.
-      $toastHwnd = [IntPtr]::Zero
-      for ($i = 0; $i -lt 20 -and $toastHwnd -eq [IntPtr]::Zero; $i++) {
-        $toastHwnd = Find-ToastHost $process.Id
-        if ($toastHwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 150 }
-      }
-      if ($toastHwnd -eq [IntPtr]::Zero) {
-        throw "WeportToastHost window never appeared for $Panel — toast_win is not wired (regression)."
-      }
-      # Capture the top card: full client width, first ~140px (card is 112 + margin).
-      $origin = New-Object WeportCapture+POINT
-      [WeportCapture]::ClientToScreen($toastHwnd, [ref]$origin) | Out-Null
+      # The egui toast viewport appears at the top-right of the work area
+      # (positioned by render_toast_viewport in gui.rs). Capture that screen
+      # region directly — the toast is an egui viewport, not a separate
+      # native window, so there's no dedicated HWND to find.
+      $spiGetWorkArea = 48
+      $workRect = New-Object WeportCapture+RECT
+      [WeportCapture]::SystemParametersInfoW($spiGetWorkArea, 0, [ref]$workRect, 0) | Out-Null
+      $toastX = $workRect.Right - 380 - 20
+      $toastY = $workRect.Top + 20
       $popupPath = Join-Path $OutputDir 'popup.png'
-      $bitmap = New-Object System.Drawing.Bitmap 400, 140
+      $bitmap = New-Object System.Drawing.Bitmap 380, 140
       $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-      $graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
+      $graphics.CopyFromScreen($toastX, $toastY, 0, 0, $bitmap.Size)
       $bitmap.Save($popupPath, [System.Drawing.Imaging.ImageFormat]::Png)
       $graphics.Dispose(); $bitmap.Dispose()
       Assert-ImageHasContent $popupPath $Panel

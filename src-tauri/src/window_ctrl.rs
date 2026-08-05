@@ -130,6 +130,8 @@ pub fn force_show() {
     if hwnd == 0 {
         return;
     }
+    // Restore the taskbar button in case we hid it when minimizing to tray.
+    show_in_taskbar();
     let hwnd = hwnd as HWND;
 
     unsafe {
@@ -165,7 +167,17 @@ pub fn force_show() {
 }
 
 /// Hide the main window for tray mode.
+///
+/// **DO NOT use SW_HIDE** — winit stops pumping `App::update` when the window
+/// is hidden, which kills toast viewport rendering (the v0.6.11/v0.6.12
+/// tray-hidden toast bug). Use `Minimized(true)` via egui's ViewportCommand
+/// instead, then call `hide_from_taskbar()` to remove the taskbar button.
+/// This keeps the winit event loop alive so `update` → `render_toast_viewport`
+/// → `show_viewport_immediate` keeps working while tray-hidden.
 pub fn force_hide() {
+    // Deprecated: only minimizes. The caller should use egui's
+    // ViewportCommand::Minimized(true) + hide_from_taskbar() instead.
+    // Kept for the tray thread's direct use if needed.
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, ShowWindow, SW_HIDE};
 
@@ -179,6 +191,55 @@ pub fn force_hide() {
         if IsWindow(h) != 0 {
             ShowWindow(h, SW_HIDE);
         }
+    }
+}
+
+/// Remove the main window's taskbar button (used when minimizing to tray).
+/// Toggles WS_EX_TOOLWINDOW on (hides from taskbar) / off (shows in taskbar).
+pub fn hide_from_taskbar() {
+    set_taskbar_button(false);
+}
+
+/// Restore the main window's taskbar button (used when restoring from tray).
+pub fn show_in_taskbar() {
+    set_taskbar_button(true);
+}
+
+fn set_taskbar_button(show: bool) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    let _ = find_weport_hwnd();
+    let hwnd = main_hwnd();
+    if hwnd == 0 {
+        return;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_APPWINDOW: u32 = 0x00040000;
+    const WS_EX_TOOLWINDOW: u32 = 0x00000080;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+    unsafe {
+        let h = hwnd as HWND;
+        let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        let new_ex = if show {
+            (ex | WS_EX_APPWINDOW) & !WS_EX_TOOLWINDOW
+        } else {
+            (ex & !WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW
+        };
+        SetWindowLongW(h, GWL_EXSTYLE, new_ex as i32);
+        // Force the taskbar to pick up the style change.
+        SetWindowPos(
+            h,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
     }
 }
 

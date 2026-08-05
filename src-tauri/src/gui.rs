@@ -1355,24 +1355,9 @@ impl WeportApp {
             },
             t.title
         );
-        // Native Windows toast host: a true topmost overlay window that is
-        // independent of the main window (keeps showing when minimized to tray,
-        // and when the main window is out of focus). Non-Windows builds fall
-        // back to the egui viewport below.
-        #[cfg(windows)]
-        {
-            let kind_label = match t.kind {
-                NotifyKind::NewMessage => "新消息",
-                NotifyKind::Recalled => "撤回提醒",
-            };
-            crate::toast_win::show_with_session(
-                &t.title,
-                &t.content,
-                kind_label,
-                &t.session_id,
-                t.avatar_png.clone(),
-            );
-        }
+        // Toasts are rendered by the egui viewport in render_toast_viewport
+        // (called from update). This is the permanent rendering stack —
+        // see AGENTS.md. Do NOT introduce a native Win32/GDI overlay here.
         self.current_toast = Some(t.clone());
         self.toast_shown_at = now_secs();
     }
@@ -1724,18 +1709,25 @@ impl WeportApp {
         #[cfg(windows)]
         {
             crate::window_ctrl::force_show();
+            crate::window_ctrl::show_in_taskbar();
             // Re-assert for a couple of frames — Windows often steals focus back.
             self.force_show_frames = self.force_show_frames.max(4);
         }
     }
 
     /// Hide main window into the tray (egui + native Win32).
+    ///
+    /// **Critical:** do NOT use `Visible(false)` / `SW_HIDE` — winit stops
+    /// pumping `App::update` when the window is hidden, which kills toast
+    /// viewport rendering. Instead, minimize the window and remove its
+    /// taskbar button. The winit event loop stays alive, so toasts still
+    /// render via `show_viewport_immediate` while tray-hidden.
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.main_visible = false;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         ctx.request_repaint();
         #[cfg(windows)]
-        crate::window_ctrl::force_hide();
+        crate::window_ctrl::hide_from_taskbar();
     }
 
     /// Tear down tray + notify and ask eframe to exit (with a hard-exit fallback).
@@ -1759,7 +1751,10 @@ impl WeportApp {
             drop(notify);
         }
         // Make the main window visible so Close is processed (some backends
-        // ignore Close on a hidden window, which left the process hung).
+        // ignore Close on a minimized/hidden window, which left the process hung).
+        #[cfg(windows)]
+        crate::window_ctrl::show_in_taskbar();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         self.main_visible = false;
@@ -1870,7 +1865,10 @@ impl eframe::App for WeportApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 #[cfg(windows)]
-                crate::window_ctrl::force_show();
+                {
+                    crate::window_ctrl::force_show();
+                    crate::window_ctrl::show_in_taskbar();
+                }
                 ctx.request_repaint();
             }
         }
@@ -2055,20 +2053,20 @@ impl eframe::App for WeportApp {
             });
 
         self.ui_modals(ctx);
-        // On Windows the native toast host owns popup rendering; the inline
-        // fallback is for non-Windows platforms only.
-        #[cfg(not(windows))]
+        // The egui toast viewport (render_toast_viewport) handles popup
+        // rendering on all platforms. When the main window is visible, also
+        // draw an inline fallback so the toast appears over the app content.
         if let Some(toast) = self.current_toast.clone() {
-            // Draw the fallback after the central panel so it cannot be
-            // covered by a later panel paint operation.
-            self.render_inline_toast(ctx, &toast);
+            if self.main_visible {
+                self.render_inline_toast(ctx, &toast);
+            }
         }
     }
 }
 
 impl WeportApp {
     fn render_toast_viewport(&mut self, ctx: &egui::Context) {
-        // Auto-dismiss bookkeeping (needed on all platforms).
+        // Auto-dismiss bookkeeping.
         if self.current_toast.is_some() {
             if now_secs() - self.toast_shown_at > TOAST_DURATION {
                 self.dismiss_current_toast();
@@ -2076,15 +2074,6 @@ impl WeportApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
         }
-        // On Windows the native toast host (toast_win) paints the popup as a
-        // real topmost overlay; the egui viewport is only a fallback for
-        // non-Windows platforms.
-        #[cfg(not(windows))]
-        self.render_egui_toast_viewport(ctx);
-    }
-
-    #[cfg(not(windows))]
-    fn render_egui_toast_viewport(&mut self, ctx: &egui::Context) {
         let Some(toast) = self.current_toast.clone() else {
             self.toast_viewport_embedded = false;
             return;

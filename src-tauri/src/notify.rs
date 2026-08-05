@@ -413,6 +413,22 @@ fn sync_once(
         if is_system_row(latest) || msg_direction(latest, &wxid) != Some(false) {
             continue;
         }
+        // Belt-and-suspenders self-sent filter: even if isSend is missing or
+        // wrong (known WeChat 4 WCDB edge case), compare the sender field
+        // directly against the own wxid. This is the user-demanded fix for
+        // self-sent messages triggering popups.
+        let sender = field_str(
+            latest,
+            &[
+                "senderUsername",
+                "sender_username",
+                "talker",
+                "fromUserName",
+            ],
+        );
+        if !sender.is_empty() && sender_wxid_equal(&sender, &wxid) {
+            continue;
+        }
         let message_key = field_str(
             latest,
             &["messageKey", "message_key", "localId", "local_id"],

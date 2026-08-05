@@ -18,8 +18,6 @@ mod wcdb_native;
 mod wcdb_worker;
 #[cfg(windows)]
 mod window_ctrl;
-#[cfg(windows)]
-mod toast_win;
 
 use serde_json::json;
 use std::env;
