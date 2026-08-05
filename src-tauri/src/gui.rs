@@ -2069,6 +2069,7 @@ impl WeportApp {
         let count = visible.len();
         let vp_h = count as f32 * TOAST_H + (count as f32 - 1.0) * TOAST_GAP + TOAST_GAP;
 
+        let screen = ctx.screen_rect();
         let builder = egui::ViewportBuilder::default()
             .with_inner_size([TOAST_W, vp_h])
             .with_min_inner_size([TOAST_W, vp_h])
@@ -2078,8 +2079,8 @@ impl WeportApp {
             .with_always_on_top()
             .with_taskbar(false)
             .with_position(egui::pos2(
-                primary_work_area().0 + primary_work_area().2 - TOAST_W - 20.0,
-                primary_work_area().1 + 20.0,
+                screen.right() - TOAST_W - 20.0,
+                screen.top() + 20.0,
             ));
 
         ctx.show_viewport_immediate(toast_vp_id(), builder, move |toast_ctx, _class| {

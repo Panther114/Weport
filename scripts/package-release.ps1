@@ -82,6 +82,8 @@ Section "Install"
   CreateDirectory "`$SMPROGRAMS\Weport"
   CreateShortCut "`$SMPROGRAMS\Weport\Weport.lnk" "`$INSTDIR\weport.exe"
   CreateShortCut "`$DESKTOP\Weport.lnk" "`$INSTDIR\weport.exe"
+  ; Launch the app after installation.
+  Exec '"`$INSTDIR\weport.exe"'
 SectionEnd
 
 Section "Uninstall"
