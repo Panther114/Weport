@@ -1,30 +1,41 @@
-name: visual-smoke
+name: Visual Smoke
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-  workflow_dispatch:
 
 jobs:
-  toast-popup:
+  capture:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build (release)
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
-      - name: Run capture-ui harness (asserts toast paints)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build unpacked app
+        run: npx electron-builder --dir
+
+      - name: Capture harness (main window + notification popup)
         shell: pwsh
-        run: |
-          # capture-ui.ps1 finds the WeportToastHost window, captures the first
-          # card, and throws if the capture is blank (Assert-ImageHasContent).
-          # This is the guard against the v0.6.11/v0.6.12 class of regression
-          # where toast_win existed but was unwired, or painted nothing.
-          ./scripts/capture-ui.ps1 -Executable "$PWD/src-tauri/target/release/weport.exe" -OutputDir "$env:TEMP/weport-smoke"
-      - name: Upload popup artifact
+        run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
+
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: weport-popup-smoke
-          path: ${{ runner.temp }}/weport-smoke/popup.png
+          name: weport-screenshots
+          path: |
+            ${{ runner.temp }}/weport-electron-screenshots/*.png
+          retention-days: 7

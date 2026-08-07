@@ -2027,7 +2027,7 @@ export class ImageDecryptService {
 
     const aesData = payload.subarray(0, alignedAesSize)
 
-    let plainAes = Buffer.alloc(0)
+    let plainAes: Buffer = Buffer.alloc(0)
     if (aesData.length > 0) {
       const decipher = crypto.createDecipheriv('aes-128-ecb', aesKey, Buffer.alloc(0))
       decipher.setAutoPadding(false)
@@ -2037,8 +2037,8 @@ export class ImageDecryptService {
     const remaining = payload.subarray(alignedAesSize)
     if (xorSize < 0 || xorSize > remaining.length) throw new Error('invalid xor size')
 
-    let rawData = Buffer.alloc(0)
-    let decodedXor = Buffer.alloc(0)
+    let rawData: Buffer = Buffer.alloc(0)
+    let decodedXor: Buffer = Buffer.alloc(0)
     if (xorSize > 0) {
       const rawLength = remaining.length - xorSize
       if (rawLength < 0) throw new Error('invalid raw size')

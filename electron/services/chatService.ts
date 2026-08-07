@@ -16,7 +16,6 @@ import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStat
 import { FILE_APP_LOCAL_TYPE_SET } from './export/constants'
 import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from './groupMyMessageCountCacheService'
 import { exportCardDiagnosticsService } from './exportCardDiagnosticsService'
-import { voiceTranscribeService } from './voiceTranscribeService'
 import { ImageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
 import { LRUCache } from '../utils/LRUCache.js'
@@ -49,6 +48,8 @@ export interface Message {
   sortSeq: number
   isSend: number | null
   senderUsername: string | null
+  senderDisplayName?: string
+  senderAvatarUrl?: string
   parsedContent: string
   rawContent: string
   content?: string  // 原始XML内容（与rawContent相同，供前端使用）
@@ -358,7 +359,7 @@ const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage'
 
 class ChatService {
   private configService: ConfigService
-  private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string }
+  private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
   private connected = false
   private readonly dbMonitorListeners = new Set<(type: string, json: string) => void>()
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
@@ -9732,26 +9733,8 @@ class ChatService {
 
           // 转写
 
-          const t5 = Date.now()
-          const result = await voiceTranscribeService.transcribeWavBuffer(wavData, (text) => {
-
-            onPartial?.(text)
-          })
-          const t6 = Date.now()
-
-
-          if (result.success) {
-            const transcript = String(result.transcript || '').trim()
-            if (transcript) {
-              this.cacheVoiceTranscript(cacheKey, transcript)
-            }
-            return { success: true, transcript }
-          } else {
-            console.error(`[Transcribe] 转写失败: ${result.error}`)
-          }
-
-
-          return result
+          // 语音转写服务已裁剪（Weport 不提供转写功能）
+          return { success: false, error: '语音转写暂不可用（已裁剪）' }
         } catch (error) {
           console.error(`[Transcribe] 异常:`, error)
           return { success: false, error: String(error) }

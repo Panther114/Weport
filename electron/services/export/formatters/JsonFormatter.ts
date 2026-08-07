@@ -46,7 +46,7 @@ export class JsonFormatter {
 
       const collectParams = this.exportService.resolveCollectParams(options)
       const collectProgressReporter = this.exportService.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
-      const collected = await this.exportService.collectMessages(
+      const collected: any = await this.exportService.collectMessages(
         sessionId,
         cleanedMyWxid,
         options.dateRange,
@@ -476,7 +476,7 @@ export class JsonFormatter {
       const avatarMap = options.exportAvatars
         ? await this.exportService.exportAvatars(
           [
-            ...Array.from(collected.memberSet.entries()).map(([username, info]: [string, any]) => ({
+            ...Array.from(collected.memberSet.entries() as Iterable<[string, any]>).map(([username, info]) => ({
               username,
               avatarUrl: info.avatarUrl
             })),
@@ -623,7 +623,7 @@ export class JsonFormatter {
         }> | undefined
 
         if (isGroup) {
-          const memberUsernames = Array.from(collected.memberSet.keys()).filter(Boolean)
+          const memberUsernames = Array.from(collected.memberSet.keys() as Iterable<string>).filter(Boolean)
           await this.exportService.preloadContacts(memberUsernames, contactCache)
           const friendLookupUsernames = buildGroupNicknameIdCandidates(memberUsernames)
           const friendFlagMap = await this.exportService.queryFriendFlagMap(friendLookupUsernames)
@@ -749,3 +749,4 @@ export class JsonFormatter {
   
   }
 }
+

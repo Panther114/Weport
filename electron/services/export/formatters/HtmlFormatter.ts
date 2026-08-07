@@ -50,7 +50,7 @@ export class HtmlFormatter {
 
       const collectParams = this.exportService.resolveCollectParams(options)
       const collectProgressReporter = this.exportService.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
-      const collected = await this.exportService.collectMessages(
+      const collected: any = await this.exportService.collectMessages(
         sessionId,
         cleanedMyWxid,
         options.dateRange,
@@ -211,7 +211,7 @@ export class HtmlFormatter {
       const avatarMap = options.exportAvatars
         ? await this.exportService.exportAvatarsToFiles(
           [
-            ...Array.from(collected.memberSet.entries()).map(([username, info]: [string, any]) => ({
+            ...Array.from(collected.memberSet.entries() as Iterable<[string, any]>).map(([username, info]) => ({
               username,
               avatarUrl: info.avatarUrl
             })),
@@ -615,3 +615,4 @@ export class HtmlFormatter {
   
   }
 }
+

@@ -5,12 +5,9 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "strict": false,
-    "noEmit": true,
+    "strict": true,
     "target": "ES2022",
-    "lib": ["ES2022"],
-    "types": ["node"]
+    "lib": ["ES2022"]
   },
   "include": [
     "vite.config.ts",

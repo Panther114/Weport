@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag (e.g. v0.0.1)'
+        description: 'Version tag (e.g. v0.7.0)'
         required: true
-        default: 'v0.6.14'
+        default: 'v0.7.0'
 
 permissions:
   contents: write
@@ -24,12 +24,10 @@ jobs:
       - name: Verify tag matches package version
         shell: pwsh
         run: |
-          $cargo = Get-Content src-tauri/Cargo.toml -Raw
-          if ($cargo -notmatch 'version\s*=\s*"([^"]+)"') { throw 'Cargo version missing' }
-          $cargoVersion = $Matches[1]
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
           $refName = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ inputs.tag }}' }
           $tagVersion = $refName.TrimStart('v')
-          if ($cargoVersion -ne $tagVersion) { throw "Tag $tagVersion does not match Cargo version $cargoVersion" }
+          if ($pkg.version -ne $tagVersion) { throw "Tag $tagVersion does not match package version $($pkg.version)" }
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -37,51 +35,27 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
 
-      - name: Install frontend deps
-        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
 
-      - name: Generate icons
-        run: node scripts/generate-icons.mjs
-
-      - name: Install NSIS
-        shell: pwsh
-        run: choco install nsis --yes --no-progress
-
-      - name: Build native Weport
+      - name: Build installer
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis
 
-      - name: Package NSIS installer and updater metadata
+      - name: Smoke test (capture harness)
         shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: ./scripts/package-release.ps1
+        run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 
-      - name: Collect artifacts
-        shell: bash
-        run: |
-          mkdir -p dist-release
-          find src-tauri/target/release/bundle -type f \( -name '*.exe' -o -name '*.sig' -o -name '*.json' -o -name '*.nsis.zip' \) -print -exec cp {} dist-release/ \;
-          ls -la dist-release
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: weport-windows
-          path: dist-release/*
-
-      - name: Create GitHub Release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: Weport ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            release/Weport-*.exe
+            release/Weport-*.exe.blockmap
+            release/latest.yml
           generate_release_notes: true
-          files: dist-release/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: false

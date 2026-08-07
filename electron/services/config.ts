@@ -40,6 +40,8 @@ interface ConfigSchema {
   imageAesKey: string
   wxidConfigs: Record<string, { decryptKey?: string; imageXorKey?: number; imageAesKey?: string; updatedAt?: number }>
   exportPath?: string;
+  /** Weport 导出格式（TXT / JSON） */
+  exportFormat?: 'txt' | 'json';
   // 缓存相关
   cachePath: string
   lastOpenedDb: string

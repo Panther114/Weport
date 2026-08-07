@@ -224,7 +224,7 @@ export class KeyServiceLinux {
 
         onStatus?.('授权通过后请在手机上确认登录微信，正在等待密钥回调...', 0)
 
-        this.sudo.exec(command, options, (error, stdout, stderr) => {
+        this.sudo.exec(command, options, (error: Error | null, stdout: string, stderr: string) => {
           execAsync(`kill -CONT ${pid}`).catch(() => {})
           if (error) {
             const detail = String(stderr || '').trim()

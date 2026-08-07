@@ -44,7 +44,7 @@ export class ChatLabFormatter {
 
       const collectParams = this.exportService.resolveCollectParams(options)
       const collectProgressReporter = this.exportService.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
-      const collected = await this.exportService.collectMessages(
+      const collected: any = await this.exportService.collectMessages(
         sessionId,
         cleanedMyWxid,
         options.dateRange,
@@ -452,7 +452,7 @@ export class ChatLabFormatter {
       const avatarMap = options.exportAvatars
         ? await this.exportService.exportAvatars(
           [
-            ...Array.from(collected.memberSet.entries()).map(([username, info]: [string, any]) => ({
+            ...Array.from(collected.memberSet.entries() as Iterable<[string, { avatarUrl?: string }]>).map(([username, info]) => ({
               username,
               avatarUrl: info.avatarUrl
             })),
@@ -462,7 +462,7 @@ export class ChatLabFormatter {
         : new Map<string, string>()
 
       const sessionAvatar = avatarMap.get(sessionId)
-      const members = await Promise.all(Array.from(collected.memberSet.values()).map(async (info) => {
+      const members = await Promise.all(Array.from(collected.memberSet.values() as Iterable<{ member: ChatLabMember; avatarUrl?: string }>).map(async (info) => {
         const profile = isGroup
           ? (senderProfileMap.get(info.member.platformId) || await resolveExportDisplayProfile(
             info.member.platformId,

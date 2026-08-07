@@ -1,7 +1,7 @@
 import { ExportContext } from './core/ExportContext'
 import { ExportOrchestrator } from './core/ExportOrchestrator'
 import { ExportStatsService } from './stats/ExportStatsService'
-import { ExportOptions, ExportProgress, ExportTaskControl, ExportStatsResult, AggregatedSessionStatsCacheEntry } from './types'
+import { ExportOptions, ExportProgress, ExportTaskControl, ExportStatsResult } from './types'
 
 export * from './types'
 export * from './utils/parallelLimit'
@@ -54,13 +54,6 @@ export class ExportServiceFacade {
     options: ExportOptions
   ): Promise<ExportStatsResult> {
     return this.statsService.getExportStats(sessionIds, options)
-  }
-
-  async getAggregatedSessionStats(
-    sessionIds: string[],
-    options: ExportOptions
-  ): Promise<AggregatedSessionStatsCacheEntry | null> {
-    return this.statsService.getAggregatedSessionStats(sessionIds, options)
   }
 }
 

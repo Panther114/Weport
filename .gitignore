@@ -11,9 +11,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-electron
-dist-ssr
 *.local
-test/
 
 # Editor directories and files
 .vscode/*
@@ -30,21 +28,7 @@ test/
 out
 release
 tmp/
-src-tauri/target
-src-tauri/resources/engine
-src-tauri/gen
-*.key
-*.key.pub
-.tauri
-dist-release
-release/
-node_modules/
-dist/
-dist-electron/
-
-# electron-liquid-glass 是嵌套的独立 git 仓库（发布到 npm，WeFlow 走 registry 依赖），
-# 不能被外层仓库跟踪（会变成悬空 gitlink）
-/packages/electron-liquid-glass/
+*.tsbuildinfo
 
 # Database
 *.db
@@ -63,47 +47,8 @@ Thumbs.db
 .electron/
 .cache/
 
-
-
-# 忽略 Visual Studio 临时文件夹
-.vs/
-# 忽略 IntelliSense 缓存文件
-*.ipch
-*.aps
-
-/wcdb/
-!resources/wcdb/
-!resources/wcdb/**
-!src-tauri/resources/wcdb/
-!src-tauri/resources/wcdb/**
-xkey/
-server/
-*info
-chatlab-format.md
-*.bak
-AGENTS.md
-AGENT.md
-.claude/
-CLAUDE.md
-.agents/
-resources/wx_send
-概述.md
-pnpm-lock.yaml
-/pnpm-workspace.yaml
-wechat-research-site
-.codex
-weflow-web-offical
-/Wedecrypt
-/scripts/syncwcdb.py
-/scripts/syncWedecrypt.py
-/scripts/syncWelive.py
-/WeLive
-
-# Local reference clone — never ship
+# 本地参考克隆 — 永不发布
 /WeFlow/
 WeFlow/
-
-# RevokeMsgPatcher — reference clone, never ship
 /RevokeMsgPatcher/
 RevokeMsgPatcher/
-

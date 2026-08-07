@@ -1,6 +1,6 @@
-import { ExportOptions, ExportProgress, ExportStatsResult, ExportStatsCacheEntry, ExportStatsSessionSnapshot, ExportAggregatedSessionStatsCacheEntry, MediaExportTelemetry, MediaSourceResolution, MessageCollectMode } from '../types';
+import { ExportOptions, ExportProgress, ExportStatsResult, ExportStatsCacheEntry, ExportStatsSessionSnapshot, ExportAggregatedSessionStatsCacheEntry, MediaExportTelemetry, MediaSourceResolution, MessageCollectMode, MediaContentType, ExportTaskControl, MediaExportItem, FileAttachmentSearchRoot, FileExportCandidate, ChatLabMember, ChatLabHeader, ChatLabMeta, ExportDisplayProfile, ExportAggregatedSessionMetric } from '../types';
 import { parallelLimit } from '../utils/parallelLimit';
-import { FILE_APP_LOCAL_TYPES, FILE_APP_LOCAL_TYPE_SET, MESSAGE_TYPE_MAP } from '../constants';
+import { FILE_APP_LOCAL_TYPES, FILE_APP_LOCAL_TYPE_SET, MESSAGE_TYPE_MAP, TXT_COLUMN_DEFINITIONS } from '../constants';
 import * as fs from 'fs'
 import * as path from 'path'
 import * as http from 'http'
@@ -13,8 +13,6 @@ import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'
 import { imageDecryptService } from '../../imageDecryptService'
 import { chatService } from '../../chatService'
-import { videoService } from '../../videoService'
-import { voiceTranscribeService } from '../../voiceTranscribeService'
 import { exportRecordService } from '../../exportRecordService'
 import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
@@ -35,9 +33,30 @@ import { getAvatarFallback } from '../../export/contacts/avatarHelper';
 import { pathExists, ensureExportDir, copyFileOptimized, hardlinkOrCopyFile } from '../../export/media/fileCopy';
 import { getMediaFileStat } from '../../export/media/attachmentResolver';
 
+// Weport 裁剪：视频/语音转写服务已移除（文本导出不涉及），保留等价兜底。
+// 若未来恢复媒体导出，把以下两个 stub 换回真实服务即可。
+const videoServiceStub = {
+  parseVideoMd5: (content: string): string => {
+    const m = /md5=["']([0-9a-fA-F]{32})["']/i.exec(String(content || ''))
+    return m ? m[1].toLowerCase() : ''
+  },
+  getVideoInfoBatch: async (..._args: unknown[]): Promise<any> => ({ success: false }),
+  getVideoInfo: async (..._args: unknown[]): Promise<any> => ({
+    success: false,
+    exists: false,
+    videoUrl: '',
+    coverUrl: '',
+    thumbUrl: '',
+  }),
+}
+const voiceTranscribeServiceStub = {
+  getModelStatus: async (): Promise<any> => ({ success: false, exists: false }),
+  downloadModel: async (..._args: unknown[]): Promise<any> => ({ success: false }),
+}
+
 export class ExportContext {
     private configService: ConfigService;
-    private runtimeConfig: { dbPath?: string; decryptKey?: string; myWxid?: string; accountDir?: string; imageXorKey?: unknown; imageAesKey?: string } | null = null;
+    private runtimeConfig: { dbPath?: string; decryptKey?: string; myWxid?: string; accountDir?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean } | null = null;
     private contactCache: LRUCache<string, { displayName: string; avatarUrl?: string }>;
     private inlineEmojiCache: LRUCache<string, string>;
     private htmlStyleCache: string | null = null;
@@ -1702,18 +1721,10 @@ export class ExportContext {
             return stripSenderPrefix(content)
           case 3: return '[图片]'
           case 34: {
-            // 语音消息 - 尝试获取转写文字
-            const transcriptGetter = (voiceTranscribeService as unknown as {
-              getCachedTranscript?: (sessionId: string, createTime: number) => string | null | undefined
-            }).getCachedTranscript
-
-            if (sessionId && createTime && typeof transcriptGetter === 'function') {
-              const transcript = transcriptGetter(sessionId, createTime)
-              if (transcript) {
-                return `[语音消息] ${transcript}`
-              }
-            }
-            return '[语音消息]'  // 占位符，导出时会替换为转文字结果
+            // 语音消息 - 尝试获取转写文字（转写服务已裁剪，直接返回语音占位）
+            void sessionId
+            void createTime
+            return '[语音]'
           }
           case 42: return '[名片]'
           case 43: return '[视频]'
@@ -3163,7 +3174,7 @@ export class ExportContext {
               videoTokenSet.add(videoMd5)
               continue
             }
-            const parsedVideoMd5 = String(videoService.parseVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
+            const parsedVideoMd5 = String(videoServiceStub.parseVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
             if (parsedVideoMd5) {
               videoTokenSet.add(parsedVideoMd5)
             }
@@ -3176,7 +3187,7 @@ export class ExportContext {
           preloadTasks.push(imageDecryptService.preloadImageHardlinkMd5s(Array.from(imageMd5Set)))
         }
         if (videoTokenSet.size > 0) {
-          preloadTasks.push(videoService.getVideoInfoBatch(Array.from(videoTokenSet), { includePoster: false }).then(() => undefined))
+          preloadTasks.push(Promise.resolve())
         }
 
         if (preloadTasks.length === 0) return
@@ -3367,7 +3378,7 @@ export class ExportContext {
               this.normalizeVideoFileToken(this.resolveWeliveMediaPath(msg))
             ]
             for (const content of contents) {
-              tokens.push(videoService.parseVideoMd5(content))
+              tokens.push(videoServiceStub.parseVideoMd5(content))
               tokens.push(this.extractVideoMd5(content))
             }
             return Array.from(new Set(tokens
@@ -3376,7 +3387,7 @@ export class ExportContext {
           }
           const resolveVideoInfo = async (token: string) => {
             if (!token) return null
-            const videoInfo = await videoService.getVideoInfo(token, { includePoster })
+            const videoInfo = await videoServiceStub.getVideoInfo(token, { includePoster })
             if (!videoInfo.exists || !videoInfo.videoUrl) return null
             return videoInfo
           }
@@ -5603,7 +5614,7 @@ export class ExportContext {
      */
     public async ensureVoiceModel(onProgress?: (progress: ExportProgress) => void): Promise<boolean> {
         try {
-          const status = await voiceTranscribeService.getModelStatus()
+          const status = await voiceTranscribeServiceStub.getModelStatus()
           if (status.success && status.exists) {
             return true
           }
@@ -5615,7 +5626,7 @@ export class ExportContext {
             phase: 'preparing'
           })
 
-          const downloadResult = await voiceTranscribeService.downloadModel((progress: any) => {
+          const downloadResult = await voiceTranscribeServiceStub.downloadModel((progress: any) => {
             if (progress.percent !== undefined) {
               onProgress?.({
                 current: progress.percent,
@@ -5811,3 +5822,4 @@ export class ExportContext {
 
     
 }
+

@@ -1,6 +1,4 @@
-import { Worker } from 'worker_threads'
-import { join } from 'path'
-import { existsSync } from 'fs'
+import { WcdbHostClient } from './wcdbHostClient'
 
 /**
  * Worker 消息接口
@@ -13,13 +11,14 @@ interface WorkerMessage {
 
 /**
  * WCDB 服务 (客户端代理)
- * 负责与后台 Worker 线程通信，执行数据库操作
- * 避免主进程阻塞
+ * 负责与后台 WCDB 宿主进程（WeFlow.exe 硬链接，见 wcdbHostClient.ts）通信，
+ * 执行数据库操作，避免主进程阻塞。
+ * 宿主进程协议与 worker_threads 完全一致，因此本文件其余逻辑保持不变。
  */
 export class WcdbService {
-  private worker: Worker | null = null
+  private worker: WcdbHostClient | null = null
   private messageId = 0
-  private pending = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>()
+  private pending = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timer?: NodeJS.Timeout }>()
   private resourcesPath: string | null = null
   private userDataPath: string | null = null
   private logEnabled = false
@@ -28,23 +27,13 @@ export class WcdbService {
   constructor() {}
 
   /**
-   * 初始化 Worker 线程
+   * 初始化 WCDB 宿主进程
    */
   private initWorker() {
     if (this.worker) return
 
-    const isDev = process.env.NODE_ENV === 'development'
-    const workerPath = isDev
-      ? join(__dirname, '../dist-electron/wcdbWorker.js')
-      : join(__dirname, 'wcdbWorker.js')
-
-    let finalPath = workerPath
-    if (isDev && !existsSync(finalPath)) {
-      finalPath = join(__dirname, 'wcdbWorker.js')
-    }
-
     try {
-      this.worker = new Worker(finalPath)
+      this.worker = new WcdbHostClient()
 
       this.worker.on('message', (msg: any) => {
         const { id, result, error, type, payload } = msg
@@ -59,27 +48,30 @@ export class WcdbService {
         const p = this.pending.get(id)
         if (p) {
           this.pending.delete(id)
+          if (p.timer) clearTimeout(p.timer)
           if (error) p.reject(new Error(error))
           else p.resolve(result)
         }
       })
 
       this.worker.on('error', (err) => {
-        // Worker 发生错误，需要 reject 所有 pending promises
-        console.error('WCDB Worker 错误:', err)
+        // 宿主进程发生错误，需要 reject 所有 pending promises
+        console.error('WCDB 宿主进程错误:', err)
         const errorMsg = err instanceof Error ? err.message : String(err)
         for (const [id, p] of this.pending) {
-          p.reject(new Error(`Worker 错误: ${errorMsg}`))
+          if (p.timer) clearTimeout(p.timer)
+          p.reject(new Error(`WCDB 宿主进程错误: ${errorMsg}`))
         }
         this.pending.clear()
       })
 
       this.worker.on('exit', (code) => {
-        // Worker 退出，需要 reject 所有 pending promises
+        // 宿主进程退出，需要 reject 所有 pending promises
         if (code !== 0) {
-          console.error('WCDB Worker 异常退出，退出码:', code)
-          const errorMsg = `Worker 异常退出 (退出码: ${code})。可能是数据服务加载失败，请检查是否安装了 Visual C++ Redistributable。`
+          console.error('WCDB 宿主进程异常退出，退出码:', code)
+          const errorMsg = `WCDB 宿主进程异常退出 (退出码: ${code})。可能是数据服务加载失败，请检查是否安装了 Visual C++ Redistributable。`
           for (const [id, p] of this.pending) {
+            if (p.timer) clearTimeout(p.timer)
             p.reject(new Error(errorMsg))
           }
           this.pending.clear()
@@ -87,7 +79,7 @@ export class WcdbService {
         this.worker = null
       })
 
-      // 如果已有路径配置，重新发送给新的 worker
+      // 如果已有路径配置，重新发送给新的宿主进程
       if (this.resourcesPath && this.userDataPath) {
         this.setPaths(this.resourcesPath, this.userDataPath)
       }
@@ -102,15 +94,23 @@ export class WcdbService {
   }
 
   /**
-   * 发送消息到 Worker 并等待响应
+   * 发送消息到 WCDB 宿主进程并等待响应
    */
   private callWorker<T>(type: string, payload: any = {}): Promise<T> {
     if (!this.worker) this.initWorker()
-    if (!this.worker) return Promise.reject(new Error('WCDB Worker 不可用'))
+    if (!this.worker) return Promise.reject(new Error('WCDB 宿主进程不可用'))
 
     return new Promise((resolve, reject) => {
       const id = ++this.messageId
-      this.pending.set(id, { resolve, reject })
+      const timeoutMs = Number(process.env.WEPORT_WCDB_TIMEOUT_MS || 180_000)
+      const timer = setTimeout(() => {
+        const p = this.pending.get(id)
+        if (p) {
+          this.pending.delete(id)
+          reject(new Error(`WCDB 调用超时 (${type}, ${timeoutMs}ms)。宿主进程可能已卡死，请重启 Weport。`))
+        }
+      }, timeoutMs)
+      this.pending.set(id, { resolve, reject, timer })
       this.worker!.postMessage({ id, type, payload })
     })
   }
@@ -179,6 +179,16 @@ export class WcdbService {
   }
 
   /**
+   * 同步强杀宿主进程（退出兜底路径使用）。
+   */
+  killHostNow(): void {
+    try {
+      this.worker?.killNow()
+    } catch { /* noop */ }
+    this.worker = null
+  }
+
+  /**
    * 关闭服务
    */
   async shutdown(): Promise<void> {
@@ -188,11 +198,6 @@ export class WcdbService {
       this.worker = null
     }
   }
-
-  /**
-   * 获取数据库连接状态
-   * 注意：此方法现在是异步的
-   */
   async isConnected(): Promise<boolean> {
     return this.callWorker('isConnected')
   }

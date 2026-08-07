@@ -3892,7 +3892,7 @@ export class WcdbCore {
     this.currentWxid = null
     this.currentDbStoragePath = null
     this.initialized = false
-    return this.open(path, key, wxid)
+    return this.open(path, key)
   }
 
   private shouldRetryCursorAfterNoDb(): boolean {
