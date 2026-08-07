@@ -838,17 +838,36 @@ async function runScreenshotMode() {
   }
   await sleep(800)
 
-  // 主窗口截图
+  // 主窗口截图（CI 上首帧可能未就绪：轮询直到非空）
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      const image = await captureWithTimeout(mainWindow, 10000)
-      if (image) {
-        const fs2 = await import('fs')
-        fs2.writeFileSync(join(outDir, 'main.png'), image.toPNG())
-        console.log('[screenshot] main.png saved')
-      } else {
-        console.warn('[screenshot] main capture timed out')
+      const isBlank = (buf: Buffer) => {
+        if (buf.length < 16) return true
+        let min = 255
+        let max = 0
+        for (let i = 0; i < buf.length; i += 997) {
+          const v = buf[i]
+          if (v < min) min = v
+          if (v > max) max = v
+        }
+        return max - min < 12
       }
+      let saved = false
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const image = await captureWithTimeout(mainWindow, 8000)
+        if (image) {
+          const png = image.toPNG()
+          if (!isBlank(png)) {
+            const fs2 = await import('fs')
+            fs2.writeFileSync(join(outDir, 'main.png'), png)
+            console.log('[screenshot] main.png saved (attempt', attempt + 1, ')')
+            saved = true
+            break
+          }
+        }
+        await sleep(400)
+      }
+      if (!saved) console.warn('[screenshot] main capture stayed blank after retries')
     }
   } catch (e) {
     console.warn('[screenshot] main capture failed:', e)
@@ -1072,6 +1091,13 @@ async function runSelfTest() {
 function startApp() {
   if (process.platform !== 'win32') {
     console.warn('[Weport] 当前仅支持 Windows')
+  }
+
+  // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）
+  if (process.env.WEPORT_SCREENSHOT_POPUP === '1') {
+    try {
+      app.commandLine.appendSwitch('disable-gpu')
+    } catch { /* noop */ }
   }
 
   const gotLock = app.requestSingleInstanceLock()

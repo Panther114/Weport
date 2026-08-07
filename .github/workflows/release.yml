@@ -42,13 +42,7 @@ jobs:
         run: npm run typecheck
 
       - name: Build installer
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run build
-
-      - name: Smoke test (capture harness)
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -59,3 +53,9 @@ jobs:
             release/latest.yml
           generate_release_notes: true
           fail_on_unmatched_files: false
+
+      - name: Smoke test (capture harness)
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
