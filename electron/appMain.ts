@@ -919,7 +919,8 @@ async function runScreenshotMode() {
   console.log('[screenshot] captures done, shutting down services...')
   try { messagePushService?.stop() } catch { /* noop */ }
   try { chatService.close() } catch { /* noop */ }
-  try { await wcdbService.shutdown() } catch { /* noop */ }
+  // 不 await 完整 shutdown（宿主调用可能卡住 180s）——直接强杀宿主后退出
+  try { wcdbService.killHostNow() } catch { /* noop */ }
   console.log('[screenshot] services stopped, exiting...')
   await sleep(200)
   console.log('[screenshot] calling app.exit(0)')
@@ -1141,7 +1142,15 @@ function startApp() {
     if (process.env.WEPORT_UPDATETEST === '1') {
       const result = await checkForUpdatesManual()
       console.log('[updatetest] feed =', getUpdaterFeedUrl())
+      console.log('[updatetest] version =', APP_VERSION)
       console.log('[updatetest] result =', JSON.stringify(result))
+      try {
+        const { appendFileSync } = require('fs')
+        appendFileSync(
+          process.env.WEPORT_UPDATETEST_OUT || join(app.getPath('temp'), 'weport-updatetest.log'),
+          JSON.stringify({ appVersion: APP_VERSION, feed: getUpdaterFeedUrl(), result, at: new Date().toISOString() }) + '\n',
+        )
+      } catch { /* noop */ }
       isAppQuitting = true
       app.exit(result.hasUpdate ? 0 : 2)
       return

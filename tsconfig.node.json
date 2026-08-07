@@ -10,7 +10,7 @@
     "lib": ["ES2022"]
   },
   "include": [
-    "vite.config.ts",
+    "vite.config.mts",
     "electron/**/*.ts",
     "electron/**/*.d.ts"
   ]
