@@ -44,7 +44,7 @@ jobs:
       - name: Build installer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win nsis
+        run: npm run build
 
       - name: Smoke test (capture harness)
         shell: pwsh

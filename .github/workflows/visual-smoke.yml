@@ -25,7 +25,7 @@ jobs:
         run: npm run typecheck
 
       - name: Build unpacked app
-        run: npx electron-builder --dir
+        run: npm run build:dir
 
       - name: Capture harness (main window + notification popup)
         shell: pwsh
