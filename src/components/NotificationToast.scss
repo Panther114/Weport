@@ -4,7 +4,7 @@
     position: relative;
     width: 100%;
     // 四周留白：容纳卡片投影，并透出窗口底层的仿桌面背景
-    padding: 12px;
+    padding: 8px;
     opacity: 0;
     transform: scale(0.96);
     transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -33,7 +33,7 @@
         display: flex;
         align-items: flex-start;
         gap: 12px;
-        padding-right: 14px; // 给右上角关闭按钮留出空间
+        padding-right: 4px; // 右侧空间留给时间，不浪费
     }
 
     .notification-avatar {
@@ -43,6 +43,7 @@
     .notification-text {
         flex: 1;
         min-width: 0;
+        position: relative; // 时间锚定在文本块内，贴右缘
 
         .notification-header {
             display: flex;
@@ -56,15 +57,16 @@
                 color: var(--noti-title-color, #ffffff);
                 text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
                 transition: color 0.08s linear, text-shadow 0.08s linear;
-                // 单行 + 省略号：标题过长时截断，绝不与右上角时间重叠
+                // 单行 + 硬截断（不显示省略号）：超出宽度就在该处直接切断，
+                // 绝不与右上角时间重叠
                 white-space: nowrap;
                 overflow: hidden;
-                text-overflow: ellipsis;
+                text-overflow: clip;
                 line-height: 1.35;
                 position: relative;
                 flex: 1;
                 min-width: 0;
-                margin-right: 52px; // 给绝对定位的时间留出空间
+                margin-right: 50px; // 给时间留出空间
 
                 // 可读性纱层：与文字极性相反的半透明底色，保证极端背景下文字仍可读
                 &::before {
@@ -83,8 +85,8 @@
                 text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
                 transition: color 0.08s linear;
                 position: absolute;
-                top: 14px;
-                right: 40px; // 关闭按钮左侧
+                top: 12px;
+                right: 2px; // 贴右缘，尽量让出标题与正文空间
                 font-variant-numeric: tabular-nums;
             }
         }

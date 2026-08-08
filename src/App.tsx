@@ -191,6 +191,7 @@ export default function App() {
   const [closeToTray, setCloseToTray] = useState(true)
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState<{ percent: number; transferred?: number; total?: number } | null>(null)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -474,6 +475,9 @@ export default function App() {
       api.app.onUpdateAvailable((info) => {
         setUpdateInfo({ version: info.version, body: info.releaseNotes || undefined })
         pushToast('info', `发现新版本 v${info.version}`, '可在顶部横幅更新')
+      }),
+      api.app.onDownloadProgress((p) => {
+        setUpdateProgress({ percent: Number(p?.percent) || 0, transferred: p?.transferred, total: p?.total })
       })
     ]
 
@@ -647,14 +651,18 @@ export default function App() {
 
   async function installUpdate() {
     setUpdateBusy(true)
+    setUpdateProgress({ percent: 0 })
     try {
       const result = await api.app.downloadAndInstall()
       if (result.success) {
+        setUpdateProgress(null)
         pushToast('ok', '更新已下载', '重启应用完成安装')
       } else {
+        setUpdateProgress(null)
         pushToast('err', '更新失败', result.error || '未知错误', 10000)
       }
     } catch (e) {
+      setUpdateProgress(null)
       pushToast('err', '更新失败', String(e), 10000)
     } finally {
       setUpdateBusy(false)
@@ -902,9 +910,20 @@ export default function App() {
             <p className="hint" style={{ marginTop: 4 }}>
               {updateInfo.body || '建议更新以获得修复与改进。'}
             </p>
+            {updateBusy && updateProgress && (
+              <div className="update-progress" aria-live="polite">
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{ width: `${Math.max(0, Math.min(100, updateProgress.percent))}%` }}
+                  />
+                </div>
+                <span>{Math.round(updateProgress.percent)}%</span>
+              </div>
+            )}
           </div>
           <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-            {updateBusy ? '更新中…' : '立即更新'}
+            {updateBusy ? (updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : '更新中…') : '立即更新'}
           </button>
         </div>
       )}
@@ -1883,7 +1902,7 @@ export default function App() {
               </button>
               {updateInfo && (
                 <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                  安装 v{updateInfo.version}
+                  {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : `安装 v${updateInfo.version}`}
                 </button>
               )}
               <button className="secondary-btn" type="button" onClick={() => setAboutOpen(false)}>

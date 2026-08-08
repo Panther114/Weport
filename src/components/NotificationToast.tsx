@@ -78,7 +78,7 @@ export function NotificationToast({
         <div className={`notification-toast-container ${isVisible ? 'visible' : ''}`}>
             <LiquidGlass
                 cornerRadius={16}
-                padding="14px 16px"
+                padding="12px 10px"
                 blurAmount={0}
                 saturation={140}
                 displacementScale={70}

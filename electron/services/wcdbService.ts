@@ -133,11 +133,14 @@ export class WcdbService {
   }
 
   /**
-   * 设置数据库监控回调
+   * 设置数据库监控回调。返回宿主侧是否成功启动监控
+   * （失败时调用方应重试，避免监控管道静默失效导致推送全部中断）。
    */
-  setMonitor(callback: (type: string, json: string) => void): void {
+  setMonitor(callback: (type: string, json: string) => void): Promise<{ success: boolean }> {
     this.monitorListener = callback;
-    this.callWorker<{ success?: boolean }>('setMonitor').catch(() => { });
+    return this.callWorker<{ success?: boolean }>('setMonitor')
+      .then((result) => ({ success: result?.success === true }))
+      .catch(() => ({ success: false }));
   }
 
   /**

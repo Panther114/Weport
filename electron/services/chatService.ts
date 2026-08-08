@@ -615,6 +615,8 @@ class ChatService {
   }
 
   private monitorSetup = false
+  private monitorRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly monitorRetryIntervalMs = 5000
 
   addDbMonitorListener(listener: (type: string, json: string) => void): () => void {
     this.dbMonitorListeners.add(listener)
@@ -623,13 +625,25 @@ class ChatService {
     }
   }
 
+  private scheduleMonitorRetry() {
+    if (this.monitorRetryTimer) return
+    this.monitorRetryTimer = setTimeout(() => {
+      this.monitorRetryTimer = null
+      // 只在仍处于连接状态时重试
+      if (this.connected && wcdbService.isReady()) {
+        this.setupDbMonitor()
+      }
+    }, this.monitorRetryIntervalMs)
+    this.monitorRetryTimer.unref?.()
+  }
+
   private setupDbMonitor() {
     if (this.monitorSetup) return
     this.monitorSetup = true
 
     // 使用 C++数据服务内部的文件监控 (ReadDirectoryChangesW)
     // 这种方式更高效，且不占用 JS 线程，并能直接监听 session/message 目录变更
-    wcdbService.setMonitor((type, json) => {
+    void wcdbService.setMonitor((type, json) => {
       this.handleSessionStatsMonitorChange(type, json)
       for (const listener of this.dbMonitorListeners) {
         try {
@@ -639,6 +653,15 @@ class ChatService {
         }
       }
       // Headless mode: renderer broadcast removed (no BrowserWindow UI).
+    }).then((result) => {
+      if (result.success) {
+        console.log('[ChatService] WCDB 数据库监控已启动')
+      } else {
+        // 监控启动失败：释放标记并重试，否则推送管线将永远收不到数据库变更事件
+        console.error('[ChatService] WCDB 数据库监控启动失败，5 秒后重试')
+        this.monitorSetup = false
+        this.scheduleMonitorRetry()
+      }
     })
   }
 
@@ -745,6 +768,10 @@ class ChatService {
     }
     this.connected = false
     this.monitorSetup = false
+    if (this.monitorRetryTimer) {
+      clearTimeout(this.monitorRetryTimer)
+      this.monitorRetryTimer = null
+    }
   }
 
   /**

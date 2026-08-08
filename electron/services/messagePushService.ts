@@ -72,6 +72,9 @@ export class MessagePushService {
   private baselineReady = false
   private messageTableScanRequested = false
   private readonly pendingMessageTableNames = new Set<string>()
+  /** 兜底轮询：数据库监控管道失效时仍能发现新消息（30 秒一次，开销极低） */
+  private fallbackPollTimer: ReturnType<typeof setInterval> | null = null
+  private readonly fallbackPollIntervalMs = 30_000
   /** 推送到应用内通知弹窗（GUI 订阅；替代原 WeFlow 的 SSE 广播） */
   private pushListeners: Array<(payload: MessagePushPayload) => void> = []
 
@@ -83,6 +86,7 @@ export class MessagePushService {
   start(): void {
     if (this.started) return
     this.started = true
+    this.startFallbackPolling()
     void this.refreshConfiguration('startup')
   }
 
@@ -90,7 +94,29 @@ export class MessagePushService {
     this.started = false
     this.processing = false
     this.rerunRequested = false
+    this.stopFallbackPolling()
     this.resetRuntimeState()
+  }
+
+  /**
+   * 兜底轮询：监控管道（wcdbStartMonitorPipe）在部分机器上可能启动失败，
+   * 或 ReadDirectoryChangesW 未捕获到变更（杀软拦截管道/文件系统差异等）。
+   * 轮询保证即使监控完全失效，新消息最迟 30 秒内仍会被发现并弹窗。
+   */
+  private startFallbackPolling(): void {
+    if (this.fallbackPollTimer) return
+    this.fallbackPollTimer = setInterval(() => {
+      if (!this.started || !this.isPushEnabled()) return
+      this.scheduleSync()
+    }, this.fallbackPollIntervalMs)
+    this.fallbackPollTimer.unref?.()
+  }
+
+  private stopFallbackPolling(): void {
+    if (this.fallbackPollTimer) {
+      clearInterval(this.fallbackPollTimer)
+      this.fallbackPollTimer = null
+    }
   }
 
   /** 订阅推送（应用内弹窗）。返回取消订阅函数。 */

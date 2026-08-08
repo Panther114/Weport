@@ -257,6 +257,35 @@ button {
   border-color: #000;
 }
 
+/* 更新下载进度条（白色横幅内） */
+.update-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  max-width: 380px;
+}
+
+.update-progress .progress-track {
+  flex: 1;
+  height: 5px;
+  background: rgba(0, 0, 0, 0.12);
+  border-color: transparent;
+}
+
+.update-progress .progress-fill {
+  background: #000;
+  transition: width 0.2s ease;
+}
+
+.update-progress span {
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.6);
+  font-family: var(--font-mono);
+  min-width: 34px;
+  text-align: right;
+}
+
 /* ---------- 工作区 ---------- */
 .workspace {
   flex: 1;
