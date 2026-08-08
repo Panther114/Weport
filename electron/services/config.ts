@@ -54,6 +54,12 @@ interface ConfigSchema {
   logEnabled: boolean
   launchAtStartup?: boolean
   silentStartup?: boolean
+  // 导出选项（Weport GUI，与 WeFlow exportDefault* 对齐）
+  exportMedia: { images: boolean; videos: boolean; voices: boolean; emojis: boolean; files: boolean; maxFileSizeMb: number }
+  exportAvatars: boolean
+  exportVoiceAsText: boolean
+  exportConflictStrategy: 'incremental' | 'overwrite' | 'rename'
+  exportConcurrency: number
   llmModelPath: string
   whisperModelName: string
   whisperModelDir: string
@@ -213,6 +219,11 @@ export class ConfigService {
       language: 'zh-CN',
       logEnabled: false,
       silentStartup: false,
+      exportMedia: { images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 },
+      exportAvatars: false,
+      exportVoiceAsText: false,
+      exportConflictStrategy: 'overwrite',
+      exportConcurrency: 4,
       llmModelPath: '',
       whisperModelName: 'base',
       whisperModelDir: '',

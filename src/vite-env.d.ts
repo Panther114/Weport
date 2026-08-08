@@ -63,7 +63,7 @@ interface ElectronApi {
     uninstallAntiRevokeTriggers: (sessionIds: string[]) => Promise<{ success: boolean; rows?: Array<{ sessionId: string; success: boolean; error?: string }>; error?: string }>
   }
   export: {
-    exportSessions: (outputRoot: string, format: 'txt' | 'json', options?: any) => Promise<any>
+    exportSessions: (outputRoot: string, options?: any) => Promise<any>
     cancelTask: (taskId: string) => Promise<{ success: boolean }>
     getExportLog: (outputRoot: string) => Promise<{ path: string; txt: string | null; json: string | null; exists: boolean }>
     clearLibrary: (outputRoot: string) => Promise<{ success: boolean; removed: string[]; error?: string }>

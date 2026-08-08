@@ -368,6 +368,20 @@ async function downloadAndInstall(): Promise<{ success: boolean; error?: string 
 // ---------------------------------------------------------------------------
 const EXPORT_LOG_NAME = 'export_log.txt'
 
+/** 导出格式 → 输出根目录下的文件夹名 */
+const EXPORT_FORMAT_FOLDERS: Record<string, string> = {
+  txt: 'TXT',
+  json: 'JSON',
+  'arkme-json': 'ARKME-JSON',
+  html: 'HTML',
+  markdown: 'MARKDOWN',
+  excel: 'XLSX',
+  sql: 'SQL',
+  chatlab: 'CHATLAB',
+  'chatlab-jsonl': 'CHATLAB-JSONL',
+  weclone: 'WECLONE',
+}
+
 function formatLocalTime(): string {
   const d = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -430,7 +444,8 @@ function clearExportLibrary(root: string): { success: boolean; removed: string[]
   if (!root.trim()) return { success: false, removed: [], error: '未指定输出目录' }
   const removed: string[] = []
   try {
-    for (const name of ['TXT', 'JSON', EXPORT_LOG_NAME]) {
+    const folderNames = Array.from(new Set(Object.values(EXPORT_FORMAT_FOLDERS)))
+    for (const name of [...folderNames, EXPORT_LOG_NAME]) {
       const p = join(root, name)
       if (!existsSync(p)) continue
       if (name === EXPORT_LOG_NAME) {
@@ -740,10 +755,19 @@ function registerIpcHandlers() {
     chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String)))
 
   // 导出
-  ipcMain.handle('export:exportSessions', async (_e, outputRoot: string, format: string, options?: any) => {
+  ipcMain.handle('export:exportSessions', async (_e, outputRoot: string, formatOrOptions?: any, legacyOptions?: any) => {
     const root = String(outputRoot || '').trim()
-    const fmt = format === 'json' ? 'json' : 'txt'
     if (!root) return { success: false, successCount: 0, failCount: 1, error: '未指定输出目录' }
+
+    // 兼容两种调用：旧 (outputRoot, format, options) 与新 (outputRoot, options)
+    const userOptions: any = typeof formatOrOptions === 'string' ? legacyOptions || {} : formatOrOptions || {}
+    const fmt = String(
+      userOptions.format || (typeof formatOrOptions === 'string' ? formatOrOptions : '') || 'txt'
+    ).trim()
+    const formatFolder = EXPORT_FORMAT_FOLDERS[fmt]
+    if (!formatFolder) {
+      return { success: false, successCount: 0, failCount: 1, error: `不支持的导出格式: ${fmt}` }
+    }
 
     const connectResult = await chatService.connect()
     if (!connectResult.success) {
@@ -773,10 +797,9 @@ function registerIpcHandlers() {
     }
 
     if (sessionIds.length === 0) {
-      return { success: true, successCount: 0, failCount: 0, skipped: true, formatFolder: fmt === 'json' ? 'JSON' : 'TXT' }
+      return { success: true, successCount: 0, failCount: 0, skipped: true, formatFolder }
     }
 
-    const formatFolder = fmt === 'json' ? 'JSON' : 'TXT'
     const outDir = join(root, formatFolder)
     try {
       mkdirSync(outDir, { recursive: true })
@@ -790,17 +813,22 @@ function registerIpcHandlers() {
       mainWindow?.webContents.send('export:progress', progress)
     }
 
-    const exportOptions = {
+    // Weport 默认值（与旧版 TXT/JSON 行为一致），用户选项优先
+    const exportOptions: any = {
       format: fmt,
-      contentType: 'text' as const,
+      contentType: 'text',
       exportMedia: false,
-      sessionLayout: 'shared' as const,
+      exportWriteLayout: 'C',
+      exportConflictStrategy: 'overwrite',
+      displayNamePreference: 'group-nickname',
+      exportPathStyle: 'windows',
       sessionNameWithTypePrefix: true,
-      exportWriteLayout: 'C' as const,
-      exportConflictStrategy: 'overwrite' as const,
-      displayNamePreference: 'group-nickname' as const,
-      exportPathStyle: 'windows' as const,
-      ...(options || {}),
+      sessionLayout: 'shared',
+      ...userOptions,
+    }
+    // 开启媒体导出时按 WeFlow 语义使用 per-session 布局
+    if (exportOptions.exportMedia === true && exportOptions.sessionLayout === 'shared') {
+      exportOptions.sessionLayout = 'per-session'
     }
 
     try {
@@ -814,7 +842,10 @@ function registerIpcHandlers() {
       })
       const result = await exportService.exportSessions(sessionIds, outDir, exportOptions, progressEmitter, control)
       const when = formatLocalTime()
-      writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
+      // 导出日志仅跟踪 TXT / JSON（旧版格式），其他格式不覆盖这两行
+      if (fmt === 'txt' || fmt === 'json') {
+        writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
+      }
       return {
         ...result,
         success: result.success && result.failCount === 0,

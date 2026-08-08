@@ -103,8 +103,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 导出
   export: {
-    exportSessions: (outputRoot: string, format: 'txt' | 'json', options?: any) =>
-      ipcRenderer.invoke('export:exportSessions', outputRoot, format, options),
+    exportSessions: (outputRoot: string, options?: any) =>
+      ipcRenderer.invoke('export:exportSessions', outputRoot, options),
     cancelTask: (taskId: string) => ipcRenderer.invoke('export:cancelTask', taskId),
     getExportLog: (outputRoot: string) => ipcRenderer.invoke('export:getExportLog', outputRoot),
     clearLibrary: (outputRoot: string) => ipcRenderer.invoke('export:clearLibrary', outputRoot),

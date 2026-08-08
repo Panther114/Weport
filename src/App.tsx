@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PlugZap, Download, ShieldCheck, Bell, Eye, EyeOff } from 'lucide-react'
 
 type Tab = 'connect' | 'export' | 'antirecall' | 'notifications'
-type Format = 'txt' | 'json'
+type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
+type PathStyle = 'auto' | 'posix' | 'windows'
+type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
+type DisplayNamePref = 'group-nickname' | 'remark' | 'nickname'
+type WriteLayout = 'A' | 'B' | 'C'
+type FilterMode = 'all' | 'whitelist' | 'blacklist'
+type SessionType = 'all' | 'private' | 'group' | 'official' | 'other'
 type ToastKind = 'ok' | 'err' | 'info'
 type Toast = { id: number; kind: ToastKind; title: string; body?: string }
 
@@ -29,6 +35,58 @@ type AntiRevokeSession = {
 
 const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 let toastSeq = 1
+
+const FORMATS: Array<{ value: Format; label: string; desc: string }> = [
+  { value: 'txt', label: 'TXT', desc: '纯文本，通用格式' },
+  { value: 'json', label: 'JSON', desc: '详细格式，包含完整消息信息' },
+  { value: 'html', label: 'HTML', desc: '网页格式，可直接浏览' },
+  { value: 'excel', label: 'XLSX', desc: '电子表格，适合统计分析' },
+  { value: 'markdown', label: 'Markdown', desc: '支持文本、图片与链接，适合 AI 场景' },
+  { value: 'chatlab', label: 'ChatLab', desc: '标准格式，支持其他软件导入' },
+  { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式格式，适合大量消息' },
+  { value: 'arkme-json', label: 'Arkme JSON', desc: '紧凑 JSON，支持关系统计' },
+  { value: 'weclone', label: 'WeClone CSV', desc: 'WeClone 兼容字段格式（CSV）' },
+  { value: 'sql', label: 'PostgreSQL', desc: '数据库脚本，便于导入数据库' },
+]
+
+const FORMAT_FOLDERS: Record<Format, string> = {
+  txt: 'TXT',
+  json: 'JSON',
+  'arkme-json': 'ARKME-JSON',
+  html: 'HTML',
+  markdown: 'MARKDOWN',
+  excel: 'XLSX',
+  sql: 'SQL',
+  chatlab: 'CHATLAB',
+  'chatlab-jsonl': 'CHATLAB-JSONL',
+  weclone: 'WECLONE',
+}
+
+const WRITE_LAYOUTS: Array<{ value: WriteLayout; label: string; desc: string }> = [
+  { value: 'A', label: 'A', desc: '类型分目录' },
+  { value: 'B', label: 'B', desc: '媒体按类型+会话' },
+  { value: 'C', label: 'C', desc: '按会话分目录' },
+]
+
+const CONFLICT_OPTIONS: Array<{ value: ConflictStrategy; label: string }> = [
+  { value: 'incremental', label: '增量跳过' },
+  { value: 'overwrite', label: '全量覆盖' },
+  { value: 'rename', label: '保留副本' },
+]
+
+const PATH_STYLE_OPTIONS: Array<{ value: PathStyle; label: string }> = [
+  { value: 'auto', label: '自动' },
+  { value: 'windows', label: 'Windows' },
+  { value: 'posix', label: 'macOS/Linux' },
+]
+
+const NAME_PREF_OPTIONS: Array<{ value: DisplayNamePref; label: string }> = [
+  { value: 'group-nickname', label: '群昵称优先' },
+  { value: 'remark', label: '备注优先' },
+  { value: 'nickname', label: '用户名优先' },
+]
+
+const CONCURRENCY_OPTIONS = [1, 3, 5, 10]
 
 const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
   { id: 'connect', label: '连接微信', icon: PlugZap },
@@ -78,6 +136,26 @@ export default function App() {
   const [antiRevokeBusy, setAntiRevokeBusy] = useState(false)
   const [notifyListening, setNotifyListening] = useState(false)
 
+  // 导出选项（WeFlow 对齐）
+  const [exportMedia, setExportMedia] = useState({ images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 })
+  const [exportAvatars, setExportAvatars] = useState(false)
+  const [exportVoiceAsText, setExportVoiceAsText] = useState(false)
+  const [exportPathStyle, setExportPathStyle] = useState<PathStyle>('auto')
+  const [exportConflict, setExportConflict] = useState<ConflictStrategy>('overwrite')
+  const [displayNamePref, setDisplayNamePref] = useState<DisplayNamePref>('group-nickname')
+  const [exportConcurrency, setExportConcurrency] = useState(4)
+  const [writeLayout, setWriteLayout] = useState<WriteLayout>('C')
+
+  // 会话通知过滤
+  const [notifyFilterOpen, setNotifyFilterOpen] = useState(false)
+  const [notifyFilterMode, setNotifyFilterMode] = useState<FilterMode>('all')
+  const [notifyFilterList, setNotifyFilterList] = useState<string[]>([])
+  const [notifySessions, setNotifySessions] = useState<Array<{ username: string; displayName?: string }>>([])
+  const [notifyFilterSearch, setNotifyFilterSearch] = useState('')
+  const [notifyFilterType, setNotifyFilterType] = useState<SessionType>('all')
+  const [notifyFilterDraft, setNotifyFilterDraft] = useState<Set<string>>(new Set())
+  const [notifyFilterBusy, setNotifyFilterBusy] = useState(false)
+
   const api = window.electronAPI
 
   const pushToast = useCallback((kind: ToastKind, title: string, body?: string, ms = 5200) => {
@@ -103,6 +181,28 @@ export default function App() {
     if (patch.exportPath !== undefined) void api.config.set('exportPath', patch.exportPath)
     if (patch.wxid !== undefined) void api.config.set('myWxid', patch.wxid)
     if (patch.format !== undefined) void api.config.set('exportFormat', patch.format)
+  }, [api])
+
+  const saveExportOptions = useCallback((opts: {
+    format?: Format
+    media?: typeof exportMedia
+    avatars?: boolean
+    voiceAsText?: boolean
+    pathStyle?: PathStyle
+    conflict?: ConflictStrategy
+    namePref?: DisplayNamePref
+    concurrency?: number
+    layout?: WriteLayout
+  }) => {
+    if (opts.format !== undefined) void api.config.set('exportFormat', opts.format)
+    if (opts.media !== undefined) void api.config.set('exportMedia', opts.media)
+    if (opts.avatars !== undefined) void api.config.set('exportAvatars', opts.avatars)
+    if (opts.voiceAsText !== undefined) void api.config.set('exportVoiceAsText', opts.voiceAsText)
+    if (opts.pathStyle !== undefined) void api.config.set('exportDefaultPathStyle', opts.pathStyle)
+    if (opts.conflict !== undefined) void api.config.set('exportConflictStrategy', opts.conflict)
+    if (opts.namePref !== undefined) void api.config.set('exportDefaultDisplayNamePreference', opts.namePref)
+    if (opts.concurrency !== undefined) void api.config.set('exportConcurrency', opts.concurrency)
+    if (opts.layout !== undefined) void api.config.set('exportWriteLayout', opts.layout)
   }, [api])
 
   const refreshExportLog = useCallback(async (path: string) => {
@@ -209,13 +309,46 @@ export default function App() {
         const wxid = await api.config.get('myWxid')
         if (typeof wxid === 'string' && wxid) setSelectedWxid(wxid)
         const fmt = await api.config.get('exportFormat')
-        if (fmt === 'json' || fmt === 'txt') setFormat(fmt)
+        if (typeof fmt === 'string' && FORMATS.some((f) => f.value === fmt)) setFormat(fmt as Format)
         const notif = await api.config.get('notificationEnabled')
         setNotificationsEnabled(notif === true)
         const silent = await api.config.get('silentStartup')
         setSilentStartup(silent === true)
         const close = await api.config.get('windowCloseBehavior')
         setCloseToTray(close !== 'quit')
+
+        // 导出选项
+        try {
+          const media = await api.config.get('exportMedia')
+          if (media && typeof media === 'object') {
+            setExportMedia((prev) => ({
+              ...prev,
+              ...(media as Partial<typeof exportMedia>),
+            }))
+          }
+          const avatars = await api.config.get('exportAvatars')
+          if (typeof avatars === 'boolean') setExportAvatars(avatars)
+          const voiceAsText = await api.config.get('exportVoiceAsText')
+          if (typeof voiceAsText === 'boolean') setExportVoiceAsText(voiceAsText)
+          const pathStyle = await api.config.get('exportDefaultPathStyle')
+          if (pathStyle === 'auto' || pathStyle === 'posix' || pathStyle === 'windows') setExportPathStyle(pathStyle)
+          const conflict = await api.config.get('exportConflictStrategy')
+          if (conflict === 'incremental' || conflict === 'overwrite' || conflict === 'rename') setExportConflict(conflict)
+          const namePref = await api.config.get('exportDefaultDisplayNamePreference')
+          if (namePref === 'group-nickname' || namePref === 'remark' || namePref === 'nickname') setDisplayNamePref(namePref)
+          const concurrency = await api.config.get('exportConcurrency')
+          if (typeof concurrency === 'number' && concurrency >= 1) setExportConcurrency(concurrency)
+          const layout = await api.config.get('exportWriteLayout')
+          if (layout === 'A' || layout === 'B' || layout === 'C') setWriteLayout(layout)
+        } catch { /* 保持默认 */ }
+
+        // 会话通知过滤
+        try {
+          const mode = await api.config.get('messagePushFilterMode')
+          if (mode === 'whitelist' || mode === 'blacklist') setNotifyFilterMode(mode)
+          const list = await api.config.get('messagePushFilterList')
+          if (Array.isArray(list)) setNotifyFilterList(list.map((x) => String(x || '').trim()).filter(Boolean))
+        } catch { /* 保持默认 */ }
         if (db) {
           await refreshAccounts(String(db))
           await loadAccountKey(String(wxid || ''))
@@ -339,8 +472,29 @@ export default function App() {
     setProgress({ current: 0, total: 0, phaseLabel: '准备中' })
     setBusyLabel('开始导出全部会话…')
 
+    const mediaEnabled = exportMedia.images || exportMedia.videos || exportMedia.voices || exportMedia.emojis || exportMedia.files
+    const options = {
+      format,
+      exportImages: exportMedia.images,
+      exportVideos: exportMedia.videos,
+      exportVoices: exportMedia.voices,
+      exportEmojis: exportMedia.emojis,
+      exportFiles: exportMedia.files,
+      exportMedia: mediaEnabled,
+      maxFileSizeMb: exportMedia.maxFileSizeMb,
+      exportAvatars,
+      exportVoiceAsText,
+      exportPathStyle,
+      exportConflictStrategy: exportConflict,
+      displayNamePreference: displayNamePref,
+      exportConcurrency,
+      exportWriteLayout: writeLayout,
+      sessionLayout: mediaEnabled ? 'per-session' : 'shared',
+      sessionNameWithTypePrefix: true,
+    }
+
     try {
-      const result = await api.export.exportSessions(exportPath.trim(), format)
+      const result = await api.export.exportSessions(exportPath.trim(), options)
       await refreshExportLog(exportPath.trim())
       if (result.success) {
         pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）`, 7000)
@@ -515,13 +669,76 @@ export default function App() {
     return Math.max(0, Math.min(100, (progress.current / progress.total) * 100))
   }, [progress])
 
-  const formatFolder = format === 'json' ? 'JSON' : 'TXT'
+  const formatFolder = FORMAT_FOLDERS[format] || 'TXT'
   const installedCount = Object.values(antiRevokeInstalled).filter(Boolean).length
   const isExporting = busy && tab === 'export' && !!progress && progress.phase !== 'complete'
 
   function switchTab(next: Tab) {
     setTab(next)
     void api.config.set('lastTab', next)
+  }
+
+  function sessionTypeOf(username: string): Exclude<SessionType, 'all'> {
+    if (username.startsWith('gh_')) return 'official'
+    if (username.endsWith('@chatroom')) return 'group'
+    return 'private'
+  }
+
+  const notifyFilteredSessions = useMemo(() => {
+    const kw = notifyFilterSearch.trim().toLowerCase()
+    return notifySessions.filter((s) => {
+      if (notifyFilterType !== 'all' && sessionTypeOf(s.username) !== notifyFilterType) return false
+      if (kw) {
+        const name = (s.displayName || s.username).toLowerCase()
+        if (!name.includes(kw) && !s.username.toLowerCase().includes(kw)) return false
+      }
+      return true
+    })
+  }, [notifySessions, notifyFilterType, notifyFilterSearch])
+
+  async function openNotifyFilter() {
+    setNotifyFilterDraft(new Set(notifyFilterList))
+    setNotifyFilterSearch('')
+    setNotifyFilterType('all')
+    setNotifyFilterOpen(true)
+    if (notifySessions.length > 0) return
+    setNotifyFilterBusy(true)
+    try {
+      const result = await api.chat.getSessions()
+      const sessions: Array<{ username: string; displayName?: string }> = []
+      for (const s of result?.sessions || []) {
+        const username = String(s?.username || '').trim()
+        if (!username || username.toLowerCase().includes('placeholder_foldgroup')) continue
+        sessions.push({ username, displayName: String(s?.displayName || '') || undefined })
+      }
+      const missing = sessions.filter((s) => !s.displayName).map((s) => s.username)
+      if (missing.length > 0) {
+        try {
+          const enriched = await api.chat.enrichSessionsContactInfo(missing)
+          for (const s of sessions) {
+            if (!s.displayName) s.displayName = enriched?.contacts?.[s.username]?.displayName
+          }
+        } catch { /* noop */ }
+      }
+      sessions.sort((a, b) => (a.displayName || a.username).localeCompare(b.displayName || b.username, 'zh-Hans-CN'))
+      setNotifySessions(sessions)
+    } catch (e) {
+      pushToast('err', '加载会话失败', String(e))
+    } finally {
+      setNotifyFilterBusy(false)
+    }
+  }
+
+  function saveNotifyFilter() {
+    const list = Array.from(notifyFilterDraft)
+    setNotifyFilterList(list)
+    void api.config.set('messagePushFilterMode', notifyFilterMode)
+    void api.config.set('messagePushFilterList', list)
+    // 与弹窗层过滤（notificationFilter*）保持一致
+    void api.config.set('notificationFilterMode', notifyFilterMode)
+    void api.config.set('notificationFilterList', list)
+    setNotifyFilterOpen(false)
+    pushToast('ok', '会话过滤已保存', notifyFilterMode === 'all' ? '通知全部会话' : `已选 ${list.length} 个会话`)
   }
 
   return (
@@ -794,36 +1011,209 @@ export default function App() {
             </div>
 
             <div className="field">
-              <label>格式</label>
-              <div className="chip-row" role="radiogroup" aria-label="导出格式">
-                <button
-                  type="button"
-                  className="chip"
-                  data-active={format === 'txt'}
-                  role="radio"
-                  aria-checked={format === 'txt'}
-                  onClick={() => {
-                    setFormat('txt')
-                    void persist({ format: 'txt' })
-                  }}
-                  disabled={busy}
-                >
-                  TXT
-                </button>
-                <button
-                  type="button"
-                  className="chip"
-                  data-active={format === 'json'}
-                  role="radio"
-                  aria-checked={format === 'json'}
-                  onClick={() => {
-                    setFormat('json')
-                    void persist({ format: 'json' })
-                  }}
-                  disabled={busy}
-                >
-                  JSON
-                </button>
+              <label>导出格式</label>
+              <div className="format-grid" role="radiogroup" aria-label="导出格式">
+                {FORMATS.map((f) => (
+                  <button
+                    key={f.value}
+                    type="button"
+                    className="chip format-chip"
+                    data-active={format === f.value}
+                    role="radio"
+                    aria-checked={format === f.value}
+                    onClick={() => {
+                      setFormat(f.value)
+                      void saveExportOptions({ format: f.value })
+                    }}
+                    disabled={busy}
+                  >
+                    <strong>{f.label}</strong>
+                    <span>{f.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field">
+              <label>目录结构</label>
+              <div className="chip-row" role="radiogroup" aria-label="目录结构">
+                {WRITE_LAYOUTS.map((l) => (
+                  <button
+                    key={l.value}
+                    type="button"
+                    className="chip"
+                    data-active={writeLayout === l.value}
+                    role="radio"
+                    aria-checked={writeLayout === l.value}
+                    onClick={() => {
+                      setWriteLayout(l.value)
+                      void saveExportOptions({ layout: l.value })
+                    }}
+                    disabled={busy}
+                    title={l.desc}
+                  >
+                    {l.label} · {l.desc}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field">
+              <label>媒体与文件附件</label>
+              <div className="opt-grid">
+                {([
+                  ['images', '导出图片'],
+                  ['videos', '导出视频'],
+                  ['voices', '导出语音'],
+                  ['emojis', '导出表情包'],
+                  ['files', '导出文件'],
+                ] as Array<[keyof typeof exportMedia, string]>).map(([key, label]) => (
+                  <label key={key} className="check-row opt">
+                    <input
+                      type="checkbox"
+                      checked={exportMedia[key] === true}
+                      onChange={(e) => {
+                        const next = { ...exportMedia, [key]: e.target.checked }
+                        setExportMedia(next)
+                        void saveExportOptions({ media: next })
+                      }}
+                      disabled={busy}
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+              {(exportMedia.videos || exportMedia.files) && (
+                <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
+                  <label htmlFor="maxFileSizeMb">视频/文件最大体积（MB）</label>
+                  <input
+                    id="maxFileSizeMb"
+                    className="num-input"
+                    type="number"
+                    min={1}
+                    max={4096}
+                    value={exportMedia.maxFileSizeMb}
+                    onChange={(e) => {
+                      const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
+                      setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
+                    }}
+                    onBlur={() => void saveExportOptions({ media: exportMedia })}
+                    disabled={busy}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="field">
+              <label>高级选项</label>
+              <div className="opt-stack">
+                <div className="opt-grid">
+                  <label className="check-row opt">
+                    <input
+                      type="checkbox"
+                      checked={exportAvatars}
+                      onChange={(e) => {
+                        setExportAvatars(e.target.checked)
+                        void saveExportOptions({ avatars: e.target.checked })
+                      }}
+                      disabled={busy}
+                    />
+                    <span>包含联系人头像</span>
+                  </label>
+                  <label className="check-row opt">
+                    <input
+                      type="checkbox"
+                      checked={exportVoiceAsText}
+                      onChange={(e) => {
+                        setExportVoiceAsText(e.target.checked)
+                        void saveExportOptions({ voiceAsText: e.target.checked })
+                      }}
+                      disabled={busy}
+                    />
+                    <span>语音转文字（若已转换）</span>
+                  </label>
+                </div>
+                <div className="opt-row">
+                  <span>媒体路径</span>
+                  <div className="chip-row">
+                    {PATH_STYLE_OPTIONS.map((o) => (
+                      <button
+                        key={o.value}
+                        type="button"
+                        className="chip chip-sm"
+                        data-active={exportPathStyle === o.value}
+                        onClick={() => {
+                          setExportPathStyle(o.value)
+                          void saveExportOptions({ pathStyle: o.value })
+                        }}
+                        disabled={busy}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="opt-row">
+                  <span>同名文件</span>
+                  <div className="chip-row">
+                    {CONFLICT_OPTIONS.map((o) => (
+                      <button
+                        key={o.value}
+                        type="button"
+                        className="chip chip-sm"
+                        data-active={exportConflict === o.value}
+                        onClick={() => {
+                          setExportConflict(o.value)
+                          void saveExportOptions({ conflict: o.value })
+                        }}
+                        disabled={busy}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="opt-row">
+                  <span>命名方式</span>
+                  <div className="chip-row">
+                    {NAME_PREF_OPTIONS.map((o) => (
+                      <button
+                        key={o.value}
+                        type="button"
+                        className="chip chip-sm"
+                        data-active={displayNamePref === o.value}
+                        onClick={() => {
+                          setDisplayNamePref(o.value)
+                          void saveExportOptions({ namePref: o.value })
+                        }}
+                        disabled={busy}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="opt-row">
+                  <span>导出并发数</span>
+                  <div className="chip-row">
+                    {CONCURRENCY_OPTIONS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className="chip chip-sm"
+                        data-active={exportConcurrency === c}
+                        onClick={() => {
+                          setExportConcurrency(c)
+                          void saveExportOptions({ concurrency: c })
+                        }}
+                        disabled={busy}
+                        title={c >= 10 ? '最快，易卡顿' : undefined}
+                      >
+                        {c}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -854,8 +1244,8 @@ export default function App() {
             </div>
 
             <p className="hint">
-              导出写入 <code>{formatFolder}/</code>，同名文件<strong>直接覆盖</strong>。
-              命名：<code>群聊_名称.{format}</code> / <code>私聊_名称.{format}</code>
+              导出写入 <code>{formatFolder}/</code>，同名文件按上方「同名文件」策略处理。
+              命名：<code>群聊_名称</code> / <code>私聊_名称</code>
             </p>
 
             <div className="export-meta" aria-live="polite">
@@ -907,7 +1297,7 @@ export default function App() {
                 </button>
               </div>
               <p className="hint">
-                清空会删除输出目录下的 <code>TXT/</code>、<code>JSON/</code> 与 <code>export_log.txt</code>
+                清空会删除输出目录下的 <code>{formatFolder}/</code> 及其他格式文件夹、<code>export_log.txt</code>
                 ，不会删除你选的根文件夹。数据仅在本地处理。
               </p>
             </div>
@@ -1018,6 +1408,27 @@ export default function App() {
                 ))}
               </div>
 
+              <div className="btn-row" style={{ alignItems: 'center', marginTop: 12 }}>
+                {!allReady ? (
+                  <span className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+                    <button className="secondary-btn" type="button" disabled>
+                      配置会话过滤
+                    </button>
+                  </span>
+                ) : (
+                  <button className="secondary-btn" type="button" onClick={() => void openNotifyFilter()}>
+                    配置会话过滤
+                  </button>
+                )}
+                <span className="hint">
+                  {notifyFilterMode === 'all'
+                    ? '接收所有会话的通知'
+                    : notifyFilterMode === 'whitelist'
+                      ? `仅通知已选 ${notifyFilterList.length} 个会话`
+                      : `屏蔽 ${notifyFilterList.length} 个会话的通知`}
+                </span>
+              </div>
+
               <p className="hint">
                 {!notificationsEnabled ? (
                   '消息提醒已关闭'
@@ -1121,6 +1532,115 @@ export default function App() {
               <button className="danger-btn" type="button" disabled={busy} onClick={() => void confirmClearLibrary()}>
                 {busy ? '清空中…' : '确认清空'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notifyFilterOpen && (
+        <div className="modal-backdrop" onClick={() => !notifyFilterBusy && setNotifyFilterOpen(false)}>
+          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="filter-title">
+            <h3 id="filter-title">会话通知过滤</h3>
+            <p className="hint">
+              勾选要接收通知的会话。仅通知已选时，白名单为空表示不通知任何会话；
+              屏蔽已选时，黑名单为空表示不屏蔽任何会话。
+            </p>
+
+            <div className="chip-row" style={{ marginTop: 12 }} role="radiogroup" aria-label="过滤模式">
+              {([
+                ['all', '接收所有通知'],
+                ['whitelist', '仅通知已选'],
+                ['blacklist', '屏蔽已选'],
+              ] as Array<[FilterMode, string]>).map(([m, label]) => (
+                <button
+                  key={m}
+                  type="button"
+                  className="chip chip-sm"
+                  data-active={notifyFilterMode === m}
+                  onClick={() => setNotifyFilterMode(m)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="filter-toolbar">
+              <input
+                className="path-input"
+                placeholder="搜索会话…"
+                value={notifyFilterSearch}
+                onChange={(e) => setNotifyFilterSearch(e.target.value)}
+                spellCheck={false}
+              />
+              <div className="chip-row" role="radiogroup" aria-label="会话类型">
+                {([
+                  ['all', '全部'],
+                  ['private', '私聊'],
+                  ['group', '群聊'],
+                  ['official', '公众号'],
+                ] as Array<[SessionType, string]>).map(([t, label]) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className="chip chip-sm"
+                    data-active={notifyFilterType === t}
+                    onClick={() => setNotifyFilterType(t)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="notify-filter-list">
+              {notifyFilterBusy ? (
+                <div className="empty">正在加载会话…</div>
+              ) : notifyFilteredSessions.length === 0 ? (
+                <div className="empty">{notifySessions.length === 0 ? '未找到会话（请先在连接页完成配置）' : '无匹配会话'}</div>
+              ) : (
+                notifyFilteredSessions.map((s) => {
+                  const checked = notifyFilterDraft.has(s.username)
+                  return (
+                    <label key={s.username} className={`notify-row${checked ? ' checked' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          const next = new Set(notifyFilterDraft)
+                          if (next.has(s.username)) next.delete(s.username)
+                          else next.add(s.username)
+                          setNotifyFilterDraft(next)
+                        }}
+                      />
+                      <span className="notify-name">{s.displayName || s.username}</span>
+                      <span className="notify-id">{s.username}</span>
+                    </label>
+                  )
+                })
+              )}
+            </div>
+
+            <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
+              <div className="btn-row">
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  onClick={() => setNotifyFilterDraft(new Set(notifyFilteredSessions.map((s) => s.username)))}
+                >
+                  全选当前
+                </button>
+                <button className="ghost-btn" type="button" onClick={() => setNotifyFilterDraft(new Set())}>
+                  清空选中
+                </button>
+              </div>
+              <div className="btn-row">
+                <button className="secondary-btn" type="button" onClick={() => setNotifyFilterOpen(false)}>
+                  取消
+                </button>
+                <button className="primary-btn" type="button" onClick={() => saveNotifyFilter()}>
+                  保存
+                </button>
+              </div>
             </div>
           </div>
         </div>
