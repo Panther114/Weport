@@ -72,10 +72,24 @@ in `pushSessionMessages`/`buildPayload`. Keep that intact.
 
 ## Export Layout
 
-GUI export (`appMain.ts` `export:exportSessions`) writes to `{out}/TXT/` or
-`{out}/JSON/` with `群聊_`/`私聊_` prefixes (engine formatters, writeLayout C,
-overwrite strategy), then updates `{out}/export_log.txt` in the legacy
-v0.6.x format (`TXT: <time> · success=N fail=N` lines).
+GUI export (`appMain.ts` `export:exportSessions`) writes to `{out}/{FMT}/`
+(FMT = TXT / JSON / HTML / XLSX / MARKDOWN / CHATLAB / CHATLAB-JSONL /
+ARKME-JSON / WECLONE / SQL) with `群聊_`/`私聊_` prefixes. Defaults: 目录结构 A
+(exportWriteLayout A + sessionLayout `shared`, text flat at root), conflict
+`overwrite`, `sessionNameWithTypePrefix: true`; layout C maps to
+`sessionLayout: per-session` (text-only exports honor it too —
+`ExportOrchestrator` respects an explicit sessionLayout). Media export
+auto-switches to per-session dirs. `export_log.txt` is only updated for TXT
+and JSON runs (legacy v0.6.x format: `TXT: <time> · success=N fail=N` lines);
+清空导出库 clears every format folder + the log.
+
+## Contact Name Warmup
+
+`appMain.ts::warmupContactNames()` preloads the first 600 sessions' display
+names/avatars into the persisted contact cache at startup (and after
+dbPath/decryptKey/myWxid config changes). Do not remove it: popups, export
+progress, and the 会话过滤 picker all rely on the warmed cache to show real
+nicknames instead of raw wxid codes.
 
 ## Build & Test
 

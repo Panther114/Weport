@@ -168,9 +168,10 @@ export class ExportOrchestrator {
             createdTaskDirs.add(dirPath)
           }
           await ensureTaskDir(exportBaseDir)
-          const sessionLayout = exportMediaEnabled
-            ? (effectiveOptions.sessionLayout ?? 'per-session')
-            : 'shared'
+          // 显式指定了 sessionLayout 时一律尊重（目录结构 C = 按会话分目录，
+          // 纯文本导出也需要 per-session 才能真正区分 B/C）；否则按媒体开关兜底
+          const sessionLayout = effectiveOptions.sessionLayout
+            ?? (exportMediaEnabled ? 'per-session' : 'shared')
           let completedCount = 0
           const activeSessionRatios = new Map<string, number>()
           const computeAggregateCurrent = () => {

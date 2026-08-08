@@ -15,8 +15,13 @@ larger type, rounded controls.
 - Black ground / white signal (SpaceX monochrome)
 - Rounded corners (~10px) on panels and buttons
 - Custom face `src/assets/fonts/weport.ttf`
-- App icon sole source: `assets/branding/weport-icon.jpg` (installer / tray /
-  taskbar / window)
+- App icon sole source: `assets/branding/weport-icon.jpg` →
+  `assets/icons/icon.png` (rounded corners + transparent background, used by
+  installer / tray / taskbar / window / navbar; `public/icon.png` mirrors it
+  for the renderer)
 
 ## Signature
 White primary export bar + progress line; inverted account selection chips.
+Export page: numbered sections (输出设置 / 导出格式 / 内容 / 高级选项) with
+format icons, A/B/C directory-layout cards showing mini trees, blue preview
+path, reset-to-defaults button in the panel head.

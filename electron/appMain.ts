@@ -494,6 +494,48 @@ function setupNotificationPipeline() {
 }
 
 // ---------------------------------------------------------------------------
+// 联系人显示名/头像预热（WeFlow 同款：startup warmup）
+// ---------------------------------------------------------------------------
+// 会话列表/popup/导出/会话过滤首次使用时，若联系缓存为空会显示原始 wxid
+// （wxid_xxx / xxx@chatroom 等）。启动时异步把前 600 个会话的显示名与头像
+// 拉取并持久化到 contactCache，之后所有展示路径都能拿到真实昵称。
+let contactWarmupTimer: NodeJS.Timeout | null = null
+
+async function warmupContactNames(): Promise<void> {
+  try {
+    const dbPath = String(configService?.get('dbPath') || '').trim()
+    const decryptKey = String(configService?.get('decryptKey') || '').trim()
+    const myWxid = String(configService?.get('myWxid') || '').trim()
+    if (!dbPath || decryptKey.length !== 64 || !myWxid) return
+
+    const connectResult = await chatService.connect()
+    if (!connectResult.success) return
+    const sessionsResult = await chatService.getSessions()
+    if (!sessionsResult.success || !Array.isArray(sessionsResult.sessions)) return
+
+    const usernames = (sessionsResult.sessions as Array<{ username: string }>)
+      .map((s) => String(s?.username || '').trim())
+      .filter(Boolean)
+      .slice(0, 600)
+    if (usernames.length === 0) return
+    await chatService.enrichSessionsContactInfo(usernames)
+    console.log(`[Weport] 联系人预热完成: ${usernames.length} 个会话`)
+  } catch (e) {
+    console.warn('[Weport] 联系人预热失败:', e)
+  }
+}
+
+/** 配置变更后延迟触发预热（合并连续写入；连接页完成密钥提取后立即生效） */
+function scheduleContactWarmup(): void {
+   if (contactWarmupTimer) clearTimeout(contactWarmupTimer)
+  contactWarmupTimer = setTimeout(() => {
+    contactWarmupTimer = null
+    void warmupContactNames()
+  }, 800)
+  contactWarmupTimer.unref?.()
+}
+
+// ---------------------------------------------------------------------------
 // 微信 CDN 请求头拦截（头像/图片 URL 需要 MicroMessenger UA + Referer，
 // 否则 wx.qlogo.cn / qpic.cn 返回 403 → 弹窗头像显示占位）
 // ---------------------------------------------------------------------------
@@ -673,6 +715,10 @@ function registerIpcHandlers() {
     if (['messagePushEnabled', 'notificationEnabled', 'dbPath', 'decryptKey', 'myWxid'].includes(key)) {
       if (configService?.get('messagePushEnabled')) messagePushService?.start()
       await messagePushService?.handleConfigChanged(key)
+    }
+    if (key === 'dbPath' || key === 'decryptKey' || key === 'myWxid') {
+      // 连接条件就绪后预热联系人缓存（首次使用即可显示真实昵称）
+      scheduleContactWarmup()
     }
     return { success: true }
   })
@@ -1208,6 +1254,9 @@ function startApp() {
 
     registerIpcHandlers()
     setupNotificationPipeline()
+
+    // 后台预热联系人显示名/头像（不阻塞窗口显示）
+    void warmupContactNames()
 
     // 微信 CDN 头像/图片请求头（否则弹窗头像 403 → 占位）
     ensureWeChatRequestHeaderInterceptor()

@@ -51,7 +51,7 @@ jobs:
             release/Weport-*.exe
             release/Weport-*.exe.blockmap
             release/latest.yml
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: false
 
       - name: Smoke test (capture harness)

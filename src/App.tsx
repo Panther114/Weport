@@ -1,5 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { PlugZap, Download, ShieldCheck, Bell, Eye, EyeOff, ChevronDown } from 'lucide-react'
+import {
+  PlugZap,
+  Download,
+  ShieldCheck,
+  Bell,
+  Eye,
+  EyeOff,
+  ChevronDown,
+  FileText,
+  Braces,
+  Code2,
+  Table2,
+  FileCode,
+  MessageSquareText,
+  Rows3,
+  Boxes,
+  FileSpreadsheet,
+  Database,
+  FolderOpen,
+  KeyRound,
+  Users,
+  RefreshCw,
+  Trash2,
+  RotateCcw,
+  Settings2,
+  Paperclip,
+  FileType,
+  ListChecks,
+  Filter,
+  BellRing,
+  ShieldPlus,
+  Undo2,
+  CheckCircle2,
+  XCircle,
+  Info,
+  Rocket,
+  Minimize2,
+} from 'lucide-react'
 
 type Tab = 'connect' | 'export' | 'antirecall' | 'notifications'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
@@ -10,7 +47,7 @@ type WriteLayout = 'A' | 'B' | 'C'
 type FilterMode = 'all' | 'whitelist' | 'blacklist'
 type SessionType = 'all' | 'private' | 'group' | 'official' | 'other'
 type ToastKind = 'ok' | 'err' | 'info'
-type Toast = { id: number; kind: ToastKind; title: string; body?: string }
+type Toast = { id: number; kind: ToastKind; title: string; body?: string; leaving?: boolean }
 
 type Account = {
   wxid: string
@@ -36,17 +73,17 @@ type AntiRevokeSession = {
 const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 let toastSeq = 1
 
-const FORMATS: Array<{ value: Format; label: string; desc: string }> = [
-  { value: 'txt', label: 'TXT', desc: '纯文本，通用格式' },
-  { value: 'json', label: 'JSON', desc: '详细格式，包含完整消息信息' },
-  { value: 'html', label: 'HTML', desc: '网页格式，可直接浏览' },
-  { value: 'excel', label: 'XLSX', desc: '电子表格，适合统计分析' },
-  { value: 'markdown', label: 'Markdown', desc: '支持文本、图片与链接，适合 AI 场景' },
-  { value: 'chatlab', label: 'ChatLab', desc: '标准格式，支持其他软件导入' },
-  { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式格式，适合大量消息' },
-  { value: 'arkme-json', label: 'Arkme JSON', desc: '紧凑 JSON，支持关系统计' },
-  { value: 'weclone', label: 'WeClone CSV', desc: 'WeClone 兼容字段格式（CSV）' },
-  { value: 'sql', label: 'PostgreSQL', desc: '数据库脚本，便于导入数据库' },
+const FORMATS: Array<{ value: Format; label: string; desc: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
+  { value: 'txt', label: 'TXT', desc: '纯文本', icon: FileText },
+  { value: 'json', label: 'JSON', desc: '完整消息详情', icon: Braces },
+  { value: 'html', label: 'HTML', desc: '网页浏览', icon: Code2 },
+  { value: 'excel', label: 'XLSX', desc: '表格统计', icon: Table2 },
+  { value: 'markdown', label: 'Markdown', desc: 'AI 友好', icon: FileCode },
+  { value: 'chatlab', label: 'ChatLab', desc: '标准格式', icon: MessageSquareText },
+  { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式 · 适合大量消息', icon: Rows3 },
+  { value: 'arkme-json', label: 'Arkme JSON', desc: '紧凑 JSON', icon: Boxes },
+  { value: 'weclone', label: 'WeClone CSV', desc: 'CSV 兼容', icon: FileSpreadsheet },
+  { value: 'sql', label: 'PostgreSQL', desc: '数据库脚本', icon: Database },
 ]
 
 const FORMAT_FOLDERS: Record<Format, string> = {
@@ -62,10 +99,25 @@ const FORMAT_FOLDERS: Record<Format, string> = {
   weclone: 'WECLONE',
 }
 
-const WRITE_LAYOUTS: Array<{ value: WriteLayout; label: string; desc: string }> = [
-  { value: 'A', label: 'A', desc: '类型分目录' },
-  { value: 'B', label: 'B', desc: '媒体按类型+会话' },
-  { value: 'C', label: 'C', desc: '按会话分目录' },
+const WRITE_LAYOUTS: Array<{ value: WriteLayout; label: string; desc: string; tree: string[] }> = [
+  {
+    value: 'A',
+    label: '文本在根目录',
+    desc: '最常用（建议）',
+    tree: ['群聊_名称.txt', 'media/群聊_名称/'],
+  },
+  {
+    value: 'B',
+    label: '按类型分目录',
+    desc: '文字媒体分类',
+    tree: ['texts/ 文本', 'images/ 媒体'],
+  },
+  {
+    value: 'C',
+    label: '按会话分目录',
+    desc: '每会话一个目录',
+    tree: ['群聊_名称/', '├ 文本 + media/'],
+  },
 ]
 
 const CONFLICT_OPTIONS: Array<{ value: ConflictStrategy; label: string }> = [
@@ -87,6 +139,18 @@ const NAME_PREF_OPTIONS: Array<{ value: DisplayNamePref; label: string }> = [
 ]
 
 const CONCURRENCY_OPTIONS = [1, 3, 5, 10]
+
+const EXPORT_DEFAULTS = {
+  format: 'txt' as Format,
+  writeLayout: 'A' as WriteLayout,
+  media: { images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 },
+  avatars: false,
+  voiceAsText: false,
+  pathStyle: 'auto' as PathStyle,
+  conflict: 'overwrite' as ConflictStrategy,
+  namePref: 'group-nickname' as DisplayNamePref,
+  concurrency: 3,
+}
 
 const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
   { id: 'connect', label: '连接微信', icon: PlugZap },
@@ -143,8 +207,8 @@ export default function App() {
   const [exportPathStyle, setExportPathStyle] = useState<PathStyle>('auto')
   const [exportConflict, setExportConflict] = useState<ConflictStrategy>('overwrite')
   const [displayNamePref, setDisplayNamePref] = useState<DisplayNamePref>('group-nickname')
-  const [exportConcurrency, setExportConcurrency] = useState(4)
-  const [writeLayout, setWriteLayout] = useState<WriteLayout>('C')
+  const [exportConcurrency, setExportConcurrency] = useState(3)
+  const [writeLayout, setWriteLayout] = useState<WriteLayout>('A')
   const [showAdvanced, setShowAdvanced] = useState(true)
 
   // 会话通知过滤
@@ -159,22 +223,28 @@ export default function App() {
 
   const api = window.electronAPI
 
+  const dismissToast = useCallback((id: number) => {
+    const t = toastTimers.current.get(id)
+    if (t) {
+      window.clearTimeout(t)
+      toastTimers.current.delete(id)
+    }
+    // 先播放退场动画，再移除 DOM
+    setToasts((prev) => prev.map((x) => (x.id === id ? { ...x, leaving: true } : x)))
+    const removeTimer = window.setTimeout(() => {
+      setToasts((prev) => prev.filter((x) => x.id !== id))
+    }, 230)
+    toastTimers.current.set(id, removeTimer)
+  }, [])
+
   const pushToast = useCallback((kind: ToastKind, title: string, body?: string, ms = 5200) => {
     const id = toastSeq++
     setToasts((prev) => [...prev.slice(-4), { id, kind, title, body }])
     const t = window.setTimeout(() => {
-      setToasts((prev) => prev.filter((x) => x.id !== id))
-      toastTimers.current.delete(id)
+      dismissToast(id)
     }, ms)
     toastTimers.current.set(id, t)
-  }, [])
-
-  const dismissToast = useCallback((id: number) => {
-    const t = toastTimers.current.get(id)
-    if (t) window.clearTimeout(t)
-    toastTimers.current.delete(id)
-    setToasts((prev) => prev.filter((x) => x.id !== id))
-  }, [])
+  }, [dismissToast])
 
   const persist = useCallback((patch: { dbPath?: string; decryptKey?: string; exportPath?: string; wxid?: string; format?: Format }) => {
     if (patch.dbPath !== undefined) void api.config.set('dbPath', patch.dbPath)
@@ -205,6 +275,30 @@ export default function App() {
     if (opts.concurrency !== undefined) void api.config.set('exportConcurrency', opts.concurrency)
     if (opts.layout !== undefined) void api.config.set('exportWriteLayout', opts.layout)
   }, [api])
+
+  function resetExportDefaults() {
+    setFormat(EXPORT_DEFAULTS.format)
+    setWriteLayout(EXPORT_DEFAULTS.writeLayout)
+    setExportMedia(EXPORT_DEFAULTS.media)
+    setExportAvatars(EXPORT_DEFAULTS.avatars)
+    setExportVoiceAsText(EXPORT_DEFAULTS.voiceAsText)
+    setExportPathStyle(EXPORT_DEFAULTS.pathStyle)
+    setExportConflict(EXPORT_DEFAULTS.conflict)
+    setDisplayNamePref(EXPORT_DEFAULTS.namePref)
+    setExportConcurrency(EXPORT_DEFAULTS.concurrency)
+    void saveExportOptions({
+      format: EXPORT_DEFAULTS.format,
+      layout: EXPORT_DEFAULTS.writeLayout,
+      media: EXPORT_DEFAULTS.media,
+      avatars: EXPORT_DEFAULTS.avatars,
+      voiceAsText: EXPORT_DEFAULTS.voiceAsText,
+      pathStyle: EXPORT_DEFAULTS.pathStyle,
+      conflict: EXPORT_DEFAULTS.conflict,
+      namePref: EXPORT_DEFAULTS.namePref,
+      concurrency: EXPORT_DEFAULTS.concurrency,
+    })
+    pushToast('ok', '已恢复默认导出设置', '目录结构 A · TXT 格式')
+  }
 
   const refreshExportLog = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -338,7 +432,7 @@ export default function App() {
           const namePref = await api.config.get('exportDefaultDisplayNamePreference')
           if (namePref === 'group-nickname' || namePref === 'remark' || namePref === 'nickname') setDisplayNamePref(namePref)
           const concurrency = await api.config.get('exportConcurrency')
-          if (typeof concurrency === 'number' && concurrency >= 1) setExportConcurrency(concurrency)
+          if (typeof concurrency === 'number' && CONCURRENCY_OPTIONS.includes(concurrency)) setExportConcurrency(concurrency)
           const layout = await api.config.get('exportWriteLayout')
           if (layout === 'A' || layout === 'B' || layout === 'C') setWriteLayout(layout)
         } catch { /* 保持默认 */ }
@@ -490,7 +584,7 @@ export default function App() {
       displayNamePreference: displayNamePref,
       exportConcurrency,
       exportWriteLayout: writeLayout,
-      sessionLayout: mediaEnabled ? 'per-session' : 'shared',
+      sessionLayout: writeLayout === 'C' ? 'per-session' : 'shared',
       sessionNameWithTypePrefix: true,
     }
 
@@ -815,12 +909,15 @@ export default function App() {
         </div>
       )}
 
-      <div className="workspace">
+      <div className="workspace" key={tab}>
         {tab === 'connect' && (
           <div className="two-col">
             <section className="panel connect-loc">
               <div className="panel-head">
-                <h2>微信聊天记录数据位置</h2>
+                <h2>
+                  <FolderOpen size={15} />
+                  微信聊天记录数据位置
+                </h2>
                 <span className={dbReady ? 'st-ok' : undefined}>{dbReady ? '已连接' : '未选择'}</span>
               </div>
               <div className="field">
@@ -850,6 +947,7 @@ export default function App() {
               </div>
               <div className="btn-row">
                 <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
+                  <RefreshCw size={14} />
                   重新扫描
                 </button>
                 <button
@@ -858,6 +956,7 @@ export default function App() {
                   onClick={() => void refreshAccounts(dbPath)}
                   disabled={busy || !dbPath.trim()}
                 >
+                  <Users size={14} />
                   刷新账号
                 </button>
               </div>
@@ -865,7 +964,10 @@ export default function App() {
 
             <section className="panel connect-key">
               <div className="panel-head">
-                <h2>解密密钥</h2>
+                <h2>
+                  <KeyRound size={15} />
+                  解密密钥
+                </h2>
                 <span className={keyOk ? 'st-ok' : 'st-warn'}>{keyOk ? '已就绪' : '待提取'}</span>
               </div>
               <ol className="steps">
@@ -942,6 +1044,7 @@ export default function App() {
 
               <div className="btn-row">
                 <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
+                  <KeyRound size={14} />
                   {busy && !progress ? '提取中…' : '提取密钥'}
                 </button>
               </div>
@@ -952,7 +1055,10 @@ export default function App() {
 
             <section className="panel connect-acc">
               <div className="panel-head">
-                <h2>微信账号</h2>
+                <h2>
+                  <Users size={15} />
+                  微信账号
+                </h2>
                 <span className={accounts.length ? 'st-ok' : undefined}>
                   {accounts.length ? `${accounts.length} 个` : '未选择'}
                 </span>
@@ -1007,14 +1113,39 @@ export default function App() {
         {tab === 'export' && (
           <section className="panel panel-fill">
             <div className="panel-head">
-              <h2>导出数据</h2>
-              <span>全部联系人 + 群聊</span>
+              <h2>
+                <Download size={15} />
+                导出数据
+              </h2>
+              <div className="panel-head-actions">
+                <span>全部联系人 + 群聊</span>
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => resetExportDefaults()}
+                  title="恢复默认导出设置（目录结构 A · TXT）"
+                >
+                  <RotateCcw size={13} />
+                  恢复默认
+                </button>
+                <button
+                  className="danger-btn"
+                  type="button"
+                  disabled={busy || !exportPath.trim()}
+                  onClick={() => setClearOpen(true)}
+                >
+                  <Trash2 size={13} />
+                  清空导出库
+                </button>
+              </div>
             </div>
 
             {/* 1. 输出设置 */}
             <div className="exp-section">
               <div className="exp-sec-head">
                 <span className="exp-num">1</span>
+                <FolderOpen size={14} />
                 输出设置
               </div>
               <div className="field">
@@ -1059,14 +1190,27 @@ export default function App() {
                       }}
                       disabled={busy}
                     >
-                      <strong>{l.label}</strong>
+                      <strong>
+                        <span className="layout-badge">{l.value}</span>
+                        {l.label}
+                      </strong>
+                      <code className="layout-tree">
+                        {l.tree.map((line, i) => (
+                          <span key={i}>{line}</span>
+                        ))}
+                      </code>
                       <span>{l.desc}</span>
                     </button>
                   ))}
                 </div>
-                <p className="hint" style={{ marginTop: 6 }}>
-                  输出预览：<code>{exportPath.trim() ? exportPath.trim() : '未选择根目录'}\{formatFolder}\</code> ·
-                  命名 <code>群聊_名称</code> / <code>私聊_名称</code>
+                <p className="hint" style={{ marginTop: 8 }}>
+                  输出预览：
+                  <code className="exp-path">
+                    {exportPath.trim()
+                      ? `${exportPath.trim()}\\${formatFolder}\\${writeLayout === 'B' ? 'texts\\' : writeLayout === 'C' ? '群聊_名称\\' : ''}`
+                      : '未选择根目录'}
+                  </code>
+                  <span> · 命名：<code>群聊_名称</code> / <code>私聊_名称</code></span>
                 </p>
               </div>
             </div>
@@ -1075,27 +1219,34 @@ export default function App() {
             <div className="exp-section">
               <div className="exp-sec-head">
                 <span className="exp-num">2</span>
+                <FileType size={14} />
                 导出格式
               </div>
               <div className="format-grid" role="radiogroup" aria-label="导出格式">
-                {FORMATS.map((f) => (
-                  <button
-                    key={f.value}
-                    type="button"
-                    className="chip format-chip"
-                    data-active={format === f.value}
-                    role="radio"
-                    aria-checked={format === f.value}
-                    onClick={() => {
-                      setFormat(f.value)
-                      void saveExportOptions({ format: f.value })
-                    }}
-                    disabled={busy}
-                  >
-                    <strong>{f.label}</strong>
-                    <span>{f.desc}</span>
-                  </button>
-                ))}
+                {FORMATS.map((f) => {
+                  const FIcon = f.icon
+                  return (
+                    <button
+                      key={f.value}
+                      type="button"
+                      className="chip format-chip"
+                      data-active={format === f.value}
+                      role="radio"
+                      aria-checked={format === f.value}
+                      onClick={() => {
+                        setFormat(f.value)
+                        void saveExportOptions({ format: f.value })
+                      }}
+                      disabled={busy}
+                    >
+                      <span className="fmt-head">
+                        <FIcon size={14} strokeWidth={1.8} />
+                        <strong>{f.label}</strong>
+                      </span>
+                      <span>{f.desc}</span>
+                    </button>
+                  )
+                })}
               </div>
             </div>
 
@@ -1103,6 +1254,7 @@ export default function App() {
             <div className="exp-section">
               <div className="exp-sec-head">
                 <span className="exp-num">3</span>
+                <Paperclip size={14} />
                 内容（媒体与附件）
               </div>
               <div className="media-row">
@@ -1161,6 +1313,7 @@ export default function App() {
                 aria-expanded={showAdvanced}
               >
                 <span className="exp-num">4</span>
+                <Settings2 size={14} />
                 高级选项
                 <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
               </button>
@@ -1309,21 +1462,12 @@ export default function App() {
 
             <div className="export-actions">
               <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
+                <Download size={16} />
                 {busy && progress ? '导出中…' : '导出全部聊天记录'}
               </button>
-              <div className="btn-row" style={{ justifyContent: 'space-between' }}>
-                <p className="hint" style={{ maxWidth: 520 }}>
-                  清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
-                </p>
-                <button
-                  className="danger-btn"
-                  type="button"
-                  disabled={busy || !exportPath.trim()}
-                  onClick={() => setClearOpen(true)}
-                >
-                  清空导出库
-                </button>
-              </div>
+              <p className="hint">
+                清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
+              </p>
             </div>
           </section>
         )}
@@ -1332,7 +1476,10 @@ export default function App() {
           <div className="single-col">
             <section className="panel">
               <div className="panel-head">
-                <h2>防撤回</h2>
+                <h2>
+                  <ShieldCheck size={15} />
+                  防撤回
+                </h2>
                 <span>会话级 WCDB 触发器（安装后无需保持 Weport 运行）</span>
               </div>
               <p className="hint">
@@ -1341,6 +1488,7 @@ export default function App() {
               </p>
               <div className="btn-row">
                 <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
+                  <RefreshCw size={14} />
                   {antiRevokeBusy ? '刷新中…' : '刷新状态'}
                 </button>
                 <button
@@ -1349,6 +1497,7 @@ export default function App() {
                   disabled={!allReady || antiRevokeBusy || antiRevokeSessions.length === 0}
                   onClick={() => void installAntiRevoke(antiRevokeSessions.map((s) => s.username))}
                 >
+                  <ShieldPlus size={14} />
                   全部安装 ({installedCount}/{antiRevokeSessions.length})
                 </button>
                 <button
@@ -1357,6 +1506,7 @@ export default function App() {
                   disabled={!allReady || antiRevokeBusy || installedCount === 0}
                   onClick={() => void uninstallAntiRevoke(Object.keys(antiRevokeInstalled).filter((id) => antiRevokeInstalled[id]))}
                 >
+                  <Undo2 size={14} />
                   全部还原
                 </button>
               </div>
@@ -1400,7 +1550,10 @@ export default function App() {
           <div className="single-col">
             <section className="panel">
               <div className="panel-head">
-                <h2>消息通知</h2>
+                <h2>
+                  <Bell size={15} />
+                  消息通知
+                </h2>
                 <span>独立置顶弹窗 · 不抢占焦点</span>
               </div>
               <div className="btn-row" style={{ alignItems: 'center' }}>
@@ -1413,12 +1566,16 @@ export default function App() {
                   <span>启用消息提醒</span>
                 </label>
                 <button className="ghost-btn" type="button" onClick={() => void api.notification.showTest()}>
+                  <BellRing size={13} />
                   测试通知弹窗
                 </button>
               </div>
 
               <div className="checklist">
-                <div className="checklist-title">提醒的前置条件</div>
+                <div className="checklist-title">
+                  <ListChecks size={14} />
+                  提醒的前置条件
+                </div>
                 {[
                   ['微信数据目录', dbReady, dbReady ? '已连接' : '未选择'],
                   ['微信账号', accountReady, accountReady ? '已选择' : '未选择'],
@@ -1441,6 +1598,7 @@ export default function App() {
                   </span>
                 ) : (
                   <button className="secondary-btn" type="button" onClick={() => void openNotifyFilter()}>
+                    <Filter size={14} />
                     配置会话过滤
                   </button>
                 )}
@@ -1471,15 +1629,21 @@ export default function App() {
 
             <section className="panel">
               <div className="panel-head">
-                <h2>设置</h2>
+                <h2>
+                  <Settings2 size={15} />
+                  设置
+                </h2>
                 <span>启动与后台行为</span>
               </div>
               <div className="setting-row">
-                <div>
-                  <strong>开机自启</strong>
-                  <span className="hint">
-                    {startupSupported ? '登录 Windows 后自动启动 Weport' : startupReason || '当前环境不支持'}
-                  </span>
+                <div className="setting-label">
+                  <Rocket size={14} />
+                  <div>
+                    <strong>开机自启</strong>
+                    <span className="hint">
+                      {startupSupported ? '登录 Windows 后自动启动 Weport' : startupReason || '当前环境不支持'}
+                    </span>
+                  </div>
                 </div>
                 <label className="switch">
                   <input
@@ -1492,9 +1656,12 @@ export default function App() {
                 </label>
               </div>
               <div className="setting-row">
-                <div>
-                  <strong>启动时隐藏到托盘</strong>
-                  <span className="hint">开机自启时以托盘模式启动，不显示主窗口</span>
+                <div className="setting-label">
+                  <EyeOff size={14} />
+                  <div>
+                    <strong>启动时隐藏到托盘</strong>
+                    <span className="hint">开机自启时以托盘模式启动，不显示主窗口</span>
+                  </div>
                 </div>
                 <label className="switch">
                   <input
@@ -1507,9 +1674,12 @@ export default function App() {
                 </label>
               </div>
               <div className="setting-row">
-                <div>
-                  <strong>关闭窗口时最小化到托盘而不是退出</strong>
-                  <span className="hint">关闭后从系统托盘恢复（托盘菜单「退出」才会完全退出）</span>
+                <div className="setting-label">
+                  <Minimize2 size={14} />
+                  <div>
+                    <strong>关闭窗口时最小化到托盘而不是退出</strong>
+                    <span className="hint">关闭后从系统托盘恢复（托盘菜单「退出」才会完全退出）</span>
+                  </div>
                 </div>
                 <label className="switch">
                   <input type="checkbox" checked={closeToTray} onChange={(e) => void toggleCloseToTray(e.target.checked)} />
@@ -1523,7 +1693,10 @@ export default function App() {
 
       <div className="toast-stack" aria-live="polite">
         {toasts.map((t) => (
-          <div key={t.id} className="toast" data-kind={t.kind}>
+          <div key={t.id} className={`toast${t.leaving ? ' leaving' : ''}`} data-kind={t.kind}>
+            <span className="toast-icon">
+              {t.kind === 'ok' ? <CheckCircle2 size={16} /> : t.kind === 'err' ? <XCircle size={16} /> : <Info size={16} />}
+            </span>
             <div>
               <h4>{t.title}</h4>
               {t.body ? <p>{t.body}</p> : null}
@@ -1538,7 +1711,10 @@ export default function App() {
       {clearOpen && (
         <div className="modal-backdrop" onClick={() => !busy && setClearOpen(false)}>
           <div className="modal danger" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="clear-title">
-            <h3 id="clear-title">清空导出库？</h3>
+            <h3 id="clear-title">
+              <Trash2 size={15} />
+              清空导出库？
+            </h3>
             <p>将删除下列内容（不可恢复）：</p>
             <p style={{ marginTop: 8 }}>
               <code>TXT/</code>、<code>JSON/</code>、<code>export_log.txt</code>
@@ -1564,7 +1740,10 @@ export default function App() {
       {notifyFilterOpen && (
         <div className="modal-backdrop" onClick={() => !notifyFilterBusy && setNotifyFilterOpen(false)}>
           <div className="modal modal-wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="filter-title">
-            <h3 id="filter-title">会话通知过滤</h3>
+            <h3 id="filter-title">
+              <Filter size={15} />
+              会话通知过滤
+            </h3>
             <p className="hint">
               勾选要接收通知的会话。仅通知已选时，白名单为空表示不通知任何会话；
               屏蔽已选时，黑名单为空表示不屏蔽任何会话。
@@ -1673,7 +1852,10 @@ export default function App() {
       {aboutOpen && (
         <div className="modal-backdrop" onClick={() => setAboutOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
-            <h3>Weport v{version}</h3>
+            <h3>
+              <Info size={15} />
+              Weport v{version}
+            </h3>
             <p>轻量微信聊天记录导出工具。读取本机微信 4.x 数据，导出全部私聊与群聊为 TXT / JSON。</p>
             <p style={{ marginTop: 8 }}>
               导出写入 <code>TXT/</code> 与 <code>JSON/</code> 子目录；根目录 <code>export_log.txt</code> 记录上次导出时间。

@@ -223,7 +223,7 @@ export class ConfigService {
       exportAvatars: false,
       exportVoiceAsText: false,
       exportConflictStrategy: 'overwrite',
-      exportConcurrency: 4,
+      exportConcurrency: 3,
       llmModelPath: '',
       whisperModelName: 'base',
       whisperModelDir: '',
