@@ -48,6 +48,8 @@ let mainWindowReady = false
 let configService: ConfigService | null = null
 let messagePushService: MessagePushService | null = null
 let shutdownPromise: Promise<void> | null = null
+/** 是否以静默方式启动（开机自启 Run 键带 --background，主窗口保持隐藏） */
+const startHidden = process.argv.includes('--background')
 
 // ---------------------------------------------------------------------------
 // 资源路径（wcdb / key / runtime DLL）
@@ -222,6 +224,38 @@ const syncLaunchAtStartupPreference = () => {
   if (stored === system) return
   const result = setSystemLaunchAtStartup(stored)
   configService.set('launchAtStartup', result.enabled)
+}
+
+/**
+ * 清理历史版本（v0.7.x 早期用 setLoginItemSettings）残留的 electron.app.* Run 值：
+ * - `electron.app.Electron` 可能指向开发目录的 node_modules\electron，开机时会把
+ *   裸 Electron 一起拉起（表现为开机多出一个 "Electron" 窗口）；
+ * - `electron.app.Weport` 与当前 `Weport` 值重复，会造成开机双实例竞争，触发
+ *   second-instance 把静默启动（--background）的主窗口带出来。
+ */
+const cleanupLegacyAutostartEntries = () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process')
+  const cmd = process.env.ComSpec || 'cmd.exe'
+  for (const name of ['electron.app.Weport', 'electron.app.Electron']) {
+    try {
+      const stdout = execFileSync(cmd, ['/c', 'reg', 'query', RUN_KEY_PATH, '/v', name], {
+        encoding: 'utf8',
+        windowsHide: true,
+      })
+      const line = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => l.includes('REG_SZ'))
+      if (!line) continue
+      const target = line.slice(line.indexOf('REG_SZ') + 6).trim().replace(/^"|"$/g, '')
+      const isOurs = target.includes('Weport') || target.toLowerCase().includes('node_modules\\electron')
+      if (!isOurs) continue
+      execFileSync(cmd, ['/c', 'reg', 'delete', RUN_KEY_PATH, '/v', name, '/f'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      console.log('[Weport] 已清理残留开机自启项:', name, '→', target)
+    } catch {
+      // 值不存在或已删除
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1141,15 @@ function startApp() {
   }
 
   app.on('second-instance', () => {
+    // 静默启动（--background）时忽略第二实例：开机自启的双实例竞争
+    // （历史版本残留多个 Run 键）曾通过这里把隐藏的主窗口带出来。
+    // 若用户已手动打开过窗口，则仅聚焦不重复显示。
+    if (startHidden) {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        mainWindow.focus()
+      }
+      return
+    }
     showMainWindow()
   })
 
@@ -1124,6 +1167,7 @@ function startApp() {
     configService = ConfigService.getInstance()
     migrateLegacySettings()
     syncLaunchAtStartupPreference()
+    cleanupLegacyAutostartEntries()
     applyUpdaterChannel()
 
     const resourcesPath = resolveResourcesPath()
@@ -1138,7 +1182,6 @@ function startApp() {
     ensureWeChatRequestHeaderInterceptor()
 
     // 主窗口（托盘隐藏/静默启动时先建后隐藏）
-    const startHidden = process.argv.includes('--background')
     mainWindow = createWindow(!startHidden)
 
     createTray()

@@ -31,11 +31,13 @@ const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 let toastSeq = 1
 
 const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
-  { id: 'connect', label: '连接', icon: PlugZap },
-  { id: 'export', label: '导出', icon: Download },
+  { id: 'connect', label: '连接微信', icon: PlugZap },
+  { id: 'export', label: '导出数据', icon: Download },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
-  { id: 'notifications', label: '通知', icon: Bell },
+  { id: 'notifications', label: '消息通知', icon: Bell },
 ]
+
+const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
 
 function MarkIcon() {
   // 顶栏品牌图标：真实应用图标（唯一来源 assets/branding/weport-icon.jpg
@@ -552,7 +554,8 @@ export default function App() {
         <nav className="tabs" role="tablist" aria-label="功能">
           {TABS.map((t) => {
             const Icon = t.icon
-            return (
+            const locked = t.id !== 'connect' && !allReady
+            const button = (
               <button
                 key={t.id}
                 type="button"
@@ -560,11 +563,20 @@ export default function App() {
                 aria-selected={tab === t.id}
                 className="tab"
                 data-active={tab === t.id}
+                disabled={locked}
                 onClick={() => switchTab(t.id)}
               >
                 <Icon size={15} strokeWidth={1.8} />
                 <span>{t.label}</span>
               </button>
+            )
+            // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
+            return locked ? (
+              <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+                {button}
+              </span>
+            ) : (
+              button
             )
           })}
         </nav>
@@ -642,24 +654,26 @@ export default function App() {
                 <li>
                   <span className="step-num">1</span>
                   <span>
-                    打开微信，并<strong>关闭「自动登录」</strong>
+                    打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
+                    然后退出当前登录（或完全退出微信）
                   </span>
                 </li>
                 <li>
                   <span className="step-num">2</span>
                   <span>
-                    点击下方<strong>提取密钥</strong>（保持 Weport 在前台）
+                    点击下方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
+                    此时 Weport 已挂接微信进程，正在等待登录
                   </span>
                 </li>
                 <li>
                   <span className="step-num">3</span>
                   <span>
-                    出现<strong>已准备就绪</strong>后，登录或退出再重新登录微信
+                    用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
                   </span>
                 </li>
                 <li>
                   <span className="step-num">4</span>
-                  <span>密钥自动填入；也可粘贴已有 64 位十六进制密钥</span>
+                  <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
                 </li>
               </ol>
 
@@ -775,7 +789,7 @@ export default function App() {
         {tab === 'export' && (
           <section className="panel panel-fill">
             <div className="panel-head">
-              <h2>导出</h2>
+              <h2>导出数据</h2>
               <span>全部联系人 + 群聊</span>
             </div>
 
@@ -943,15 +957,13 @@ export default function App() {
                 </div>
               )}
               {antiRevokeSessions.length > 0 && (
-                <div className="account-list" role="listbox" aria-label="防撤回会话" style={{ maxHeight: 420 }}>
+                <div className="account-list anti-revoke-list" role="listbox" aria-label="防撤回会话">
                   {antiRevokeSessions.map((s) => {
                     const installed = antiRevokeInstalled[s.username] === true
                     return (
-                      <div key={s.username} className="account-item static" data-active={installed}>
-                        <div>
-                          <strong>{s.displayName || s.username}</strong>
-                          <span>{s.username}</span>
-                        </div>
+                      <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
+                        <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
+                        <span className="ar-id">{s.username}</span>
                         <span className={`badge ${installed ? 'ok' : ''}`}>{installed ? '已安装' : '未安装'}</span>
                         <button
                           className="ghost-btn"
@@ -974,7 +986,7 @@ export default function App() {
           <div className="single-col">
             <section className="panel">
               <div className="panel-head">
-                <h2>消息提醒</h2>
+                <h2>消息通知</h2>
                 <span>独立置顶弹窗 · 不抢占焦点</span>
               </div>
               <div className="btn-row" style={{ alignItems: 'center' }}>

@@ -171,6 +171,23 @@ button {
   box-shadow: 0 2px 10px rgba(255, 255, 255, 0.15);
 }
 
+/* 未连接数据库时禁用的功能 Tab：外层包裹承载悬停提示 */
+.tab-tip {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tab-tip .tab {
+  pointer-events: none;
+}
+
+.tab-tip .tab[data-active="true"] {
+  background: transparent;
+  color: var(--text-faint);
+  box-shadow: none;
+  font-weight: 400;
+}
+
 .top-actions {
   display: flex;
   gap: 8px;
@@ -631,6 +648,54 @@ button:disabled {
 
 .account-item.static {
   cursor: default;
+}
+
+/* 防撤回列表：更紧凑的单行布局 */
+.anti-revoke-list {
+  max-height: 280px;
+  gap: 4px;
+}
+
+.anti-revoke-list .account-item {
+  padding: 6px 10px;
+  gap: 10px;
+}
+
+.anti-revoke-list .ar-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 0 1 45%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.anti-revoke-list .ar-id {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 已安装：用中性灰底 + 绿色徽标，而不是整行白底 */
+.anti-revoke-list .account-item[data-active="true"] {
+  background: var(--elevated);
+  color: var(--text);
+  border-color: rgba(159, 232, 168, 0.35);
+  box-shadow: none;
+}
+
+.anti-revoke-list .account-item[data-active="true"] .ar-name {
+  color: var(--text);
+}
+
+.anti-revoke-list .account-item[data-active="true"] .ar-id {
+  color: var(--text-faint);
 }
 
 /* 账号横向卡片（面板占满两列时更紧凑） */
