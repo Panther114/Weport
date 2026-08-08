@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { PlugZap, Download, ShieldCheck, Bell, Eye, EyeOff } from 'lucide-react'
+import { PlugZap, Download, ShieldCheck, Bell, Eye, EyeOff, ChevronDown } from 'lucide-react'
 
 type Tab = 'connect' | 'export' | 'antirecall' | 'notifications'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
@@ -145,6 +145,7 @@ export default function App() {
   const [displayNamePref, setDisplayNamePref] = useState<DisplayNamePref>('group-nickname')
   const [exportConcurrency, setExportConcurrency] = useState(4)
   const [writeLayout, setWriteLayout] = useState<WriteLayout>('C')
+  const [showAdvanced, setShowAdvanced] = useState(true)
 
   // 会话通知过滤
   const [notifyFilterOpen, setNotifyFilterOpen] = useState(false)
@@ -1010,8 +1011,72 @@ export default function App() {
               <span>全部联系人 + 群聊</span>
             </div>
 
-            <div className="field">
-              <label>导出格式</label>
+            {/* 1. 输出设置 */}
+            <div className="exp-section">
+              <div className="exp-sec-head">
+                <span className="exp-num">1</span>
+                输出设置
+              </div>
+              <div className="field">
+                <label htmlFor="exportPath">输出文件夹</label>
+                <div className="path-row">
+                  <input
+                    id="exportPath"
+                    className="path-input"
+                    value={exportPath}
+                    placeholder="选择导出根目录…"
+                    onChange={(e) => setExportPath(e.target.value)}
+                    onBlur={() => {
+                      if (exportPath.trim()) void persist({ exportPath: exportPath.trim() })
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && exportPath.trim()) {
+                        void persist({ exportPath: exportPath.trim() })
+                        void refreshExportLog(exportPath.trim())
+                      }
+                    }}
+                    spellCheck={false}
+                  />
+                  <button className="ghost-btn" type="button" onClick={() => void pickExportFolder()} disabled={busy}>
+                    浏览
+                  </button>
+                </div>
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>目录结构</label>
+                <div className="layout-row" role="radiogroup" aria-label="目录结构">
+                  {WRITE_LAYOUTS.map((l) => (
+                    <button
+                      key={l.value}
+                      type="button"
+                      className="chip format-chip layout-chip"
+                      data-active={writeLayout === l.value}
+                      role="radio"
+                      aria-checked={writeLayout === l.value}
+                      onClick={() => {
+                        setWriteLayout(l.value)
+                        void saveExportOptions({ layout: l.value })
+                      }}
+                      disabled={busy}
+                    >
+                      <strong>{l.label}</strong>
+                      <span>{l.desc}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="hint" style={{ marginTop: 6 }}>
+                  输出预览：<code>{exportPath.trim() ? exportPath.trim() : '未选择根目录'}\{formatFolder}\</code> ·
+                  命名 <code>群聊_名称</code> / <code>私聊_名称</code>
+                </p>
+              </div>
+            </div>
+
+            {/* 2. 导出格式 */}
+            <div className="exp-section">
+              <div className="exp-sec-head">
+                <span className="exp-num">2</span>
+                导出格式
+              </div>
               <div className="format-grid" role="radiogroup" aria-label="导出格式">
                 {FORMATS.map((f) => (
                   <button
@@ -1034,41 +1099,21 @@ export default function App() {
               </div>
             </div>
 
-            <div className="field">
-              <label>目录结构</label>
-              <div className="chip-row" role="radiogroup" aria-label="目录结构">
-                {WRITE_LAYOUTS.map((l) => (
-                  <button
-                    key={l.value}
-                    type="button"
-                    className="chip"
-                    data-active={writeLayout === l.value}
-                    role="radio"
-                    aria-checked={writeLayout === l.value}
-                    onClick={() => {
-                      setWriteLayout(l.value)
-                      void saveExportOptions({ layout: l.value })
-                    }}
-                    disabled={busy}
-                    title={l.desc}
-                  >
-                    {l.label} · {l.desc}
-                  </button>
-                ))}
+            {/* 3. 内容 */}
+            <div className="exp-section">
+              <div className="exp-sec-head">
+                <span className="exp-num">3</span>
+                内容（媒体与附件）
               </div>
-            </div>
-
-            <div className="field">
-              <label>媒体与文件附件</label>
-              <div className="opt-grid">
+              <div className="media-row">
                 {([
-                  ['images', '导出图片'],
-                  ['videos', '导出视频'],
-                  ['voices', '导出语音'],
-                  ['emojis', '导出表情包'],
-                  ['files', '导出文件'],
+                  ['images', '图片'],
+                  ['videos', '视频'],
+                  ['voices', '语音'],
+                  ['emojis', '表情包'],
+                  ['files', '文件'],
                 ] as Array<[keyof typeof exportMedia, string]>).map(([key, label]) => (
-                  <label key={key} className="check-row opt">
+                  <label key={key} className="media-check">
                     <input
                       type="checkbox"
                       checked={exportMedia[key] === true}
@@ -1079,174 +1124,154 @@ export default function App() {
                       }}
                       disabled={busy}
                     />
-                    <span>{label}</span>
+                    <span>导出{label}</span>
                   </label>
                 ))}
+                {(exportMedia.videos || exportMedia.files) && (
+                  <label className="media-size">
+                    <span>视频/文件最大体积</span>
+                    <input
+                      className="num-input"
+                      type="number"
+                      min={1}
+                      max={4096}
+                      value={exportMedia.maxFileSizeMb}
+                      onChange={(e) => {
+                        const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
+                        setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
+                      }}
+                      onBlur={() => void saveExportOptions({ media: exportMedia })}
+                      disabled={busy}
+                    />
+                    <span>MB</span>
+                  </label>
+                )}
               </div>
-              {(exportMedia.videos || exportMedia.files) && (
-                <div className="field" style={{ marginTop: 10, marginBottom: 0 }}>
-                  <label htmlFor="maxFileSizeMb">视频/文件最大体积（MB）</label>
-                  <input
-                    id="maxFileSizeMb"
-                    className="num-input"
-                    type="number"
-                    min={1}
-                    max={4096}
-                    value={exportMedia.maxFileSizeMb}
-                    onChange={(e) => {
-                      const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
-                      setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
-                    }}
-                    onBlur={() => void saveExportOptions({ media: exportMedia })}
-                    disabled={busy}
-                  />
+              <p className="hint" style={{ marginTop: 6 }}>
+                不勾选则仅导出文字消息（默认）。导出媒体时会同时导出对应文字消息。
+              </p>
+            </div>
+
+            {/* 4. 高级选项 */}
+            <div className="exp-section">
+              <button
+                type="button"
+                className="exp-sec-head exp-collapse"
+                onClick={() => setShowAdvanced((v) => !v)}
+                aria-expanded={showAdvanced}
+              >
+                <span className="exp-num">4</span>
+                高级选项
+                <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
+              </button>
+              {showAdvanced && (
+                <div className="opt-panel">
+                  <div className="opt-checks">
+                    <label className="check-row opt">
+                      <input
+                        type="checkbox"
+                        checked={exportAvatars}
+                        onChange={(e) => {
+                          setExportAvatars(e.target.checked)
+                          void saveExportOptions({ avatars: e.target.checked })
+                        }}
+                        disabled={busy}
+                      />
+                      <span>包含联系人头像</span>
+                    </label>
+                    <label className="check-row opt">
+                      <input
+                        type="checkbox"
+                        checked={exportVoiceAsText}
+                        onChange={(e) => {
+                          setExportVoiceAsText(e.target.checked)
+                          void saveExportOptions({ voiceAsText: e.target.checked })
+                        }}
+                        disabled={busy}
+                      />
+                      <span>语音转文字（若已转换）</span>
+                    </label>
+                  </div>
+                  <div className="opt-row">
+                    <span className="opt-label">媒体路径</span>
+                    <div className="seg" role="radiogroup" aria-label="媒体路径">
+                      {PATH_STYLE_OPTIONS.map((o) => (
+                        <button
+                          key={o.value}
+                          type="button"
+                          data-active={exportPathStyle === o.value}
+                          onClick={() => {
+                            setExportPathStyle(o.value)
+                            void saveExportOptions({ pathStyle: o.value })
+                          }}
+                          disabled={busy}
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="opt-row">
+                    <span className="opt-label">同名文件</span>
+                    <div className="seg" role="radiogroup" aria-label="同名文件">
+                      {CONFLICT_OPTIONS.map((o) => (
+                        <button
+                          key={o.value}
+                          type="button"
+                          data-active={exportConflict === o.value}
+                          onClick={() => {
+                            setExportConflict(o.value)
+                            void saveExportOptions({ conflict: o.value })
+                          }}
+                          disabled={busy}
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="opt-row">
+                    <span className="opt-label">命名方式</span>
+                    <div className="seg" role="radiogroup" aria-label="命名方式">
+                      {NAME_PREF_OPTIONS.map((o) => (
+                        <button
+                          key={o.value}
+                          type="button"
+                          data-active={displayNamePref === o.value}
+                          onClick={() => {
+                            setDisplayNamePref(o.value)
+                            void saveExportOptions({ namePref: o.value })
+                          }}
+                          disabled={busy}
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="opt-row">
+                    <span className="opt-label">导出并发数</span>
+                    <div className="seg" role="radiogroup" aria-label="导出并发数">
+                      {CONCURRENCY_OPTIONS.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          data-active={exportConcurrency === c}
+                          onClick={() => {
+                            setExportConcurrency(c)
+                            void saveExportOptions({ concurrency: c })
+                          }}
+                          disabled={busy}
+                          title={c >= 10 ? '最快，易卡顿' : undefined}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
-
-            <div className="field">
-              <label>高级选项</label>
-              <div className="opt-stack">
-                <div className="opt-grid">
-                  <label className="check-row opt">
-                    <input
-                      type="checkbox"
-                      checked={exportAvatars}
-                      onChange={(e) => {
-                        setExportAvatars(e.target.checked)
-                        void saveExportOptions({ avatars: e.target.checked })
-                      }}
-                      disabled={busy}
-                    />
-                    <span>包含联系人头像</span>
-                  </label>
-                  <label className="check-row opt">
-                    <input
-                      type="checkbox"
-                      checked={exportVoiceAsText}
-                      onChange={(e) => {
-                        setExportVoiceAsText(e.target.checked)
-                        void saveExportOptions({ voiceAsText: e.target.checked })
-                      }}
-                      disabled={busy}
-                    />
-                    <span>语音转文字（若已转换）</span>
-                  </label>
-                </div>
-                <div className="opt-row">
-                  <span>媒体路径</span>
-                  <div className="chip-row">
-                    {PATH_STYLE_OPTIONS.map((o) => (
-                      <button
-                        key={o.value}
-                        type="button"
-                        className="chip chip-sm"
-                        data-active={exportPathStyle === o.value}
-                        onClick={() => {
-                          setExportPathStyle(o.value)
-                          void saveExportOptions({ pathStyle: o.value })
-                        }}
-                        disabled={busy}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="opt-row">
-                  <span>同名文件</span>
-                  <div className="chip-row">
-                    {CONFLICT_OPTIONS.map((o) => (
-                      <button
-                        key={o.value}
-                        type="button"
-                        className="chip chip-sm"
-                        data-active={exportConflict === o.value}
-                        onClick={() => {
-                          setExportConflict(o.value)
-                          void saveExportOptions({ conflict: o.value })
-                        }}
-                        disabled={busy}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="opt-row">
-                  <span>命名方式</span>
-                  <div className="chip-row">
-                    {NAME_PREF_OPTIONS.map((o) => (
-                      <button
-                        key={o.value}
-                        type="button"
-                        className="chip chip-sm"
-                        data-active={displayNamePref === o.value}
-                        onClick={() => {
-                          setDisplayNamePref(o.value)
-                          void saveExportOptions({ namePref: o.value })
-                        }}
-                        disabled={busy}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="opt-row">
-                  <span>导出并发数</span>
-                  <div className="chip-row">
-                    {CONCURRENCY_OPTIONS.map((c) => (
-                      <button
-                        key={c}
-                        type="button"
-                        className="chip chip-sm"
-                        data-active={exportConcurrency === c}
-                        onClick={() => {
-                          setExportConcurrency(c)
-                          void saveExportOptions({ concurrency: c })
-                        }}
-                        disabled={busy}
-                        title={c >= 10 ? '最快，易卡顿' : undefined}
-                      >
-                        {c}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="field">
-              <label htmlFor="exportPath">输出文件夹</label>
-              <div className="path-row">
-                <input
-                  id="exportPath"
-                  className="path-input"
-                  value={exportPath}
-                  placeholder="选择导出根目录…"
-                  onChange={(e) => setExportPath(e.target.value)}
-                  onBlur={() => {
-                    if (exportPath.trim()) void persist({ exportPath: exportPath.trim() })
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && exportPath.trim()) {
-                      void persist({ exportPath: exportPath.trim() })
-                      void refreshExportLog(exportPath.trim())
-                    }
-                  }}
-                  spellCheck={false}
-                />
-                <button className="ghost-btn" type="button" onClick={() => void pickExportFolder()} disabled={busy}>
-                  浏览
-                </button>
-              </div>
-            </div>
-
-            <p className="hint">
-              导出写入 <code>{formatFolder}/</code>，同名文件按上方「同名文件」策略处理。
-              命名：<code>群聊_名称</code> / <code>私聊_名称</code>
-            </p>
 
             <div className="export-meta" aria-live="polite">
               <div className="row">
@@ -1286,7 +1311,10 @@ export default function App() {
               <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
                 {busy && progress ? '导出中…' : '导出全部聊天记录'}
               </button>
-              <div className="btn-row">
+              <div className="btn-row" style={{ justifyContent: 'space-between' }}>
+                <p className="hint" style={{ maxWidth: 520 }}>
+                  清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
+                </p>
                 <button
                   className="danger-btn"
                   type="button"
@@ -1296,10 +1324,6 @@ export default function App() {
                   清空导出库
                 </button>
               </div>
-              <p className="hint">
-                清空会删除输出目录下的 <code>{formatFolder}/</code> 及其他格式文件夹、<code>export_log.txt</code>
-                ，不会删除你选的根文件夹。数据仅在本地处理。
-              </p>
             </div>
           </section>
         )}
