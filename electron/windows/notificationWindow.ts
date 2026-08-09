@@ -219,10 +219,11 @@ export function createNotificationWindow() {
     },
   });
 
-  // 把窗口从屏幕采集中排除（WDA_EXCLUDEFROMCAPTURE，Win10 2004+）：
-  // 玻璃靠采集屏幕获得折射像素，不排除自身会拍到自己形成无限回环。
-  // 副作用：系统截图/录屏中看不到通知窗口本体
-  notificationWindow.setContentProtection(true);
+  // 用户要求通知窗口可被系统截图（与微信弹窗行为一致）。
+  // 注意：setContentProtection(true) 会把窗口从屏幕采集排除（WDA_EXCLUDEFROMCAPTURE），
+  // 导致系统截图/录屏中看不到弹窗——因此不再启用内容保护。
+  // 玻璃回环风险由窗口尺寸小 + 渲染层重绘控制；如需恢复保护，直接启用下一行即可。
+  // notificationWindow.setContentProtection(true);
 
   applyWindowSize(notificationWindow, width, height);
 

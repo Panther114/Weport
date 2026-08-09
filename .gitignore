@@ -52,3 +52,7 @@ Thumbs.db
 WeFlow/
 /RevokeMsgPatcher/
 RevokeMsgPatcher/
+/Reasonix/
+
+# Sensitive QA fixture - contains real wxids/paths/chat content, never commit
+replay-payload.json

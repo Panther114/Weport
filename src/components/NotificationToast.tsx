@@ -79,10 +79,10 @@ export function NotificationToast({
             <LiquidGlass
                 cornerRadius={16}
                 padding="12px 10px"
-                blurAmount={0}
-                saturation={140}
-                displacementScale={70}
-                aberrationIntensity={1}
+                blurAmount={0.3}
+                saturation={175}
+                displacementScale={85}
+                aberrationIntensity={1.5}
                 backdropImage={backdropImage}
                 nativeBackdrop={nativeBackdrop}
                 hoverEffect={false}

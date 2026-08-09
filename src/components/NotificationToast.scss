@@ -63,20 +63,9 @@
                 overflow: hidden;
                 text-overflow: clip;
                 line-height: 1.35;
-                position: relative;
                 flex: 1;
                 min-width: 0;
                 margin-right: 50px; // 给时间留出空间
-
-                // 可读性纱层：与文字极性相反的半透明底色，保证极端背景下文字仍可读
-                &::before {
-                    content: '';
-                    position: absolute;
-                    inset: -3px -8px;
-                    border-radius: 6px;
-                    background: var(--noti-title-scrim, rgba(10, 10, 14, 0.4));
-                    z-index: -1;
-                }
             }
 
             .notification-time {
@@ -85,7 +74,7 @@
                 text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
                 transition: color 0.08s linear;
                 position: absolute;
-                top: 12px;
+                top: 2px; // 与标题文字对齐（标题行内文字约占上 2px 起）
                 right: 2px; // 贴右缘，尽量让出标题与正文空间
                 font-variant-numeric: tabular-nums;
             }
@@ -104,17 +93,6 @@
             -webkit-box-orient: vertical;
             overflow: hidden;
             word-break: break-all;
-            position: relative;
-
-            // 可读性纱层（同上）
-            &::before {
-                content: '';
-                position: absolute;
-                inset: -3px -8px;
-                border-radius: 6px;
-                background: var(--noti-body-scrim, rgba(10, 10, 14, 0.4));
-                z-index: -1;
-            }
         }
     }
 }

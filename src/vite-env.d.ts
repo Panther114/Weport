@@ -69,6 +69,57 @@ interface ElectronApi {
     clearLibrary: (outputRoot: string) => Promise<{ success: boolean; removed: string[]; error?: string }>
     onProgress: (callback: (payload: any) => void) => () => void
   }
+  ai: {
+    getSetup: () => Promise<{
+      hasApiKey: boolean
+      baseUrl: string
+      model: string
+      maxTokens: number
+      reasoningEffort: string
+      maxSteps: number
+      customPrompt: string
+      workspaceRoot: string
+      exportPath: string
+      dbReady: boolean
+      disabledTools: string[]
+      maxToolChars: number
+      conversationLimit: number
+    }>
+    setSetup: (patch: any) => Promise<{ success: boolean }>
+    listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number }> }>
+    createChat: (title?: string) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number } }>
+    renameChat: (chatId: string, title: string) => Promise<{ success: boolean }>
+    reorderChats: (orderedIds: string[]) => Promise<{ success: boolean }>
+    deleteChat: (chatId: string) => Promise<{ success: boolean }>
+    getChat: (chatId: string) => Promise<{
+      chat: { id: string; title: string; createdAt: number; updatedAt: number }
+      workspaceDir: string
+      memoryDir: string
+      messages: Array<{
+        id: string
+        role: 'user' | 'assistant' | 'tool'
+        content: string
+        reasoning?: string
+        toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string }>
+        createdAt: number
+      }>
+      lastRun?: {
+        usage?: { totalTokens?: number; promptTokens?: number; completionTokens?: number; reasoningTokens?: number; promptCacheHitTokens?: number }
+        context?: { promptTokens?: number; cacheHitTokens?: number; lastRequestTokens?: number; recentRate?: number; contextWindow?: number }
+      }
+    } | null>
+    listNotes: (chatId: string) => Promise<{ notes: Array<{ path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }> }>
+    readNoteFile: (chatId: string, path: string) => Promise<{ content: string | null }>
+    deleteNoteFile: (chatId: string, path: string) => Promise<{ success: boolean }>
+    clearMemory: () => Promise<{ success: boolean; removed: number; error?: string }>
+    getDebugLog: (limit?: number) => Promise<{ lines: string[] }>
+    clearDebugLog: () => Promise<{ success: boolean }>
+    listActions: () => Promise<{ actions: Array<{ id: string; name: string; prompt: string }> }>
+    saveActions: (actions: Array<{ id: string; name: string; prompt: string }>) => Promise<{ success: boolean }>
+    send: (chatId: string, text: string) => Promise<{ success: boolean; error?: string }>
+    abort: (chatId: string) => Promise<{ success: boolean }>
+    onEvent: (callback: (event: any) => void) => () => void
+  }
   process: {
     platform: string
     arch: string

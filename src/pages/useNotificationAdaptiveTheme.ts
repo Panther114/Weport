@@ -44,8 +44,8 @@ const SAMPLE_H = 16
 const MIN_SAMPLE_GAP_MS = 33
 /** 兜底轮询间隔：桌面静止（视频不出帧）但通知自身布局变化时仍能刷新 */
 const FALLBACK_INTERVAL_MS = 250
-/** 与 NotificationToast 传给 LiquidGlass 的 saturation=140 保持一致 */
-const GLASS_SATURATION = 1.4
+/** 与 NotificationToast 传给 LiquidGlass 的 saturation=175 保持一致 */
+const GLASS_SATURATION = 1.75
 /** WCAG AA 小字号文本的目标对比度 */
 const TARGET_CONTRAST = 4.5
 /** 极性切换所需的对比度优势（滞回），避免临界背景来回翻转 */
@@ -59,9 +59,12 @@ const RECT_BLEED = 4
 
 const WHITE_VEIL: RGB = [255, 255, 255]
 const DARK_VEIL: RGB = [22, 20, 18]
-/** 纱层 alpha 求解范围：下限保持玻璃通透，上限防止退化成实心色块 */
-const WHITE_VEIL_ALPHA: readonly [number, number] = [0.1, 0.38]
-const DARK_VEIL_ALPHA: readonly [number, number] = [0.35, 0.6]
+/**
+ * 纱层 alpha 求解范围：下限保证整卡自带半透明背景（不依赖桌面明暗即可读），
+ * 上限防止退化成实心色块。~0.5 的半透明磨砂卡片即 Apple 液态玻璃观感。
+ */
+const WHITE_VEIL_ALPHA: readonly [number, number] = [0.42, 0.58]
+const DARK_VEIL_ALPHA: readonly [number, number] = [0.5, 0.65]
 
 /**
  * 标题与正文共用同一组主文字锚点：灰色正文在蓝色等彩色背景上即使对比度达标，

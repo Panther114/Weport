@@ -170,6 +170,8 @@ export interface ContactInfo {
   description?: string
   detailDescription?: string
   region?: string
+  /** 性别：微信联系人表可能以 sex/gender/personal_card 列存储（1=男 2=女） */
+  gender?: 'male' | 'female' | 'unknown'
   avatarUrl?: string
   type: 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other'
   officialAccountKind?: 'subscription' | 'service' | 'enterprise' | 'unknown'
@@ -441,7 +443,9 @@ class ChatService {
     'detail_description', 'detailDescription', 'description', 'desc', 'contact_description', 'contactDescription', 'signature', 'sign',
     'country', 'province', 'city', 'region',
     'profile', 'introduction', 'phone', 'mobile', 'telephone', 'tel', 'vcard', 'card_info', 'cardInfo',
-    'extra_buffer', 'extraBuffer'
+    'extra_buffer', 'extraBuffer',
+    // 性别（不同微信版本列名不同：sex / gender / personal_card，动态探测存在即读取）
+    'sex', 'gender', 'personal_card', 'personalCard', 'user_sex', 'userSex'
   ]
   private readonly contactExtendedFieldCandidateSet = new Set(this.contactExtendedFieldCandidates.map((name) => name.toLowerCase()))
   private contactExtendedSelectableColumns: string[] | null = null
@@ -2231,6 +2235,7 @@ class ChatService {
         const description = isLiteMode ? '' : this.getContactDescription(row)
         const detailDescription = isLiteMode ? '' : this.getContactSignature(row)
         const region = isLiteMode ? '' : this.getContactRegion(row)
+        const gender = isLiteMode ? undefined : this.parseContactGender(row)
         const officialAccountType = type === 'official' ? officialAccountTypeMap.get(username) : undefined
 
         contacts.push({
@@ -2243,6 +2248,7 @@ class ChatService {
           description: description || undefined,
           detailDescription: detailDescription || undefined,
           region: region || undefined,
+          gender,
           avatarUrl: undefined,
           type,
           officialAccountType,
@@ -3926,6 +3932,26 @@ class ChatService {
       return hasProvinceOrCity
     }
     return false
+  }
+
+  /**
+   * 性别解析：微信联系人表按版本不同可能叫 sex / gender / personal_card /
+   * user_sex 等列；取值约定 1=男、2=女（personal_card 相同约定），
+   * 其余取值（0、-1、文本）一律视为未知，避免误判。
+   */
+  private parseContactGender(row: Record<string, any>): 'male' | 'female' | 'unknown' | undefined {
+    const raw = this.getRowString(row, ['sex', 'gender', 'personal_card', 'personalCard', 'user_sex', 'userSex'])
+    if (!raw) return undefined
+    const normalized = String(raw).trim().toLowerCase()
+    if (normalized === '1' || normalized === 'male' || normalized === '男') return 'male'
+    if (normalized === '2' || normalized === 'female' || normalized === '女') return 'female'
+    if (normalized === '0' || normalized === '-1' || normalized === 'unknown' || normalized === '') return 'unknown'
+    const numeric = Number(normalized)
+    if (Number.isFinite(numeric)) {
+      if (numeric === 1) return 'male'
+      if (numeric === 2) return 'female'
+    }
+    return 'unknown'
   }
 
   private getContactRegion(row: Record<string, any>): string {

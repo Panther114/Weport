@@ -1,4 +1,4 @@
-﻿import { join } from 'path'
+import { join } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import crypto from 'crypto'
 import Store from 'electron-store'
@@ -152,6 +152,22 @@ interface ConfigSchema {
   aiInsightDebugLogEnabled: boolean
   autoDownloadHighRes: boolean
   autoDownloadWhitelist: string[]
+
+  // WeportAI（v0.8 原生聊天历史分析助手）
+  weportAiApiKey: string
+  weportAiBaseUrl: string
+  weportAiModel: string
+  weportAiMaxTokens: number
+  weportAiReasoningEffort: 'low' | 'high' | 'max'
+  weportAiMaxSteps: number
+  weportAiCustomPrompt: string
+  weportAiWorkspaceRoot: string
+  weportAiConversationLimit: number
+  weportAiLastWorkspaceDir: string
+  weportAiDisabledTools: string[]
+  weportAiActions: Array<{ id: string; name: string; prompt: string }>
+  weportAiMaxToolChars: number
+  weportAiContextWindow: number
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -162,7 +178,8 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'httpApiToken',
   'aiModelApiKey',
   'aiInsightApiKey',
-  'aiInsightWeiboCookie'
+  'aiInsightWeiboCookie',
+  'weportAiApiKey'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
 const ENCRYPTED_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
@@ -252,7 +269,7 @@ export class ConfigService {
       messagePushEnabled: false,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
-      windowCloseBehavior: 'ask',
+      windowCloseBehavior: 'tray',
       quoteLayout: 'quote-top',
       wordCloudExcludeWords: [],
       exportWriteLayout: 'A',
@@ -297,7 +314,38 @@ export class ConfigService {
       aiMessageInsightSystemPrompt: '',
       aiInsightDebugLogEnabled: false,
       autoDownloadHighRes: false,
-      autoDownloadWhitelist: []
+      autoDownloadWhitelist: [],
+      weportAiApiKey: '',
+      weportAiBaseUrl: 'https://api.deepseek.com',
+      weportAiModel: 'deepseek-v4-flash',
+      weportAiMaxTokens: 32768,
+      weportAiReasoningEffort: 'high',
+      weportAiMaxSteps: 48,
+      weportAiCustomPrompt: '',
+      weportAiWorkspaceRoot: '',
+      weportAiConversationLimit: 40,
+      weportAiLastWorkspaceDir: '',
+      weportAiDisabledTools: [],
+      weportAiActions: [
+        {
+          id: 'action-weekly',
+          name: '本周复盘',
+          prompt: '梳理最近 7 天我在所有聊天里的动态，按天总结每天发生了什么，指出关键事件与趋势，并把这些事实更新到 memory/events.md。',
+        },
+        {
+          id: 'action-people',
+          name: '人物档案',
+          prompt: '找出最近互动最频繁的 3-5 个联系人，分析各自的关系状态、互动模式与近况，把人物观察更新到 memory/people.md。',
+        },
+        {
+          id: 'action-day',
+          name: '某日全景',
+          prompt: '查看指定日期的跨聊天全景（把当天所有聊天合并成按时间排序的完整时间线），重建当天全貌（学业/工作/社交/生活各线），把值得记录的事件更新到 memory/events.md。',
+        },
+      ],
+      weportAiMaxToolChars: 12000,
+      // deepseek-v4-flash 官方上下文窗口 1M tokens
+      weportAiContextWindow: 1000000,
     }
 
     const storeOptions: any = {

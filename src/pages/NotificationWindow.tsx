@@ -11,7 +11,7 @@ import '../components/NotificationToast.scss'
 import './NotificationWindow.scss'
 
 /** 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值） */
-const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 2, displacementScale: 70, aberrationIntensity: 1, saturation: 140 }
+const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 4, displacementScale: 85, aberrationIntensity: 1.5, saturation: 175 }
 
 export default function NotificationWindow() {
     const [notification, setNotification] = useState<NotificationData | null>(null)

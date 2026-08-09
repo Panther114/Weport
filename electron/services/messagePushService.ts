@@ -64,6 +64,8 @@ export class MessagePushService {
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
+  /** 弹窗新鲜窗口：消息时间距今超过该秒数视为同步回填（不弹窗），避免打开微信后补弹旧消息 */
+  private readonly freshPushWindowSeconds = 120
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
@@ -319,14 +321,8 @@ export class MessagePushService {
         const sessionId = String(session.username || '').trim()
         if (sessionId) candidateIds.add(sessionId)
         const previous = previousBaseline.get(session.username) || this.sessionBaseline.get(session.username)
-        const scanRecentRevokes = this.hasUnreadCountDecreased(previous, session) ||
-          (this.hasUnreadCountChanged(previous, session) && this.isRevokeSessionSummary(session)) ||
-          (Boolean(sessionId) && messageTableTargetSessionIds.has(sessionId))
-        const result = await this.pushSessionMessages(
-          session,
-          previous,
-          { scanRecentRevokes }
-        )
+        // 撤回不再推送弹窗（仅真实私聊/群聊消息触发）
+        const result = await this.pushSessionMessages(session, previous, { scanRecentRevokes: false })
         this.updateInspectedBaseline(session, previousBaseline.get(session.username), result)
         if (result.retry) {
           this.rerunRequested = true
@@ -407,16 +403,13 @@ export class MessagePushService {
     if (!sessionId || sessionId.toLowerCase().includes('placeholder_foldgroup')) {
       return false
     }
+    if (this.getSessionType(sessionId, session) === 'official') return false
 
     const lastTimestamp = Number(session.lastTimestamp || 0)
     const unreadCount = Number(session.unreadCount || 0)
 
     if (!previous) {
       return unreadCount > 0 && lastTimestamp > 0
-    }
-
-    if (this.isRevokeSessionSummary(session) && lastTimestamp >= previous.lastTimestamp) {
-      return true
     }
 
     return lastTimestamp > previous.lastTimestamp || unreadCount !== previous.unreadCount
@@ -493,6 +486,14 @@ export class MessagePushService {
       const recent = this.isRecentMessage(messageKey)
       const revokeMessage = this.isRevokeSystemMessage(message)
 
+      // 弹窗只针对真实私聊/群聊消息：
+      // - 撤回（含系统级 10002）不弹窗
+      // - 微信系统通知（10000，如进群/改昵称/通话提示等）不弹窗
+      if (revokeMessage || this.isSystemNotificationMessage(message)) {
+        this.rememberSeenMessageKey(messageKey)
+        continue
+      }
+
       if (message.isSend !== 1) {
         if (!previous || createTime > previousTimestamp || (seenPrimed && createTime === previousTimestamp)) {
           observedIncomingCount += 1
@@ -544,6 +545,20 @@ export class MessagePushService {
     for (const message of messagesToPush) {
       const messageKey = String(message.messageKey || '').trim()
       if (!messageKey) continue
+
+      // 根因修复：弹窗只在「消息时间接近检测时刻」时触发。
+      // 微信桌面端在打开窗口时会从服务端/手机端补同步旧消息到本机库，
+      // 这些消息的 createTime 远早于检测时刻——若不拦截，用户会看到
+      // 「很晚才弹出很久以前的消息」。超过新鲜窗口的一律视为同步回填，
+      // 只推进基线、不弹窗。
+      const createTime = Number(message.createTime || 0)
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      if (createTime > 0 && createTime < nowSeconds - this.freshPushWindowSeconds) {
+        this.rememberMessageKey(messageKey)
+        this.rememberSeenMessageKey(messageKey)
+        continue
+      }
+
       if (!this.isRevokeSystemMessage(message) && suppressedNormalMessageKeys.has(messageKey)) {
         this.rememberMessageKey(messageKey)
         continue
@@ -805,6 +820,15 @@ export class MessagePushService {
     // localType 10002 即撤回类型（内容可能只在 compress_content 里，
     // 此时 rawContent/parsedContent 为空）——无条件按撤回处理
     if (localType === 10002) return true
+    return false
+  }
+
+  /** 微信系统通知（进群/退群/改昵称/通话提示等 10000 类）——不应触发消息弹窗 */
+  private isSystemNotificationMessage(message: Message): boolean {
+    const localType = Number(message.localType || 0)
+    if (localType === 10000) return true
+    // 部分系统提示以 49 号 appmsg 携带（如群公告、拍一拍落款），文本类系统通知以
+    // 10000 为主；这里只按 10000 收紧，保留真实聊天消息
     return false
   }
 
@@ -1232,6 +1256,10 @@ export class MessagePushService {
 
   private shouldPushPayload(payload: MessagePushPayload): boolean {
     const sessionId = String(payload.sessionId || '').trim()
+    // 只弹真实私聊/群聊消息：公众号、系统会话一律不弹
+    if (payload.sessionType === 'official' || payload.sessionType === 'other') {
+      return false
+    }
     const filterMode = this.getMessagePushFilterMode()
     if (filterMode === 'all') {
       return true

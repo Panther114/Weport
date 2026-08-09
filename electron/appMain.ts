@@ -20,8 +20,8 @@ import {
   session,
 } from 'electron'
 import { autoUpdater } from 'electron-updater'
-import { join } from 'path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
+import { dirname, join } from 'path'
+import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
 import { ConfigService } from './services/config'
 import { chatService } from './services/chatService'
 import { wcdbService } from './services/wcdbService'
@@ -30,6 +30,7 @@ import { exportTaskControlService } from './services/exportTaskControlService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
 import { MessagePushService } from './services/messagePushService'
+import { weportAiService } from './services/weportAiService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -136,6 +137,9 @@ function migrateLegacySettings() {
   // Weport 行为默认值（与 Rust 版一致）
   if (store.get('launchAtStartup') === undefined) store.set('launchAtStartup', true)
   if (!store.get('windowCloseBehavior')) store.set('windowCloseBehavior', 'tray')
+  // 历史版本默认值是 'ask'（弹窗询问，从未实现）——统一映射为托盘模式，
+  // 否则「关闭窗口最小化到托盘」勾选显示开启但实际直接退出
+  if (store.get('windowCloseBehavior') === 'ask') store.set('windowCloseBehavior', 'tray')
   if (store.get('notificationEnabled') === undefined) store.set('notificationEnabled', false)
   if (store.get('messagePushEnabled') === undefined) store.set('messagePushEnabled', false)
 }
@@ -211,19 +215,41 @@ const applyLaunchAtStartupPreference = (
   return { ...result, supported: true }
 }
 
+/** 读取当前 Run 键的启动命令值（不含则返回 null） */
+const getRunKeyValue = (): string | null => {
+  const { execFileSync } = require('child_process') as typeof import('child_process')
+  try {
+    const stdout = execFileSync(process.env.ComSpec || 'cmd.exe', ['/c', 'reg', 'query', RUN_KEY_PATH, '/v', RUN_VALUE_NAME], {
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+    const line = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => l.includes('REG_SZ'))
+    if (!line) return null
+    return line.slice(line.indexOf('REG_SZ') + 6).trim().replace(/^"|"$/g, '')
+  } catch {
+    return null
+  }
+}
+
 const syncLaunchAtStartupPreference = () => {
   if (!configService) return
   const reason = getLaunchAtStartupUnsupportedReason()
   if (reason) return
   const stored = configService.get('launchAtStartup')
-  const system = getSystemLaunchAtStartup()
+  const silent = configService.get('silentStartup') === true
   if (typeof stored !== 'boolean') {
-    configService.set('launchAtStartup', system)
+    configService.set('launchAtStartup', getSystemLaunchAtStartup())
     return
   }
-  if (stored === system) return
-  const result = setSystemLaunchAtStartup(stored)
-  configService.set('launchAtStartup', result.enabled)
+  if (!stored) {
+    if (getSystemLaunchAtStartup()) setSystemLaunchAtStartup(false)
+    return
+  }
+  // 已开启时：不仅要保证 Run 键存在，还要保证命令行参数与 silentStartup 一致
+  // （否则「启动时隐藏到托盘」勾选开启但开机仍然弹窗——只有再点一次开关才会生效）
+  const desired = `"${process.execPath}"${silent ? ' --background' : ''}`
+  if (getRunKeyValue() === desired) return
+  setSystemLaunchAtStartup(true)
 }
 
 /**
@@ -608,6 +634,28 @@ function createWindow(autoShow: boolean): BrowserWindow {
     if (autoShow) win.show()
   })
 
+  // 锁定缩放：禁止 Ctrl+Plus / Ctrl+Minus / Ctrl+0 / Ctrl+滚轮 缩放界面，
+  // 并每次加载后把缩放因子复位为 100%（用户曾遇到 Ctrl± 把界面放大后无法还原）
+  try {
+    win.webContents.setVisualZoomLevelLimits(1, 1)
+  } catch { /* noop */ }
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.control && ['+', '-', '=', '0'].includes(input.key)) {
+      event.preventDefault()
+    }
+  })
+  win.webContents.on('did-finish-load', () => {
+    try {
+      win.webContents.setZoomFactor(1)
+    } catch { /* noop */ }
+  })
+  win.webContents.on('zoom-changed', (event) => {
+    event.preventDefault()
+    try {
+      win.webContents.setZoomFactor(1)
+    } catch { /* noop */ }
+  })
+
   win.on('close', (e) => {
     if (isAppQuitting || win !== mainWindow) return
     const behavior = configService?.get('windowCloseBehavior') || 'tray'
@@ -923,6 +971,47 @@ function registerIpcHandlers() {
     await showNotification(payload, { force: true })
     return { success: true }
   })
+
+  // -------------------------------------------------------------------------
+  // WeportAI（v0.8 聊天历史分析助手）
+  // -------------------------------------------------------------------------
+  ipcMain.handle('ai:getSetup', () => weportAiService.getSetup())
+  ipcMain.handle('ai:setSetup', (_e, patch: any) => {
+    weportAiService.updateSetup(patch || {})
+    return { success: true }
+  })
+  ipcMain.handle('ai:listChats', () => ({ chats: weportAiService.listChats() }))
+  ipcMain.handle('ai:createChat', (_e, title?: string) => ({ chat: weportAiService.createChat(title) }))
+  ipcMain.handle('ai:renameChat', (_e, chatId: string, title: string) => ({
+    success: weportAiService.renameChat(String(chatId || ''), String(title || '')),
+  }))
+  ipcMain.handle('ai:reorderChats', (_e, orderedIds: any) => ({
+    success: weportAiService.reorderChats(Array.isArray(orderedIds) ? orderedIds.map(String) : []),
+  }))
+  ipcMain.handle('ai:deleteChat', (_e, chatId: string) => ({
+    success: weportAiService.deleteChat(String(chatId || '')),
+  }))
+  ipcMain.handle('ai:getChat', (_e, chatId: string) => weportAiService.getChat(String(chatId || '')))
+  ipcMain.handle('ai:listNotes', (_e, chatId: string) => ({ notes: weportAiService.listNotes(String(chatId || '')) }))
+  ipcMain.handle('ai:readNoteFile', (_e, chatId: string, path: string) => ({
+    content: weportAiService.readNoteFile(String(chatId || ''), String(path || '')),
+  }))
+  ipcMain.handle('ai:deleteNoteFile', (_e, chatId: string, path: string) => ({
+    success: weportAiService.deleteNoteFile(String(chatId || ''), String(path || '')),
+  }))
+  ipcMain.handle('ai:clearMemory', () => weportAiService.clearMemory())
+  ipcMain.handle('ai:getDebugLog', (_e, limit?: number) => ({ lines: weportAiService.getDebugLog(Number(limit) || 300) }))
+  ipcMain.handle('ai:clearDebugLog', () => ({ success: weportAiService.clearDebugLog() }))
+  ipcMain.handle('ai:listActions', () => ({ actions: weportAiService.getActions() }))
+  ipcMain.handle('ai:saveActions', (_e, actions: any) => ({
+    success: weportAiService.saveActions(Array.isArray(actions) ? actions : []),
+  }))
+  ipcMain.handle('ai:send', (_e, chatId: string, text: string) =>
+    weportAiService.runChat(String(chatId || ''), String(text || '')))
+  ipcMain.handle('ai:abort', (_e, chatId: string) => {
+    weportAiService.abort(String(chatId || ''))
+    return { success: true }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,11 +1286,522 @@ async function runSelfTest() {
 }
 
 // ---------------------------------------------------------------------------
+// QA 自检模式（WeportAI 端到端：真实 API → agent loop → 工具 → 笔记）
+// ---------------------------------------------------------------------------
+async function runAiSelfTest() {
+  const outDir = process.env.WEPORT_AI_SELFTEST_OUT || join(app.getPath('temp'), 'weport-ai-selftest')
+  const logFile = join(outDir, 'selftest.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+  }
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+
+  const apiKey = String(configService?.get('weportAiApiKey') || '').trim()
+  if (!apiKey) {
+    log('FAIL: 未配置 weportAiApiKey（请用 WEPORT_AI_BOOTSTRAP_KEY 注入）')
+    process.exitCode = 1
+    app.exit(1)
+    return
+  }
+  log(`apiKey = present (${apiKey.length} chars)`)
+  log(`dbPath = ${String(configService?.get('dbPath') || '') || '(missing)'}`)
+  log(`wxid   = ${String(configService?.get('myWxid') || '') || '(missing)'}`)
+
+  const chat = weportAiService.createChat('[selftest]')
+  log(`chat = ${chat.id}`)
+
+  const events: string[] = []
+  let resolveDone: (ev: string) => void
+  const donePromise = new Promise<string>((resolve) => { resolveDone = resolve })
+  const timeout = setTimeout(() => resolveDone('TIMEOUT'), 600000)
+  timeout.unref?.()
+
+  weportAiService.setEventEmitter((ev) => {
+    if (ev.type === 'tool_start') {
+      events.push(`tool_start: ${ev.name} | ${ev.friendly}`)
+    } else if (ev.type === 'tool_result') {
+      events.push(`tool_result: ${ev.name} ok=${ev.ok}`)
+    } else if (ev.type === 'error' && ev.message) {
+      events.push(`error: ${ev.message}`)
+    } else if (ev.type === 'done') {
+      events.push(`done: usage=${JSON.stringify(ev.usage)} context=${JSON.stringify(ev.context)} aborted=${ev.aborted === true}`)
+      resolveDone(ev.aborted === true ? 'ABORTED' : 'DONE')
+    }
+  })
+
+  const startedAt = Date.now()
+  const task = String(process.env.WEPORT_AI_SELFTEST_TASK || '').trim()
+  const defaultTask = !task
+  const finalTask = task ||
+    '请先调用 get_self_overview 了解分析范围，再调用 list_sessions 列出前 10 个会话（不要做详细分析），最后把观察写入 memory/selftest.md。回答用中文，控制在 5 行以内。'
+  const result = await weportAiService.runChat(chat.id, finalTask)
+  const final = await Promise.race([donePromise, Promise.resolve('NO_EVENT')])
+  clearTimeout(timeout)
+  const elapsed = Math.round((Date.now() - startedAt) / 1000)
+
+  log(`runChat result = ${JSON.stringify(result)} (${elapsed}s)`)
+  log(`doneEvent = ${final}`)
+  for (const ev of events) log(`event: ${ev}`)
+
+  const chatData = weportAiService.getChat(chat.id)
+  const assistantCount = chatData?.messages.filter((m) => m.role === 'assistant').length || 0
+  const toolCalls = chatData?.messages.reduce((n, m) => n + (m.toolCalls?.length || 0), 0) || 0
+  const notes = weportAiService.listNotes(chat.id)
+  log(`assistant messages = ${assistantCount}, tool calls = ${toolCalls}, notes = ${notes.length}`)
+  const finalAssistant = chatData?.messages.filter((m) => m.role === 'assistant').at(-1)
+  log(`final answer = ${JSON.stringify(finalAssistant?.content || '').slice(0, 1600)}`)
+  if (finalAssistant?.reasoning) {
+    log(`final reasoning = ${JSON.stringify(finalAssistant.reasoning).slice(0, 400)}`)
+  }
+  const noteFile = notes.find((n) => n.path === 'memory/selftest.md')
+  if (noteFile) {
+    try {
+      const { readFileSync } = await import('fs')
+      log(`note memory/selftest.md = ${JSON.stringify(readFileSync(join(weportAiService.getSetup().workspaceRoot, 'memory', 'selftest.md'), 'utf8').slice(0, 800))}`)
+    } catch { /* noop */ }
+  }
+
+  const noteOk = defaultTask
+    ? notes.some((n) => n.path === 'memory/selftest.md')
+    : true
+  const ok =
+    result.success === true &&
+    assistantCount >= 1 &&
+    toolCalls >= 1 &&
+    noteOk
+  log(`${ok ? 'PASS' : 'FAIL'} (out: ${outDir})`)
+  weportAiService.deleteChat(chat.id)
+  isAppQuitting = true
+  try { chatService.close() } catch { /* noop */ }
+  try { await wcdbService.shutdown() } catch (e) { log(`wcdb shutdown warning: ${String(e)}`) }
+  try { mainWindow?.destroy() } catch { /* noop */ }
+  mainWindow = null
+  app.exit(ok ? 0 : 1)
+}
+
+// ---------------------------------------------------------------------------
+// QA UI 自检模式（WEPORT_UI_DUMP=1）：真实驱动渲染进程点击 WeportAI 页签、
+// 输入并发送消息，把对话 DOM 摘要写成 JSON，用于无头验证 UI 端到端。
+// ---------------------------------------------------------------------------
+async function runUiDumpMode() {
+  const outDir = process.env.WEPORT_UI_DUMP_OUT || join(app.getPath('temp'), 'weport-ui-dump')
+  const task = String(process.env.WEPORT_UI_DUMP_TASK || '').trim()
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'ui-dump.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try {
+      const { appendFileSync } = require('fs')
+      appendFileSync(logFile, line + '\n')
+    } catch { /* noop */ }
+  }
+
+  // 等待窗口加载完成
+  for (let i = 0; i < 40 && mainWindow && mainWindow.webContents.isLoading(); i += 1) {
+    await sleep(250)
+  }
+  await sleep(1200)
+
+  const wc = mainWindow?.webContents
+  if (!wc) {
+    log('FAIL: 主窗口不存在')
+    app.exit(1)
+    return
+  }
+
+  // 1) 切换到 WeportAI 页签
+  const tabClick = await wc.executeJavaScript(`
+    (() => {
+      const buttons = Array.from(document.querySelectorAll('.tab'));
+      const ai = buttons.find((b) => b.textContent.includes('WeportAI'));
+      if (!ai) return { ok: false, tabs: buttons.map((b) => b.textContent.trim()) };
+      ai.click();
+      return { ok: true, tabs: buttons.map((b) => b.textContent.trim()) };
+    })()
+  `)
+  log(`tabClick = ${JSON.stringify(tabClick)}`)
+  if (!tabClick?.ok) {
+    log('FAIL: 未找到 WeportAI 页签')
+    app.exit(1)
+    return
+  }
+  await sleep(1500)
+
+  const dumpState = async () =>
+    wc.executeJavaScript(`
+      (() => {
+        const rect = (el) => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; };
+        const shell = document.querySelector('.ai-shell');
+        return {
+          hasShell: !!shell,
+          shellRect: rect(shell),
+          side: rect(document.querySelector('.ai-side')),
+          main: rect(document.querySelector('.ai-main')),
+          workspace: rect(document.querySelector('.ai-workspace')),
+          chatItems: Array.from(document.querySelectorAll('.ai-chat-item .ai-chat-main span')).map((s) => s.textContent),
+          emptyText: document.querySelector('.ai-empty') ? document.querySelector('.ai-empty').textContent.slice(0, 200) : null,
+          warnBanners: Array.from(document.querySelectorAll('.ai-warn-banner')).map((b) => b.textContent.trim()),
+          composer: !!document.querySelector('.ai-input'),
+          sendBtn: !!document.querySelector('.ai-send'),
+          modelTag: document.querySelector('.ai-model-tag') ? document.querySelector('.ai-model-tag').textContent.trim() : null,
+          settingsBtn: !!document.querySelector('.ai-settings-btn'),
+          notesCount: document.querySelectorAll('.ai-ws-note').length,
+          msgCount: document.querySelectorAll('.ai-msg').length,
+          viewport: { w: window.innerWidth, h: window.innerHeight },
+          scrollX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          scrollY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+        };
+      })()
+    `)
+
+  const initial = await dumpState()
+  log(`initialState = ${JSON.stringify(initial)}`)
+
+  let expandCheck: { clicked?: boolean; expanded?: boolean } | null = null
+
+  if (task) {
+    // 2) 输入并发送消息（模拟真实用户输入）
+    const typed = await wc.executeJavaScript(`
+      (() => {
+        const el = document.querySelector('.ai-input');
+        if (!el) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(el, ${JSON.stringify(task)});
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()
+    `)
+    log(`typed = ${typed}`)
+    await sleep(400)
+    const clicked = await wc.executeJavaScript(`
+      (() => {
+        const btn = document.querySelector('.ai-send');
+        if (!btn || btn.disabled) return false;
+        btn.click();
+        return true;
+      })()
+    `)
+    log(`sendClicked = ${clicked}`)
+
+    // 3) 轮询等待运行结束（发送按钮重新可用 + 无 stop 按钮 + 消息数稳定）
+    let lastMsgCount = -1
+    let stableRounds = 0
+    const deadline = Date.now() + 600000
+    let done = false
+    const abortAfterMs = Number(process.env.WEPORT_UI_DUMP_ABORT_MS || 0)
+    if (abortAfterMs > 0) {
+      log(`abort scheduled after ${abortAfterMs}ms`)
+      setTimeout(() => {
+        void wc.executeJavaScript(`document.querySelector('.ai-send.stop')?.click()`).then((r) => {
+          log(`abortClicked = ${r}`)
+        })
+      }, abortAfterMs)
+    }
+    while (Date.now() < deadline) {
+      await sleep(3000)
+      const state = await dumpState()
+      const stopBtn = await wc.executeJavaScript(`!!document.querySelector('.ai-send.stop')`)
+      if (!stopBtn && state.msgCount > 0 && state.msgCount === lastMsgCount) {
+        stableRounds += 1
+        if (stableRounds >= 2) {
+          done = true
+          log(`runFinished msgCount=${state.msgCount}`)
+          break
+        }
+      } else {
+        stableRounds = 0
+        lastMsgCount = state.msgCount
+      }
+      if (state.msgCount > 0 && !stopBtn && state.msgCount === lastMsgCount && stableRounds < 1) {
+        lastMsgCount = state.msgCount
+      }
+    }
+    if (!done) log(`TIMEOUT waiting for run (lastMsgCount=${lastMsgCount})`)
+    if (abortAfterMs > 0) {
+      const afterAbort = await dumpState()
+      log(`afterAbort = ${JSON.stringify(afterAbort)}`)
+      const errText = await wc.executeJavaScript(`document.querySelector('.ai-error-bubble')?.textContent.slice(0, 300) || null`)
+      log(`afterAbort errorBubble = ${JSON.stringify(errText)}`)
+    }
+
+    // 4) 转储对话内容
+    const convo = await wc.executeJavaScript(`
+      (() => {
+        const out = { msgs: [], toolCards: [], notes: [], usage: null, hasActionsBtn: !!document.querySelector('.ai-actions-btn'), toolRows: document.querySelectorAll('.ai-tool-row').length };
+        out.msgs = Array.from(document.querySelectorAll('.ai-msg')).map((m) => {
+          const userBubble = m.querySelector('.ai-msg-bubble');
+          const md = m.querySelector('.ai-md');
+          const errBubble = m.querySelector('.ai-error-bubble');
+          if (userBubble) return { kind: 'user', text: userBubble.textContent.slice(0, 300) };
+          if (errBubble) return { kind: 'error', text: errBubble.textContent.slice(0, 500) };
+          if (m.classList.contains('live')) return { kind: 'live', md: md ? md.textContent.slice(0, 300) : '', thinking: !!m.querySelector('.ai-thinking') };
+          return { kind: 'assistant', md: md ? md.textContent.slice(0, 3000) : '', reasoning: !!m.querySelector('.ai-reasoning pre') ? m.querySelector('.ai-reasoning pre').textContent.slice(0, 200) : null };
+        });
+        out.toolCards = Array.from(document.querySelectorAll('.ai-tool-card')).map((c) => c.textContent.replace(/\\s+/g, ' ').trim().slice(0, 220));
+        out.steps = document.querySelectorAll('.ai-step').length;
+        out.inlineReasoning = document.querySelectorAll('.ai-reasoning.inline').length;
+        out.ctxBar = !!document.querySelector('.ai-bar-fill.ctx');
+        out.cacheBar = !!document.querySelector('.ai-bar-fill.cache');
+        out.notes = Array.from(document.querySelectorAll('.ai-ws-note')).map((n) => n.textContent.replace(/\\s+/g, ' ').trim());
+        const usageEl = document.querySelector('.ai-ws-usage strong');
+        out.usage = usageEl ? usageEl.textContent.trim() : null;
+        return out;
+      })()
+    `)
+    log(`conversation = ${JSON.stringify(convo)}`)
+
+    // 4.5) 可折叠工具卡片验证：点击第一条工具行，检查详情展开
+    const expandCheckResult = await wc.executeJavaScript(`
+      (async () => {
+        const row = document.querySelector('.ai-tool-row');
+        if (!row) return { clicked: false };
+        const card = row.closest('.ai-tool-card');
+        const before = !!card.querySelector('.ai-tool-detail');
+        row.click();
+        await new Promise((r) => setTimeout(r, 250));
+        const after = !!card.querySelector('.ai-tool-detail');
+        return { clicked: true, expanded: after, wasCollapsedBefore: !before };
+      })()
+    `)
+    expandCheck = expandCheckResult
+    log(`toolCardExpand = ${JSON.stringify(expandCheck)}`)
+    // 收起，恢复初始状态
+    await wc.executeJavaScript(`document.querySelector('.ai-tool-row')?.click()`)
+  } else {
+    expandCheck = null
+  }
+
+  // 5) 打开设置弹窗并转储字段（第一个 ai-settings-btn 是调试日志按钮，选"设置"）
+  const settingsOpen = await wc.executeJavaScript(`
+    (() => {
+      const btn = Array.from(document.querySelectorAll('.ai-settings-btn')).find((b) => b.title.includes('设置'));
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()
+  `)
+  await sleep(600)
+  const settingsDump = await wc.executeJavaScript(`
+    (() => {
+      const modal = document.querySelector('.ai-settings');
+      if (!modal) return null;
+      const labels = Array.from(modal.querySelectorAll('label')).map((l) => l.textContent.replace(/\\s+/g, ' ').trim());
+      const inputs = Array.from(modal.querySelectorAll('input, textarea, select')).map((el) => ({
+        id: el.id || '',
+        value: el.tagName === 'INPUT' && el.type === 'password' ? (el.value ? '(filled)' : '') : el.value.slice(0, 60),
+      }));
+      const r = modal.getBoundingClientRect();
+      const body = modal.querySelector('.ai-settings-body');
+      return {
+        labels, inputs,
+        modalHeight: Math.round(r.height),
+        viewportHeight: window.innerHeight,
+        fitsViewport: r.height <= window.innerHeight && r.bottom <= window.innerHeight && r.top >= 0,
+        bodyScrollable: body ? body.scrollHeight > body.clientHeight : false,
+        toolToggles: modal.querySelectorAll('.ai-tool-toggle').length,
+        actionEditors: modal.querySelectorAll('.ai-action-edit').length,
+      };
+    })()
+  `)
+  log(`settingsOpen = ${settingsOpen}, settings = ${JSON.stringify(settingsDump)}`)
+  const settingsOk = settingsDump?.fitsViewport === true && settingsDump?.toolToggles === 14
+  log(`settingsFitCheck = ${settingsOk}`)
+  await wc.executeJavaScript(`document.querySelector('.ai-settings .modal-actions .secondary-btn')?.click()`)
+
+  // 5.5) 右栏折叠 → 展开 循环验证（边界把手必须始终可点，且平滑）
+  const wsCollapseCheck = await wc.executeJavaScript(`
+    (async () => {
+      const toggle = document.querySelector('.ai-ws-toggle');
+      if (!toggle) return { ok: false, reason: 'no toggle' };
+      const before = getComputedStyle(document.querySelector('.ai-shell')).gridTemplateColumns;
+      toggle.click();
+      await new Promise((r) => setTimeout(r, 350));
+      const bodyHidden = document.querySelector('.ai-ws-body').offsetParent === null;
+      const toggleVisible = toggle.offsetParent !== null;
+      const during = getComputedStyle(document.querySelector('.ai-shell')).gridTemplateColumns;
+      toggle.click();
+      await new Promise((r) => setTimeout(r, 350));
+      const bodyVisible = document.querySelector('.ai-ws-body').offsetParent !== null;
+      const after = getComputedStyle(document.querySelector('.ai-shell')).gridTemplateColumns;
+      const headBtns = Array.from(document.querySelectorAll('.ai-ws-head .ai-ws-refresh')).map((b) => b.title);
+      return { ok: bodyHidden && toggleVisible && bodyVisible, bodyHidden, toggleVisible, bodyVisible, before, during, after, headBtns };
+    })()
+  `)
+  log(`wsCollapseCycle = ${JSON.stringify(wsCollapseCheck)}`)
+
+  // 5.6) 输入框自动扩展验证：多行输入 / 长行自动换行 / 快捷动作填入
+  const inputGrowCheck = await wc.executeJavaScript(`
+    (async () => {
+      const el = document.querySelector('.ai-input');
+      if (!el) return { ok: false, reason: 'no input' };
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      const h0 = el.getBoundingClientRect().height;
+      setter.call(el, 'line1\\nline2\\nline3\\nline4');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 150));
+      const h1 = el.getBoundingClientRect().height;
+      setter.call(el, 'x'.repeat(220));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 150));
+      const h2 = el.getBoundingClientRect().height;
+      setter.call(el, '');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 150));
+      const h3 = el.getBoundingClientRect().height;
+      const actionBtn = document.querySelector('.ai-actions-btn');
+      if (actionBtn) {
+        actionBtn.click();
+        await new Promise((r) => setTimeout(r, 150));
+        const item = document.querySelector('.ai-action-item');
+        item?.click();
+        await new Promise((r) => setTimeout(r, 150));
+        const filled = el.value.length > 0;
+        const h4 = el.getBoundingClientRect().height;
+        const actionGrew = filled && h4 > h0 + 8;
+        setter.call(el, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 100));
+        return { ok: h1 > h0 + 8 && h2 > h0 + 8 && h3 <= h0 + 8 && actionGrew, h0: Math.round(h0), h1: Math.round(h1), h2: Math.round(h2), h3: Math.round(h3), filled, h4: actionGrew ? Math.round(h4) : null };
+      }
+      return { ok: h1 > h0 + 8 && h2 > h0 + 8 && h3 <= h0 + 8, h0: Math.round(h0), h1: Math.round(h1), h2: Math.round(h2), h3: Math.round(h3) };
+    })()
+  `)
+  log(`inputGrow = ${JSON.stringify(inputGrowCheck)}`)
+
+  // 5.7) 删除对话 → 弹窗确认（取消/确认按钮）
+  const deleteConfirmCheck = await wc.executeJavaScript(`
+    (async () => {
+      const del = Array.from(document.querySelectorAll('.ai-chat-del')).find((b) => b.title === '删除对话');
+      if (!del) return { ok: false, reason: 'no chats' };
+      del.click();
+      await new Promise((r) => setTimeout(r, 200));
+      const modal = document.querySelector('.ai-settings, .modal.danger');
+      const isDelModal = !!document.querySelector('.modal.danger');
+      const hasCancel = isDelModal && !!document.querySelector('.modal.danger .secondary-btn');
+      const hasConfirm = isDelModal && !!document.querySelector('.modal.danger .danger-btn');
+      document.querySelector('.modal.danger .secondary-btn')?.click();
+      await new Promise((r) => setTimeout(r, 150));
+      const closed = !document.querySelector('.modal.danger');
+      return { ok: isDelModal && hasCancel && hasConfirm && closed, isDelModal, hasCancel, hasConfirm, closed };
+    })()
+  `)
+  log(`deleteConfirm = ${JSON.stringify(deleteConfirmCheck)}`)
+
+  // 5.8) 对话重命名：铅笔按钮 → 行内输入框 → Esc 取消
+  const renameCheck = await wc.executeJavaScript(`
+    (async () => {
+      const pencil = Array.from(document.querySelectorAll('.ai-chat-del')).find((b) => b.title === '重命名对话');
+      if (!pencil) return { ok: false, reason: 'no pencil' };
+      pencil.click();
+      await new Promise((r) => setTimeout(r, 150));
+      const input = document.querySelector('.ai-chat-rename');
+      if (!input) return { ok: false, reason: 'no input' };
+      const shown = input.value.length > 0;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 150));
+      const closed = !document.querySelector('.ai-chat-rename');
+      return { ok: shown && closed, shown, closed };
+    })()
+  `)
+  log(`renameCheck = ${JSON.stringify(renameCheck)}`)
+
+  // 5.9) 新建对话复用 / 置顶 / 空对话自动删除 / 可拖拽
+  const newChatCheck = await wc.executeJavaScript(`
+    (async () => {
+      const count = () => document.querySelectorAll('.ai-chat-item').length;
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const waitCount = async (target) => {
+        for (let i = 0; i < 15; i += 1) {
+          if (count() === target) return true;
+          await wait(200);
+        }
+        return count() === target;
+      };
+      const initial = count();
+      const draggable = document.querySelector('.ai-chat-item')?.draggable === true;
+      const newBtn = document.querySelector('.ai-new-chat');
+      newBtn.click();
+      await wait(300);
+      const afterCreate = count();
+      const created = afterCreate === initial + 1;
+      const topTitle = document.querySelector('.ai-chat-item .ai-chat-main span')?.textContent || '';
+      newBtn.click();
+      await wait(300);
+      const afterSecond = count();
+      const reused = afterSecond === afterCreate;
+      const firstChat = document.querySelectorAll('.ai-chat-item')[1]?.querySelector('.ai-chat-main');
+      firstChat?.click();
+      await waitCount(initial);
+      const autoDeleted = count() === initial;
+      return { ok: created && reused && autoDeleted && draggable, initial, afterCreate, afterSecond, autoDeleted, draggable, topTitle: topTitle.slice(0, 16) };
+    })()
+  `)
+  log(`newChatCheck = ${JSON.stringify(newChatCheck)}`)
+
+  const state = await dumpState()
+  log(`finalState = ${JSON.stringify(state)}`)
+  const fail =
+    !initial?.hasShell ||
+    !initial?.composer ||
+    state.msgCount === 0 ||
+    (task && !expandCheck?.clicked) ||
+    (task && expandCheck?.clicked && !expandCheck.expanded) ||
+    !settingsOk ||
+    wsCollapseCheck?.ok !== true ||
+    inputGrowCheck?.ok !== true ||
+    deleteConfirmCheck?.ok !== true ||
+    renameCheck?.ok !== true ||
+    newChatCheck?.ok !== true
+  log(`${fail ? 'FAIL' : 'PASS'} (out: ${outDir})`)
+  isAppQuitting = true
+  app.exit(fail ? 1 : 0)
+}
+
+// ---------------------------------------------------------------------------
 // 启动 / 退出
 // ---------------------------------------------------------------------------
 function startApp() {
   if (process.platform !== 'win32') {
     console.warn('[Weport] 当前仅支持 Windows')
+  }
+
+  const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
+  if (aiSelfTest) {
+    // Electron otherwise shows one modal dialog per uncaught main-process
+    // exception. A headless harness must fail once and leave a searchable log,
+    // never spray JavaScript error popups onto the user's desktop.
+    const fatalLog = join(
+      process.env.WEPORT_AI_SELFTEST_OUT || app.getPath('temp'),
+      'fatal.log',
+    )
+    const recordFatal = (kind: string, error: unknown) => {
+      try {
+        mkdirSync(dirname(fatalLog), { recursive: true })
+        appendFileSync(fatalLog, `${new Date().toISOString()} ${kind}: ${String((error as Error)?.stack || error)}\n`, 'utf8')
+      } catch { /* noop */ }
+    }
+    const isBrokenPipe = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'EPIPE'
+    // Packaged Electron detaches from the launching shell on Windows. Any later
+    // console output can then target a closed stdout/stderr pipe; that is a
+    // transport condition, not an application failure and must never produce a
+    // JavaScript modal or terminate a long-running agent test.
+    process.stdout?.on('error', (error) => {
+      if (!isBrokenPipe(error)) recordFatal('stdout', error)
+    })
+    process.stderr?.on('error', (error) => {
+      if (!isBrokenPipe(error)) recordFatal('stderr', error)
+    })
+    process.on('uncaughtException', (error) => {
+      if (isBrokenPipe(error)) return
+      recordFatal('uncaughtException', error)
+      isAppQuitting = true
+      app.exit(1)
+    })
+    process.on('unhandledRejection', (error) => recordFatal('unhandledRejection', error))
   }
 
   // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）
@@ -1242,18 +1842,56 @@ function startApp() {
     process.env.WEPORT_USER_DATA_PATH = app.getPath('userData')
 
     configService = ConfigService.getInstance()
-    migrateLegacySettings()
-    syncLaunchAtStartupPreference()
-    cleanupLegacyAutostartEntries()
-    applyUpdaterChannel()
+
+    // One-time key bootstrap is needed by both the normal UI and the isolated
+    // AI harness. It stays local and never writes the secret to diagnostics.
+    const bootstrapKey = String(process.env.WEPORT_AI_BOOTSTRAP_KEY || '').trim()
+    if (bootstrapKey && !String(configService?.get('weportAiApiKey') || '').trim()) {
+      try {
+        configService?.set('weportAiApiKey', bootstrapKey)
+        console.log('[WeportAI] API 密钥已通过引导环境变量写入本地配置')
+      } catch (e) {
+        console.warn('[WeportAI] API 密钥引导写入失败:', e)
+      }
+    }
 
     const resourcesPath = resolveResourcesPath()
     const userDataPath = app.getPath('userData')
     wcdbService.setPaths(resourcesPath, userDataPath)
     wcdbService.setLogEnabled(configService.get('logEnabled') === true)
 
+    // True headless path: no BrowserWindow, tray, notification monitor, updater,
+    // registry synchronization, or visible renderer. Windows Electron can quit
+    // a zero-window process while the WCDB host is active, so retain one hidden
+    // 1x1 keep-alive window for the duration of the self-test only.
+    if (aiSelfTest) {
+      app.on('window-all-closed', () => { /* self-test owns explicit shutdown */ })
+      mainWindow = new BrowserWindow({
+        width: 1,
+        height: 1,
+        show: false,
+        frame: false,
+        skipTaskbar: true,
+        focusable: false,
+      })
+      await runAiSelfTest()
+      return
+    }
+
+    migrateLegacySettings()
+    syncLaunchAtStartupPreference()
+    cleanupLegacyAutostartEntries()
+    applyUpdaterChannel()
+
     registerIpcHandlers()
     setupNotificationPipeline()
+
+    // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
+    weportAiService.setEventEmitter((event) => {
+      try {
+        mainWindow?.webContents.send('ai:event', event)
+      } catch { /* noop */ }
+    })
 
     // 后台预热联系人显示名/头像（不阻塞窗口显示）
     void warmupContactNames()
@@ -1284,6 +1922,11 @@ function startApp() {
 
     if (process.env.WEPORT_SELFTEST === '1') {
       await runSelfTest()
+      return
+    }
+
+    if (process.env.WEPORT_UI_DUMP === '1') {
+      await runUiDumpMode()
       return
     }
 
@@ -1334,6 +1977,9 @@ const shutdownAppServices = async (): Promise<void> => {
     tray = null
     destroyNotificationWindow()
     messagePushService?.stop()
+    for (const chatId of weportAiService.listChats().map((c) => c.id)) {
+      weportAiService.abort(chatId)
+    }
     const forceExitTimer = setTimeout(() => {
       console.warn('[Weport] Force exit after timeout')
       // app.exit 会等待 IPC 子进程（WCDB 宿主）回收；先强杀宿主再退出

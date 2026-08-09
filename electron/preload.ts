@@ -114,6 +114,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // WeportAI（v0.8 聊天历史分析助手）
+  ai: {
+    getSetup: () => ipcRenderer.invoke('ai:getSetup'),
+    setSetup: (patch: any) => ipcRenderer.invoke('ai:setSetup', patch),
+    listChats: () => ipcRenderer.invoke('ai:listChats'),
+    createChat: (title?: string) => ipcRenderer.invoke('ai:createChat', title),
+    renameChat: (chatId: string, title: string) => ipcRenderer.invoke('ai:renameChat', chatId, title),
+    reorderChats: (orderedIds: string[]) => ipcRenderer.invoke('ai:reorderChats', orderedIds),
+    deleteChat: (chatId: string) => ipcRenderer.invoke('ai:deleteChat', chatId),
+    getChat: (chatId: string) => ipcRenderer.invoke('ai:getChat', chatId),
+    listNotes: (chatId: string) => ipcRenderer.invoke('ai:listNotes', chatId),
+    readNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:readNoteFile', chatId, path),
+    deleteNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:deleteNoteFile', chatId, path),
+    clearMemory: () => ipcRenderer.invoke('ai:clearMemory'),
+    getDebugLog: (limit?: number) => ipcRenderer.invoke('ai:getDebugLog', limit),
+    clearDebugLog: () => ipcRenderer.invoke('ai:clearDebugLog'),
+    listActions: () => ipcRenderer.invoke('ai:listActions'),
+    saveActions: (actions: any) => ipcRenderer.invoke('ai:saveActions', actions),
+    send: (chatId: string, text: string) => ipcRenderer.invoke('ai:send', chatId, text),
+    abort: (chatId: string) => ipcRenderer.invoke('ai:abort', chatId),
+    onEvent: (callback: (event: any) => void) => {
+      ipcRenderer.on('ai:event', (_: any, event: any) => callback(event))
+      return () => ipcRenderer.removeAllListeners('ai:event')
+    }
+  },
+
   process: {
     platform: process.platform,
     arch: process.arch

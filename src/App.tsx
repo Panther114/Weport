@@ -36,9 +36,12 @@ import {
   Info,
   Rocket,
   Minimize2,
+  Sparkles,
 } from 'lucide-react'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications'
+import WeportAiPanel from './components/weportAi/WeportAiPanel'
+
+type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -157,6 +160,7 @@ const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: n
   { id: 'export', label: '导出数据', icon: Download },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
   { id: 'notifications', label: '消息通知', icon: Bell },
+  { id: 'ai', label: 'WeportAI', icon: Sparkles },
 ]
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
@@ -874,6 +878,7 @@ export default function App() {
         <nav className="tabs" role="tablist" aria-label="功能">
           {TABS.map((t) => {
             const Icon = t.icon
+            // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
             const locked = t.id !== 'connect' && !allReady
             const button = (
               <button
@@ -1490,6 +1495,8 @@ export default function App() {
             </div>
           </section>
         )}
+
+        {tab === 'ai' && <WeportAiPanel />}
 
         {tab === 'antirecall' && (
           <div className="single-col">
