@@ -5,7 +5,8 @@
 param(
   [string]$Executable = "",
   [string]$ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path,
-  [string]$OutputDir = (Join-Path $env:TEMP "weport-electron-screenshots")
+  [string]$OutputDir = (Join-Path $env:TEMP "weport-electron-screenshots"),
+  [switch]$PublishToDocs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,9 +76,25 @@ Remove-Item Env:WEPORT_SCREENSHOT_OUT -ErrorAction SilentlyContinue
 
 $mainPng = Join-Path $OutputDir 'main.png'
 $popupPng = Join-Path $OutputDir 'popup.png'
+$exportPng = Join-Path $OutputDir 'export.png'
+$aiPng = Join-Path $OutputDir 'ai.png'
 if (-not (Test-Path $mainPng)) { throw "main.png missing - main window capture failed" }
 if (-not (Test-Path $popupPng)) { throw "popup.png missing - notification window capture failed" }
+if (-not (Test-Path $exportPng)) { throw "export.png missing - export tab capture failed" }
+if (-not (Test-Path $aiPng)) { throw "ai.png missing - WeportAI tab capture failed" }
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
+Assert-ImageHasContent $exportPng 'export tab'
+Assert-ImageHasContent $aiPng 'WeportAI tab'
 Write-Output "Screenshots written to $OutputDir"
+
+if ($PublishToDocs) {
+  $docsDir = Join-Path $ProjectRoot "docs\screenshots"
+  New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
+  Copy-Item $mainPng (Join-Path $docsDir "connect.png") -Force
+  Copy-Item $exportPng (Join-Path $docsDir "export.png") -Force
+  Copy-Item $aiPng (Join-Path $docsDir "ai.png") -Force
+  Copy-Item $popupPng (Join-Path $docsDir "popup.png") -Force
+  Write-Output "Published screenshots to $docsDir"
+}

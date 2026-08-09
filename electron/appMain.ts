@@ -51,6 +51,8 @@ let messagePushService: MessagePushService | null = null
 let shutdownPromise: Promise<void> | null = null
 /** 是否以静默方式启动（开机自启 Run 键带 --background，主窗口保持隐藏） */
 const startHidden = process.argv.includes('--background')
+/** QA 截图模式（scripts/capture-ui.ps1 驱动）：全程使用脱敏演示数据，不读取真实配置 */
+const isScreenshotMode = process.env.WEPORT_SCREENSHOT_POPUP === '1'
 
 // ---------------------------------------------------------------------------
 // 资源路径（wcdb / key / runtime DLL）
@@ -1012,6 +1014,160 @@ function registerIpcHandlers() {
     weportAiService.abort(String(chatId || ''))
     return { success: true }
   })
+
+  // 截图模式：用演示数据覆盖会暴露个人信息的通道（真实配置/微信数据绝不进截图）
+  if (isScreenshotMode) installScreenshotDemoHandlers()
+}
+
+// ---------------------------------------------------------------------------
+// 截图演示数据（WEPORT_SCREENSHOT_POPUP=1）
+// 全部为虚构值：不读取用户配置、不扫描真实微信目录、不调用真实 API。
+// config:set 在截图模式下被吞掉，演示数据绝不会落盘污染真实配置。
+// ---------------------------------------------------------------------------
+const DEMO_DECRYPT_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+const DEMO_DB_PATH = 'D:\\demo\\xwechat_files'
+const DEMO_EXPORT_PATH = 'D:\\demo\\weport-export'
+const DEMO_WXID = 'wxid_demo'
+const DEMO_WORKSPACE = 'D:\\demo\\weport-export\\WeportAI'
+const DEMO_CHAT_ID = 'demo-chat-1'
+
+function demoConfigValue(key: string): unknown {
+  switch (key) {
+    case 'dbPath':
+      return DEMO_DB_PATH
+    case 'exportPath':
+      return DEMO_EXPORT_PATH
+    case 'myWxid':
+      return DEMO_WXID
+    case 'wxidConfigs':
+      return { [DEMO_WXID]: { decryptKey: DEMO_DECRYPT_KEY, updatedAt: 0 } }
+    case 'lastTab':
+      return 'connect'
+    case 'messagePushEnabled':
+      return false
+    default:
+      return (configService as any)?.get(key)
+  }
+}
+
+function demoAiSetup() {
+  return {
+    hasApiKey: true,
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+    maxTokens: 32768,
+    reasoningEffort: 'high',
+    maxSteps: 48,
+    customPrompt: '',
+    workspaceRoot: DEMO_WORKSPACE,
+    exportPath: DEMO_EXPORT_PATH,
+    dbReady: true,
+    disabledTools: [],
+    maxToolChars: 12000,
+    conversationLimit: 60,
+  }
+}
+
+function demoAiChatData() {
+  const now = Date.now()
+  const day = 24 * 60 * 60 * 1000
+  return {
+    chat: {
+      id: DEMO_CHAT_ID,
+      title: '和家人聊天的总结',
+      createdAt: now - 2 * day,
+      updatedAt: now - 30 * 60 * 1000,
+      sortOrder: 0,
+      titleVersion: 2,
+    },
+    workspaceDir: `${DEMO_WORKSPACE}\\${DEMO_CHAT_ID}`,
+    memoryDir: `${DEMO_WORKSPACE}\\memory`,
+    messages: [
+      {
+        id: 'demo-u1',
+        role: 'user',
+        content: '帮我总结一下最近和家人的聊天，看看有什么值得注意的事情',
+        createdAt: now - 30 * 60 * 1000,
+      },
+      {
+        id: 'demo-a1',
+        role: 'assistant',
+        content: '',
+        reasoning:
+          '先抽样「一家人」群最近三个时间窗口的消息，了解话题分布；再细读高频话题所在日期，确认值得记录的事件。',
+        toolCalls: [
+          {
+            id: 'demo-t1',
+            name: 'sample_session_history',
+            args: { username: 'family@chatroom', windows: 3 },
+            friendly: '分层抽样会话「一家人」的历史消息',
+            ok: true,
+            result: '已读取 96 条消息（近 7 天 · 早/中/晚 3 个时间窗口）\n话题分布：出游 31 · 家庭聚餐 24 · 健康提醒 18 · 日常琐事 23',
+          },
+          {
+            id: 'demo-t2',
+            name: 'read_session_messages',
+            args: { username: 'family@chatroom', start: '2026-08-06', end: '2026-08-08' },
+            friendly: '读取会话「一家人」消息（08-06 ~ 08-08）',
+            ok: true,
+            result: '共 42 条消息。8月7日提及「周末去郊野公园野餐」，妈妈多次提醒「天热注意防暑」……',
+          },
+        ],
+        createdAt: now - 29 * 60 * 1000,
+      },
+      {
+        id: 'demo-a2',
+        role: 'assistant',
+        content:
+          '## 最近与家人的聊天总结\n\n### 值得注意\n\n- **周末出游计划**：8月7日群里商定了周末去郊野公园野餐，人数约 6 人，建议提前确认天气与座位。\n- **健康提醒高频出现**：近一周「注意防暑」「早点休息」出现 18 次，天气炎热时期家人对彼此的健康提醒明显增多。\n- **家庭聚餐**：8月8日有两次聚餐提议，一次成行，一次待定。\n\n### 建议\n\n1. 出游当周记得给群里的长辈带遮阳伞和防晒。\n2. 可以把「周末出游」列入 `notes/出游计划.md`，方便后续跟进。\n3. 我已把近期家庭事件写入 `memory/events.md`，以后追问「这个月家里有什么大事」可以直接命中。',
+        createdAt: now - 28 * 60 * 1000,
+      },
+    ],
+    lastRun: {
+      usage: {
+        totalTokens: 48612,
+        promptTokens: 40127,
+        completionTokens: 8485,
+        reasoningTokens: 3011,
+        promptCacheHitTokens: 31298,
+      },
+      context: { promptTokens: 40127, cacheHitTokens: 31298, lastRequestTokens: 40127, recentRate: 78, contextWindow: 1000000 },
+    },
+  }
+}
+
+function demoAiNotes() {
+  const now = Date.now()
+  const day = 24 * 60 * 60 * 1000
+  return [
+    { path: 'memory/events.md', bytes: 1564, mtime: now - 30 * 60 * 1000, scope: 'memory' },
+    { path: 'memory/relationships.md', bytes: 842, mtime: now - day, scope: 'memory' },
+    { path: 'notes/出游计划.md', bytes: 2310, mtime: now - 2 * day, scope: 'notes' },
+  ]
+}
+
+function installScreenshotDemoHandlers() {
+  const override = (channel: string, handler: (...args: any[]) => unknown) => {
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, handler)
+  }
+  override('config:get', (_e, key: string) => demoConfigValue(String(key || '')))
+  override('config:set', async () => { /* 截图模式不落盘：演示数据绝不写进真实配置 */ })
+  override('dbpath:scanWxids', () => [{ wxid: DEMO_WXID, nickname: '演示账号', modifiedTime: 0, avatarUrl: '' }])
+  override('ai:getSetup', () => demoAiSetup())
+  override('ai:listChats', () => ({ chats: [demoAiChatData().chat] }))
+  override('ai:createChat', () => ({ chat: demoAiChatData().chat }))
+  override('ai:getChat', () => demoAiChatData())
+  override('ai:listNotes', () => ({ notes: demoAiNotes() }))
+  override('ai:readNoteFile', () => ({ content: '# 演示笔记\n\n（截图模式演示内容）' }))
+  override('ai:deleteNoteFile', () => ({ success: true }))
+  override('ai:listActions', () => ({ actions: [] }))
+  override('ai:saveActions', () => ({ success: true }))
+  override('ai:clearMemory', () => ({ success: true, removed: 0 }))
+  override('ai:getDebugLog', () => ({ lines: [] }))
+  override('ai:clearDebugLog', () => ({ success: true }))
+  override('ai:send', () => ({ success: true }))
+  override('ai:abort', () => ({ success: true }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,56 +1187,120 @@ async function runScreenshotMode() {
       new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
     ])
 
+  const isBlank = (buf: Buffer, threshold: number) => {
+    if (buf.length < 16) return true
+    let min = 255
+    let max = 0
+    for (let i = 0; i < buf.length; i += 997) {
+      const v = buf[i]
+      if (v < min) min = v
+      if (v > max) max = v
+    }
+    return max - min < threshold
+  }
+
   // 等待渲染进程加载完成
   for (let i = 0; i < 30; i += 1) {
     if (mainWindow && !mainWindow.webContents.isLoading()) break
     await sleep(250)
   }
-  await sleep(800)
+  // 等「找到 N 个账号」之类的 toast 过期 + 字体/首屏稳定，避免入画
+  await sleep(4000)
 
-  // 主窗口截图（CI 上首帧可能未就绪：轮询直到非空）
-  try {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const isBlank = (buf: Buffer) => {
-        if (buf.length < 16) return true
-        let min = 255
-        let max = 0
-        for (let i = 0; i < buf.length; i += 997) {
-          const v = buf[i]
-          if (v < min) min = v
-          if (v > max) max = v
-        }
-        return max - min < 12
-      }
-      let saved = false
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        const image = await captureWithTimeout(mainWindow, 8000)
-        if (image) {
-          const png = image.toPNG()
-          if (!isBlank(png)) {
-            const fs2 = await import('fs')
-            fs2.writeFileSync(join(outDir, 'main.png'), png)
-            console.log('[screenshot] main.png saved (attempt', attempt + 1, ')')
-            saved = true
-            break
+  // 稳定帧捕获：轮询直到画面非空，再隔 400ms 复拍一帧；
+  // 两帧 PNG 字节完全一致 = 画面已静止（入场动画/滚动/渐隐/半透明帧都会失败重试）。
+  // 这样 README 里的截图永远不会是淡出中的残影帧
+  const saveStable = async (win: BrowserWindow, file: string, threshold = 12, maxAttempts = 24) => {
+    let prev: Buffer | null = null
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const image = await captureWithTimeout(win, 8000)
+      if (image) {
+        const png = image.toPNG()
+        if (!isBlank(png, threshold)) {
+          if (prev && prev.equals(png)) {
+            writeFileSync(join(outDir, file), png)
+            console.log(`[screenshot] ${file} saved (attempt ${attempt + 1}, settled)`)
+            return true
           }
+          prev = png
         }
-        await sleep(400)
       }
-      if (!saved) console.warn('[screenshot] main capture stayed blank after retries')
+      await sleep(400)
     }
-  } catch (e) {
-    console.warn('[screenshot] main capture failed:', e)
+    console.warn(`[screenshot] ${file} stayed unstable/blank after retries`)
+    return false
   }
 
-  // 弹窗截图（独立通知窗口）
+  const clickTab = (label: string) =>
+    (mainWindow?.webContents
+      .executeJavaScript(
+        `(() => { const b = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
+        true,
+      )
+      .catch(() => false) ?? Promise.resolve(false))
+
+  const waitForDom = (selector: string, tries = 40) => {
+    const check = () =>
+      (mainWindow?.webContents
+        .executeJavaScript(`!!document.querySelector(${JSON.stringify(selector)})`, true)
+        .catch(() => false) ?? Promise.resolve(false))
+    return (async () => {
+      for (let i = 0; i < tries; i += 1) {
+        if (await check()) return true
+        await sleep(250)
+      }
+      return false
+    })()
+  }
+
+  // 1) 连接页（演示数据：假路径 / 假密钥 / 演示账号，无任何真实个人信息）
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await saveStable(mainWindow, 'main.png')
+    } catch (e) {
+      console.warn('[screenshot] main capture failed:', e)
+    }
+  }
+
+  // 2) 导出数据页
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await clickTab('导出数据')
+      if (await waitForDom('.format-grid')) {
+        await sleep(500)
+        await saveStable(mainWindow, 'export.png')
+      } else {
+        console.warn('[screenshot] export tab did not render')
+      }
+    } catch (e) {
+      console.warn('[screenshot] export capture failed:', e)
+    }
+  }
+
+  // 3) WeportAI 页（演示会话由截图演示处理器注入，含工具调用与笔记面板）
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await clickTab('WeportAI')
+      if ((await waitForDom('.ai-shell')) && (await waitForDom('.ai-msg'))) {
+        await sleep(500)
+        await saveStable(mainWindow, 'ai.png', 12, 30)
+      } else {
+        console.warn('[screenshot] AI tab did not render')
+      }
+    } catch (e) {
+      console.warn('[screenshot] AI capture failed:', e)
+    }
+  }
+
+  // 4) 通知弹窗（persistent：卡片不自动淡出，稳定帧捕获必然拿到完整不透明卡片）
   try {
     const payload = {
       sessionId: 'weport-test',
       channel: 'message',
       title: 'Weport 测试通知',
-      content: '这是一条测试通知 · 独立置顶弹窗',
+      content: '这是一条测试通知 · 液态玻璃弹窗置顶显示、不抢焦点',
       timestamp: Math.floor(Date.now() / 1000),
+      persistent: true,
     }
     await showNotification(payload, { force: true })
     const popup = BrowserWindow.getAllWindows().find((w) => w !== mainWindow && !w.isDestroyed())
@@ -1094,40 +1314,9 @@ async function runScreenshotMode() {
       for (let i = 0; i < 30 && popup.webContents.isLoading(); i += 1) {
         await sleep(250)
       }
-
-      // 轮询捕获直到画面非空（冷启动/字体加载较慢时固定等待会拿到空白帧；
-      // 阈值取 40 保证等到的是一张完全渲染的卡片，而非入场渐隐中的半透明帧）
-      const isBlank = (buf: Buffer) => {
-        if (buf.length < 16) return true
-        let min = 255
-        let max = 0
-        for (let i = 0; i < buf.length; i += 997) {
-          const v = buf[i]
-          if (v < min) min = v
-          if (v > max) max = v
-        }
-        return max - min < 40
-      }
-      let saved = false
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        const image = await captureWithTimeout(popup, 8000)
-        if (image) {
-          const png = image.toPNG()
-          if (!isBlank(png)) {
-            const fs2 = await import('fs')
-            fs2.writeFileSync(join(outDir, 'popup.png'), png)
-            console.log('[screenshot] popup.png saved (attempt', attempt + 1, ') size =', image.getSize())
-            saved = true
-            break
-          }
-        } else {
-          console.warn('[screenshot] popup capture attempt', attempt + 1, 'timed out')
-        }
-        await sleep(300)
-      }
-      if (!saved) {
-        console.warn('[screenshot] popup capture stayed blank after retries')
-      }
+      // 等卡片入场动画 + 玻璃面板就绪
+      await sleep(1500)
+      await saveStable(popup, 'popup.png', 40, 30)
     } else {
       console.warn('[screenshot] popup window not found')
     }
@@ -1893,8 +2082,10 @@ function startApp() {
       } catch { /* noop */ }
     })
 
-    // 后台预热联系人显示名/头像（不阻塞窗口显示）
-    void warmupContactNames()
+    // 后台预热联系人显示名/头像（不阻塞窗口显示；截图模式跳过：演示数据无真实会话）
+    if (!isScreenshotMode) {
+      void warmupContactNames()
+    }
 
     // 微信 CDN 头像/图片请求头（否则弹窗头像 403 → 占位）
     ensureWeChatRequestHeaderInterceptor()
@@ -1909,7 +2100,10 @@ function startApp() {
       messagePushService?.start()
     }
 
-    checkForUpdatesOnStartup()
+    // 截图模式：跳过更新检查（避免更新横幅入画）
+    if (!isScreenshotMode) {
+      checkForUpdatesOnStartup()
+    }
 
     if (startHidden && mainWindow) {
       mainWindow.hide()

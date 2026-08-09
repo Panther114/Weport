@@ -27,7 +27,7 @@ jobs:
       - name: Build unpacked app
         run: npm run build:dir
 
-      - name: Capture harness (main window + notification popup)
+      - name: Capture harness (connect / export / WeportAI / popup, demo data)
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 

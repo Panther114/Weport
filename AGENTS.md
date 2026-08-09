@@ -103,9 +103,18 @@ powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 ```
 
 `capture-ui.ps1` launches the app in `WEPORT_SCREENSHOT_POPUP` mode (the app
-captures its own main window + popup via `capturePage`), then asserts both
-captures are non-blank (`Assert-ImageHasContent`, stddev ≥ 12). A broken or
-unwired popup fails the harness.
+captures its own window via `capturePage`), then asserts all captures are
+non-blank (`Assert-ImageHasContent`, stddev ≥ 12). A broken or unwired popup
+fails the harness.
+
+Screenshot mode is fully **demo-data driven**: `appMain.ts::installScreenshotDemoHandlers`
+overrides `config:get`/`config:set`/`dbpath:scanWxids`/`ai:*` IPC with fake
+values (fake dbPath/key/account, demo AI conversation, notes). `config:set` is
+swallowed so demo values never pollute the real config, and `capture-ui.ps1
+-PublishToDocs` regenerates `docs/screenshots/*.png` for the README. Never
+capture real user data in screenshot mode — README shots must be personal-info
+free. Popup captures use `persistent: true` (toast never auto-fades) plus a
+two-frame-identical settle check, so README popup.png can't be a fading frame.
 
 ## CI
 

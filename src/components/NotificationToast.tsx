@@ -14,6 +14,8 @@ export interface NotificationData {
     title: string
     content: string
     timestamp: number
+    /** 常驻模式：不自动淡出（QA 截图模式用，保证捕获完整不透明卡片） */
+    persistent?: boolean
 }
 
 interface NotificationToastProps {
@@ -58,6 +60,8 @@ export function NotificationToast({
         if (data) {
             setCurrentData(data)
             setIsVisible(true)
+
+            if (data.persistent) return
 
             const timer = setTimeout(() => {
                 beginHide()

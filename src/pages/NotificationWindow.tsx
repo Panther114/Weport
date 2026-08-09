@@ -45,7 +45,8 @@ export default function NotificationWindow() {
                 title: data.title,
                 content: data.content,
                 timestamp: timestamp,
-                avatarUrl: data.avatarUrl
+                avatarUrl: data.avatarUrl,
+                persistent: Boolean(data.persistent)
             }
 
             if (data.position) {
