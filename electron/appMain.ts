@@ -1044,6 +1044,8 @@ function demoConfigValue(key: string): unknown {
     case 'lastTab':
       return 'connect'
     case 'messagePushEnabled':
+      return true
+    case 'notificationEnabled':
       return false
     default:
       return (configService as any)?.get(key)
@@ -1129,9 +1131,9 @@ function demoAiChatData() {
         promptTokens: 40127,
         completionTokens: 8485,
         reasoningTokens: 3011,
-        promptCacheHitTokens: 31298,
+        promptCacheHitTokens: 38121,
       },
-      context: { promptTokens: 40127, cacheHitTokens: 31298, lastRequestTokens: 40127, recentRate: 78, contextWindow: 1000000 },
+      context: { promptTokens: 40127, cacheHitTokens: 38121, lastRequestTokens: 40127, recentRate: 95, contextWindow: 1000000 },
     },
   }
 }
@@ -1146,6 +1148,19 @@ function demoAiNotes() {
   ]
 }
 
+function demoAntiRevokeSessions() {
+  return [
+    { username: 'family@chatroom', displayName: '一家人' },
+    { username: 'proj@chatroom', displayName: '项目群 · 产品迭代' },
+    { username: 'alumni@chatroom', displayName: '老同学' },
+    { username: 'parents@chatroom', displayName: '爸妈' },
+    { username: 'wxid_zhangwei', displayName: '张伟' },
+    { username: 'wxid_lina', displayName: '李娜' },
+    { username: 'trip@chatroom', displayName: '周末郊游小分队' },
+    { username: 'daily@chatroom', displayName: '工作日报群' },
+  ]
+}
+
 function installScreenshotDemoHandlers() {
   const override = (channel: string, handler: (...args: any[]) => unknown) => {
     ipcMain.removeHandler(channel)
@@ -1154,6 +1169,21 @@ function installScreenshotDemoHandlers() {
   override('config:get', (_e, key: string) => demoConfigValue(String(key || '')))
   override('config:set', async () => { /* 截图模式不落盘：演示数据绝不写进真实配置 */ })
   override('dbpath:scanWxids', () => [{ wxid: DEMO_WXID, nickname: '演示账号', modifiedTime: 0, avatarUrl: '' }])
+  override('chat:connect', () => ({ success: true }))
+  override('chat:getAntiRevokeSessions', () => ({ sessions: demoAntiRevokeSessions() }))
+  override('chat:checkAntiRevokeTriggers', () => ({
+    rows: ['family@chatroom', 'parents@chatroom'].map((sessionId) => ({
+      sessionId,
+      installed: true,
+      success: true,
+    })),
+  }))
+  override('chat:installAntiRevokeTriggers', (e, sessionIds: string[]) => ({
+    rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
+  }))
+  override('chat:uninstallAntiRevokeTriggers', (e, sessionIds: string[]) => ({
+    rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
+  }))
   override('ai:getSetup', () => demoAiSetup())
   override('ai:listChats', () => ({ chats: [demoAiChatData().chat] }))
   override('ai:createChat', () => ({ chat: demoAiChatData().chat }))
@@ -1239,6 +1269,32 @@ async function runScreenshotMode() {
       )
       .catch(() => false) ?? Promise.resolve(false))
 
+  // 输出关键 UI 元素的精确几何（CSS px），供视频演示对齐覆盖层
+  const dumpRects = async (file: string, selectors: string[]) => {
+    const rects = await mainWindow?.webContents
+      .executeJavaScript(
+        `(() => {
+          const out = {};
+          for (const sel of ${JSON.stringify(selectors)}) {
+            const els = Array.from(document.querySelectorAll(sel));
+            out[sel] = els.map((el) => {
+              const r = el.getBoundingClientRect();
+              const s = getComputedStyle(el);
+              return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), visible: s.display !== 'none' && s.visibility !== 'hidden' };
+            });
+          }
+          return out;
+        })()`,
+        true,
+      )
+      .catch(() => null)
+    if (rects) {
+      try {
+        writeFileSync(join(outDir, file), JSON.stringify(rects, null, 1), 'utf8')
+      } catch { /* noop */ }
+    }
+  }
+
   const waitForDom = (selector: string, tries = 40) => {
     const check = () =>
       (mainWindow?.webContents
@@ -1257,6 +1313,9 @@ async function runScreenshotMode() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await saveStable(mainWindow, 'main.png')
+      await dumpRects('main-rects.json', [
+        '.tab', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
+      ])
     } catch (e) {
       console.warn('[screenshot] main capture failed:', e)
     }
@@ -1269,6 +1328,23 @@ async function runScreenshotMode() {
       if (await waitForDom('.format-grid')) {
         await sleep(500)
         await saveStable(mainWindow, 'export.png')
+        await dumpRects('export-rects.json', [
+          '.format-chip.layout-chip', '.format-grid .format-chip', '.media-check',
+          '.opt-panel .seg', '.export-meta .row', '.progress', '.primary-btn.block',
+        ])
+        // 滚动到底部，捕获导出按钮 + 进度条区域（export-bottom.png + 滚动值）
+        const scrollTop = await mainWindow.webContents
+          .executeJavaScript(
+            `(() => { const ws = document.querySelector('.workspace'); if (!ws) return 0; ws.scrollTop = ws.scrollHeight; return Math.round(ws.scrollTop) })()`,
+            true,
+          )
+          .catch(() => 0)
+        await sleep(600)
+        await saveStable(mainWindow, 'export-bottom.png')
+        try {
+          writeFileSync(join(outDir, 'export-scroll.json'), JSON.stringify({ scrollTop }), 'utf8')
+        } catch { /* noop */ }
+        await dumpRects('export-bottom-rects.json', ['.primary-btn.block', '.progress', '.export-meta .row'])
       } else {
         console.warn('[screenshot] export tab did not render')
       }
@@ -1277,13 +1353,67 @@ async function runScreenshotMode() {
     }
   }
 
-  // 3) WeportAI 页（演示会话由截图演示处理器注入，含工具调用与笔记面板）
+  // 3) 防撤回页（演示会话 + 已安装状态）
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await clickTab('防撤回')
+      if (await waitForDom('.anti-revoke-list')) {
+        await sleep(500)
+        await saveStable(mainWindow, 'antirecall.png')
+        await dumpRects('antirecall-rects.json', [
+          '.anti-revoke-list .account-item', '.anti-revoke-list .badge',
+          '.panel-head .primary-btn', '.count-pill',
+        ])
+      } else {
+        console.warn('[screenshot] antirecall tab did not render')
+      }
+    } catch (e) {
+      console.warn('[screenshot] antirecall capture failed:', e)
+    }
+  }
+
+  // 4) 消息通知页（打开监听开关 → 绿色呼吸状态点）
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await clickTab('消息通知')
+      if (await waitForDom('.checklist')) {
+        mainWindow.webContents.executeJavaScript(
+          `(() => { const s = document.querySelector('.switch-label input'); if (s && !s.checked) { s.click(); return true } return false })()`,
+          true,
+        )
+        await waitForDom('.status-dot.listening')
+        // 呼吸动画会破坏「两帧一致」稳定判定：截图前临时禁用
+        mainWindow.webContents.executeJavaScript(
+          `(() => { const st = document.createElement('style'); st.textContent = '.status-dot.listening { animation: none !important; box-shadow: 0 0 0 4px rgba(159,232,168,0.25) !important; }'; document.head.appendChild(st); return true })()`,
+          true,
+        )
+        await sleep(1500)
+        const notifScroll = await mainWindow.webContents
+          .executeJavaScript(`(() => { const ws = document.querySelector('.workspace'); return ws ? ws.scrollTop : -1 })()`, true)
+          .catch(() => -1)
+        console.log(`[screenshot] notifications scrollTop=${notifScroll}`)
+        await saveStable(mainWindow, 'notifications.png')
+        await dumpRects('notifications-rects.json', [
+          '.switch-label', '.status-dot', '.check-row', '.checklist', '.setting-row',
+        ])
+      } else {
+        console.warn('[screenshot] notifications tab did not render')
+      }
+    } catch (e) {
+      console.warn('[screenshot] notifications capture failed:', e)
+    }
+  }
+
+  // 5) WeportAI 页（演示会话由截图演示处理器注入，含工具调用与笔记面板）
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await clickTab('WeportAI')
       if ((await waitForDom('.ai-shell')) && (await waitForDom('.ai-msg'))) {
         await sleep(500)
         await saveStable(mainWindow, 'ai.png', 12, 30)
+        await dumpRects('ai-rects.json', [
+          '.ai-input', '.ai-send', '.ai-chat-item', '.ai-ws-note', '.ai-ws-usage', '.ai-msg', '.ai-ws-body',
+        ])
       } else {
         console.warn('[screenshot] AI tab did not render')
       }
@@ -1292,15 +1422,34 @@ async function runScreenshotMode() {
     }
   }
 
-  // 4) 通知弹窗（persistent：卡片不自动淡出，稳定帧捕获必然拿到完整不透明卡片）
+  // 6) 通知弹窗（persistent：卡片不自动淡出，稳定帧捕获必然拿到完整不透明卡片）
   try {
     const payload = {
-      sessionId: 'weport-test',
+      sessionId: 'family@chatroom',
       channel: 'message',
-      title: 'Weport 测试通知',
-      content: '这是一条测试通知 · 液态玻璃弹窗置顶显示、不抢焦点',
+      title: '一家人 · Max Shuang',
+      content: '晚上一起吃饭？6 点老地方见',
+      avatarUrl: process.env.WEPORT_SCREENSHOT_AVATAR_URL || '',
       timestamp: Math.floor(Date.now() / 1000),
       persistent: true,
+    }
+    // 主进程预热真实头像（带微信 UA/Referer），保证渲染进程必命中缓存，头像不会缺失
+    if (payload.avatarUrl) {
+      try {
+        const { net } = require('electron')
+        const warm = net.request({
+          url: payload.avatarUrl,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090719) XWEB/8351',
+            Referer: 'https://servicewechat.com/',
+          },
+        })
+        warm.on('response', () => warm.abort())
+        warm.on('error', () => { /* noop */ })
+        warm.end()
+      } catch { /* noop */ }
+      await sleep(1200)
     }
     await showNotification(payload, { force: true })
     const popup = BrowserWindow.getAllWindows().find((w) => w !== mainWindow && !w.isDestroyed())
@@ -1314,9 +1463,25 @@ async function runScreenshotMode() {
       for (let i = 0; i < 30 && popup.webContents.isLoading(); i += 1) {
         await sleep(250)
       }
-      // 等卡片入场动画 + 玻璃面板就绪
-      await sleep(1500)
-      await saveStable(popup, 'popup.png', 40, 30)
+      // 等卡片入场动画 + 玻璃面板就绪；若指定了真实头像，多等 CDN 加载完成
+      await sleep(payload.avatarUrl ? 5000 : 1500)
+      await saveStable(popup, 'popup.png', 40, 40)
+      try {
+        const rects = await popup.webContents.executeJavaScript(
+          `(() => {
+            const out = {};
+            for (const sel of ['.notification-avatar', '.notification-title', '.notification-time', '.notification-body']) {
+              const el = document.querySelector(sel);
+              if (!el) continue;
+              const r = el.getBoundingClientRect();
+              out[sel] = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+            }
+            return out;
+          })()`,
+          true,
+        )
+        if (rects) writeFileSync(join(outDir, 'popup-rects.json'), JSON.stringify(rects, null, 1), 'utf8')
+      } catch { /* noop */ }
     } else {
       console.warn('[screenshot] popup window not found')
     }

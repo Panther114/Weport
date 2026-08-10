@@ -1,4 +1,4 @@
-﻿# Weport UI capture harness (Electron)
+# Weport UI capture harness (Electron)
 # Captures the main window + notification popup via the app's own
 # WEPORT_SCREENSHOT_POPUP mode, then asserts the popup is non-blank.
 # A blank popup (broken renderer / unwired viewport) fails the build.
@@ -77,15 +77,21 @@ Remove-Item Env:WEPORT_SCREENSHOT_OUT -ErrorAction SilentlyContinue
 $mainPng = Join-Path $OutputDir 'main.png'
 $popupPng = Join-Path $OutputDir 'popup.png'
 $exportPng = Join-Path $OutputDir 'export.png'
+$antirecallPng = Join-Path $OutputDir 'antirecall.png'
+$notificationsPng = Join-Path $OutputDir 'notifications.png'
 $aiPng = Join-Path $OutputDir 'ai.png'
 if (-not (Test-Path $mainPng)) { throw "main.png missing - main window capture failed" }
 if (-not (Test-Path $popupPng)) { throw "popup.png missing - notification window capture failed" }
 if (-not (Test-Path $exportPng)) { throw "export.png missing - export tab capture failed" }
+if (-not (Test-Path $antirecallPng)) { throw "antirecall.png missing - antirecall tab capture failed" }
+if (-not (Test-Path $notificationsPng)) { throw "notifications.png missing - notifications tab capture failed" }
 if (-not (Test-Path $aiPng)) { throw "ai.png missing - WeportAI tab capture failed" }
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
 Assert-ImageHasContent $exportPng 'export tab'
+Assert-ImageHasContent $antirecallPng 'antirecall tab'
+Assert-ImageHasContent $notificationsPng 'notifications tab'
 Assert-ImageHasContent $aiPng 'WeportAI tab'
 Write-Output "Screenshots written to $OutputDir"
 
@@ -94,6 +100,8 @@ if ($PublishToDocs) {
   New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
   Copy-Item $mainPng (Join-Path $docsDir "connect.png") -Force
   Copy-Item $exportPng (Join-Path $docsDir "export.png") -Force
+  Copy-Item $antirecallPng (Join-Path $docsDir "antirecall.png") -Force
+  Copy-Item $notificationsPng (Join-Path $docsDir "notifications.png") -Force
   Copy-Item $aiPng (Join-Path $docsDir "ai.png") -Force
   Copy-Item $popupPng (Join-Path $docsDir "popup.png") -Force
   Write-Output "Published screenshots to $docsDir"
