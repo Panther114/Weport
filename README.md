@@ -21,9 +21,9 @@
 
 ## ▶️ 产品演示
 
-[![Wexport 产品演示（34 秒）](docs/media/weport-demo-poster.png)](docs/media/weport-demo.mp4)
+[![Weport 产品演示（37 秒）](docs/media/weport-demo-poster.png)](docs/media/weport-demo.mp4)
 
-点击上图播放 **34 秒产品演示**：连接微信 → 一键导出（10 种格式）→ 置顶弹窗 → 防撤回 → WeportAI 分析，全程真实界面直拍。
+点击上图播放 **37 秒产品演示**：连接微信 → 一键导出（10 种格式）→ 置顶弹窗 → 防撤回 → WeportAI 分析，全程真实界面直拍。
 
 ## ✨ 这是什么？
 

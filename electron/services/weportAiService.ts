@@ -1885,7 +1885,7 @@ class WeportAiService {
     if (!userText) return { success: false, error: '消息为空' }
 
     const apiKey = String(this.configService.get('weportAiApiKey') || '').trim()
-    if (!apiKey) return { success: false, error: '未配置 API 密钥，请在 WeporAI 设置中填写' }
+    if (!apiKey) return { success: false, error: '未配置 API 密钥，请在 WeportAI 设置中填写' }
 
     const ctrl = new AbortController()
     this.running.set(chatId, ctrl)
@@ -1974,7 +1974,7 @@ class WeportAiService {
         if (!stepResult.ok) {
           error = stepResult.error || '模型调用失败'
           if (stepResult.httpStatus === 401) {
-            error = 'API 密钥无效或已过期（401），请在 WeporAI 设置中更新'
+            error = 'API 密钥无效或已过期（401），请在 WeportAI 设置中更新'
           } else if (stepResult.httpStatus === 402) {
             error = 'API 余额不足（402），请充值后重试'
           } else if (stepResult.httpStatus === 429) {
