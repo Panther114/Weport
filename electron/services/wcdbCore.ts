@@ -1,6 +1,7 @@
 import { join, dirname, basename } from 'path'
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, symlinkSync, rmdirSync, realpathSync } from 'fs'
 import { appendFile } from 'fs/promises'
+import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
@@ -54,6 +55,7 @@ export class WcdbCore {
   private currentKey: string | null = null
   private currentWxid: string | null = null
   private currentDbStoragePath: string | null = null
+  private readonly asciiJunctionCache = new Map<string, string>()
 
   // 函数引用
   private wcdbInitProtection: any = null
@@ -1397,8 +1399,8 @@ export class WcdbCore {
         return { success: false, error: this.formatInitProtectionError(-3001) }
       }
 
-      // 递归查找 session.db
-      const sessionDbPath = this.findSessionDb(dbStoragePath)
+      // 递归查找 session.db（非 ASCII 路径下 DLL 消息库扫描为空，走 ASCII junction）
+      const sessionDbPath = this.findSessionDb(join(this.asciiPathForDll(accountDir), 'db_storage'))
       this.writeLog(`testConnection sessionDb=${sessionDbPath || 'null'}`)
 
       if (!sessionDbPath) {
@@ -1808,6 +1810,54 @@ export class WcdbCore {
   /**
    * 打开数据库
    */
+  private hasNonAscii(p: string): boolean {
+    for (let i = 0; i < p.length; i++) {
+      if (p.charCodeAt(i) > 0x7f) return true
+    }
+    return false
+  }
+
+  /**
+   * wcdb_api.dll 内部对 db_storage/message 的目录扫描无法处理非 ASCII 路径
+   * （如中文 OneDrive 目录），导致 message_db_cache 为 0、openMessageCursor
+   * 返回 -3，进而导出/弹窗/防撤回全部失效。此处用 NTFS junction（无需管理员
+   * 权限）把账号目录映射到纯 ASCII 路径，仅对 DLL 使用该映射路径。
+   */
+  private asciiPathForDll(accountDir: string): string {
+    if (!this.hasNonAscii(accountDir)) return accountDir
+    const cached = this.asciiJunctionCache.get(accountDir)
+    if (cached) return cached
+    try {
+      const root = this.userDataPath || join(tmpdir(), 'wepor-junctions')
+      const junctionDir = join(root, 'wcdb-junctions')
+      mkdirSync(junctionDir, { recursive: true })
+      const name = `acct_${createHash('sha1').update(accountDir).digest('hex').slice(0, 16)}`
+      const junction = join(junctionDir, name)
+      if (existsSync(junction)) {
+        try {
+          const target = realpathSync(junction)
+          const expect = realpathSync(accountDir)
+          if (target.toLowerCase() === expect.toLowerCase()) {
+            this.asciiJunctionCache.set(accountDir, junction)
+            this.writeLog(`[ascii-junction] reuse ${junction} -> ${accountDir}`, true)
+            return junction
+          }
+          // 目标已移动（如 OneDrive 重定位），删除失效 junction 后重建
+          try { rmdirSync(junction) } catch { /* ignore */ }
+        } catch {
+          // 损坏的 junction，走重建路径
+        }
+      }
+      symlinkSync(accountDir, junction, 'junction')
+      this.asciiJunctionCache.set(accountDir, junction)
+      this.writeLog(`[ascii-junction] created ${junction} -> ${accountDir}`, true)
+      return junction
+    } catch (e) {
+      this.writeLog(`[ascii-junction] failed, falling back to original path: ${String(e)}`, true)
+      return accountDir
+    }
+  }
+
   async open(accountDir: string, hexKey: string): Promise<boolean> {
     try {
       lastDllInitError = null
@@ -1841,7 +1891,9 @@ export class WcdbCore {
         return false
       }
 
-      const sessionDbPath = this.findSessionDb(dbStoragePath)
+      // 非 ASCII 路径下 DLL 的消息库扫描返回空（-3），用 ASCII junction 喂给 DLL
+      const dllAccountDir = this.asciiPathForDll(accountDir)
+      const sessionDbPath = this.findSessionDb(join(dllAccountDir, 'db_storage'))
       this.writeLog(`open sessionDb=${sessionDbPath || 'null'}`, true)
       if (!sessionDbPath) {
         console.error('未找到 session.db 文件')
