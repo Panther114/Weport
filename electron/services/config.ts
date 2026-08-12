@@ -235,7 +235,10 @@ export class ConfigService {
       themeId: 'cloud-dancer',
       language: 'zh-CN',
       logEnabled: false,
-      silentStartup: false,
+      launchAtStartup: true,
+      // 开机自启 + 静默启动默认开启（与窗口关闭最小化到托盘一致）：
+      // 首次运行即写 Run 键（带 --background），登录后托盘常驻、不弹窗
+      silentStartup: true,
       exportMedia: { images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 },
       exportAvatars: false,
       exportVoiceAsText: false,

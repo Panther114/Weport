@@ -28,7 +28,15 @@ try {
   app.on('window-all-closed', () => {
     /* keep host alive */
   })
-  // 宿主不渲染任何窗口：关掉 GPU 进程（省 ~80-100MB）与硬件加速
+  // 宿主不渲染任何窗口：关掉 GPU 进程（省 ~80-100MB）与硬件加速。
+  // 实测（Electron 43 / Chromium）：仅 disableHardwareAcceleration 或
+  // disable-gpu 仍会拉起软件 GPU 子进程，必须叠加 --in-process-gpu 让 GPU
+  // 并入宿主进程内（宿主零渲染，纯省进程）；网络服务 utility 子进程是
+  // Chromium 默认进程模型的组成部分，Electron 43 无法关闭（试过
+  // NetworkServiceInProcess / disable-features=NetworkService 均无效）。
+  app.commandLine.appendSwitch('disable-gpu')
+  app.commandLine.appendSwitch('in-process-gpu')
+  app.commandLine.appendSwitch('disable-software-rasterizer')
   app.disableHardwareAcceleration()
   electronGuard = true
 } catch { /* 非 Electron 环境（node 控制测试） */ }

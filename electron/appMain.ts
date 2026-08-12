@@ -343,8 +343,11 @@ async function checkForUpdatesManual(): Promise<{
   }
 }
 
+let updateCheckScheduled = false
+
 function checkForUpdatesOnStartup() {
-  if (!app.isPackaged) return
+  if (!app.isPackaged || updateCheckScheduled) return
+  updateCheckScheduled = true
   const ignored = configService?.get('ignoredUpdateVersion')
   updateCheckTimer = setTimeout(async () => {
     try {
@@ -508,13 +511,14 @@ function buildPopupData(p: MessagePushPayload) {  const title = p.groupName && p
 function setupNotificationPipeline() {
   messagePushService = new MessagePushService()
   messagePushService.onPush((payload: MessagePushPayload) => {
+    // 弹窗渲染 CDN 头像同样需要 UA/Referer 拦截（注册是幂等的）。
+    // 延迟到真正出弹窗时才注册，避免静默启动时过早拉起网络服务子进程
+    ensureWeChatRequestHeaderInterceptor()
     void showNotification(buildPopupData(payload))
   })
   setNotificationNavigateHandler(() => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (!mainWindow.isVisible()) mainWindow.show()
-      mainWindow.focus()
-    }
+    // 静默启动不建主窗口：通知点击时按需创建/显示
+    showMainWindow()
   })
   chatService.addDbMonitorListener((type, json) => {
     messagePushService?.handleDbMonitorChange(type, json)
@@ -528,6 +532,8 @@ function setupNotificationPipeline() {
 // （wxid_xxx / xxx@chatroom 等）。启动时异步把前 600 个会话的显示名与头像
 // 拉取并持久化到 contactCache，之后所有展示路径都能拿到真实昵称。
 let contactWarmupTimer: NodeJS.Timeout | null = null
+/** 静默启动（--background）时跳过开机预热，标记为延迟到主窗口首次创建时补跑 */
+let contactWarmupDeferred = false
 
 async function warmupContactNames(): Promise<void> {
   try {
@@ -684,6 +690,9 @@ function createWindow(autoShow: boolean): BrowserWindow {
   } else {
     win.loadFile(join(__dirname, '../dist/index.html'))
   }
+  // 主窗口创建即注册微信 CDN 请求头拦截（幂等；首窗口/弹窗两条路径共用）。
+  // 静默启动不建窗口时不注册，避免开机即初始化网络栈拉起网络服务子进程
+  ensureWeChatRequestHeaderInterceptor()
   return win
 }
 
@@ -699,6 +708,16 @@ function hideMainWindowToTray() {
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createWindow(true)
+    // 静默启动跳过的主窗口按需创建后，补跑延迟的联系人预热
+    // （不阻塞窗口显示；无有效配置时 warmupContactNames 内部直接返回）
+    if (contactWarmupDeferred) {
+      contactWarmupDeferred = false
+      void warmupContactNames()
+    }
+    // 静默启动跳过的更新检查，随窗口首次创建补跑（幂等）
+    if (!isScreenshotMode) {
+      checkForUpdatesOnStartup()
+    }
     return
   }
   if (!mainWindow.isVisible()) {
@@ -2247,16 +2266,26 @@ function startApp() {
       } catch { /* noop */ }
     })
 
-    // 后台预热联系人显示名/头像（不阻塞窗口显示；截图模式跳过：演示数据无真实会话）
-    if (!isScreenshotMode) {
+    // 后台预热联系人显示名/头像（不阻塞窗口显示；截图模式跳过：演示数据无真实会话）。
+    // 仅当需要常驻数据库连接（消息推送开启）或用户主动启动（非静默）时执行；
+    // 静默启动时跳过可避免开机即拉起 WCDB 宿主进程与全部微信库连接（约 900MB），
+    // 改为窗口打开时由 showMainWindow 按需预热
+    if (!isScreenshotMode && (configService.get('messagePushEnabled') === true || !startHidden)) {
       void warmupContactNames()
+    } else if (!isScreenshotMode && startHidden) {
+      contactWarmupDeferred = true
     }
 
-    // 微信 CDN 头像/图片请求头（否则弹窗头像 403 → 占位）
-    ensureWeChatRequestHeaderInterceptor()
+    // 微信 CDN 头像/图片请求头（否则弹窗头像 403 → 占位）。
+    // 延迟到首次创建窗口 / 弹窗时注册（幂等，见 createWindow / onPush），
+    // 避免静默启动时过早初始化网络栈而无谓拉起网络服务子进程
 
-    // 主窗口（托盘隐藏/静默启动时先建后隐藏）
-    mainWindow = createWindow(!startHidden)
+    // 主窗口：仅非静默启动时创建。--background 下不创建窗口，
+    // 由托盘点击 / 通知点击经 showMainWindow() 按需创建，
+    // 省掉隐藏的渲染/GPU/网络子进程约 1GB 常驻内存
+    if (!startHidden) {
+      mainWindow = createWindow(true)
+    }
 
     createTray()
 
@@ -2265,13 +2294,10 @@ function startApp() {
       messagePushService?.start()
     }
 
-    // 截图模式：跳过更新检查（避免更新横幅入画）
-    if (!isScreenshotMode) {
+    // 截图模式：跳过更新检查（避免更新横幅入画）。
+    // 静默启动也跳过：无主窗口时横幅无处可送，等首次打开窗口再检查
+    if (!isScreenshotMode && !startHidden) {
       checkForUpdatesOnStartup()
-    }
-
-    if (startHidden && mainWindow) {
-      mainWindow.hide()
     }
 
     if (process.env.WEPORT_SCREENSHOT_POPUP === '1') {

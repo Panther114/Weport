@@ -116,20 +116,25 @@ export class WcdbService {
   }
 
   /**
-   * 设置资源路径
+   * 设置资源路径（仅记录；宿主未启动时不立即拉起——initWorker 在下次
+   * 真实调用时会重发 setPaths/setLogEnabled，启动即省掉整个宿主进程）
    */
   setPaths(resourcesPath: string, userDataPath: string): void {
     this.resourcesPath = resourcesPath
     this.userDataPath = userDataPath
-    this.callWorker('setPaths', { resourcesPath, userDataPath }).catch(() => { })
+    if (this.worker) {
+      this.callWorker('setPaths', { resourcesPath, userDataPath }).catch(() => { })
+    }
   }
 
   /**
-   * 启用/禁用日志
+   * 启用/禁用日志（仅记录；宿主未启动时不拉起，见 setPaths）
    */
   setLogEnabled(enabled: boolean): void {
     this.logEnabled = enabled
-    this.callWorker('setLogEnabled', { enabled }).catch(() => { })
+    if (this.worker) {
+      this.callWorker('setLogEnabled', { enabled }).catch(() => { })
+    }
   }
 
   /**

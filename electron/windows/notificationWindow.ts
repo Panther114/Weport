@@ -461,9 +461,11 @@ export async function registerNotificationHandlers() {
   // - 预创建原生玻璃面板（隐藏待命）：worker 线程、D3D 设备、着色器编译、
   //   DComp 窗口链全部离开首条通知的可见路径（原生端实测 ~150ms）；
   //   隐藏面板零渲染零采集，常驻开销可忽略
-  // 仅当消息提醒开启时才预热（关闭时省掉常驻的弹窗渲染进程 ~60MB）
+  // 预热仅当消息推送开启时进行：推送关闭时不会有真实弹窗（ai-insight 频道
+  // 无触发源，测试/截图走 force 按需创建），常驻的弹窗渲染进程 ~84MB 纯属浪费。
+  // 若推送中途开启，下一条通知会经 showNotification 按需冷启动，功能不受影响。
   const config = ConfigService.getInstance();
-  const shouldPrewarm = (await config.get("messagePushEnabled")) === true || (await config.get("notificationEnabled")) !== false;
+  const shouldPrewarm = (await config.get("messagePushEnabled")) === true;
   if (!shouldPrewarm) return;
   setTimeout(() => {
     const win = createNotificationWindow();
