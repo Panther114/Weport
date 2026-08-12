@@ -62,7 +62,7 @@ jobs:
       - name: Build macOS installer (arm64, ad-hoc signed)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --mac dmg zip --arm64 --publish never --config.npmRebuild=false
+        run: npm run build:mac
 
       - name: Attach to existing release
         env:

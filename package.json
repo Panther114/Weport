@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "build": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && electron-builder --publish never",
     "build:dir": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && electron-builder --dir --publish never",
+    "build:mac": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && electron-builder --mac dmg zip --arm64 --publish never",
     "package": "node scripts/clean-dist-electron.cjs && vite build && electron-builder --publish never"
   },
   "dependencies": {

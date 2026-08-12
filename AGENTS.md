@@ -114,7 +114,7 @@ npm run dev                                   # vite dev + electron (vite-plugin
 npm run typecheck                             # renderer + electron typecheck
 npm run build                                 # clean → tsc → vite build → electron-builder (NSIS, Windows)
 npm run build:dir                             # unpacked build (faster iteration)
-npx electron-builder --mac dmg zip --arm64 --publish never   # macOS DMG + ZIP (arm64, 需在 macOS 上执行)
+npm run build:mac                             # macOS DMG + ZIP (arm64, 需在 macOS 上执行)
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 ```
 

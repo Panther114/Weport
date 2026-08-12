@@ -124,7 +124,7 @@ npm run dev                       # 开发模式（vite + electron）
 npm run typecheck                 # 渲染进程 + 主进程类型检查
 npm run build                     # Windows: 构建 NSIS 安装包（release/ 目录）
 npm run build:dir                 # 免安装构建（迭代更快）
-npx electron-builder --mac dmg zip --arm64 --publish never   # macOS: 构建 DMG + ZIP（arm64）
+npm run build:mac                 # macOS: 构建 DMG + ZIP（arm64）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # Windows UI 冒烟测试（自动截屏 + 内容断言）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1 -PublishToDocs   # 生成并发布 README 截图
 ```
