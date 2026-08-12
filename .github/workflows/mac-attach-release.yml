@@ -29,7 +29,7 @@ jobs:
         run: |
           TAG="${{ inputs.releaseTag }}"
           if [ -z "$TAG" ]; then
-            TAG="$(gh release view --json tagName -q .tagName)"
+            TAG="$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Will attach macOS installer to release: $TAG"
@@ -68,8 +68,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ steps.resolve.outputs.tag }}" \
+          gh release upload --repo ${{ github.repository }} "${{ steps.resolve.outputs.tag }}" \
             release/Weport-*.dmg release/Weport-*.zip release/latest-mac.yml \
             --clobber
           echo "macOS installer attached to ${{ steps.resolve.outputs.tag }}"
-          gh release view "${{ steps.resolve.outputs.tag }}" --json tagName,url -q '"tag=\(.tagName) url=\(.url)"'
+          gh release view --repo ${{ github.repository }} "${{ steps.resolve.outputs.tag }}" --json tagName,url -q '"tag=\(.tagName) url=\(.url)"'
