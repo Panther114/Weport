@@ -59,3 +59,6 @@ replay-payload.json
 
 # 产品演示视频项目（HyperFrames）— 全部本地生成，永不发布
 /videos/
+
+# 产品演示视频 — 体积过大，GitHub 无法渲染，仅在本地播放
+docs/media/weport-demo.mp4
