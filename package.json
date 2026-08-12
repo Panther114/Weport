@@ -51,7 +51,6 @@
   "build": {
     "appId": "com.weport.desktop",
     "productName": "Weport",
-    "artifactName": "Weport-${version}-Setup.${ext}",
     "directories": {
       "output": "release"
     },
@@ -68,10 +67,47 @@
       "dist-electron/**/*",
       "assets/icons/**/*"
     ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.utilities",
+      "artifactName": "Weport-${version}-${arch}.${ext}",
+      "icon": "resources/icons/macos/icon.icns",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "entitlements": "electron/entitlements.mac.plist",
+      "entitlementsInherit": "electron/entitlements.mac.plist",
+      "extraResources": [
+        {
+          "from": "resources/wcdb/macos/universal",
+          "to": "resources/wcdb/macos/universal"
+        },
+        {
+          "from": "resources/key/macos/universal",
+          "to": "resources/key/macos/universal"
+        },
+        {
+          "from": "resources/wedecrypt/macos/${arch}",
+          "to": "resources/wedecrypt/macos/${arch}"
+        },
+        {
+          "from": "resources/welive/macos/${arch}",
+          "to": "resources/welive/macos/${arch}",
+          "filter": [
+            "**/*",
+            "!**/*.framework",
+            "!**/*.framework/**/*"
+          ]
+        }
+      ]
+    },
     "win": {
       "target": [
         "nsis"
       ],
+      "artifactName": "Weport-${version}-Setup.${ext}",
       "icon": "assets/icons/icon.png",
       "extraFiles": [
         {

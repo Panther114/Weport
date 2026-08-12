@@ -1,9 +1,10 @@
 /**
  * WCDB 宿主进程客户端（替代 worker_threads 的传输层）。
  *
- * wcdb_api.dll 的 -1006 安全检查要求宿主可执行文件名为 WeFlow.exe。
- * 方案：在当前 exe 同目录创建硬链接 WeFlow.exe -> 当前 exe（NTFS 零磁盘开销，
- * 与 exe 同目录可复用 electron.dll / resources），再以 --wcdb-host 参数启动。
+ * wcdb_api.dll 的 -1006 安全检查要求宿主可执行文件名为 WeFlow.exe（Windows）
+ * / WeFlow（macOS，同名规则）。方案：在当前 exe 同目录创建硬链接
+ * WeFlow[.exe] -> 当前 exe（NTFS / APFS 零磁盘开销，与 exe 同目录可复用
+ * electron.dll / Electron.framework / resources），再以 --wcdb-host 参数启动。
  * 该实例进入 wcdbHost.ts 的 IPC 循环（process.on('message') / process.send），
  * 协议与 wcdbWorker.ts 完全一致，因此 WcdbService 无需改动其余任何逻辑。
  *
@@ -20,7 +21,8 @@ function resolveHostExe(): string {
   if (override && existsSync(override)) return override
 
   const target = process.execPath
-  const hostPath = join(dirname(target), 'WeFlow.exe')
+  const hostName = process.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
+  const hostPath = join(dirname(target), hostName)
 
   // 已存在且大小一致 → 直接复用（覆盖安装/更新后 exe 大小变化则重建链接）
   const needRefresh = (() => {
@@ -37,7 +39,7 @@ function resolveHostExe(): string {
     } catch (e) {
       throw new Error(
         `无法创建 WCDB 宿主进程 (${hostPath}): ${String((e as Error)?.message || e)}。` +
-        '请确认安装目录可写（NTFS），或以管理员身份运行。'
+        '请确认安装目录可写（Windows: NTFS / macOS: APFS），或以管理员身份运行。'
       )
     }
   }

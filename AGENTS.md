@@ -7,21 +7,33 @@
 
 ## Tech Stack (Permanent)
 
-Weport is an **Electron + React + Vite + TypeScript** desktop app for Windows.
-The engine (`electron/services/`) is a TypeScript port of WeFlow's WCDB stack
-(koffi FFI + native `wcdb_api.dll`). There is **no Rust, no Tauri, no CLI**
-anymore — the v0.6.x Rust/egui stack and the headless engine CLI were removed
-in 0.7.0.
+Wexport is an **Electron + React + Vite + TypeScript** desktop app for
+**Windows and macOS (Apple Silicon, arm64)**. The engine
+(`electron/services/`) is a TypeScript port of WeFlow's WCDB stack (koffi FFI
++ native `wcdb_api.dll` / `libwcdb_api.dylib`). There is **no Rust, no Tauri,
+no CLI** anymore — the v0.6.x Rust/egui stack and the headless engine CLI were
+removed in 0.7.0.
+
+Platform split lives in `process.platform` branches (same tree, no fork):
+- Key service: Windows `keyService.ts` vs macOS `keyServiceMac.ts`
+  (selected in `appMain.ts` `key:autoGetDbKey`; Linux not supported).
+- Autostart: Windows HKCU Run key vs macOS `app.setLoginItemSettings`
+  (see `appMain.ts` `setSystemLaunchAtStartup`).
+- Notification glass: `@hicccc77/electron-liquid-glass` is Windows-only;
+  macOS uses the Chromium desktop-stream fallback (already the default).
 
 ## WCDB Host Process (Permanent — Do Not Change)
 
-`wcdb_api.dll` refuses to initialize (`-1006`) unless the host executable is
-named **`WeFlow.exe`**. Empirically verified: any other name fails, a renamed
-copy/hardlink passes. The app therefore runs the DLL in a **subprocess**:
+`wcdb_api.dll` / `libwcdb_api.dylib` refuses to initialize (`-1006`) unless
+the host executable is named **`WeFlow.exe`** (Windows) / **`WeFlow`**
+(macOS, same-name rule). Empirically verified on Windows: any other name
+fails, a renamed copy/hardlink passes. The app therefore runs the WCDB
+engine in a **subprocess**:
 
-- `electron/wcdbHostClient.ts` creates a hardlink `WeFlow.exe` next to the
-  current exe (NTFS, zero disk cost, same dir so `electron.dll`/resources
-  resolve), then spawns it with `--wcdb-host`.
+- `electron/wcdbHostClient.ts` creates a hardlink `WeFlow[.exe]` next to the
+  current exe (NTFS / APFS, zero disk cost, same dir so
+  `electron.dll`/`Electron.framework`/resources resolve), then spawns it with
+  `--wcdb-host`.
 - `electron/main.ts` detects `--wcdb-host` and loads `wcdbHost.js`
   (separate vite entry); that process runs `wcdbHost.ts` — a stdio-free WCDB
   loop speaking the worker_threads-style message protocol over the **Node IPC
@@ -31,7 +43,8 @@ copy/hardlink passes. The app therefore runs the DLL in a **subprocess**:
 
 **Do not reintroduce:**
 
-- `worker_threads` for WCDB — the DLL check fails inside `weport.exe`.
+- `worker_threads` for WCDB — the name check fails inside `Wexport`'s own
+  binary (any platform).
 - stdio JSON-lines transport — **Electron's main-process stdin hits EOF
   immediately on Windows even with a real pipe** (verified). IPC channel only.
 - A zero-window Electron process without a `window-all-closed` listener and a
@@ -41,10 +54,12 @@ copy/hardlink passes. The app therefore runs the DLL in a **subprocess**:
 
 The popup is `electron/windows/notificationWindow.ts` (WeFlow port): a separate
 frameless transparent `BrowserWindow` (344×114, top-right of work area,
-`alwaysOnTop "screen-saver"`, `focusable: false`, `skipTaskbar`, click-through
+`alwaysOnTop`, `focusable: false`, `skipTaskbar`, click-through
 when hidden). Renderer: `src/pages/NotificationWindow.tsx` +
 `src/components/NotificationToast.tsx` + `LiquidGlass` (native
-`@hicccc77/electron-liquid-glass` panel with Chromium desktop-stream fallback).
+`@hicccc77/electron-liquid-glass` panel with Chromium desktop-stream fallback;
+the native glass panel is **Windows-only** — on macOS only the Chromium
+fallback path runs).
 
 Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChange`
 → `emitPush` → `appMain.ts` `buildPopupData` → `showNotification`.
@@ -97,10 +112,15 @@ nicknames instead of raw wxid codes.
 npm install                                   # postinstall: electron-builder install-app-deps + runtime DLL sync
 npm run dev                                   # vite dev + electron (vite-plugin-electron)
 npm run typecheck                             # renderer + electron typecheck
-npm run build                                 # clean → tsc → vite build → electron-builder (NSIS)
+npm run build                                 # clean → tsc → vite build → electron-builder (NSIS, Windows)
 npm run build:dir                             # unpacked build (faster iteration)
+npx electron-builder --mac dmg zip --arm64 --publish never   # macOS DMG + ZIP (arm64, 需在 macOS 上执行)
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 ```
+
+macOS packaging requires restoring the exec bit on the key helpers first
+(Git does not track file modes): `chmod +x resources/key/macos/universal/*`
+and `resources/welive/macos/arm64/welive` — CI workflows already do this.
 
 `capture-ui.ps1` launches the app in `WEPORT_SCREENSHOT_POPUP` mode (the app
 captures its own window via `capturePage`), then asserts all captures are
@@ -118,7 +138,11 @@ two-frame-identical settle check, so README popup.png can't be a fading frame.
 
 ## CI
 
-- `.github/workflows/release.yml` — builds + publishes on tag push
+- `.github/workflows/release.yml` — builds Windows (NSIS) + macOS (DMG/ZIP,
+  arm64) and publishes on tag push
+- `.github/workflows/mac-attach-release.yml` — manual: builds the macOS
+  installer from a branch and attaches it to the **existing** latest release
+  (used to backfill a mac installer onto an already-published version)
 - `.github/workflows/visual-smoke.yml` — runs the capture harness on push/PR
 
 ## Reference Repos (on-disk only, never shipped)
@@ -126,3 +150,6 @@ two-frame-identical settle check, so README popup.png can't be a fading frame.
 - `WeFlow/` — the upstream Electron app (source of the notification stack)
 - `RevokeMsgPatcher/` — reference for the old v0.6.x Weixin.dll patching
   (superseded by per-session WCDB anti-revoke triggers)
+- `wechattweak/` — reference for macOS WeChat binary patching (sunnyyoung,
+  AGPL-3.0); not merged — the WCDB trigger approach covers macOS too
+  (`libwcdb_api.dylib` exports the anti-revoke API)

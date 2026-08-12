@@ -5,14 +5,14 @@
 <h1 align="center">Weport</h1>
 
 <p align="center">
-  <b>轻量、本地化的微信聊天记录导出与分析工具（Windows）</b><br />
+  <b>轻量、本地化的微信聊天记录导出与分析工具（Windows · macOS）</b><br />
   一键导出全部私聊与群聊 · 10 种导出格式 · 新消息置顶弹窗 · 防撤回 · WeportAI 聊天历史分析助手
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/github/v/release/Panther114/Weport" alt="Latest release" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
-  <img src="https://img.shields.io/badge/platform-Windows-blue" alt="Windows" />
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20(arm64)-blue" alt="Windows | macOS (arm64)" />
   <img src="https://img.shields.io/badge/WeChat-4.x-brightgreen" alt="WeChat 4.x" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20V4%20Flash-purple" alt="DeepSeek V4 Flash" />
 </p>
@@ -21,7 +21,7 @@
 
 ## ✨ 这是什么？
 
-Weport 是一款 Windows 桌面应用，直接读取本机**微信 4.x** 的聊天数据，把全部联系人、群聊记录导出为文件，还能用 **WeportAI** 直接对聊天记录提问、总结、复盘——核心处理都在本机完成。
+Weport 是一款跨平台桌面应用（Windows · macOS Apple Silicon），直接读取本机**微信 4.x** 的聊天数据，把全部联系人、群聊记录导出为文件，还能用 **WeportAI** 直接对聊天记录提问、总结、复盘——核心处理都在本机完成。
 
 - 🔒 **本地优先** — 微信数据不出本机，不上传任何内容
 - 📦 **一键导出** — 全部私聊 + 群聊，不用逐个选择
@@ -51,10 +51,22 @@ Weport 是一款 Windows 桌面应用，直接读取本机**微信 4.x** 的聊�
 
 ## 🚀 快速开始
 
-1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包并安装
+### Windows
+
+1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-Setup.exe`）并安装
 2. 打开 Weport，在「连接微信」页选择数据目录（自动检测 `xwechat_files` 文件夹）
 3. 按页面提示**获取解密密钥**（见下方说明）
 4. 切到「导出数据」页，选择格式与输出文件夹，点击**导出全部聊天记录**
+
+### macOS（Apple Silicon）
+
+1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-arm64.dmg`），打开后将 Weport 拖入「应用程序」
+2. 首次打开：右键 Weport →「打开」（未经 Apple 公证的 ad-hoc 签名应用首次需要手动放行）
+3. 打开 Weport，在「连接微信」页选择数据目录（自动检测 `~/Library/Containers/com.tencent.xinWeChat/...`）
+4. 按页面提示**获取解密密钥**（见下方说明）
+5. 切到「导出数据」页，选择格式与输出文件夹，点击**导出全部聊天记录**
+
+> macOS 自动获取密钥依赖系统调试权限（`task_for_pid`）：需要**关闭 SIP**（`csrutil disable`）或在系统提示授权时输入管理员密码；获取失败时界面会给出当前微信版本对应的排障步骤。防撤回、导出与弹窗功能不需要关闭 SIP。
 
 ### 🔑 获取解密密钥（重要）
 
@@ -104,16 +116,27 @@ WeportAI 是 Weport 内置的聊天历史分析环境（v0.8 起）：把 DeepSe
 
 ## 🛠️ 开发
 
-环境要求：Node 20+，Windows。
+环境要求：Node 20+。Windows / macOS 均可开发与构建（构建需在对应平台上进行）。
 
 ```sh
-npm install                       # 安装依赖 + 同步运行时 DLL
+npm install                       # 安装依赖（Windows 额外同步运行时 DLL）
 npm run dev                       # 开发模式（vite + electron）
 npm run typecheck                 # 渲染进程 + 主进程类型检查
-npm run build                     # 构建 NSIS 安装包（release/ 目录）
+npm run build                     # Windows: 构建 NSIS 安装包（release/ 目录）
 npm run build:dir                 # 免安装构建（迭代更快）
-powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # UI 冒烟测试（自动截屏 + 内容断言）
+npx electron-builder --mac dmg zip --arm64 --publish never   # macOS: 构建 DMG + ZIP（arm64）
+powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # Windows UI 冒烟测试（自动截屏 + 内容断言）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1 -PublishToDocs   # 生成并发布 README 截图
+```
+
+macOS 打包前需为密钥 helper 恢复可执行位（Git 不跟踪 exec bit）：
+
+```sh
+chmod +x resources/key/macos/universal/xkey_helper \
+  resources/key/macos/universal/xkey_helper_macos \
+  resources/key/macos/universal/image_scan_helper \
+  resources/key/macos/universal/libwx_key.dylib \
+  resources/welive/macos/arm64/welive
 ```
 
 `capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截图「连接 / 导出 / WeportAI / 通知弹窗」四个画面并断言非空。该模式**全部使用脱敏演示数据**（假路径、假密钥、演示账号），不会把真实个人信息截进 README。
@@ -122,20 +145,29 @@ powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1 -PublishToDocs  
 
 | 目录 | 说明 |
 |------|------|
-| `electron/appMain.ts` | 主进程：窗口、托盘、IPC、更新、导出、通知管线、QA 截图模式 |
+| `electron/appMain.ts` | 主进程：窗口、托盘、IPC、更新、导出、通知管线、QA 截图模式（按平台选择密钥服务与开机自启实现） |
 | `electron/services/` | 引擎（WeFlow WCDB 栈的 TypeScript 移植）：会话、WCDB、密钥、导出、推送 |
 | `electron/services/weportAiService.ts` | WeportAI：agent 循环、工具调用、记忆/笔记工作区、脱敏日志 |
-| `electron/wcdbHost.ts` | WCDB 宿主子进程（以 `WeFlow.exe --wcdb-host` 运行，IPC 通信） |
-| `electron/windows/notificationWindow.ts` | 液态玻璃通知弹窗 |
+| `electron/wcdbHost.ts` | WCDB 宿主子进程（`WeFlow[.exe] --wcdb-host` 硬链接运行，IPC 通信） |
+| `electron/windows/notificationWindow.ts` | 通知弹窗（Windows 液态玻璃 / 跨平台 Chromium 桌面流回退） |
 | `src/` | React 渲染层（主界面 + 通知窗口 + WeportAI 面板） |
-| `resources/` | 原生 DLL：`wcdb` / `key` / `wedecrypt` / `runtime` |
+| `resources/` | 各平台原生库：`wcdb` / `key` / `wedecrypt` / `welive` / `runtime`（win32 + macos） |
 
 ## 🧭 行为约定
 
-- 关闭窗口默认**最小化到托盘**，从托盘菜单「退出」才会完全退出
-- 开机自启支持**静默启动**（`--background`，不显示主窗口）
+- 关闭窗口默认**最小化到托盘**，从托盘菜单「退出」才会完全退出（macOS 上关闭窗口同样隐藏，可从 Dock 菜单栏图标唤出）
+- 开机自启支持**静默启动**（`--background`，不显示主窗口；Windows 写 Run 键，macOS 注册 LoginItem）
 - 通知弹窗为独立置顶窗口，不抢占焦点；点击弹窗可唤出主窗口
 - 数据目录与密钥保存在本机，重启后自动恢复
+
+## 🖥️ 平台支持
+
+| 平台 | 架构 | 安装包 | 备注 |
+|------|------|--------|------|
+| Windows | x64 | `.exe`（NSIS） | 微信 4.x，完整功能 |
+| macOS | Apple Silicon（arm64） | `.dmg` / `.zip` | 微信 4.x；自动获取密钥需关闭 SIP 或按提示授权 |
+
+> Intel Mac（x64）暂不支持；Linux 暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）。
 
 ## 🔐 隐私
 

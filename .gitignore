@@ -53,6 +53,8 @@ WeFlow/
 /RevokeMsgPatcher/
 RevokeMsgPatcher/
 /Reasonix/
+/wechattweak/
+wechattweak/
 
 # Sensitive QA fixture - contains real wxids/paths/chat content, never commit
 replay-payload.json

@@ -1,0 +1,75 @@
+name: Attach macOS installer to latest release
+
+# 手动运行：从指定分支（默认 main，需包含 macOS 支持代码）构建 macOS
+# 安装包（arm64），并附加到当前最新 GitHub Release 的已有 tag 上。
+# 不创建新 release、不改动版本号。适用于「给已发布的当前版本补上 mac 安装包」。
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '构建所用分支（必须包含 macOS 支持代码）'
+        required: false
+        default: 'main'
+      releaseTag:
+        description: '要附加到的 Release tag（留空 = 自动选择最新 release）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac-arm64:
+    runs-on: macos-14
+    steps:
+      - name: Resolve target release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.releaseTag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --json tagName -q .tagName)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Will attach macOS installer to release: $TAG"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Ensure mac helpers are executable
+        run: |
+          chmod +x resources/key/macos/universal/xkey_helper \
+            resources/key/macos/universal/xkey_helper_macos \
+            resources/key/macos/universal/image_scan_helper \
+            resources/key/macos/universal/libwx_key.dylib \
+            resources/welive/macos/arm64/welive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build macOS installer (arm64, ad-hoc signed)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac dmg zip --arm64 --publish never --config.npmRebuild=false
+
+      - name: Attach to existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.resolve.outputs.tag }}" \
+            release/Weport-*.dmg release/Weport-*.zip release/latest-mac.yml \
+            --clobber
+          echo "macOS installer attached to ${{ steps.resolve.outputs.tag }}"
+          gh release view "${{ steps.resolve.outputs.tag }}" --json tagName,url -q '"tag=\(.tagName) url=\(.url)"'

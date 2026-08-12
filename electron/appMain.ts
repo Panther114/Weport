@@ -29,6 +29,7 @@ import { exportService } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
+import { KeyServiceMac } from './services/keyServiceMac'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 import {
@@ -147,11 +148,15 @@ function migrateLegacySettings() {
 }
 
 // ---------------------------------------------------------------------------
-// 开机自启（直接写 HKCU Run 键 —— Electron 的 setLoginItemSettings 在本构建
-// 上静默失效，且旧版 Rust 应用就是写注册表，保持同一机制）
+// 开机自启
+// - Windows：直接写 HKCU Run 键（Electron 的 setLoginItemSettings 在本构建上
+//   静默失效，且旧版 Rust 应用就是写注册表，保持同一机制）
+// - macOS：LoginItems（app.setLoginItemSettings）
 // ---------------------------------------------------------------------------
 const RUN_KEY_PATH = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 const RUN_VALUE_NAME = 'Weport'
+const isWindowsHost = process.platform === 'win32'
+const isMacHost = process.platform === 'darwin'
 
 const getLaunchAtStartupUnsupportedReason = (): string | null => {
   if (!app.isPackaged) return '仅安装后的版本支持开机自启动'
@@ -159,6 +164,14 @@ const getLaunchAtStartupUnsupportedReason = (): string | null => {
 }
 
 const getSystemLaunchAtStartup = (): boolean => {
+  if (isMacHost) {
+    try {
+      return app.getLoginItemSettings({ path: process.execPath }).openAtLogin
+    } catch {
+      return false
+    }
+  }
+  if (!isWindowsHost) return false
   const { execFileSync } = require('child_process') as typeof import('child_process')
   try {
     execFileSync(process.env.ComSpec || 'cmd.exe', ['/c', 'reg', 'query', RUN_KEY_PATH, '/v', RUN_VALUE_NAME], {
@@ -171,7 +184,38 @@ const getSystemLaunchAtStartup = (): boolean => {
   }
 }
 
+/** macOS 专用：读取当前 LoginItem 的启动参数（用于核对 --background 是否一致） */
+const getMacLoginItemArgs = (): string[] => {
+  try {
+    const settings = app.getLoginItemSettings({ path: process.execPath })
+    return (settings.launchItems || []).find((item) => item.enabled)?.args || []
+  } catch {
+    return []
+  }
+}
+
 const setSystemLaunchAtStartup = (enabled: boolean): { success: boolean; enabled: boolean; error?: string } => {
+  if (isMacHost) {
+    const silent = configService?.get('silentStartup') === true
+    try {
+      app.setLoginItemSettings({
+        openAtLogin: enabled,
+        openAsHidden: enabled && silent,
+        args: enabled && silent ? ['--background'] : [],
+        path: process.execPath,
+      })
+      return { success: true, enabled: getSystemLaunchAtStartup() }
+    } catch (e) {
+      return {
+        success: false,
+        enabled: getSystemLaunchAtStartup(),
+        error: `设置开机自启动失败: ${String((e as Error)?.message || e)}`,
+      }
+    }
+  }
+  if (!isWindowsHost) {
+    return { success: false, enabled: false, error: '当前平台不支持开机自启动' }
+  }
   const { execFileSync } = require('child_process') as typeof import('child_process')
   const cmd = process.env.ComSpec || 'cmd.exe'
   try {
@@ -217,8 +261,9 @@ const applyLaunchAtStartupPreference = (
   return { ...result, supported: true }
 }
 
-/** 读取当前 Run 键的启动命令值（不含则返回 null） */
+/** 读取当前 Run 键的启动命令值（不含则返回 null；仅 Windows） */
 const getRunKeyValue = (): string | null => {
+  if (!isWindowsHost) return null
   const { execFileSync } = require('child_process') as typeof import('child_process')
   try {
     const stdout = execFileSync(process.env.ComSpec || 'cmd.exe', ['/c', 'reg', 'query', RUN_KEY_PATH, '/v', RUN_VALUE_NAME], {
@@ -247,21 +292,33 @@ const syncLaunchAtStartupPreference = () => {
     if (getSystemLaunchAtStartup()) setSystemLaunchAtStartup(false)
     return
   }
-  // 已开启时：不仅要保证 Run 键存在，还要保证命令行参数与 silentStartup 一致
+  // 已开启时：不仅要保证登录项存在，还要保证启动参数与 silentStartup 一致
   // （否则「启动时隐藏到托盘」勾选开启但开机仍然弹窗——只有再点一次开关才会生效）
-  const desired = `"${process.execPath}"${silent ? ' --background' : ''}`
-  if (getRunKeyValue() === desired) return
-  setSystemLaunchAtStartup(true)
+  if (isWindowsHost) {
+    const desired = `"${process.execPath}"${silent ? ' --background' : ''}`
+    if (getRunKeyValue() === desired) return
+    setSystemLaunchAtStartup(true)
+    return
+  }
+  if (isMacHost) {
+    const currentArgs = getMacLoginItemArgs()
+    const argsMatch = silent ? currentArgs.includes('--background') : !currentArgs.includes('--background')
+    if (getSystemLaunchAtStartup() && argsMatch) return
+    setSystemLaunchAtStartup(true)
+    return
+  }
 }
 
 /**
- * 清理历史版本（v0.7.x 早期用 setLoginItemSettings）残留的 electron.app.* Run 值：
+ * 清理历史版本（v0.7.x 早期用 setLoginItemSettings）残留的 electron.app.* Run 值
+ * （仅 Windows）：
  * - `electron.app.Electron` 可能指向开发目录的 node_modules\electron，开机时会把
  *   裸 Electron 一起拉起（表现为开机多出一个 "Electron" 窗口）；
  * - `electron.app.Weport` 与当前 `Weport` 值重复，会造成开机双实例竞争，触发
  *   second-instance 把静默启动（--background）的主窗口带出来。
  */
 const cleanupLegacyAutostartEntries = () => {
+  if (!isWindowsHost) return
   const { execFileSync } = require('child_process') as typeof import('child_process')
   const cmd = process.env.ComSpec || 'cmd.exe'
   for (const name of ['electron.app.Weport', 'electron.app.Electron']) {
@@ -829,7 +886,7 @@ function registerIpcHandlers() {
 
   // 密钥
   ipcMain.handle('key:autoGetDbKey', async () => {
-    const keyService = new KeyService()
+    const keyService = process.platform === 'darwin' ? new KeyServiceMac() : new KeyService()
     const result = await keyService.autoGetDbKey(180_000, (message, level) => {
       mainWindow?.webContents.send('key:dbKeyStatus', { message, level })
     })
@@ -2138,8 +2195,8 @@ async function runUiDumpMode() {
 // 启动 / 退出
 // ---------------------------------------------------------------------------
 function startApp() {
-  if (process.platform !== 'win32') {
-    console.warn('[Weport] 当前仅支持 Windows')
+  if (process.platform !== 'win32' && process.platform !== 'darwin') {
+    console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS）')
   }
 
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'

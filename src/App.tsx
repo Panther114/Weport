@@ -1667,7 +1667,7 @@ export default function App() {
                   <div>
                     <strong>开机自启</strong>
                     <span className="hint">
-                      {startupSupported ? '登录 Windows 后自动启动 Weport' : startupReason || '当前环境不支持'}
+                      {startupSupported ? '登录系统后自动启动 Weport' : startupReason || '当前环境不支持'}
                     </span>
                   </div>
                 </div>

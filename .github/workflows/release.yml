@@ -59,3 +59,55 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
+
+  build-mac:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          pkg_version="$(node -p "require('./package.json').version")"
+          ref_name="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          tag_version="${ref_name#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "Tag $tag_version does not match package version $pkg_version" >&2
+            exit 1
+          fi
+
+      - name: Ensure mac helpers are executable
+        run: |
+          chmod +x resources/key/macos/universal/xkey_helper \
+            resources/key/macos/universal/xkey_helper_macos \
+            resources/key/macos/universal/image_scan_helper \
+            resources/key/macos/universal/libwx_key.dylib \
+            resources/welive/macos/arm64/welive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build macOS installer (arm64, ad-hoc signed)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac dmg zip --arm64 --publish never --config.npmRebuild=false
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Weport-*.dmg
+            release/Weport-*.zip
+            release/latest-mac.yml
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: false
