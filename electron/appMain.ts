@@ -3314,6 +3314,24 @@ async function runScreenshotMode() {
         ])
       } else {
         log('WARN [screenshot] AI tab did not render')
+        const aiState = await mainWindow?.webContents
+          .executeJavaScript(
+            `(() => {
+              const tab = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes('WeportAI'))
+              const workspace = document.querySelector('.workspace')
+              const active = document.querySelector('.tab[data-active="true"]')
+              return JSON.stringify({
+                tabFound: !!tab,
+                tabDisabled: tab ? (tab as HTMLButtonElement).disabled : null,
+                activeTab: active ? (active.textContent || '').trim() : null,
+                wsChildren: workspace ? Array.from(workspace.children).map((c: Element) => (c.className || c.tagName).toString()).slice(0, 4) : null,
+                wsText: workspace ? (workspace.textContent || '').slice(0, 120) : null
+              })
+            })()`,
+            true,
+          )
+          .catch(() => 'eval-failed')
+        log('WARN [screenshot] AI tab state:', aiState)
       }
     } catch (e) {
       log('WARN [screenshot] AI capture failed:', e)
