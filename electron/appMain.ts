@@ -3063,6 +3063,14 @@ async function runScreenshotMode() {
     mkdirSync(outDir, { recursive: true })
   } catch { /* noop */ }
 
+  // 独立于 stdout 的日志文件：CI 上重定向拿不到 GUI 应用的控制台输出，
+  // 截图失败时靠这个文件定位（harness 失败分支会打印它的尾部）
+  const logFile = join(outDir, 'screenshot.log')
+  const log = (msg: string) => {
+    console.log(msg)
+    try { appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`) } catch { /* noop */ }
+  }
+
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
   // capturePage 在 GPU 负载高时可能永不 resolve，加超时兜底
   const captureWithTimeout = (win: BrowserWindow, ms: number) =>
@@ -3195,7 +3203,7 @@ async function runScreenshotMode() {
         '.tab', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
       ])
     } catch (e) {
-      console.warn('[screenshot] main capture failed:', e)
+      log('WARN [screenshot] main capture failed:', e)
     }
   }
 
@@ -3224,10 +3232,10 @@ async function runScreenshotMode() {
         } catch { /* noop */ }
         await dumpRects('export-bottom-rects.json', ['.primary-btn.block', '.progress', '.export-meta .row'])
       } else {
-        console.warn('[screenshot] export tab did not render')
+        log('WARN [screenshot] export tab did not render')
       }
     } catch (e) {
-      console.warn('[screenshot] export capture failed:', e)
+      log('WARN [screenshot] export capture failed:', e)
     }
   }
 
@@ -3243,10 +3251,10 @@ async function runScreenshotMode() {
           '.panel-head .primary-btn', '.count-pill',
         ])
       } else {
-        console.warn('[screenshot] antirecall tab did not render')
+        log('WARN [screenshot] antirecall tab did not render')
       }
     } catch (e) {
-      console.warn('[screenshot] antirecall capture failed:', e)
+      log('WARN [screenshot] antirecall capture failed:', e)
     }
   }
 
@@ -3275,10 +3283,10 @@ async function runScreenshotMode() {
           '.switch-label', '.status-dot', '.check-row', '.checklist', '.setting-row',
         ])
       } else {
-        console.warn('[screenshot] notifications tab did not render')
+        log('WARN [screenshot] notifications tab did not render')
       }
     } catch (e) {
-      console.warn('[screenshot] notifications capture failed:', e)
+      log('WARN [screenshot] notifications capture failed:', e)
     }
   }
 
@@ -3288,15 +3296,26 @@ async function runScreenshotMode() {
       await clickTab('WeportAI')
       if ((await waitForDom('.ai-shell')) && (await waitForDom('.ai-msg'))) {
         await sleep(500)
-        await saveStable(mainWindow, 'ai.png', 12, 30)
+        const ok = await saveStable(mainWindow, 'ai.png', 12, 30)
+        if (!ok) {
+          // CI 上偶发面板挂载/动画未就绪：切走再切回，全新挂载后重试一次
+          log('WARN [screenshot] ai.png first attempt failed, remounting AI panel...')
+          await clickTab('设置')
+          await sleep(800)
+          await clickTab('WeportAI')
+          if ((await waitForDom('.ai-shell')) && (await waitForDom('.ai-msg'))) {
+            await sleep(500)
+            await saveStable(mainWindow, 'ai.png', 12, 30)
+          }
+        }
         await dumpRects('ai-rects.json', [
           '.ai-input', '.ai-send', '.ai-chat-item', '.ai-ws-note', '.ai-ws-usage', '.ai-msg', '.ai-ws-body',
         ])
       } else {
-        console.warn('[screenshot] AI tab did not render')
+        log('WARN [screenshot] AI tab did not render')
       }
     } catch (e) {
-      console.warn('[screenshot] AI capture failed:', e)
+      log('WARN [screenshot] AI capture failed:', e)
     }
   }
 
@@ -3372,10 +3391,10 @@ async function runScreenshotMode() {
         if (rects) writeFileSync(join(outDir, 'popup-rects.json'), JSON.stringify(rects, null, 1), 'utf8')
       } catch { /* noop */ }
     } else {
-      console.warn('[screenshot] popup window not found')
+      log('WARN [screenshot] popup window not found')
     }
   } catch (e) {
-    console.warn('[screenshot] popup capture failed:', e)
+    log('WARN [screenshot] popup capture failed:', e)
   }
 
   // 7) v0.9 页面截图（演示数据，无真实个人信息）
@@ -3456,17 +3475,17 @@ async function runScreenshotMode() {
     await clickTab('设置')
   })
 
-  console.log('[screenshot] captures done, shutting down services...')
+  log('[screenshot] captures done, shutting down services...')
   try { messagePushService?.stop() } catch { /* noop */ }
   try { chatService.close() } catch { /* noop */ }
   // 不 await 完整 shutdown（宿主调用可能卡住 180s）——直接强杀宿主后退出
   try { wcdbService.killHostNow() } catch { /* noop */ }
-  console.log('[screenshot] services stopped, exiting...')
+  log('[screenshot] services stopped, exiting...')
   await sleep(200)
-  console.log('[screenshot] calling app.exit(0)')
+  log('[screenshot] calling app.exit(0)')
   isAppQuitting = true
   app.exit(0)
-  console.log('[screenshot] app.exit returned, forcing process.exit')
+  log('[screenshot] app.exit returned, forcing process.exit')
   process.exit(0)
 }
 

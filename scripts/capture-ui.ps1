@@ -109,11 +109,15 @@ function Assert-Captured([string]$Path, [string]$Label) {
   if (-not (Test-Path $Path)) {
     $tail = (Get-Content $appOut -ErrorAction SilentlyContinue | Select-Object -Last 30) -join "`n"
     $errTail = (Get-Content $appErr -ErrorAction SilentlyContinue | Select-Object -Last 10) -join "`n"
+    $shotLog = Join-Path $OutputDir 'screenshot.log'
+    $shotTail = (Get-Content $shotLog -ErrorAction SilentlyContinue | Select-Object -Last 40) -join "`n"
+    Write-Output "--- screenshot.log (tail) ---"
+    Write-Output $shotTail
     Write-Output "--- app.stdout.log (tail) ---"
     Write-Output $tail
     Write-Output "--- app.stderr.log (tail) ---"
     Write-Output $errTail
-    throw "$Label missing - capture failed (see $appOut / $appErr)"
+    throw "$Label missing - capture failed (see $shotLog / $appOut / $appErr)"
   }
 }
 Assert-Captured $mainPng 'main.png'
