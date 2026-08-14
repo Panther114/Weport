@@ -3295,16 +3295,24 @@ async function runScreenshotMode() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await clickTab('WeportAI')
-      if ((await waitForDom('.ai-shell')) && (await waitForDom('.ai-msg'))) {
+      const probe = () =>
+        mainWindow?.webContents
+          .executeJavaScript(`1 + 1`, true)
+          .then((v) => v === 2)
+          .catch(() => false)
+      // CI 上该面板首次挂载可能让渲染进程忙很久（软渲染），放宽等待
+      const mounted =
+        (await waitForDom('.ai-shell', 100)) && (await waitForDom('.ai-msg', 100))
+      log(`[screenshot] AI tab mounted=${mounted} rendererProbe=${await probe()}`)
+      if (mounted) {
         await sleep(500)
         const ok = await saveStable(mainWindow, 'ai.png', 12, 30)
         if (!ok) {
-          // CI 上偶发面板挂载/动画未就绪：切走再切回，全新挂载后重试一次
           log('WARN [screenshot] ai.png first attempt failed, remounting AI panel...')
           await clickTab('设置')
           await sleep(800)
           await clickTab('WeportAI')
-          if ((await waitForDom('.ai-shell')) && (await waitForDom('.ai-msg'))) {
+          if ((await waitForDom('.ai-shell', 100)) && (await waitForDom('.ai-msg', 100))) {
             await sleep(500)
             await saveStable(mainWindow, 'ai.png', 12, 30)
           }
