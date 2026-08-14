@@ -1,6 +1,7 @@
 import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
+import { avatarCacheService } from './avatarCacheService'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
@@ -98,6 +99,8 @@ export class MessagePushService {
     this.rerunRequested = false
     this.stopFallbackPolling()
     this.resetRuntimeState()
+    // 推送关闭后不再持有 WCDB 连接/监控管道（其他功能需要时会自行重连）
+    try { chatService.close() } catch { /* noop */ }
   }
 
   /**
@@ -1202,6 +1205,10 @@ export class MessagePushService {
     const normalized = String(avatarUrl || '').trim()
     if (!normalized) return undefined
     if (!normalized.startsWith('data:image/')) {
+      // CDN URL：优先本地磁盘缓存（weport-media:// 即时显示），未缓存则后台下载
+      const localized = avatarCacheService.localUrlOrOriginal(normalized)
+      if (localized !== normalized) return localized
+      void avatarCacheService.ensure(normalized)
       return normalized
     }
 

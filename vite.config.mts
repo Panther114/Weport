@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import { resolve } from 'path'
@@ -7,7 +7,40 @@ const handleElectronOnStart = (options: { reload: () => void }) => {
   options.reload()
 }
 
-export default defineConfig({
+// 渲染层 CSP：生产严格、开发兼容 HMR/React Refresh。
+// 必须在 meta 中注入（不能仅靠 session.headers，否则 file:// 下不生效）。
+const cspPlugin = (mode: string): Plugin => {
+  const prod = [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' https: http: data: blob: weport-media:",
+    "media-src 'self' https: http: data: blob: weport-media:",
+    "font-src 'self' data:",
+    "connect-src 'self' https: http: weport-media:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'"
+  ].join('; ')
+  const dev = prod
+    .replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
+    .replace('connect-src', "connect-src ws: wss:")
+  return {
+    name: 'inject-csp',
+    transformIndexHtml: {
+      order: 'pre',
+      handler(html) {
+        const csp = mode === 'development' ? dev : prod
+        return html.replace(
+          '<meta name="viewport"',
+          `<meta http-equiv="Content-Security-Policy" content="${csp}" />\n    <meta name="viewport"`
+        )
+      }
+    }
+  }
+}
+
+export default defineConfig(({ mode }) => ({
   base: './',
   server: {
     port: 3000,
@@ -20,6 +53,7 @@ export default defineConfig({
     }
   },
   plugins: [
+    cspPlugin(mode),
     react(),
     electron([
       {
@@ -82,6 +116,22 @@ export default defineConfig({
             }
           }
         }
+      },
+      {
+        entry: 'electron/annualReportWorker.ts',
+        onstart: handleElectronOnStart,
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: ['electron'],
+              output: {
+                entryFileNames: 'annualReportWorker.js',
+                codeSplitting: false
+              }
+            }
+          }
+        }
       }
     ])
   ],
@@ -91,5 +141,5 @@ export default defineConfig({
       '@': resolve(import.meta.dirname, 'src')
     }
   }
-})
+}))
 

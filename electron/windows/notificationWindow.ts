@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, screen } from "electron";
+import { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell } from "electron";
 import { join } from "path";
 import { ConfigService } from "../services/config";
 
@@ -125,7 +125,14 @@ function ensureGlassPanel(
 let cachedSnapshot: string | null = null;
 
 async function captureDesktopSnapshot(): Promise<string | null> {
+  // 弹窗自身此时已在屏幕上（本函数用于生成玻璃回退背景）。若不临时启用
+  // 内容保护，截图会把弹窗自己也拍进去，玻璃背景里出现"弹窗套弹窗"。
+  // 拍摄期间临时排除自身，拍完立即恢复（用户要求弹窗可被系统截图/录屏）。
+  let wasProtection = false;
   try {
+    if (notificationWindow && !notificationWindow.isDestroyed()) {
+      try { wasProtection = true; notificationWindow.setContentProtection(true); } catch { /* noop */ }
+    }
     const display = screen.getPrimaryDisplay();
     const scale = 0.5; // 半分辨率：玻璃模糊会抹平降采样，肉眼不可辨
     const sources = await desktopCapturer.getSources({
@@ -144,6 +151,12 @@ async function captureDesktopSnapshot(): Promise<string | null> {
   } catch (error) {
     console.warn("[NotificationWindow] Failed to capture desktop snapshot:", error);
     return null;
+  } finally {
+    try {
+      if (wasProtection && notificationWindow && !notificationWindow.isDestroyed()) {
+        notificationWindow.setContentProtection(false);
+      }
+    } catch { /* noop */ }
   }
 }
 
@@ -249,6 +262,16 @@ export function createNotificationWindow() {
 
   notificationWindow.on("closed", () => {
     notificationWindow = null;
+  });
+
+  notificationWindow.webContents.on("will-navigate", (event, url) => {
+    const devServer = process.env.VITE_DEV_SERVER_URL || "";
+    const allowed = devServer ? url.startsWith(devServer) : url.startsWith("file://");
+    if (!allowed) event.preventDefault();
+  });
+  notificationWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
   });
 
   return notificationWindow;
@@ -491,20 +514,27 @@ export async function registerNotificationHandlers() {
   // Handle resize request from renderer
   ipcMain.on("notification:resize", (event, { width, height }) => {
     if (notificationWindow && !notificationWindow.isDestroyed()) {
-      // Enforce max-height if needed, or trust renderer
-      // Ensure it doesn't go off screen bottom?
-      // Logic in showAndSend handles position, but we need to keep anchor point (top-right usually).
-      // If we resize, we should re-calculate position to keep it anchored?
-      // Actually, setSize changes size. If it's top-right, x/y stays same -> window grows down. That's fine for top-right.
-      // If bottom-right, growing down pushes it off screen.
+      const win = notificationWindow;
+      const prevSize = win.getSize();
+      applyWindowSize(win, Math.round(width), Math.round(height));
 
-      // Simple version: just setSize. For V1 we assume Top-Right.
-      // But wait, the config supports bottom-right.
-      // We can re-call setPosition or just let it be.
-      // If bottom-right, y needs to prevent overflow.
-
-      // For now, let's just set the size as requested.
-      applyWindowSize(notificationWindow, Math.round(width), Math.round(height));
+      // 底部定位（bottom-left / bottom-right）：窗口按渲染层实测高度增高后，
+      // 必须重新贴底，否则会向下长出屏幕（此前只 setSize，Y 不再重算）。
+      const [, newH] = win.getSize();
+      if (Math.round(newH) !== Math.round(prevSize[1])) {
+        void (async () => {
+          try {
+            const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
+            if (position === "bottom-left" || position === "bottom-right") {
+              const workArea = screen.getPrimaryDisplay().workArea;
+              const padding = 20;
+              const [winX] = win.getPosition();
+              const newY = workArea.y + workArea.height - newH - padding;
+              win.setPosition(winX, newY);
+            }
+          } catch { /* noop */ }
+        })();
+      }
     }
   });
 

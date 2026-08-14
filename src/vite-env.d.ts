@@ -73,6 +73,7 @@ interface ElectronApi {
     getSetup: () => Promise<{
       hasApiKey: boolean
       baseUrl: string
+      baseUrlError?: string
       model: string
       maxTokens: number
       reasoningEffort: string
@@ -119,6 +120,60 @@ interface ElectronApi {
     send: (chatId: string, text: string) => Promise<{ success: boolean; error?: string }>
     abort: (chatId: string) => Promise<{ success: boolean }>
     onEvent: (callback: (event: any) => void) => () => void
+  }
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; timeline?: any[]; error?: string }>
+    getSnsUsernames: () => Promise<{ success: boolean; usernames?: string[]; error?: string }>
+    getUserPostCounts: (options?: { preferCache?: boolean; forceRefresh?: boolean }) => Promise<{ success: boolean; counts?: Record<string, number>; error?: string }>
+    getExportStats: (options?: { allowTimelineFallback?: boolean; preferCache?: boolean; forceRefresh?: boolean }) => Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number; myPosts: number | null }; error?: string }>
+    getExportStatsFast: () => Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number; myPosts: number | null }; error?: string }>
+    getUserPostStats: (username: string) => Promise<{ success: boolean; data?: { username: string; totalPosts: number }; error?: string }>
+    debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
+    proxyImage: (payload: string | { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; videoPath?: string; cachePath?: string; status?: number; error?: string }>
+    downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    exportTimeline: (options: any) => Promise<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; paused?: boolean; stopped?: boolean; error?: string }>
+    selectExportDir: () => Promise<{ canceled: boolean; filePath?: string }>
+    installBlockDeleteTrigger: () => Promise<{ success: boolean; alreadyInstalled?: boolean; error?: string }>
+    uninstallBlockDeleteTrigger: () => Promise<{ success: boolean; error?: string }>
+    checkBlockDeleteTrigger: () => Promise<{ success: boolean; installed?: boolean; error?: string }>
+    deleteSnsPost: (postId: string) => Promise<{ success: boolean; error?: string }>
+    downloadEmoji: (params: { url: string; encryptUrl?: string; aesKey?: string }) => Promise<{ success: boolean; localPath?: string; error?: string }>
+    getCacheMigrationStatus: () => Promise<{ success: boolean; needed: boolean; inProgress: boolean; totalFiles: number; items?: Array<{ label: string; fileCount: number }>; error?: string }>
+    startCacheMigration: () => Promise<{ success: boolean; copied?: number; skipped?: number; totalFiles?: number; error?: string }>
+    onExportProgress: (callback: (payload: any) => void) => () => void
+    onCacheMigrationProgress: (callback: (payload: any) => void) => () => void
+  }
+  analytics: {
+    getOverallStatistics: (force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
+    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    getTimeDistribution: () => Promise<{ success: boolean; data?: any; error?: string }>
+    getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
+    getExcludedUsernames: () => Promise<{ success: boolean; data?: string[]; error?: string }>
+    setExcludedUsernames: (usernames: string[]) => Promise<{ success: boolean; data?: string[]; error?: string }>
+    getExcludeCandidates: () => Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string }>; error?: string }>
+    clearCache: () => Promise<{ success: boolean; error?: string }>
+  }
+  groupAnalytics: {
+    getGroupChats: () => Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; memberCount: number; messageCount: number; avatarUrl?: string }>; error?: string }>
+    getGroupMembers: (chatroomId: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    getGroupMembersPanelData: (chatroomId: string, options?: any) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    getGroupMessageRanking: (chatroomId: string, limit?: number, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    getGroupActiveHours: (chatroomId: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: { hourlyDistribution: Record<number, number> }; error?: string }>
+    getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: any; error?: string }>
+    getGroupMemberAnalytics: (chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: any; error?: string }>
+    getGroupMemberMessages: (chatroomId: string, memberUsername: string, options?: any) => Promise<{ success: boolean; data?: { messages: any[]; hasMore: boolean; nextCursor: number }; error?: string }>
+    exportGroupMembers: (chatroomId: string, outputPath: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    exportGroupMemberMessages: (chatroomId: string, memberUsername: string, outputPath: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; filePath?: string; error?: string }>
+  }
+  annualReport: {
+    getAvailableYears: () => Promise<{ success: boolean; data?: number[]; error?: string; meta?: any }>
+    startAvailableYearsLoad: () => Promise<{ success: boolean; taskId?: string; reused?: boolean; snapshot?: any; error?: string }>
+    cancelAvailableYearsLoad: (taskId: string) => Promise<{ success: boolean; error?: string }>
+    generateReport: (year: number) => Promise<{ success: boolean; data?: any; error?: string }>
+    exportImages: (payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) => Promise<{ success: boolean; dir?: string; error?: string }>
+    captureCurrentWindow: () => Promise<{ success: boolean; dataUrl?: string; size?: number[]; error?: string }>
+    onProgress: (callback: (payload: any) => void) => () => void
+    onAvailableYearsProgress: (callback: (payload: any) => void) => () => void
   }
   process: {
     platform: string

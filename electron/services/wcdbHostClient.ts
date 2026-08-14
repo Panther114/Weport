@@ -24,10 +24,13 @@ function resolveHostExe(): string {
   const hostName = process.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
   const hostPath = join(dirname(target), hostName)
 
-  // 已存在且大小一致 → 直接复用（覆盖安装/更新后 exe 大小变化则重建链接）
+  // 已存在且大小+修改时间一致 → 直接复用（覆盖安装/更新后 exe 变化则重建链接；
+  // 只比大小会漏掉「新 exe 与旧版本恰好同尺寸」的更新——硬链接指向的仍是旧文件）
   const needRefresh = (() => {
     try {
-      return !existsSync(hostPath) || statSync(hostPath).size !== statSync(target).size
+      const s = statSync(hostPath)
+      const t = statSync(target)
+      return s.size !== t.size || Math.floor(s.mtimeMs) !== Math.floor(t.mtimeMs)
     } catch {
       return true
     }

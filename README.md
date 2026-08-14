@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>轻量、本地化的微信聊天记录导出与分析工具（Windows · macOS）</b><br />
-  一键导出全部私聊与群聊 · 10 种导出格式 · 新消息置顶弹窗 · 防撤回 · WeportAI 聊天历史分析助手
+  一键导出全部私聊与群聊 · 朋友圈归档 · 微信数据分析 · 新消息置顶弹窗 · 防撤回 · WeportAI 聊天历史分析助手
 </p>
 
 <p align="center">
@@ -21,11 +21,13 @@
 
 ## ✨ 这是什么？
 
-Weport 是一款跨平台桌面应用（Windows · macOS Apple Silicon），直接读取本机**微信 4.x** 的聊天数据，把全部联系人、群聊记录导出为文件，还能用 **WeportAI** 直接对聊天记录提问、总结、复盘——核心处理都在本机完成。
+Weport 把微信 4.x 的本地聊天数据变成你自己的文件与洞察：一键导出全部私聊和群聊、离线浏览历史朋友圈、统计这一年聊了谁最多——所有处理都在本机完成，数据不出门。想直接问问题？WeportAI 可以对聊天记录提问、总结、复盘。
 
 - 🔒 **本地优先** — 微信数据不出本机，不上传任何内容
 - 📦 **一键导出** — 全部私聊 + 群聊，不用逐个选择
 - 🎨 **10 种格式** — TXT / JSON / HTML / XLSX / Markdown / ChatLab / SQL 等
+- 🖼️ **朋友圈归档（v0.9）** — 全量浏览历史朋友圈、按人/关键词/日期筛选、图片视频解密预览、导出（JSON/HTML/ARKME/Markdown）、防删除
+- 📊 **微信数据分析（v0.9）** — 全局统计（时段分布、联系排行榜、排除名单）、群聊分析（成员排行、活跃热力图、媒体构成、成员画像）、年度报告
 - 🤖 **WeportAI** — 基于 DeepSeek V4 Flash 的聊天历史分析助手，带 17 个检索/分析工具与长期记忆
 - 🔔 **消息提醒** — 独立置顶弹窗，新消息与撤回即时通知（可按会话过滤）
 - 🛡️ **防撤回** — 会话级 WCDB 触发器，撤回的消息在微信本地仍然可见
@@ -41,9 +43,33 @@ Weport 是一款跨平台桌面应用（Windows · macOS Apple Silicon），直�
 
 ![导出数据页](docs/screenshots/export.png)
 
+**朋友圈** —— 全量时间线，左侧按发布者 / 关键词 / 日期筛选，媒体本地解密预览：
+
+![朋友圈](docs/screenshots/sns.png)
+
+**分析入口** —— 全局分析与群聊分析，两块入口并排选择：
+
+![分析入口](docs/screenshots/analytics-hub.png)
+
+**全局分析** —— 消息类型构成、时段分布、联系排行榜与统计排除名单：
+
+![全局分析](docs/screenshots/analytics-global.png)
+
+**群聊分析** —— 成员列表、消息排行、活跃时段与媒体构成：
+
+![群聊分析](docs/screenshots/analytics-group.png)
+
+**年度报告** —— 一年到头，聊了谁最多、哪一天最热闹：
+
+![年度报告](docs/screenshots/annual-report.png)
+
 **WeportAI** —— 对聊天记录提问：工具调用、思考过程与 Markdown 结论，右侧为长期记忆与笔记：
 
-![WeportAI 分析助手](docs/screenshots/ai.png)
+![WexportAI 分析助手](docs/screenshots/ai.png)
+
+**设置** —— 开机自启、启动行为与色彩主题（浅蓝 / 黑白）：
+
+![设置](docs/screenshots/settings.png)
 
 **通知弹窗** —— 液态玻璃风格，置顶显示、不抢焦点：
 
@@ -79,7 +105,7 @@ Weport 是一款跨平台桌面应用（Windows · macOS Apple Silicon），直�
 
 ## 🤖 WeportAI · 聊天历史分析助手
 
-WeportAI 是 Weport 内置的聊天历史分析环境（v0.8 起）：把 DeepSeek V4 Flash 与 17 个本地检索工具组合成一个**可推理的 agent**，让你用自然语言问自己的聊天记录。
+WexportAI 把 DeepSeek V4 Flash 与 17 个本地检索工具组合成一个**可推理的 agent**——不用写查询，直接用自然语言问自己的聊天记录（v0.8 起）。
 
 **可以这样问：**
 
@@ -99,6 +125,25 @@ WeportAI 是 Weport 内置的聊天历史分析环境（v0.8 起）：把 DeepSe
 - **完全可控**：模型、API 地址、最大步数、快捷动作、可用工具都可在设置中调整
 
 > 🔐 隐私：分析时仅把**聊天文本**发送给你配置的模型 API（默认 DeepSeek）。密钥、文件、头像、原始数据库均不会离开本机；调试日志对密钥等敏感内容做脱敏处理。
+
+## 🖼️ 朋友圈（v0.9）
+
+微信的本地 `sns.db` 存着你的全部朋友圈，Wexport 直接读它，离线就能翻任意历史动态：
+
+- **全量浏览** — 分页时间线，按发布者、关键词、日期快速筛选；点击发布者可查看其全部动态
+- **媒体解密** — 图片/实况照片/视频经本地解密后直接预览（内存缓存 + 磁盘缓存加速，无需重新下载）
+- **导出** — JSON / HTML / ARKME JSON / Markdown 四种格式，支持时间范围与媒体文件（图片/实况/视频）选择，后台进度可取消
+- **防删除** — 一键安装朋友圈删除拦截触发器（WCDB 触发器），被删除的动态在本地仍然可见；也可单独删除某条记录
+- **旧缓存迁移** — 自动检测旧版朋友圈媒体缓存目录并迁移，加速历史媒体加载
+
+## 📊 微信数据分析（v0.9）
+
+「分析」模块把所有非 AI 的统计放进一个入口，两块选择：**全局分析**（自己所有私聊的整体画像）与**群聊分析**（单个群的成员与活跃度）：
+
+- **全局分析** — 全部私聊会话的总体统计（消息类型构成、24 小时/星期/月度分布、我的每日消息）、联系排行榜 Top 20、统计排除名单（公众号/广告账号一键排除并即时重算），以及**年度报告**（年度核心好友、每月聊得最多的人、全年 7×24 活跃热力图、深夜王者、互相奔赴、响应速度、高频短语、朋友圈年度统计等，可导出报告图片）
+- **群聊分析** — 选择任意群聊：成员列表（群主/好友标识、消息占比条）、消息排行 Top 20、24 小时活跃时段、媒体构成；点击成员查看画像（统计卡片、活跃时段、高频短语、常用表情、消息记录分页）并可导出 CSV
+
+所有统计基于本地数据实时计算，支持缓存清理与强制刷新，不依赖任何外部服务。
 
 ## 📦 导出格式
 
@@ -139,18 +184,28 @@ chmod +x resources/key/macos/universal/xkey_helper \
   resources/welive/macos/arm64/welive
 ```
 
-`capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截图「连接 / 导出 / WeportAI / 通知弹窗」四个画面并断言非空。该模式**全部使用脱敏演示数据**（假路径、假密钥、演示账号），不会把真实个人信息截进 README。
+`capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截取「连接 / 导出 / 防撤回 / 消息通知 / WeportAI / 朋友圈 / 分析入口 / 全局分析 / 群聊分析 / 年度报告 / 设置 / 通知弹窗」共 12 个画面并逐一断言非空。该模式**全部使用脱敏演示数据**（假路径、假密钥、演示账号），不会把真实个人信息截进 README；`-PublishToDocs` 会把截图发布到 `docs/screenshots/`。
+
+v0.9 的端到端 QA 使用 `WEPORT_V09_DUMP=1` 模式：以脱敏演示数据驱动真实页面渲染（朋友圈 / 分析入口 / 全局分析 / 年度报告 / 群聊分析 / 成员画像），逐页断言关键 DOM 节点与渲染进程 console 错误数，结果写入 `WEPORT_V09_DUMP_OUT` 目录（JSON + 日志），失败退出码非 0：
+
+```sh
+$env:WEPORT_V09_DUMP = '1'
+$env:WEPORT_V09_DUMP_OUT = "$env:TEMP\v09-dump"
+.\release\win-unpacked\Weport.exe   # 全部断言通过时退出码 0
+```
 
 ### 架构速览
 
 | 目录 | 说明 |
 |------|------|
-| `electron/appMain.ts` | 主进程：窗口、托盘、IPC、更新、导出、通知管线、QA 截图模式（按平台选择密钥服务与开机自启实现） |
-| `electron/services/` | 引擎（WeFlow WCDB 栈的 TypeScript 移植）：会话、WCDB、密钥、导出、推送 |
-| `electron/services/weportAiService.ts` | WeportAI：agent 循环、工具调用、记忆/笔记工作区、脱敏日志 |
+| `electron/appMain.ts` | 主进程：窗口、托盘、IPC、更新、导出、通知管线、朋友圈/分析/年度报告 IPC、QA 截图与 v0.9 转储模式 |
+| `electron/services/` | 引擎（WeFlow WCDB 栈的 TypeScript 移植）：会话、WCDB、密钥、导出、推送、朋友圈（`snsService.ts`）、全局分析（`analyticsService.ts`）、群聊分析（`groupAnalyticsService.ts`）、年度报告（`annualReportService.ts` + `annualReportWorker.ts`）、媒体解密（`isaac64.ts` / `wasmService.ts`） |
+| `electron/services/weportAiService.ts` | WexportAI：agent 循环、工具调用、记忆/笔记工作区、脱敏日志 |
 | `electron/wcdbHost.ts` | WCDB 宿主子进程（`WeFlow[.exe] --wcdb-host` 硬链接运行，IPC 通信） |
 | `electron/windows/notificationWindow.ts` | 通知弹窗（Windows 液态玻璃 / 跨平台 Chromium 桌面流回退） |
-| `src/` | React 渲染层（主界面 + 通知窗口 + WeportAI 面板） |
+| `src/pages/SnsPage.tsx` + `src/components/sns/` | 朋友圈界面：时间线、媒体网格、预览灯箱、作者动态、导出对话框 |
+| `src/pages/analytics/` | 分析界面：入口选择（全局/群聊）、全局统计、群聊分析、年度报告（ECharts 双主题：浅蓝 / 黑白） |
+| `src/` | React 渲染层（主界面 + 通知窗口 + WexportAI 面板） |
 | `resources/` | 各平台原生库：`wcdb` / `key` / `wedecrypt` / `welive` / `runtime`（win32 + macos） |
 
 ## 🧭 行为约定

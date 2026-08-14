@@ -3,11 +3,26 @@ import * as fs from 'fs'
 import { normalizeTimestampSeconds } from './timestamp'
 import { ExportOptions } from '../types'
 
+const WINDOWS_RESERVED_NAMES = new Set([
+  'con', 'prn', 'aux', 'nul',
+  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+])
+
 export function sanitizeExportFileNamePart(value: string): string {
-  return String(value || '')
+  let name = String(value || '')
     .replace(/[<>:"\/\\|?*]/g, '_')
     .replace(/\.+$/, '')
+    // Windows 不允许文件名以空格或点结尾
+    .replace(/[\s.]+$/, '')
     .trim()
+  // Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）即使带扩展名也无法创建，
+  // 加前缀规避（同名会话名称为「CON」时导出会直接失败）
+  const base = name.replace(/\.[^.]+$/, '').toLowerCase()
+  if (WINDOWS_RESERVED_NAMES.has(base)) {
+    name = `_${name}`
+  }
+  return name
 }
 
 export function resolveFileAttachmentExtensionDir(msg: any, fileName: string): string {

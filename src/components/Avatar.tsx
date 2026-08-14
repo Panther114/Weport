@@ -42,12 +42,14 @@ export const Avatar = React.memo(function Avatar({
     loading = false,
     onClick
 }: AvatarProps) {
+    // 本地协议 URL（weport-media:// 磁盘缓存头像）无需排队，直接即时加载
+    const isLocalSrc = !!src && src.startsWith('weport-media://')
     // 如果 URL 已在缓存中，则直接标记为已加载，不显示骨架屏和淡入动画
     const isCached = useMemo(() => src ? loadedAvatarCache.has(src) : false, [src])
     const isFailed = useMemo(() => src ? avatarLoadQueue.hasFailed(src) : false, [src])
     const [imageLoaded, setImageLoaded] = useState(isCached)
     const [imageError, setImageError] = useState(isFailed)
-    const [shouldLoad, setShouldLoad] = useState(!lazy || isCached)
+    const [shouldLoad, setShouldLoad] = useState(!lazy || isCached || isLocalSrc)
     const [isInQueue, setIsInQueue] = useState(false)
     const imgRef = useRef<HTMLImageElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
@@ -92,12 +94,13 @@ export const Avatar = React.memo(function Avatar({
     useEffect(() => {
         const cached = src ? loadedAvatarCache.has(src) : false
         const failed = src ? avatarLoadQueue.hasFailed(src) : false
+        const localSrc = !!src && src.startsWith('weport-media://')
         setImageLoaded(cached)
         setImageError(failed)
         if (failed) {
             setShouldLoad(false)
             setIsInQueue(false)
-        } else if (lazy && !cached) {
+        } else if (lazy && !cached && !localSrc) {
             setShouldLoad(false)
             setIsInQueue(false)
         } else {

@@ -85,6 +85,82 @@ Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChan
 `messagePushService.ts` (WeFlow logic) filters on `message.isSend === 1`
 in `pushSessionMessages`/`buildPayload`. Keep that intact.
 
+## v0.9 Modules — 朋友圈 (SNS) / 分析 (Analytics)
+
+The engine layer (native FFI in `wcdbCore.ts` + `wcdbHost.ts` commands +
+`wcdbService.ts` proxies) was already present for SNS/analytics/group/annual
+report before v0.9; the v0.9 work added the service + IPC + UI layers.
+
+**Main process (near-verbatim WeFlow ports, adapted to WePort):**
+- `electron/services/snsService.ts` (timeline parse, media fetch/decrypt via
+  ISAAC64 keystream, exports, anti-delete triggers, cache migration),
+  `analyticsService.ts`, `groupAnalyticsService.ts`,
+  `annualReportService.ts` + `electron/annualReportWorker.ts`,
+  `electron/services/isaac64.ts` + `wasmService.ts` (SNS video/image keystream
+  XOR; pure-TS fallback if wasm missing).
+- IPC registration lives in `appMain.ts::registerIpcHandlers` (channels
+  `sns:*`, `analytics:*`, `groupAnalytics:*`, `annualReport:*`), plus helpers
+  `collectLegacySnsCacheMigrationPlan` / `runLegacySnsCacheMigration` and a
+  lean in-memory years-load task book (no disk snapshot persistence, unlike
+  WeFlow). Preload namespaces: `src` side typed in `src/vite-env.d.ts`
+  (`ElectronApi`) — **keep preload.ts and vite-env.d.ts in sync**.
+- WeFlow never typechecks its electron folder; its code carries latent strict
+  errors. When copying WeFlow services, run `npm run typecheck` and fix
+  strict-mode issues (e.g. filter predicates, `configService.get` casts).
+
+**Renderer (original WePort design, not a copy):**
+- 朋友圈: `src/pages/SnsPage.tsx` + `src/components/sns/*` — B/W theme,
+  sidebar author/keyword/date filters (hero block merges page header + stats +
+  actions), media grid with in-app lightbox (`SnsPreviewLightbox`), author
+  timeline dialog, export dialog (`SnsExportDialog`), anti-delete toggle,
+  legacy-cache migration banner. Media loads as 720px grid thumbnails
+  (main-process `nativeImage` resize in `snsService.makeGridThumbnail`); the
+  lightbox/download read the full cached file via `weport-media://`.
+- 分析: `src/pages/analytics/AnalyticsModule.tsx` (hub with two always
+  side-by-side cards 全局分析 / 群聊分析 — light blue vs deep blue),
+  `GlobalAnalytics.tsx`, `GroupAnalytics.tsx`, `AnnualReportView.tsx`. Charts
+  via ECharts (`echarts-for-react`) with the shared theme in
+  `src/utils/echartsTheme.ts` (blue stack `blueRamp()` colors bars by value;
+  `blueVerticalGradient()` for areas). Annual report image export uses
+  `html2canvas` (added dep; do not remove without replacing it).
+- New styles live in `src/styles/v09.scss` (imported once from `App.tsx`).
+
+**Color themes:** `src/utils/colorMode.ts` — `colorful` (default; single
+light-blue accent family, numbers stay white, icons/charts/outlines
+colored) / `mono` (gray fallback). Config key `colorMode`, applied via
+`document.documentElement.dataset.theme`, charts rebuild via `useColorMode`.
+ECharts palettes and ramps switch with the theme.
+
+**Media protocol:** `weport-media://local/<encodeURIComponent(绝对路径)>` serves
+decrypted local media + cached avatars to the renderer (`appMain.ts`,
+registered via `registerSchemesAsPrivileged` before ready + `protocol.handle`
+after ready). Renderer helper: `snsMediaProtocolUrl()` in
+`src/utils/snsParse.ts`. **Never put the drive letter in the host**
+(`weport-media://C:/…` breaks — Chromium normalizes `C:` to host `c` by
+treating the colon as a port separator). Do not switch to `webSecurity: false`.
+
+**Avatar pipeline (do not regress):** `electron/services/avatarCacheService.ts`
+persists all avatars to `{cacheBasePath}/avatars/{sha1(url)}.jpg` and returns
+`weport-media://` URLs. `chatService` prefers `head_image.db` buffers over CDN
+URLs (local, offline, never expires) and persists the protocol URL into the
+contact cache; cache hits validate file existence (`isResolvable`) and
+re-resolve when the file is gone. `snsService` / `groupAnalyticsService` /
+`messagePushService` / `analyticsService.getContactRankings` (via
+`chatService.enrichSessionsContactInfo`) localize avatar URLs through the same
+service. The head-image batch size is 60 (larger IPC responses truncate →
+silent CDN fallback). Renderer `AvatarLoadQueue` is 8-concurrent with a 2ms
+gap; local protocol URLs skip the queue entirely (`Avatar.tsx`).
+
+**QA harness:** `WEPORT_V09_DUMP=1` drives all v0.9 pages with demo data
+(see `installV09DemoHandlers` + `runV09DumpMode` in appMain.ts), asserts key
+DOM nodes per page, counts renderer console errors, resizes the window to
+probe responsive layouts (`.sns-main` must keep 2 columns down to the window
+min width), exits non-zero on failure. Demo data is deterministic and never
+persisted (config:set is swallowed) — keep it personal-info free.
+`WEPORT_SCREENSHOT_POPUP` (capture-ui.ps1) now also captures the 6 v0.9
+screens (sns / analytics-hub / analytics-global / annual-report /
+analytics-group / settings) — 12 captures total, all asserted non-blank.
+
 ## Export Layout
 
 GUI export (`appMain.ts` `export:exportSessions`) writes to `{out}/{FMT}/`

@@ -59,6 +59,9 @@ export class JsonFormatter {
       const totalMessages = collected.rows.length
 
       // 如果没有消息,不创建文件
+      if (collected.error) {
+        return { success: false, error: collected.error }
+      }
       if (totalMessages === 0) {
         return { success: false, error: await this.exportService.buildNoMessagesError(sessionId, collected) }
       }

@@ -299,6 +299,43 @@ export class ExportContext {
         }
     }
 
+    /**
+     * 原子写目标：先写同目录临时文件，commit 时 rename 覆盖最终路径。
+     * - 写中途失败：旧导出文件保持原样（不再被截断/写残），临时文件被清理；
+     * - 流错误立即捕获（不再等到 end() 才挂 error 监听导致崩溃/挂死）。
+     * 同目录临时文件保证 rename 在同一卷内原子完成。
+     */
+    public createAtomicWriteTarget(outputPath: string): { stream: fs.WriteStream; commit: () => Promise<void>; abort: () => void } {
+        const tmpPath = `${outputPath}.${process.pid}.tmp`
+        const stream = fs.createWriteStream(tmpPath, { encoding: 'utf-8' })
+        let writeError: Error | null = null
+        stream.on('error', (err) => {
+          writeError = err
+        })
+        const commit = (): Promise<void> =>
+          new Promise<void>((resolve, reject) => {
+            stream.end(() => {
+              if (writeError) {
+                fs.promises.unlink(tmpPath).catch(() => { /* noop */ })
+                reject(writeError)
+                return
+              }
+              try {
+                fs.renameSync(tmpPath, outputPath)
+                resolve()
+              } catch (e) {
+                fs.promises.unlink(tmpPath).catch(() => { /* noop */ })
+                reject(e)
+              }
+            })
+          })
+        const abort = (): void => {
+          try { stream.destroy() } catch { /* noop */ }
+          fs.promises.unlink(tmpPath).catch(() => { /* noop */ })
+        }
+        return { stream, commit, abort }
+    }
+
     public async createWeliveRawOutputPlaceholder(outputPath: string, control?: ExportTaskControl): Promise<void> {
         if (!this.isWeliveRawExportMode()) return
         const normalized = String(outputPath || '').trim()
@@ -2162,7 +2199,12 @@ export class ExportContext {
 
     public escapeCsvCell(value: unknown): string {
         if (value === null || value === undefined) return ''
-        const text = String(value);
+        let text = String(value);
+        // 公式注入防护：Excel/WPS 会把以 = + - @ 制表符/回车开头的内容当作公式执行。
+        // 加撇号前缀（CSV 标准常见做法），避免恶意会话内容在打开导出表时执行任意运算。
+        if (/^[=+\-@\t\r]/.test(text)) {
+          text = `'${text}`
+        }
         if (/[",\r\n]/.test(text)) {
           return `"${text.replace(/"/g, '""')}"`
         }
@@ -4510,7 +4552,14 @@ export class ExportContext {
               
               if (!batch.success) {
                 console.error(`[Export] 获取批次 ${batchCount} 失败: ${batch.error}`)
-                break
+                // 中途失败必须显式上报 error，否则下游会把部分行当作完整导出写入
+                return {
+                  rows,
+                  memberSet,
+                  firstTime,
+                  lastTime,
+                  error: batch.error || `获取消息批次 ${batchCount} 失败`
+                }
               }
               
               if (!batch.rows) break

@@ -130,6 +130,10 @@ export class ExportOrchestrator {
         const failedSessionIds: string[] = [];
         const failedSessionErrors: Record<string, string> = {};
         const sessionOutputPaths: Record<string, string> = {};
+        // 同一次导出运行内已占用的输出路径（跨会话去重）。
+        // 两个同名会话（如多个「一家人」群）在 overwrite/incremental 模式下
+        // 会算出完全相同的输出路径，后一个会把前一个的导出结果整个覆盖掉。
+        const claimedOutputPaths = new Set<string>();
         const progressEmitter = this.context.createProgressEmitter(onProgress);
         let attachMediaTelemetry = false;
         const emitProgress = (progress: ExportProgress, options?: { force?: boolean }) => {
@@ -394,7 +398,7 @@ export class ExportOrchestrator {
                 latestTimestampHint > 0 &&
                 await pathExists(preferredOutputPath)
               if (canTrySkipUnchanged) {
-                const latestRecord = exportRecordService.getLatestRecord(sessionId, effectiveOptions.format)
+                const latestRecord = exportRecordService.getLatestRecord(sessionId, effectiveOptions.format, conn.cleanedWxid)
                 const hasNoDataChange = Boolean(
                   latestRecord &&
                   latestRecord.messageCount === messageCountHint &&
@@ -404,6 +408,7 @@ export class ExportOrchestrator {
                   successCount++
                   successSessionIds.push(sessionId)
                   sessionOutputPaths[sessionId] = preferredOutputPath
+                  claimedOutputPaths.add(preferredOutputPath)
                   activeSessionRatios.delete(sessionId)
                   completedCount++
                   emitProgress({
@@ -422,7 +427,9 @@ export class ExportOrchestrator {
 
               const outputPath = conflictStrategy === 'rename'
                 ? await reserveUniqueOutputPath(preferredOutputPath, reservedOutputPaths)
-                : preferredOutputPath
+                : claimedOutputPaths.has(preferredOutputPath)
+                  ? await reserveUniqueOutputPath(preferredOutputPath, claimedOutputPaths)
+                  : preferredOutputPath
 
               let result: { success: boolean; error?: string }
               if (effectiveOptions.format === 'json' || effectiveOptions.format === 'arkme-json') {
@@ -458,13 +465,14 @@ export class ExportOrchestrator {
                 successCount++
                 successSessionIds.push(sessionId)
                 sessionOutputPaths[sessionId] = outputPath
+                claimedOutputPaths.add(outputPath)
                 if (typeof messageCountHint === 'number' && messageCountHint >= 0) {
                   exportRecordService.saveRecord(sessionId, effectiveOptions.format, messageCountHint, {
                     sourceLatestMessageTimestamp: typeof latestTimestampHint === 'number' && latestTimestampHint > 0
                       ? latestTimestampHint
                       : undefined,
                     outputPath
-                  })
+                  }, conn.cleanedWxid)
                 }
               } else {
                 failCount++

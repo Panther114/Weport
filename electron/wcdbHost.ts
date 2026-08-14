@@ -370,21 +370,36 @@ function reply(msg: { id: number }, resp: { result?: any; error?: string }) {
   } catch { /* 父进程已断开 */ }
 }
 
+// 原生 core（wcdb_api.dll）不是可重入的：testConnection / open / close 会
+// 切换或重建全局句柄，若与其他在途请求交错执行（例如批量导出期间恰好有人
+// 触发 testConnection），会打到空句柄或已失效的会话上。所有消息排队串行执行。
+let dispatchChain: Promise<void> = Promise.resolve()
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const run = dispatchChain.then(fn)
+  dispatchChain = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
 process.on('message', (msg: { id?: number; type?: string; payload?: any }) => {
   if (!msg || typeof msg !== 'object' || typeof msg.id !== 'number') return
   const type = String(msg.type || '')
   const payload = msg.payload || {}
 
   if (type === 'shutdown') {
-    shutdownRequested = true
-    try { core.close() } catch { /* noop */ }
-    try { process.send!({ id: msg.id, result: { success: true } }) } catch { /* noop */ }
-    // 等待响应送达后退出
-    setTimeout(() => process.exit(0), 50)
+    void enqueue(async () => {
+      shutdownRequested = true
+      try { core.close() } catch { /* noop */ }
+      try { process.send!({ id: msg.id, result: { success: true } }) } catch { /* noop */ }
+      // 等待响应送达后退出
+      setTimeout(() => process.exit(0), 50)
+    })
     return
   }
 
-  void dispatch(type, payload).then((resp) => reply(msg as { id: number }, resp))
+  void enqueue(() => dispatch(type, payload)).then((resp) => reply(msg as { id: number }, resp))
 })
 
 // 父进程断开（退出/崩溃）后立即收尾，避免残留

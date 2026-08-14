@@ -35,7 +35,8 @@ export class WcdbService {
     try {
       this.worker = new WcdbHostClient()
 
-      this.worker.on('message', (msg: any) => {
+      const child = this.worker
+      child.on('message', (msg: any) => {
         const { id, result, error, type, payload } = msg
 
         if (type === 'monitor') {
@@ -54,7 +55,7 @@ export class WcdbService {
         }
       })
 
-      this.worker.on('error', (err) => {
+      child.on('error', (err) => {
         // 宿主进程发生错误，需要 reject 所有 pending promises
         console.error('WCDB 宿主进程错误:', err)
         const errorMsg = err instanceof Error ? err.message : String(err)
@@ -65,18 +66,23 @@ export class WcdbService {
         this.pending.clear()
       })
 
-      this.worker.on('exit', (code) => {
-        // 宿主进程退出，需要 reject 所有 pending promises
+      child.on('exit', (code) => {
+        // 宿主进程退出，无论退出码都 reject 在途请求：
+        // 退出码 0 也可能在请求尚未完成时发生（如被外部杀进程），
+        // 挂着的请求若只靠 180s 超时兜底会长时间假死。
         if (code !== 0) {
           console.error('WCDB 宿主进程异常退出，退出码:', code)
-          const errorMsg = `WCDB 宿主进程异常退出 (退出码: ${code})。可能是数据服务加载失败，请检查是否安装了 Visual C++ Redistributable。`
-          for (const [id, p] of this.pending) {
-            if (p.timer) clearTimeout(p.timer)
-            p.reject(new Error(errorMsg))
-          }
-          this.pending.clear()
         }
-        this.worker = null
+        const errorMsg = code !== 0
+          ? `WCDB 宿主进程异常退出 (退出码: ${code})。可能是数据服务加载失败，请检查是否安装了 Visual C++ Redistributable。`
+          : 'WCDB 宿主进程已退出'
+        for (const [id, p] of this.pending) {
+          if (p.timer) clearTimeout(p.timer)
+          p.reject(new Error(errorMsg))
+        }
+        this.pending.clear()
+        // 重建宿主后旧进程的 exit 事件仍可能触发，只有仍指向它时才清引用
+        if (this.worker === child) this.worker = null
       })
 
       // 如果已有路径配置，重新发送给新的宿主进程
@@ -106,13 +112,30 @@ export class WcdbService {
       const timer = setTimeout(() => {
         const p = this.pending.get(id)
         if (p) {
-          this.pending.delete(id)
-          reject(new Error(`WCDB 调用超时 (${type}, ${timeoutMs}ms)。宿主进程可能已卡死，请重启 Weport。`))
+          // 宿主疑似卡死：清掉全部在途请求并重建宿主进程，而不是让后续
+          // 调用继续打到同一具僵尸进程上（此前只能靠重启 Weport 恢复）
+          const err = new Error(`WCDB 调用超时 (${type}, ${timeoutMs}ms)。宿主进程可能已卡死，已自动重建。`)
+          this.recycleHost(err)
         }
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
       this.worker!.postMessage({ id, type, payload })
     })
+  }
+
+  /** 强杀并重建宿主进程（超时/卡死兜底），所有在途请求一并失败 */
+  private recycleHost(cause: Error): void {
+    for (const [pid, p] of this.pending) {
+      if (p.timer) clearTimeout(p.timer)
+      p.reject(cause)
+    }
+    this.pending.clear()
+    const old = this.worker
+    this.worker = null
+    if (old) {
+      try { old.killNow() } catch { /* noop */ }
+    }
+    this.initWorker()
   }
 
   /**

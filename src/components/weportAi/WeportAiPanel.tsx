@@ -55,6 +55,7 @@ type AiEvent =
 type SetupInfo = {
   hasApiKey: boolean
   baseUrl: string
+  baseUrlError?: string
   model: string
   maxTokens: number
   reasoningEffort: string
@@ -237,6 +238,11 @@ export default function WeportAiPanel() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const stickToBottom = useRef(true)
   const actionsRef = useRef<HTMLDivElement | null>(null)
+  // 用于异步回调里的会话一致性判断（openChat 的 getChat 可能晚于后续切换返回）
+  const activeIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
 
   const refreshChats = useCallback(async () => {
     try {
@@ -259,6 +265,12 @@ export default function WeportAiPanel() {
 
   const openChat = useCallback(
     async (id: string) => {
+      // 切换前中止旧会话的运行：否则旧会话的 status:false 事件会被下面的
+      // chatId 过滤丢弃，running 永远卡在 true，Stop 也会打到错误的会话
+      if (activeId && activeId !== id) {
+        void api.ai.abort(activeId)
+        setRunning(false)
+      }
       // 切换前自动清理：空的「新对话」没有保留价值，直接删除
       if (activeId && activeId !== id && messages.length === 0) {
         const prev = activeId
@@ -273,6 +285,8 @@ export default function WeportAiPanel() {
       setNotes([])
       try {
         const data = await api.ai.getChat(id)
+        // 期间用户又切换了会话 → 丢弃过期响应，防止 A→B→A 时旧数据覆盖新会话
+        if (activeIdRef.current !== id) return
         if (data) {
           setMessages(data.messages || [])
           setWorkspaceDir(data.workspaceDir)
@@ -308,6 +322,7 @@ export default function WeportAiPanel() {
           )
         }
         const n = await api.ai.listNotes(id)
+        if (activeIdRef.current !== id) return
         setNotes(n.notes || [])
       } catch { /* noop */ }
     },
@@ -697,7 +712,7 @@ export default function WeportAiPanel() {
 
       {/* 中栏：对话 */}
       <main className="ai-main">
-        {!setup?.hasApiKey && (
+        {setup && !setup.hasApiKey && (
           <div className="ai-warn-banner warn">
             未配置 API 密钥 — 打开左下角「设置」填入你的 DeepSeek API Key 后才能使用。
           </div>
@@ -1233,6 +1248,7 @@ function AiSettingsModal({
   const [actions, setActions] = useState<AiAction[]>([])
   const [saving, setSaving] = useState(false)
   const [clearingMemory, setClearingMemory] = useState(false)
+  const [baseUrlError, setBaseUrlError] = useState(setup.baseUrlError || '')
 
   useEffect(() => {
     void api.ai.listActions().then((r) => setActions(r.actions || [])).catch(() => undefined)
@@ -1256,6 +1272,8 @@ function AiSettingsModal({
       })
       await api.ai.saveActions(actions)
       const next = await api.ai.getSetup()
+      setBaseUrlError(next.baseUrlError || '')
+      if (next.baseUrlError) return
       onSaved(next)
     } finally {
       setSaving(false)
@@ -1296,7 +1314,7 @@ function AiSettingsModal({
           WeportAI 设置
         </h3>
         <p className="hint">
-          连接 DeepSeek 的 OpenAI 兼容接口。API 密钥只会加密保存在这台电脑上，绝不会上传到任何服务器。
+          连接 DeepSeek 或其他 OpenAI 兼容接口。密钥只保存在这台电脑上，但发送请求时会以 Bearer 头传给上面配置的 API 地址——请仅使用 https 地址，防止密钥在网络中被窃听。
         </p>
 
         <div className="ai-settings-body">
@@ -1335,9 +1353,17 @@ function AiSettingsModal({
                   id="aiBaseUrl"
                   className="path-input ai-input-wide"
                   value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
+                  onChange={(e) => {
+                    setBaseUrl(e.target.value)
+                    if (baseUrlError) setBaseUrlError('')
+                  }}
                   spellCheck={false}
                 />
+                {baseUrlError && (
+                  <p className="hint" style={{ marginTop: 4, color: 'var(--danger, #e5484d)' }}>
+                    {baseUrlError}
+                  </p>
+                )}
               </div>
               <div className="field" style={{ gridColumn: '1 / -1' }}>
                 <label htmlFor="aiModel">

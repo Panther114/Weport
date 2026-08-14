@@ -156,6 +156,7 @@ interface ConfigSchema {
   // WeportAI（v0.8 原生聊天历史分析助手）
   weportAiApiKey: string
   weportAiBaseUrl: string
+  weportAiBaseUrlError: string
   weportAiModel: string
   weportAiMaxTokens: number
   weportAiReasoningEffort: 'low' | 'high' | 'max'
@@ -320,6 +321,7 @@ export class ConfigService {
       autoDownloadWhitelist: [],
       weportAiApiKey: '',
       weportAiBaseUrl: 'https://api.deepseek.com',
+      weportAiBaseUrlError: '',
       weportAiModel: 'deepseek-v4-flash',
       weportAiMaxTokens: 32768,
       weportAiReasoningEffort: 'high',

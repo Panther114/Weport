@@ -51,9 +51,18 @@ class ExportRecordService {
     }
   }
 
-  getLatestRecord(sessionId: string, format: string): ExportRecord | null {
+  /**
+   * 记录按账号（wxid）隔离：不同账号目录下的会话 username 会重复，
+   * 不做隔离时第二个账号可能命中第一个账号的「无变化跳过」记录。
+   */
+  private recordKey(wxid: string | undefined, sessionId: string): string {
+    const wx = String(wxid || '').trim()
+    return wx ? `${wx}:${String(sessionId || '').trim()}` : String(sessionId || '').trim()
+  }
+
+  getLatestRecord(sessionId: string, format: string, wxid?: string): ExportRecord | null {
     this.ensureLoaded()
-    const records = this.store[sessionId]
+    const records = this.store[this.recordKey(wxid, sessionId)]
     if (!records || records.length === 0) return null
     for (let i = records.length - 1; i >= 0; i--) {
       const record = records[i]
@@ -69,15 +78,16 @@ class ExportRecordService {
     extra?: {
       sourceLatestMessageTimestamp?: number
       outputPath?: string
-    }
+    },
+    wxid?: string
   ): void {
     this.ensureLoaded()
-    const normalizedSessionId = String(sessionId || '').trim()
-    if (!normalizedSessionId) return
-    if (!this.store[normalizedSessionId]) {
-      this.store[normalizedSessionId] = []
+    const key = this.recordKey(wxid, sessionId)
+    if (!key) return
+    if (!this.store[key]) {
+      this.store[key] = []
     }
-    const list = this.store[normalizedSessionId]
+    const list = this.store[key]
     list.push({
       exportTime: Date.now(),
       format,
@@ -87,7 +97,7 @@ class ExportRecordService {
     })
     // keep the latest 30 records per session
     if (list.length > 30) {
-      this.store[normalizedSessionId] = list.slice(-30)
+      this.store[key] = list.slice(-30)
     }
     this.persist()
   }

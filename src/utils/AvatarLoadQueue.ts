@@ -1,12 +1,13 @@
 
-// 全局头像加载队列管理器（限制并发，避免卡顿）
+// 全局头像加载队列管理器（限制并发，避免 CDN 突发打满带宽）
+// 本地头像（weport-media://）不走队列，由 Avatar 组件直接即时加载。
 export class AvatarLoadQueue {
     private queue: Array<{ url: string; resolve: () => void; reject: (error: Error) => void }> = []
     private loading = new Map<string, Promise<void>>()
     private failed = new Map<string, number>()
     private activeCount = 0
-    private readonly maxConcurrent = 3
-    private readonly delayBetweenBatches = 10
+    private readonly maxConcurrent = 8
+    private readonly delayBetweenBatches = 2
     private readonly failedTtlMs = 10 * 60 * 1000
 
     private static instance: AvatarLoadQueue

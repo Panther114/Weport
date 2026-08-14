@@ -12,6 +12,7 @@ import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
+import { avatarCacheService } from './avatarCacheService'
 import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStats } from './sessionStatsCacheService'
 import { FILE_APP_LOCAL_TYPE_SET } from './export/constants'
 import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from './groupMyMessageCountCacheService'
@@ -763,10 +764,12 @@ class ChatService {
   close(): void {
     try {
       for (const state of this.messageCursors.values()) {
-        wcdbService.closeMessageCursor(state.cursor)
+        wcdbService.closeMessageCursor(state.cursor).catch(() => { /* 关闭中可能无连接 */ })
       }
       this.messageCursors.clear()
-      wcdbService.close()
+      // 宿主侧已串行化（见 wcdbHost.ts），close 与后续 open 按到达顺序执行，
+      // 这里 fire-and-forget 不会与重连交错
+      wcdbService.close().catch(() => { /* noop */ })
     } catch (e) {
       console.error('ChatService: 关闭数据库失败:', e)
     }
@@ -1555,6 +1558,11 @@ class ChatService {
         // 如果缓存有效且有头像，直接使用；如果没有头像，也需要重新尝试获取
         // 额外检查：如果头像是无效的 hex 格式（以 ffd8 开头），也需要重新获取
         if (cached && now - cached.updatedAt < this.avatarCacheTtlMs && cachedAvatarUrl) {
+          // 本地协议 URL 需验证文件仍存在（缓存目录变更 → 重新解析）
+          if (!avatarCacheService.isResolvable(cachedAvatarUrl)) {
+            missing.push(username)
+            continue
+          }
           result[username] = {
             displayName: skipDisplayName ? undefined : cached.displayName,
             avatarUrl: cachedAvatarUrl
@@ -1569,21 +1577,26 @@ class ChatService {
         const displayNames = skipDisplayName
           ? null
           : await wcdbService.getDisplayNames(missing)
-        const avatarUrls = await wcdbService.getAvatarUrls(missing)
-
-        // 收集没有头像 URL 的用户名
-        const missingAvatars: string[] = []
+        // 本地优先：head_image.db 头像离线可用、不过期；CDN URL 仅作兜底
+        const [avatarUrls, localAvatars] = await Promise.all([
+          wcdbService.getAvatarUrls(missing),
+          this.getAvatarsFromHeadImageDb(missing),
+        ])
 
         for (const username of missing) {
           const previous = this.avatarCache.get(username)
           const displayName = displayNames?.success && displayNames.map
             ? displayNames.map[username]
             : undefined
-          let avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
-
-          // 如果没有头像 URL，记录下来稍后从 head_image.db 获取
-          if (!avatarUrl) {
-            missingAvatars.push(username)
+          let avatarUrl: string | undefined = localAvatars[username]
+          if (!avatarUrl || !this.isValidAvatarUrl(avatarUrl)) {
+            const cdnUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
+            avatarUrl = cdnUrl && this.isValidAvatarUrl(cdnUrl) ? cdnUrl : undefined
+          }
+          // 本地 head_image → 落盘并返回可持久化的 weport-media:// URL（短、稳定、离线可用）
+          if (avatarUrl && avatarUrl.startsWith('data:image/')) {
+            const localUrl = await avatarCacheService.persistDataUrl(avatarUrl)
+            if (localUrl) avatarUrl = localUrl
           }
 
           const cacheEntry: ContactCacheEntry = {
@@ -1604,24 +1617,20 @@ class ChatService {
           updatedEntries[username] = cacheEntry
         }
 
-        // 从 head_image.db 获取缺失的头像
-        if (missingAvatars.length > 0) {
-          const headImageAvatars = await this.getAvatarsFromHeadImageDb(missingAvatars)
-          for (const username of missingAvatars) {
-            const avatarUrl = headImageAvatars[username]
-            if (avatarUrl) {
-              result[username].avatarUrl = avatarUrl
-              const cached = this.avatarCache.get(username)
-              if (cached && this.shouldPersistAvatarUrl(avatarUrl)) {
-                cached.avatarUrl = avatarUrl
-                updatedEntries[username] = cached
-              }
-            }
-          }
-        }
-
         if (Object.keys(updatedEntries).length > 0) {
           this.contactCacheService.setEntries(updatedEntries)
+        }
+      }
+
+      // 本地化头像 URL：已缓存的返回 weport-media://（渲染进程零网络即时显示），
+      // 未缓存的在后台落盘 / 下载，下次查询即命中
+      for (const entry of Object.values(result)) {
+        if (!entry.avatarUrl) continue
+        const url = entry.avatarUrl
+        const localized = avatarCacheService.localUrlOrOriginal(url)
+        entry.avatarUrl = localized
+        if (localized === url) {
+          void avatarCacheService.ensure(url)
         }
       }
       return { success: true, contacts: result }
@@ -1648,7 +1657,9 @@ class ChatService {
       )
       if (normalizedUsernames.length === 0) return result
 
-      const batchSize = 320
+      // 批量不宜过大：每条返回的 hex 头像可达几十 KB，IPC 通道大响应
+      // 易截断/超时（实测 60 人/批稳定，320 人/批会丢数据 → 回退 CDN）
+      const batchSize = 60
       for (let i = 0; i < normalizedUsernames.length; i += batchSize) {
         const batch = normalizedUsernames.slice(i, i + batchSize)
         if (batch.length === 0) continue
@@ -7879,26 +7890,31 @@ class ChatService {
       const cached = this.avatarCache.get(normalizedUsername)
       // 检查缓存是否有效，且头像不是错误的 hex 格式
       const cachedAvatarUrl = this.shouldPersistAvatarUrl(cached?.avatarUrl) ? cached?.avatarUrl : undefined
-      if (cached && cachedAvatarUrl && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
-        return { avatarUrl: cachedAvatarUrl, displayName: groupDisplayName || cached.displayName }
+      if (cached && cachedAvatarUrl && Date.now() - cached.updatedAt < this.avatarCacheTtlMs && avatarCacheService.isResolvable(cachedAvatarUrl)) {
+        return { avatarUrl: avatarCacheService.localUrlOrOriginal(cachedAvatarUrl), displayName: groupDisplayName || cached.displayName }
       }
 
       const contact = await this.getContact(normalizedUsername)
-      const avatarResult = await wcdbService.getAvatarUrls([normalizedUsername])
-      let avatarUrl = avatarResult.success && avatarResult.map ? avatarResult.map[normalizedUsername] : undefined
-      if (!this.isValidAvatarUrl(avatarUrl)) {
-        avatarUrl = undefined
+      // 本地优先：head_image.db 头像离线可用且不过期；CDN URL 仅作兜底
+      const [avatarResult, headImages] = await Promise.all([
+        wcdbService.getAvatarUrls([normalizedUsername]),
+        this.getAvatarsFromHeadImageDb([normalizedUsername]),
+      ])
+      let avatarUrl: string | undefined = headImages[normalizedUsername]
+      if (!avatarUrl || !this.isValidAvatarUrl(avatarUrl)) {
+        const cdnUrl = avatarResult.success && avatarResult.map ? avatarResult.map[normalizedUsername] : undefined
+        avatarUrl = cdnUrl && this.isValidAvatarUrl(cdnUrl) ? cdnUrl : undefined
       }
-      if (!avatarUrl) {
-        const headImageAvatars = await this.getAvatarsFromHeadImageDb([normalizedUsername])
-        const fallbackAvatarUrl = headImageAvatars[normalizedUsername]
-        if (this.isValidAvatarUrl(fallbackAvatarUrl)) {
-          avatarUrl = fallbackAvatarUrl
-        }
+      // 本地 head_image → 落盘并返回可持久化的 weport-media:// URL
+      if (avatarUrl && avatarUrl.startsWith('data:image/')) {
+        const localUrl = await avatarCacheService.persistDataUrl(avatarUrl)
+        if (localUrl) avatarUrl = localUrl
       }
       const effectiveAvatarUrl = this.shouldPersistAvatarUrl(avatarUrl)
         ? avatarUrl
         : cachedAvatarUrl
+      // 展示用：新鲜值优先（本地 head_image 即使不落盘 contacts.json 也应展示）
+      const displayAvatarUrl = avatarUrl || cachedAvatarUrl
       const contactDisplayName = contact?.remark || contact?.nickName || contact?.alias || cached?.displayName || normalizedUsername
       const displayName = groupDisplayName || contactDisplayName
       const cacheEntry: ContactCacheEntry = {
@@ -7908,7 +7924,12 @@ class ChatService {
       }
       this.avatarCache.set(normalizedUsername, cacheEntry)
       this.contactCacheService.setEntries({ [normalizedUsername]: cacheEntry })
-      return { avatarUrl: effectiveAvatarUrl, displayName }
+      // 本地化：data → 磁盘缓存；CDN → 后台下载；已缓存 → weport-media:// 即时显示
+      const localized = avatarCacheService.localUrlOrOriginal(displayAvatarUrl)
+      if (displayAvatarUrl && localized !== displayAvatarUrl) {
+        void avatarCacheService.ensure(displayAvatarUrl)
+      }
+      return { avatarUrl: localized, displayName }
     } catch {
       return null
     }

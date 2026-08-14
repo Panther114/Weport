@@ -23,7 +23,6 @@ import {
   RefreshCw,
   Trash2,
   RotateCcw,
-  Settings2,
   Paperclip,
   FileType,
   ListChecks,
@@ -37,11 +36,20 @@ import {
   Rocket,
   Minimize2,
   Sparkles,
+  Images,
+  LineChart,
+  Palette,
+  Contrast,
+  Settings2 as SettingsIcon,
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
+import SnsPage from './pages/SnsPage'
+import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
+import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
+import './styles/v09.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai'
+type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -158,9 +166,12 @@ const EXPORT_DEFAULTS = {
 const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
   { id: 'connect', label: '连接微信', icon: PlugZap },
   { id: 'export', label: '导出数据', icon: Download },
+  { id: 'sns', label: '朋友圈', icon: Images },
+  { id: 'analytics', label: '分析', icon: LineChart },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
   { id: 'notifications', label: '消息通知', icon: Bell },
   { id: 'ai', label: 'WeportAI', icon: Sparkles },
+  { id: 'settings', label: '设置', icon: SettingsIcon },
 ]
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
@@ -186,6 +197,7 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
   const [progress, setProgress] = useState<any | null>(null)
+  const [exportTaskId, setExportTaskId] = useState<string | null>(null)
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(false)
   const [launchAtStartup, setLaunchAtStartup] = useState(false)
@@ -204,6 +216,12 @@ export default function App() {
   const [antiRevokeInstalled, setAntiRevokeInstalled] = useState<Record<string, boolean>>({})
   const [antiRevokeBusy, setAntiRevokeBusy] = useState(false)
   const [notifyListening, setNotifyListening] = useState(false)
+  const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
+  const colorMode = useColorMode()
+
+  useEffect(() => {
+    void initColorMode()
+  }, [])
 
   // 导出选项（WeFlow 对齐）
   const [exportMedia, setExportMedia] = useState({ images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 })
@@ -369,11 +387,22 @@ export default function App() {
     try {
       const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
       const cfg = wxidConfigs[wxid]
-      setDecryptKey(typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : '')
+      const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      setDecryptKey(key)
+      // 全局 decryptKey 必须与当前账号一致，导出/后端连接都读全局配置；
+      // 只改 React 状态会让「界面显示 A 账号密钥、实际用 B 账号密钥」的错位状态出现。
+      // 注意：仅当与全局配置确实不同才写回——启动加载时两者通常已一致，
+      // 无脑写会触发主进程 config:set → close → reconnect 循环（连接抖动）。
+      if (key) {
+        try {
+          const globalKey = await api.config.get('decryptKey')
+          if (globalKey !== key) void persist({ decryptKey: key })
+        } catch { /* noop */ }
+      }
     } catch {
       setDecryptKey('')
     }
-  }, [api])
+  }, [api, persist])
 
   const saveAccountKey = useCallback(async (wxid: string, key: string) => {
     if (!wxid || !key) return
@@ -475,6 +504,7 @@ export default function App() {
         const label = payload.phaseLabel || payload.phase || '导出中'
         const session = payload.currentSession || ''
         setBusyLabel(session ? `${label} · ${session}` : label)
+        if (payload.taskId) setExportTaskId(payload.taskId)
       }),
       api.app.onUpdateAvailable((info) => {
         setUpdateInfo({ version: info.version, body: info.releaseNotes || undefined })
@@ -573,6 +603,7 @@ export default function App() {
 
     setBusy(true)
     setProgress({ current: 0, total: 0, phaseLabel: '准备中' })
+    setExportTaskId(null)
     setBusyLabel('开始导出全部会话…')
 
     const mediaEnabled = exportMedia.images || exportMedia.videos || exportMedia.voices || exportMedia.emojis || exportMedia.files
@@ -610,6 +641,18 @@ export default function App() {
     } finally {
       setBusy(false)
       setBusyLabel('')
+      setExportTaskId(null)
+    }
+  }
+
+  async function cancelExport() {
+    if (!exportTaskId) return
+    const res = await api.export.cancelTask(exportTaskId).catch(() => ({ success: false }))
+    if (!res.success) {
+      pushToast('err', '取消失败', '导出任务不存在或已结束', 6000)
+    } else {
+      pushToast('info', '正在取消导出…', '已写入的部分文件将被清理')
+      setBusyLabel('正在取消导出…')
     }
   }
 
@@ -691,9 +734,16 @@ export default function App() {
   }
 
   async function toggleLaunchAtStartup(on: boolean) {
-    setLaunchAtStartup(on)
     const result = await api.app.setLaunchAtStartup(on)
-    if (!result.success && result.error) pushToast('err', '开机自启设置失败', result.error)
+    if (result.success) {
+      // 以系统实际状态为准（reg 写入失败时 UI 不显示"已开启"）
+      const status = await api.app.getLaunchAtStartupStatus().catch(() => null)
+      if (status) setLaunchAtStartup(status.enabled)
+      if (!status?.enabled) pushToast('err', '开机自启设置失败', result.error || '系统未接受设置')
+    } else {
+      setLaunchAtStartup(false)
+      pushToast('err', '开机自启设置失败', result.error || '未知错误')
+    }
   }
 
   async function toggleSilentStartup(on: boolean) {
@@ -1337,7 +1387,7 @@ export default function App() {
                 aria-expanded={showAdvanced}
               >
                 <span className="exp-num">4</span>
-                <Settings2 size={14} />
+                <SettingsIcon size={14} />
                 高级选项
                 <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
               </button>
@@ -1489,6 +1539,11 @@ export default function App() {
                 <Download size={16} />
                 {busy && progress ? '导出中…' : '导出全部聊天记录'}
               </button>
+              {busy && progress && progress.phase !== 'complete' && (
+                <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
+                  取消导出
+                </button>
+              )}
               <p className="hint">
                 清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
               </p>
@@ -1497,6 +1552,8 @@ export default function App() {
         )}
 
         {tab === 'ai' && <WeportAiPanel />}
+        {tab === 'sns' && <SnsPage />}
+        {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
 
         {tab === 'antirecall' && (
           <div className="single-col">
@@ -1652,15 +1709,20 @@ export default function App() {
                 )}
               </p>
             </section>
+          </div>
+        )}
 
+        {tab === 'settings' && (
+          <div className="single-col">
             <section className="panel">
               <div className="panel-head">
                 <h2>
-                  <Settings2 size={15} />
+                  <SettingsIcon size={15} />
                   设置
                 </h2>
-                <span>启动与后台行为</span>
+                <span>启动与后台行为 · 外观主题</span>
               </div>
+
               <div className="setting-row">
                 <div className="setting-label">
                   <Rocket size={14} />
@@ -1711,6 +1773,86 @@ export default function App() {
                   <input type="checkbox" checked={closeToTray} onChange={(e) => void toggleCloseToTray(e.target.checked)} />
                   <span className="track" />
                 </label>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Palette size={15} />
+                  色彩主题
+                </h2>
+                <span>应用于文字 / 图标 / 图表 / 数字</span>
+              </div>
+              <div className="theme-picker">
+                {(
+                  [
+                    {
+                      id: 'colorful',
+                      label: '浅蓝',
+                      desc: '统一浅蓝 accent 色调，现代克制',
+                      icon: Palette,
+                      swatches: ['#6ea8ff', '#7fb4ff', '#93c2ff', '#5b93ff', '#84b7ff', '#a6cfff'],
+                    },
+                    {
+                      id: 'mono',
+                      label: '黑白',
+                      desc: '经典单色灰阶，保持纯黑白风格',
+                      icon: Contrast,
+                      swatches: ['#f4f4f5', '#d4d4da', '#b8b8c0', '#9a9aa4', '#7e7e88', '#63636d'],
+                    },
+                  ] as Array<{ id: 'colorful' | 'mono'; label: string; desc: string; icon: React.ComponentType<{ size?: number | string }>; swatches: string[] }>
+                ).map((t) => {
+                  const Icon = t.icon
+                  const active = colorMode === t.id
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className={`theme-card ${active ? 'theme-card-active' : ''}`}
+                      onClick={() => setColorMode(t.id)}
+                    >
+                      <div className="theme-card-head">
+                        <Icon size={17} />
+                        <strong>{t.label}</strong>
+                        {active && <span className="theme-card-check">当前</span>}
+                      </div>
+                      <div className="theme-swatches">
+                        {t.swatches.map((c) => (
+                          <span key={c} style={{ background: c }} />
+                        ))}
+                      </div>
+                      <span className="theme-card-desc">{t.desc}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Info size={15} />
+                  关于
+                </h2>
+                <span>版本与更新</span>
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Info size={14} />
+                  <div>
+                    <strong>Weport v{version}</strong>
+                    <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
+                  </div>
+                </div>
+                <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
+                  {updateBusy ? '检查中…' : '检查更新'}
+                </button>
+                {updateInfo && (
+                  <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
+                    {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : `安装 v${updateInfo.version}`}
+                  </button>
+                )}
               </div>
             </section>
           </div>
@@ -1922,3 +2064,5 @@ export default function App() {
     </div>
   )
 }
+
+

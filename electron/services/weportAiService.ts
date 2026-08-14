@@ -70,6 +70,7 @@ export interface AiChatData {
 export interface AiSetupInfo {
   hasApiKey: boolean
   baseUrl: string
+  baseUrlError?: string
   model: string
   maxTokens: number
   reasoningEffort: 'low' | 'high' | 'max'
@@ -457,7 +458,12 @@ class WeportAiService {
 
   private persistChats(): void {
     try {
-      writeFileSync(join(this.dataDir, 'index.json'), JSON.stringify({ chats: this.chats }, null, 2), 'utf8')
+      const target = join(this.dataDir, 'index.json')
+      const tmp = `${target}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify({ chats: this.chats }, null, 2), 'utf8')
+      // 原子替换：崩溃/断电时索引不会剩半个 JSON（此前直接写最终文件，
+      // 中途失败会把整个会话列表打成空）
+      renameSync(tmp, target)
     } catch (e) {
       console.warn('[WeportAI] 写入会话索引失败:', e)
     }
@@ -543,11 +549,14 @@ class WeportAiService {
     lastRun?: AiChatData['lastRun']
   ): void {
     try {
+      const target = this.chatFilePath(chatId)
+      const tmp = `${target}.${process.pid}.tmp`
       writeFileSync(
-        this.chatFilePath(chatId),
+        tmp,
         JSON.stringify({ chatId, messages, compressed, lastRun: lastRun || undefined }, null, 2),
         'utf8'
       )
+      renameSync(tmp, target)
     } catch (e) {
       console.warn('[WeportAI] 写入会话消息失败:', e)
     }
@@ -751,6 +760,9 @@ class WeportAiService {
     const chats = this.loadChats()
     const idx = chats.findIndex((c) => c.id === chatId)
     if (idx < 0) return false
+    // 先中止正在进行的 agent 运行，避免删除后运行继续写回已删除的文件
+    this.abort(chatId)
+    this.running.delete(chatId)
     chats.splice(idx, 1)
     this.previousApiInput.delete(chatId)
     this.persistChats()
@@ -845,6 +857,7 @@ class WeportAiService {
     return {
       hasApiKey: String(this.configService.get('weportAiApiKey') || '').trim().length > 0,
       baseUrl: String(this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim(),
+      baseUrlError: String(this.configService.get('weportAiBaseUrlError') || '').trim(),
       model: String(this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim(),
       maxTokens: Number(this.configService.get('weportAiMaxTokens')) || 32768,
       reasoningEffort: this.configService.get('weportAiReasoningEffort') || 'high',
@@ -879,7 +892,22 @@ class WeportAiService {
       this.configService.set('weportAiApiKey', trimmed)
     }
     if (typeof patch.baseUrl === 'string' && patch.baseUrl.trim()) {
-      this.configService.set('weportAiBaseUrl', patch.baseUrl.trim())
+      const raw = patch.baseUrl.trim()
+      // 安全校验：密钥以 Bearer 头发给 baseUrl，明文 http 会把密钥暴露在网络上。
+      // 仅允许 https；localhost/127.0.0.1/[::1]（本地代理如 LM Studio/Ollama）例外。
+      let parsed: URL | null = null
+      try { parsed = new URL(raw) } catch { parsed = null }
+      const host = parsed?.hostname?.toLowerCase() || ''
+      const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
+      const isSecure = parsed?.protocol === 'https:' || (parsed?.protocol === 'http:' && isLocalHost)
+      if (!parsed) {
+        this.configService.set('weportAiBaseUrlError', 'API 地址格式无效，应以 http(s):// 开头')
+      } else if (!isSecure) {
+        this.configService.set('weportAiBaseUrlError', 'API 地址必须使用 https（仅 localhost 可使用 http，避免密钥明文传输）')
+      } else {
+        this.configService.set('weportAiBaseUrlError', '')
+        this.configService.set('weportAiBaseUrl', raw)
+      }
     }
     if (typeof patch.model === 'string' && patch.model.trim()) {
       this.configService.set('weportAiModel', patch.model.trim())
@@ -2409,6 +2437,17 @@ class WeportAiService {
       reasoningEffort,
     })
 
+    // 看门狗：流中途长时间无新字节（代理/服务端挂起）时主动中止，避免无限等待。
+    // 本地 AbortController 链到调用方 signal（AbortSignal.any 不可用时退化为原 signal），
+    // 必须在 fetch 之前创建，否则中止无法传导到已发起的请求。
+    const idleCtrl = new AbortController()
+    let streamSignal: AbortSignal
+    try {
+      streamSignal = AbortSignal.any([signal, idleCtrl.signal])
+    } catch {
+      streamSignal = signal
+    }
+
     let resp: Response
     try {
       resp = await fetch(url, {
@@ -2418,10 +2457,11 @@ class WeportAiService {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
-        signal,
+        signal: streamSignal,
       })
     } catch (e) {
       if (signal.aborted) return { ok: false, error: '已中止' }
+      if (idleCtrl.signal.aborted) return { ok: false, error: '请求超时（无响应）' }
       this.appendDebugLog({ kind: 'error', chatId, error: String((e as Error)?.message || e), durationMs: Date.now() - startedAt })
       return { ok: false, error: `网络请求失败：${String((e as Error)?.message || e)}` }
     }
@@ -2453,64 +2493,97 @@ class WeportAiService {
     let reasoning = ''
     const toolAccums = new Map<number, { id?: string; name?: string; args: string }>()
     let finishReason: string | null = null
-    let usage: AiRunUsage | null = null
+    // 仅在 handleSseLine 闭包内赋值：声明后若不加 `!`，TS 会把 usage 收窄为
+    // null 初始值，读取属性时报 never
+    let usage!: AiRunUsage | null
+    const SSE_IDLE_TIMEOUT_MS = 90_000
+    let idleTimer: NodeJS.Timeout | null = null
+    const armIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        idleTimer = null
+        if (signal.aborted) return
+        console.warn(`[WeportAI] SSE ${SSE_IDLE_TIMEOUT_MS}ms 无数据，判定服务端挂起，中止本次请求`)
+        try { idleCtrl.abort() } catch { /* noop */ }
+      }, SSE_IDLE_TIMEOUT_MS)
+    }
+    const disarmIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = null
+    }
+
+    const handleSseLine = (rawLine: string): void => {
+      const line = rawLine.trim()
+      if (!line || !line.startsWith('data:')) return
+      const data = line.slice(5).trim()
+      if (data === '[DONE]') return
+      let chunk: any
+      try {
+        chunk = JSON.parse(data)
+      } catch {
+        return
+      }
+      if (chunk?.usage) {
+        usage = {
+          promptTokens: chunk.usage.prompt_tokens || 0,
+          promptCacheHitTokens: chunk.usage.prompt_cache_hit_tokens || 0,
+          completionTokens: chunk.usage.completion_tokens || 0,
+          reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens || 0,
+          totalTokens: chunk.usage.total_tokens || 0,
+        }
+      }
+      const choice = chunk?.choices?.[0]
+      if (!choice) {
+        return
+      }
+      if (choice.finish_reason) finishReason = choice.finish_reason
+      const delta = choice.delta || {}
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        reasoning += delta.reasoning_content
+        this.emit({ type: 'reasoning_delta', chatId, delta: delta.reasoning_content })
+      }
+      if (typeof delta.content === 'string' && delta.content) {
+        content += delta.content
+        this.emit({ type: 'text_delta', chatId, delta: delta.content })
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const index = Number(tc.index ?? 0)
+          const acc = toolAccums.get(index) || { args: '' }
+          if (tc.id) acc.id = tc.id
+          if (tc.function?.name) acc.name = tc.function.name
+          if (typeof tc.function?.arguments === 'string') acc.args += tc.function.arguments
+          toolAccums.set(index, acc)
+        }
+      }
+    }
 
     try {
       for (;;) {
+        armIdle()
         const { done, value } = await reader.read()
+        disarmIdle()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
         let idx: number
         while ((idx = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, idx).trim()
+          const line = buffer.slice(0, idx)
           buffer = buffer.slice(idx + 1)
-          if (!line || !line.startsWith('data:')) continue
-          const data = line.slice(5).trim()
-          if (data === '[DONE]') continue
-          let chunk: any
-          try {
-            chunk = JSON.parse(data)
-          } catch {
-            continue
-          }
-          if (chunk?.usage) {
-            usage = {
-              promptTokens: chunk.usage.prompt_tokens || 0,
-              promptCacheHitTokens: chunk.usage.prompt_cache_hit_tokens || 0,
-              completionTokens: chunk.usage.completion_tokens || 0,
-              reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens || 0,
-              totalTokens: chunk.usage.total_tokens || 0,
-            }
-          }
-          const choice = chunk?.choices?.[0]
-          if (!choice) {
-            continue
-          }
-          if (choice.finish_reason) finishReason = choice.finish_reason
-          const delta = choice.delta || {}
-          if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-            reasoning += delta.reasoning_content
-            this.emit({ type: 'reasoning_delta', chatId, delta: delta.reasoning_content })
-          }
-          if (typeof delta.content === 'string' && delta.content) {
-            content += delta.content
-            this.emit({ type: 'text_delta', chatId, delta: delta.content })
-          }
-          if (Array.isArray(delta.tool_calls)) {
-            for (const tc of delta.tool_calls) {
-              const index = Number(tc.index ?? 0)
-              const acc = toolAccums.get(index) || { args: '' }
-              if (tc.id) acc.id = tc.id
-              if (tc.function?.name) acc.name = tc.function.name
-              if (typeof tc.function?.arguments === 'string') acc.args += tc.function.arguments
-              toolAccums.set(index, acc)
-            }
-          }
+          handleSseLine(line)
         }
+      }
+      // 流结束后缓冲区里可能残留未换行的最后一行，必须处理掉
+      // （此前直接丢弃：内容以 tool_calls/usage 结尾时会丢失最后一次增量）
+      if (buffer) {
+        handleSseLine(buffer)
+        buffer = ''
       }
     } catch (e) {
       if (signal.aborted) return { ok: false, error: '已中止' }
+      if (idleCtrl.signal.aborted) return { ok: false, error: `流式响应超时（${SSE_IDLE_TIMEOUT_MS}ms 无数据）` }
       throw e
+    } finally {
+      disarmIdle()
     }
 
     const toolCalls = Array.from(toolAccums.entries())

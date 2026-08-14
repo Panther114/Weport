@@ -57,6 +57,9 @@ export class TxtFormatter {
       const totalMessages = collected.rows.length
 
       // 如果没有消息,不创建文件
+      if (collected.error) {
+        return { success: false, error: collected.error }
+      }
       if (totalMessages === 0) {
         return { success: false, error: await this.exportService.buildNoMessagesError(sessionId, collected) }
       }
@@ -216,7 +219,7 @@ export class TxtFormatter {
       })
 
       await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-      const stream = fs.createWriteStream(outputPath, { encoding: 'utf-8' })
+      const { stream, commit, abort } = this.exportService.createAtomicWriteTarget(outputPath)
       const writeChunk = async (chunk: string): Promise<void> => {
         await new Promise<void>((resolve, _reject) => {
           this.exportService.throwIfStopRequested(control)
@@ -385,10 +388,12 @@ export class TxtFormatter {
       })
 
       this.exportService.throwIfStopRequested(control)
-      await new Promise<void>((resolve, reject) => {
-        stream.on('error', reject)
-        stream.end(() => resolve())
-      })
+      try {
+        await commit()
+      } catch (e) {
+        abort()
+        throw e
+      }
 
       onProgress?.({
         current: 100,

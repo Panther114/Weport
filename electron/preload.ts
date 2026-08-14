@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+// 事件订阅统一模式：返回"只移除本回调"的退订函数。
+// 用 removeAllListeners 会把同频道的其他订阅者（多组件）一并清掉。
+function subscribe(channel: string, callback: (...args: any[]) => void): () => void {
+  const listener = (_: unknown, ...args: any[]) => callback(...args)
+  ipcRenderer.on(channel, listener)
+  return () => {
+    ipcRenderer.removeListener(channel, listener)
+  }
+}
+
 // 暴露给渲染进程的 API（Weport 精简版，模式与 WeFlow preload 一致）
 contextBridge.exposeInMainWorld('electronAPI', {
   // 配置
@@ -19,15 +29,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     glassRect: (payload: any) => ipcRenderer.send('notification:glassRect', payload),
     glassHide: () => ipcRenderer.send('notification:glassHide'),
     showTest: () => ipcRenderer.invoke('notification:showTest'),
-    onLuma: (callback: (bands: any) => void) => {
-      const listener = (_: any, bands: any) => callback(bands)
-      ipcRenderer.on('notification:luma', listener)
-      return () => ipcRenderer.removeListener('notification:luma', listener)
-    },
-    onShow: (callback: (event: any, data: any) => void) => {
-      ipcRenderer.on('notification:show', callback)
-      return () => ipcRenderer.removeAllListeners('notification:show')
-    }
+    onLuma: (callback: (bands: any) => void) => subscribe('notification:luma', callback),
+    onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback)
   },
 
   // 对话框
@@ -50,14 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
     ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
-    onDownloadProgress: (callback: (progress: any) => void) => {
-      ipcRenderer.on('app:downloadProgress', (_: any, progress: any) => callback(progress))
-      return () => ipcRenderer.removeAllListeners('app:downloadProgress')
-    },
-    onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string }) => void) => {
-      ipcRenderer.on('app:updateAvailable', (_: any, info: { version: string; releaseNotes: string }) => callback(info))
-      return () => ipcRenderer.removeAllListeners('app:updateAvailable')
-    }
+    onDownloadProgress: (callback: (progress: any) => void) => subscribe('app:downloadProgress', callback),
+    onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string }) => void) => subscribe('app:updateAvailable', callback)
   },
 
   // 数据库路径
@@ -70,10 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 密钥
   key: {
     autoGetDbKey: () => ipcRenderer.invoke('key:autoGetDbKey'),
-    onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => {
-      ipcRenderer.on('key:dbKeyStatus', (_: any, payload: { message: string; level: number }) => callback(payload))
-      return () => ipcRenderer.removeAllListeners('key:dbKeyStatus')
-    }
+    onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => subscribe('key:dbKeyStatus', callback)
   },
 
   // WCDB
@@ -108,10 +102,86 @@ contextBridge.exposeInMainWorld('electronAPI', {
     cancelTask: (taskId: string) => ipcRenderer.invoke('export:cancelTask', taskId),
     getExportLog: (outputRoot: string) => ipcRenderer.invoke('export:getExportLog', outputRoot),
     clearLibrary: (outputRoot: string) => ipcRenderer.invoke('export:clearLibrary', outputRoot),
-    onProgress: (callback: (payload: any) => void) => {
-      ipcRenderer.on('export:progress', (_: any, payload: any) => callback(payload))
-      return () => ipcRenderer.removeAllListeners('export:progress')
-    }
+    onProgress: (callback: (payload: any) => void) => subscribe('export:progress', callback)
+  },
+
+  // 朋友圈（v0.9）
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('sns:getTimeline', limit, offset, usernames, keyword, startTime, endTime),
+    getSnsUsernames: () => ipcRenderer.invoke('sns:getSnsUsernames'),
+    getUserPostCounts: (options?: { preferCache?: boolean; forceRefresh?: boolean }) =>
+      ipcRenderer.invoke('sns:getUserPostCounts', options),
+    getExportStats: (options?: { allowTimelineFallback?: boolean; preferCache?: boolean; forceRefresh?: boolean }) =>
+      ipcRenderer.invoke('sns:getExportStats', options),
+    getExportStatsFast: () => ipcRenderer.invoke('sns:getExportStatsFast'),
+    getUserPostStats: (username: string) => ipcRenderer.invoke('sns:getUserPostStats', username),
+    debugResource: (url: string) => ipcRenderer.invoke('sns:debugResource', url),
+    proxyImage: (payload: string | { url: string; key?: string | number }) =>
+      ipcRenderer.invoke('sns:proxyImage', payload),
+    downloadImage: (payload: { url: string; key?: string | number }) =>
+      ipcRenderer.invoke('sns:downloadImage', payload),
+    exportTimeline: (options: any) => ipcRenderer.invoke('sns:exportTimeline', options),
+    selectExportDir: () => ipcRenderer.invoke('sns:selectExportDir'),
+    installBlockDeleteTrigger: () => ipcRenderer.invoke('sns:installBlockDeleteTrigger'),
+    uninstallBlockDeleteTrigger: () => ipcRenderer.invoke('sns:uninstallBlockDeleteTrigger'),
+    checkBlockDeleteTrigger: () => ipcRenderer.invoke('sns:checkBlockDeleteTrigger'),
+    deleteSnsPost: (postId: string) => ipcRenderer.invoke('sns:deleteSnsPost', postId),
+    downloadEmoji: (params: { url: string; encryptUrl?: string; aesKey?: string }) =>
+      ipcRenderer.invoke('sns:downloadEmoji', params),
+    getCacheMigrationStatus: () => ipcRenderer.invoke('sns:getCacheMigrationStatus'),
+    startCacheMigration: () => ipcRenderer.invoke('sns:startCacheMigration'),
+    onExportProgress: (callback: (payload: any) => void) => subscribe('sns:exportProgress', callback),
+    onCacheMigrationProgress: (callback: (payload: any) => void) => subscribe('sns:cacheMigrationProgress', callback)
+  },
+
+  // 全局分析（v0.9）
+  analytics: {
+    getOverallStatistics: (force?: boolean) => ipcRenderer.invoke('analytics:getOverallStatistics', force),
+    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) =>
+      ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp),
+    getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
+    getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
+      ipcRenderer.invoke('analytics:getSelfSentDailyDistribution', beginTimestamp, endTimestamp, force),
+    getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
+    setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
+    getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
+    clearCache: () => ipcRenderer.invoke('cache:clearAnalytics')
+  },
+
+  // 群聊分析（v0.9）
+  groupAnalytics: {
+    getGroupChats: () => ipcRenderer.invoke('groupAnalytics:getGroupChats'),
+    getGroupMembers: (chatroomId: string) => ipcRenderer.invoke('groupAnalytics:getGroupMembers', chatroomId),
+    getGroupMembersPanelData: (chatroomId: string, options?: { forceRefresh?: boolean; includeMessageCounts?: boolean } | boolean) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupMembersPanelData', chatroomId, options),
+    getGroupMessageRanking: (chatroomId: string, limit?: number, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupMessageRanking', chatroomId, limit, startTime, endTime),
+    getGroupActiveHours: (chatroomId: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupActiveHours', chatroomId, startTime, endTime),
+    getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime),
+    getGroupMemberAnalytics: (chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupMemberAnalytics', chatroomId, memberUsername, startTime, endTime),
+    getGroupMemberMessages: (chatroomId: string, memberUsername: string, options?: { startTime?: number; endTime?: number; limit?: number; cursor?: number }) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupMemberMessages', chatroomId, memberUsername, options),
+    exportGroupMembers: (chatroomId: string, outputPath: string) =>
+      ipcRenderer.invoke('groupAnalytics:exportGroupMembers', chatroomId, outputPath),
+    exportGroupMemberMessages: (chatroomId: string, memberUsername: string, outputPath: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:exportGroupMemberMessages', chatroomId, memberUsername, outputPath, startTime, endTime)
+  },
+
+  // 年度报告（v0.9）
+  annualReport: {
+    getAvailableYears: () => ipcRenderer.invoke('annualReport:getAvailableYears'),
+    startAvailableYearsLoad: () => ipcRenderer.invoke('annualReport:startAvailableYearsLoad'),
+    cancelAvailableYearsLoad: (taskId: string) => ipcRenderer.invoke('annualReport:cancelAvailableYearsLoad', taskId),
+    generateReport: (year: number) => ipcRenderer.invoke('annualReport:generateReport', year),
+    exportImages: (payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) =>
+      ipcRenderer.invoke('annualReport:exportImages', payload),
+    captureCurrentWindow: () => ipcRenderer.invoke('annualReport:captureCurrentWindow'),
+    onProgress: (callback: (payload: any) => void) => subscribe('annualReport:progress', callback),
+    onAvailableYearsProgress: (callback: (payload: any) => void) => subscribe('annualReport:availableYearsProgress', callback)
   },
 
   // WeportAI（v0.8 聊天历史分析助手）
@@ -134,10 +204,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveActions: (actions: any) => ipcRenderer.invoke('ai:saveActions', actions),
     send: (chatId: string, text: string) => ipcRenderer.invoke('ai:send', chatId, text),
     abort: (chatId: string) => ipcRenderer.invoke('ai:abort', chatId),
-    onEvent: (callback: (event: any) => void) => {
-      ipcRenderer.on('ai:event', (_: any, event: any) => callback(event))
-      return () => ipcRenderer.removeAllListeners('ai:event')
-    }
+    onEvent: (callback: (event: any) => void) => subscribe('ai:event', callback)
   },
 
   process: {

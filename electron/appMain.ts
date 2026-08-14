@@ -18,11 +18,22 @@ import {
   dialog,
   shell,
   session,
+  protocol,
+  net,
 } from 'electron'
+import { pathToFileURL } from 'url'
 import { autoUpdater } from 'electron-updater'
 import { dirname, join } from 'path'
-import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'fs'
+import { readdir, copyFile, mkdir as mkdirAsync, rm as rmAsync, writeFile as writeFileAsync } from 'fs/promises'
+import { Worker } from 'worker_threads'
 import { ConfigService } from './services/config'
+import { avatarCacheService, toProtocolUrl, protocolUrlToPath } from './services/avatarCacheService'
+import { snsService, isVideoUrl } from './services/snsService'
+import { WasmService } from './services/wasmService'
+import { analyticsService } from './services/analyticsService'
+import { groupAnalyticsService } from './services/groupAnalyticsService'
+import { annualReportService } from './services/annualReportService'
 import { chatService } from './services/chatService'
 import { wcdbService } from './services/wcdbService'
 import { exportService } from './services/export'
@@ -42,6 +53,12 @@ import type { MessagePushPayload } from './services/messagePushService'
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL
 const APP_VERSION = app.getVersion()
+
+// 本地媒体协议：渲染层通过 weport-media:// 读取本地解密产物（朋友圈图片/视频预览）。
+// 必须在 app ready 之前注册特权，否则 file:// 在 webSecurity 下无法渲染。
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'weport-media', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } },
+])
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -278,6 +295,13 @@ const getRunKeyValue = (): string | null => {
   }
 }
 
+/** 期望的 Run 键值（与 getRunKeyValue 同样去除外层引号后再比较） */
+const desiredRunKeyValue = (): string => {
+  const silent = configService?.get('silentStartup') === true
+  const value = `"${process.execPath}"${silent ? ' --background' : ''}`
+  return value.replace(/^"|"$/g, '')
+}
+
 const syncLaunchAtStartupPreference = () => {
   if (!configService) return
   const reason = getLaunchAtStartupUnsupportedReason()
@@ -295,8 +319,10 @@ const syncLaunchAtStartupPreference = () => {
   // 已开启时：不仅要保证登录项存在，还要保证启动参数与 silentStartup 一致
   // （否则「启动时隐藏到托盘」勾选开启但开机仍然弹窗——只有再点一次开关才会生效）
   if (isWindowsHost) {
-    const desired = `"${process.execPath}"${silent ? ' --background' : ''}`
-    if (getRunKeyValue() === desired) return
+    const desired = desiredRunKeyValue()
+    const current = getRunKeyValue()
+    // 值缺失 / 指向其他可执行文件（旧安装路径、unpacked 构建）/ 参数不一致 → 重写
+    if (current === desired) return
     setSystemLaunchAtStartup(true)
     return
   }
@@ -310,18 +336,19 @@ const syncLaunchAtStartupPreference = () => {
 }
 
 /**
- * 清理历史版本（v0.7.x 早期用 setLoginItemSettings）残留的 electron.app.* Run 值
- * （仅 Windows）：
+ * 清理历史版本残留的开机自启 Run 值（仅 Windows）：
  * - `electron.app.Electron` 可能指向开发目录的 node_modules\electron，开机时会把
  *   裸 Electron 一起拉起（表现为开机多出一个 "Electron" 窗口）；
  * - `electron.app.Weport` 与当前 `Weport` 值重复，会造成开机双实例竞争，触发
- *   second-instance 把静默启动（--background）的主窗口带出来。
+ *   second-instance 把静默启动（--background）的主窗口带出来；
+ * - `electron.app.WeFlow` 为参考项目 WeFlow 安装时遗留的登录项，会随系统开机
+ *   拉起无关的 WeFlow 应用。
  */
 const cleanupLegacyAutostartEntries = () => {
   if (!isWindowsHost) return
   const { execFileSync } = require('child_process') as typeof import('child_process')
   const cmd = process.env.ComSpec || 'cmd.exe'
-  for (const name of ['electron.app.Weport', 'electron.app.Electron']) {
+  for (const name of ['electron.app.Weport', 'electron.app.Electron', 'electron.app.WeFlow']) {
     try {
       const stdout = execFileSync(cmd, ['/c', 'reg', 'query', RUN_KEY_PATH, '/v', name], {
         encoding: 'utf8',
@@ -330,7 +357,7 @@ const cleanupLegacyAutostartEntries = () => {
       const line = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => l.includes('REG_SZ'))
       if (!line) continue
       const target = line.slice(line.indexOf('REG_SZ') + 6).trim().replace(/^"|"$/g, '')
-      const isOurs = target.includes('Weport') || target.toLowerCase().includes('node_modules\\electron')
+      const isOurs = target.includes('Weport') || target.includes('WeFlow') || target.toLowerCase().includes('node_modules\\electron')
       if (!isOurs) continue
       execFileSync(cmd, ['/c', 'reg', 'delete', RUN_KEY_PATH, '/v', name, '/f'], {
         stdio: 'ignore',
@@ -367,17 +394,31 @@ const applyUpdaterChannel = () => {
   }
 }
 
-// 简单 semver 比较（a > b 返回 true）
+// 简单 semver 比较（a > b 返回 true），区分预发布：
+// 1.0.0-beta.1 视为比 1.0.0 旧；1.0.0-beta.2 > 1.0.0-beta.1。
+// 此前只比数字段：1.0.0 与 1.0.0-beta.2 判等 → 用户永远收不到正式版更新。
 function isNewerVersion(a: string, b: string): boolean {
-  const pa = String(a || '').split('.').map((x) => parseInt(x, 10) || 0)
-  const pb = String(b || '').split('.').map((x) => parseInt(x, 10) || 0)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
-    const va = pa[i] || 0
-    const vb = pb[i] || 0
+  const parse = (v: string) => {
+    const [core = '', pre = ''] = String(v || '').trim().split('-', 2)
+    return {
+      nums: core.split('.').map((x) => parseInt(x, 10) || 0),
+      pre: pre.trim(),
+    }
+  }
+  const pa = parse(a)
+  const pb = parse(b)
+  const len = Math.max(pa.nums.length, pb.nums.length)
+  for (let i = 0; i < len; i += 1) {
+    const va = pa.nums[i] || 0
+    const vb = pb.nums[i] || 0
     if (va > vb) return true
     if (va < vb) return false
   }
-  return false
+  // 数字部分相等时比较预发布后缀：有 pre 的版本更旧；都无 pre 则相等
+  if (pa.pre && !pb.pre) return false
+  if (!pa.pre && pb.pre) return true
+  if (pa.pre === pb.pre) return false
+  return pa.pre > pb.pre
 }
 
 async function checkForUpdatesManual(): Promise<{
@@ -699,6 +740,18 @@ function createWindow(autoShow: boolean): BrowserWindow {
     if (autoShow) win.show()
   })
 
+  // 导航守卫：渲染层只能停留在应用页面；外链一律交给系统浏览器。
+  // (AI 聊天若输出恶意链接，preventDefault 保证不会在应用窗口内导航/开新窗)
+  win.webContents.on('will-navigate', (event, url) => {
+    const devServer = process.env.VITE_DEV_SERVER_URL || ''
+    const allowed = devServer ? url.startsWith(devServer) : url.startsWith('file://')
+    if (!allowed) event.preventDefault()
+  })
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
   // 锁定缩放：禁止 Ctrl+Plus / Ctrl+Minus / Ctrl+0 / Ctrl+滚轮 缩放界面，
   // 并每次加载后把缩放因子复位为 100%（用户曾遇到 Ctrl± 把界面放大后无法还原）
   try {
@@ -746,6 +799,17 @@ function createWindow(autoShow: boolean): BrowserWindow {
     win.loadURL(process.env.VITE_DEV_SERVER_URL!)
   } else {
     win.loadFile(join(__dirname, '../dist/index.html'))
+  }
+  // 默认最大化启动（QA 模式保持固定窗口尺寸，保证截图/断言稳定）
+  const isQaMode =
+    isScreenshotMode ||
+    process.env.WEPORT_V09_DUMP === '1' ||
+    process.env.WEPORT_REAL_DUMP === '1' ||
+    process.env.WEPORT_UI_DUMP === '1' ||
+    process.env.WEPORT_SELFTEST === '1' ||
+    process.env.WEPORT_AI_SELFTEST === '1'
+  if (!isQaMode && autoShow) {
+    win.maximize()
   }
   // 主窗口创建即注册微信 CDN 请求头拦截（幂等；首窗口/弹窗两条路径共用）。
   // 静默启动不建窗口时不注册，避免开机即初始化网络栈拉起网络服务子进程
@@ -819,6 +883,568 @@ function createTray() {
 }
 
 // ---------------------------------------------------------------------------
+// v0.9 功能层辅助（朋友圈导出任务控制 / 旧版缓存迁移 / 年度报告年份加载）
+// ---------------------------------------------------------------------------
+const normalizeExportTaskId = (taskId: unknown): string => String(taskId || '').trim()
+
+const finalizeExportTaskControlResult = async (taskId: string, result: any) => {
+  if (!taskId) return result
+  if (result?.stopped) {
+    const cleanup = await exportTaskControlService.cleanupTask(taskId)
+    if (!cleanup.success) {
+      return {
+        ...result,
+        success: false,
+        error: `导出已停止，但清理已导出文件失败：${cleanup.error || '未知错误'}`,
+      }
+    }
+    return { ...result, cleanup }
+  }
+  if (!result?.paused) {
+    exportTaskControlService.releaseTask(taskId)
+  }
+  return result
+}
+
+type SnsCacheMigrationCandidate = {
+  label: string
+  sourceDir: string
+  targetDir: string
+  fileCount: number
+}
+
+type SnsCacheMigrationPlan = {
+  legacyBaseDir: string
+  currentBaseDir: string
+  candidates: SnsCacheMigrationCandidate[]
+  totalFiles: number
+}
+
+type SnsCacheMigrationProgressPayload = {
+  status: 'running' | 'done' | 'error'
+  phase: 'copying' | 'cleanup' | 'done' | 'error'
+  current: number
+  total: number
+  copied: number
+  skipped: number
+  remaining: number
+  message?: string
+  currentItemLabel?: string
+}
+
+let snsCacheMigrationInProgress = false
+
+const normalizeFsPathForCompare = (value: string): string => {
+  const normalized = String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+const countFilesInDir = async (dirPath: string): Promise<number> => {
+  if (!dirPath || !existsSync(dirPath)) return 0
+  try {
+    const entries = await readdir(dirPath, { withFileTypes: true })
+    let count = 0
+    for (const entry of entries) {
+      const fullPath = join(dirPath, entry.name)
+      if (entry.isDirectory()) {
+        count += await countFilesInDir(fullPath)
+        continue
+      }
+      if (entry.isFile()) count += 1
+    }
+    return count
+  } catch {
+    return 0
+  }
+}
+
+const migrateDirectoryPreserveNewFiles = async (
+  sourceDir: string,
+  targetDir: string,
+  onFileProcessed?: (payload: { copied: boolean }) => void,
+): Promise<{ copied: number; skipped: number; processed: number }> => {
+  let copied = 0
+  let skipped = 0
+  let processed = 0
+
+  if (!existsSync(sourceDir)) return { copied, skipped, processed }
+  await mkdirAsync(targetDir, { recursive: true })
+
+  const entries = await readdir(sourceDir, { withFileTypes: true })
+  for (const entry of entries) {
+    const sourcePath = join(sourceDir, entry.name)
+    const targetPath = join(targetDir, entry.name)
+
+    if (entry.isDirectory()) {
+      const nested = await migrateDirectoryPreserveNewFiles(sourcePath, targetPath, onFileProcessed)
+      copied += nested.copied
+      skipped += nested.skipped
+      processed += nested.processed
+      continue
+    }
+
+    if (!entry.isFile()) continue
+
+    if (existsSync(targetPath)) {
+      skipped += 1
+      processed += 1
+      onFileProcessed?.({ copied: false })
+      continue
+    }
+
+    await mkdirAsync(dirname(targetPath), { recursive: true })
+    await copyFile(sourcePath, targetPath)
+    copied += 1
+    processed += 1
+    onFileProcessed?.({ copied: true })
+  }
+
+  return { copied, skipped, processed }
+}
+
+const collectLegacySnsCacheMigrationPlan = async (): Promise<SnsCacheMigrationPlan | null> => {
+  if (!configService) return null
+
+  const legacyBaseDir = configService.getCacheBasePath()
+  const configuredCachePath = String(configService.get('cachePath') || '').trim()
+  const currentBaseDir = configuredCachePath || join(app.getPath('documents'), 'Weport')
+
+  if (!legacyBaseDir || !currentBaseDir) return null
+
+  const candidates = [
+    {
+      label: '朋友圈媒体缓存',
+      sourceDir: join(legacyBaseDir, 'sns_cache'),
+      targetDir: join(currentBaseDir, 'sns_cache'),
+    },
+    {
+      label: '朋友圈表情缓存（合并到 Emojis）',
+      sourceDir: join(legacyBaseDir, 'sns_emoji_cache'),
+      targetDir: join(currentBaseDir, 'Emojis'),
+    },
+    {
+      label: '朋友圈表情缓存（当前目录残留）',
+      sourceDir: join(currentBaseDir, 'sns_emoji_cache'),
+      targetDir: join(currentBaseDir, 'Emojis'),
+    },
+  ]
+
+  const pendingKeys = new Set<string>()
+  const pending: SnsCacheMigrationCandidate[] = []
+  for (const item of candidates) {
+    const sourceKey = normalizeFsPathForCompare(item.sourceDir)
+    const targetKey = normalizeFsPathForCompare(item.targetDir)
+    if (!sourceKey || sourceKey === targetKey) continue
+    const dedupeKey = `${sourceKey}=>${targetKey}`
+    if (pendingKeys.has(dedupeKey)) continue
+    const fileCount = await countFilesInDir(item.sourceDir)
+    if (fileCount <= 0) continue
+    pendingKeys.add(dedupeKey)
+    pending.push({ ...item, fileCount })
+  }
+  if (pending.length === 0) return null
+
+  const totalFiles = pending.reduce((sum, item) => sum + item.fileCount, 0)
+  return {
+    legacyBaseDir,
+    currentBaseDir,
+    candidates: pending,
+    totalFiles,
+  }
+}
+
+const runLegacySnsCacheMigration = async (
+  plan: SnsCacheMigrationPlan,
+  onProgress: (payload: SnsCacheMigrationProgressPayload) => void,
+): Promise<{ copied: number; skipped: number; totalFiles: number }> => {
+  let processed = 0
+  let copied = 0
+  let skipped = 0
+  const total = plan.totalFiles
+
+  const emitProgress = (patch?: Partial<SnsCacheMigrationProgressPayload>) => {
+    onProgress({
+      status: 'running',
+      phase: 'copying',
+      current: processed,
+      total,
+      copied,
+      skipped,
+      remaining: Math.max(0, total - processed),
+      ...patch,
+    })
+  }
+
+  emitProgress({ message: '准备迁移缓存...' })
+
+  for (const item of plan.candidates) {
+    emitProgress({ currentItemLabel: item.label, message: `正在迁移：${item.label}` })
+    const result = await migrateDirectoryPreserveNewFiles(item.sourceDir, item.targetDir, ({ copied: copiedThisFile }) => {
+      processed += 1
+      if (copiedThisFile) copied += 1
+      else skipped += 1
+      emitProgress({ currentItemLabel: item.label })
+    })
+    const expectedProcessed = copied + skipped
+    if (processed !== expectedProcessed) {
+      processed = expectedProcessed
+      copied = Math.max(copied, result.copied)
+      skipped = Math.max(skipped, result.skipped)
+      emitProgress({ currentItemLabel: item.label })
+    }
+  }
+
+  emitProgress({ phase: 'cleanup', message: '正在清理旧目录...' })
+  for (const item of plan.candidates) {
+    await rmAsync(item.sourceDir, { recursive: true, force: true })
+  }
+
+  if (existsSync(plan.legacyBaseDir)) {
+    try {
+      const remaining = await readdir(plan.legacyBaseDir)
+      if (remaining.length === 0) {
+        await rmAsync(plan.legacyBaseDir, { recursive: true, force: true })
+      }
+    } catch {
+      // 忽略旧目录清理失败，不影响迁移结果
+    }
+  }
+
+  return { copied, skipped, totalFiles: total }
+}
+
+// 年度报告：年份加载任务簿（内存态，支持取消 + 跨窗口进度广播）// 年度报告：年份加载任务簿（内存态，支持取消 + 跨窗口进度广播）
+type AnnualReportYearsProgressPayload = {
+  years: number[]
+  done: boolean
+  canceled?: boolean
+  error?: string
+  strategy?: string
+  phase?: string
+  statusText?: string
+}
+
+interface AnnualReportYearsLoadTask {
+  cacheKey: string
+  canceled: boolean
+  done: boolean
+  snapshot: AnnualReportYearsProgressPayload
+  updatedAt: number
+}
+
+const annualReportYearsLoadTasks = new Map<string, AnnualReportYearsLoadTask>()
+const annualReportYearsTaskByCacheKey = new Map<string, string>()
+
+const isYearsLoadCanceled = (taskId: string): boolean =>
+  annualReportYearsLoadTasks.get(taskId)?.canceled === true
+
+const buildAnnualReportYearsCacheKey = (dbPath: unknown, wxid: unknown): string =>
+  `${String(dbPath || '').trim()}|${String(wxid || '').trim()}`
+
+const broadcastAnnualReportYearsProgress = (taskId: string, snapshot: AnnualReportYearsProgressPayload) => {
+  const payload = { taskId, snapshot }
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('annualReport:availableYearsProgress', payload)
+    }
+  }
+}
+
+/**
+ * 在独立 worker 线程中生成年度报告（与 WeFlow 相同的生产路径）。
+ * 返回 report 结果；onProgress 可选回调进度。
+ */
+const generateAnnualReportInWorker = (
+  year: number,
+  onProgress?: (progress: { status: string; progress: number }) => void,
+): Promise<{ success: boolean; data?: any; error?: string }> => {
+  const cfg = configService
+  if (!cfg) return Promise.resolve({ success: false, error: '配置服务未就绪' })
+
+  const dbPath = cfg.get('dbPath')
+  const decryptKey = cfg.get('decryptKey')
+  const wxid = cfg.getMyWxidCleaned()
+  const logEnabled = cfg.get('logEnabled')
+  const resourcesPath = resolveResourcesPath()
+  const userDataPath = app.getPath('userData')
+  const workerPath = join(__dirname, 'annualReportWorker.js')
+
+  return new Promise((resolve) => {
+    const worker = new Worker(workerPath, {
+      workerData: { year, dbPath, decryptKey, myWxid: wxid, resourcesPath, userDataPath, logEnabled },
+    })
+
+    const cleanup = () => {
+      worker.removeAllListeners()
+    }
+
+    worker.on('message', (msg: any) => {
+      if (msg && msg.type === 'annualReport:progress') {
+        onProgress?.(msg.data)
+        return
+      }
+      if (msg && (msg.type === 'annualReport:result' || msg.type === 'done')) {
+        cleanup()
+        void worker.terminate()
+        resolve(msg.data ?? msg.result)
+        return
+      }
+      if (msg && (msg.type === 'annualReport:error' || msg.type === 'error')) {
+        cleanup()
+        void worker.terminate()
+        resolve({ success: false, error: msg.error || '年度报告生成失败' })
+      }
+    })
+
+    worker.on('error', (err) => {
+      cleanup()
+      resolve({ success: false, error: String(err) })
+    })
+
+    worker.on('exit', (code) => {
+      if (code !== 0) {
+        cleanup()
+        resolve({ success: false, error: `年度报告线程异常退出: ${code}` })
+      }
+    })
+  })
+}
+
+// ---------------------------------------------------------------------------
+// QA 真实数据转储模式（WEPORT_REAL_DUMP=1）
+// 不使用任何演示数据：读取真实配置（dbPath/decryptKey/myWxid），通过真实
+// WCDB 宿主进程执行全部 v0.9 只读查询，验证真实数据库端到端可用性。
+// 结果（聚合统计 + 显示名，非原文消息）写入 WEPORT_REAL_DUMP_OUT。
+// ---------------------------------------------------------------------------
+async function runRealDataDump() {
+  const outDir = process.env.WEPORT_REAL_DUMP_OUT || join(app.getPath('temp'), 'weport-real-dump')
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'real-dump.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+  }
+
+  const report: Record<string, unknown> = {}
+  const run = async (key: string, fn: () => Promise<unknown>): Promise<boolean> => {
+    const startedAt = Date.now()
+    try {
+      const result = await fn()
+      report[key] = result
+      log(`${key} = ${JSON.stringify(result)?.slice(0, 1200)}`)
+      return true
+    } catch (e) {
+      report[key] = { error: String((e as Error)?.message || e) }
+      log(`${key} FAILED: ${String((e as Error)?.message || e)}`)
+      return false
+    } finally {
+      log(`${key} took ${Date.now() - startedAt}ms`)
+    }
+  }
+
+  log('real-data dump started (read-only queries)')
+  const cfg = configService
+  if (!cfg) {
+    log('FAIL: configService 未就绪')
+    app.exit(1)
+    return
+  }
+  report.config = {
+    dbPath: String(cfg.get('dbPath') || '').slice(0, 80),
+    myWxid: String(cfg.getMyWxidCleaned() || ''),
+    hasDecryptKey: String(cfg.get('decryptKey') || '').length === 64,
+  }
+  log(`config = ${JSON.stringify(report.config)}`)
+
+  // 1) 连接真实数据库（真实 WCDB 宿主进程 + 真实密钥）
+  const connectRes = await chatService.connect()
+  report.connect = { success: connectRes.success, error: connectRes.error }
+  log(`connect = ${JSON.stringify(report.connect)}`)
+  if (!connectRes.success) {
+    log('FAIL: 真实数据库连接失败，无法继续')
+    try { writeFileSync(join(outDir, 'real-dump.json'), JSON.stringify(report, null, 2), 'utf8') } catch { /* noop */ }
+    app.exit(1)
+    return
+  }
+  await sleep(1500)
+
+  let ok = true
+
+  // 2) 朋友圈（真实 sns.db）
+  ok = (await run('snsUsernames', () => snsService.getSnsUsernames())) && ok
+  ok = (await run('snsExportStats', () => snsService.getExportStats({ allowTimelineFallback: true }))) && ok
+  ok = (await run('snsTimelineSample', async () => {
+    const r = await snsService.getTimeline(5, 0)
+    if (r.success && r.timeline) {
+      return {
+        success: true,
+        count: r.timeline.length,
+        sample: r.timeline.map((p: any) => ({
+          nickname: p.nickname,
+          createTime: p.createTime,
+          contentDesc: String(p.contentDesc || '').slice(0, 40),
+          mediaCount: p.media?.length || 0,
+          likesCount: p.likes?.length || 0,
+          commentsCount: p.comments?.length || 0,
+        })),
+      }
+    }
+    return r
+  })) && ok
+  ok = (await run('snsUserPostCounts', () => snsService.getUserPostCounts({ preferCache: false, forceRefresh: true }))) && ok
+  // 2.5) 朋友圈解密探针：真实媒体 URL + key 走完整解密管线，量化耗时
+  await run('snsDecryptProbe', async () => {
+    const tl = await snsService.getTimeline(40, 0)
+    const posts = tl.success ? (tl.timeline || []) : []
+    const candidates: Array<{ url: string; key?: string | number }> = []
+    for (const p of posts) {
+      for (const m of (p.media || [])) {
+        if (!String(m.url || '').startsWith('data:')) {
+          candidates.push({ url: String(m.url || ''), key: m.key })
+        }
+        if (candidates.length >= 3) break
+      }
+      if (candidates.length >= 3) break
+    }
+    if (candidates.length === 0) return { success: false, error: 'timeline 无可用媒体' }
+    const results = []
+    for (const c of candidates) {
+      const t0 = Date.now()
+      const first = await snsService.proxyImage(c.url, c.key)
+      const firstMs = Date.now() - t0
+      const t1 = Date.now()
+      const second = await snsService.proxyImage(c.url, c.key)
+      const secondMs = Date.now() - t1
+      results.push({
+        success: first.success,
+        firstMs,
+        secondMs,
+        dataUrlLen: first.dataUrl ? first.dataUrl.length : 0,
+        cachePath: first.cachePath || '',
+        url: String(c.url || '').slice(0, 120),
+        error: first.error,
+      })
+    }
+    const cacheStats = WasmService.getInstance().getKeystreamCacheStats()
+    return { success: results.every((r) => r.success), results, keystreamCache: cacheStats }
+  })
+
+  // 3) 全局分析（真实聚合统计）
+  ok = (await run('analyticsOverall', () => analyticsService.getOverallStatistics(true))) && ok
+  ok = (await run('analyticsTimeDistribution', () => analyticsService.getTimeDistribution())) && ok
+  ok = (await run('analyticsContactRankings', () => analyticsService.getContactRankings(8, 0, 0))) && ok
+
+  // 3.5) 头像本地化探针：head_image.db 覆盖率 + 磁盘缓存文件存在率
+  await sleep(3500) // 等启动预热（enrich + 落盘）完成，避免与探针竞争
+  await run('avatarProbe', async () => {
+    const sessionsRes = await chatService.getSessions()
+    const allUsernames = ((sessionsRes as any)?.sessions || [])
+      .map((s: any) => String(s?.username || '').trim())
+      .filter(Boolean)
+    const usernames = allUsernames.slice(0, 60)
+
+    // 全量 head_image 覆盖：分批（60/批）直接查询，与 enrich 内部一致
+    let fullHit = 0
+    for (let i = 0; i < allUsernames.length; i += 60) {
+      const batch = allUsernames.slice(i, i + 60)
+      const res = await wcdbService.getHeadImageBuffers(batch)
+      if (res.success && res.map) {
+        fullHit += Object.keys(res.map).filter((u) => res.map![u]).length
+      }
+    }
+
+    const headImages = await wcdbService.getHeadImageBuffers(usernames)
+    const headHit = headImages.success ? Object.keys(headImages.map || {}).filter((u) => headImages.map![u]).length : 0
+    const enriched = await chatService.enrichSessionsContactInfo(usernames)
+    const contacts = enriched.success ? enriched.contacts || {} : {}
+    const entries = Object.values(contacts) as Array<{ avatarUrl?: string }>
+    const withAvatar = entries.filter((e) => e.avatarUrl).length
+    const localProtocol = entries.filter((e) => e.avatarUrl?.startsWith('weport-media://')).length
+    const dataAvatar = entries.filter((e) => e.avatarUrl?.startsWith('data:image/')).length
+    const cdnAvatar = entries.filter((e) => e.avatarUrl?.startsWith('http')).length
+    // 文件存在性：协议 URL 直接验证文件；CDN URL 验证 sha1 文件是否已下载
+    const { createHash } = await import('crypto')
+    const { join } = await import('path')
+    const { existsSync } = await import('fs')
+    const avatarDir = join(configService!.getCacheBasePath(), 'avatars')
+    let filesOnDisk = 0
+    try {
+      const { readdirSync } = await import('fs')
+      filesOnDisk = readdirSync(avatarDir).filter((f: string) => f.endsWith('.jpg')).length
+    } catch { /* noop */ }
+    const fileResolvable = entries.filter((e) => {
+      const url = e.avatarUrl
+      if (!url) return false
+      if (url.startsWith('weport-media://')) {
+        const p = protocolUrlToPath(url)
+        return !!p && existsSync(p)
+      }
+      if (url.startsWith('http')) {
+        const hash = createHash('sha1').update(url).digest('hex')
+        return existsSync(join(avatarDir, `${hash}.jpg`))
+      }
+      return true
+    }).length
+    const sampleLocal = entries.filter((e) => e.avatarUrl?.startsWith('weport-media://')).slice(0, 3).map((e) => e.avatarUrl)
+    return {
+      probed: usernames.length,
+      totalSessions: allUsernames.length,
+      headImageFullHit: fullHit,
+      headImageFullHitRate: allUsernames.length > 0 ? Math.round((fullHit / allUsernames.length) * 100) : 0,
+      headImageHit: headHit,
+      headImageHitRate: usernames.length > 0 ? Math.round((headHit / usernames.length) * 100) : 0,
+      withAvatar,
+      localProtocol,
+      dataUrl: dataAvatar,
+      cdnFallback: cdnAvatar,
+      fileResolvable,
+      fileResolvableRate: entries.length > 0 ? Math.round((fileResolvable / entries.length) * 100) : 0,
+      filesOnDisk,
+      avatarDir,
+      sampleLocal,
+    }
+  })
+
+  // 4) 群聊分析（真实群数据）
+  const groupsRes = (await run('groupChats', () => groupAnalyticsService.getGroupChats())) ? (report.groupChats as any) : null
+  const groups = groupsRes?.data || []
+  if (groups.length > 0) {
+    const first = groups[0]?.username as string
+    await run('groupMembers', () => groupAnalyticsService.getGroupMembersPanelData(first, { includeMessageCounts: true, forceRefresh: true }))
+    await run('groupRanking', () => groupAnalyticsService.getGroupMessageRanking(first, 5, 0, 0))
+  } else {
+    log('groupChats: 无群聊（可能无数据）')
+  }
+
+  // 5) 年度报告：真实年份 + 真实 worker 生成（最大年份）
+  const yearsRes = (await run('annualYears', () => annualReportService.getAvailableYears({
+    dbPath: cfg.get('dbPath'),
+    decryptKey: cfg.get('decryptKey'),
+    wxid: cfg.getMyWxidCleaned(),
+  }))) ? (report.annualYears as any) : null
+  const years: number[] = yearsRes?.data || []
+  if (years.length > 0) {
+    const year = Math.max(...years)
+    ok = (await run(`annualReport_${year}`, () => generateAnnualReportInWorker(year, (progress) => {
+      log(`  annualReport progress: ${progress.status} (${progress.progress}%)`)
+    }))) && ok
+  } else {
+    log('annualYears: 无可用年份')
+  }
+
+  report.ok = ok
+  log(`RESULT ok=${ok}`)
+  try {
+    writeFileSync(join(outDir, 'real-dump.json'), JSON.stringify(report, null, 2), 'utf8')
+    log(`written to ${join(outDir, 'real-dump.json')}`)
+  } catch { /* noop */ }
+  try { await chatService.close() } catch { /* noop */ }
+  app.exit(ok ? 0 : 1)
+}
+
+// ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
 function registerIpcHandlers() {
@@ -839,7 +1465,10 @@ function registerIpcHandlers() {
       applyLaunchAtStartupPreference(true)
     }
     if (['messagePushEnabled', 'notificationEnabled', 'dbPath', 'decryptKey', 'myWxid'].includes(key)) {
+      // 关闭推送时同步停掉轮询/监控并释放 WCDB 连接（此前只会在开启时 start，
+      // 关闭路径从不 stop，连接会一直占着）
       if (configService?.get('messagePushEnabled')) messagePushService?.start()
+      else messagePushService?.stop()
       await messagePushService?.handleConfigChanged(key)
     }
     if (key === 'dbPath' || key === 'decryptKey' || key === 'myWxid') {
@@ -982,7 +1611,8 @@ function registerIpcHandlers() {
     const taskId = `export-${Date.now()}`
     const control = exportTaskControlService.createControl(taskId, outDir)
     const progressEmitter = (progress: any) => {
-      mainWindow?.webContents.send('export:progress', progress)
+      // 进度事件携带 taskId：渲染层靠它执行 export:cancelTask
+      mainWindow?.webContents.send('export:progress', { ...progress, taskId })
     }
 
     // Weport 默认值（与旧版 TXT/JSON 行为一致），用户选项优先
@@ -1013,6 +1643,13 @@ function registerIpcHandlers() {
         isPackaged: app.isPackaged,
       })
       const result = await exportService.exportSessions(sessionIds, outDir, exportOptions, progressEmitter, control)
+      // 用户取消：清掉本次运行已写出的部分文件/目录，避免残留半截导出
+      if (exportTaskControlService.getState(taskId) === 'cancel_requested') {
+        const cleanup = await exportTaskControlService.cleanupTask(taskId)
+        if (!cleanup.success) {
+          console.warn('[Export] 取消后的清理未完全成功:', cleanup.error)
+        }
+      }
       const when = formatLocalTime()
       // 导出日志仅跟踪 TXT / JSON（旧版格式），其他格式不覆盖这两行
       if (fmt === 'txt' || fmt === 'json') {
@@ -1023,6 +1660,7 @@ function registerIpcHandlers() {
         success: result.success && result.failCount === 0,
         formatFolder,
         formatDir: outDir,
+        taskId,
       }
     } catch (e) {
       return { success: false, successCount: 0, failCount: sessionIds.length, error: String((e as Error)?.message || e) }
@@ -1031,11 +1669,343 @@ function registerIpcHandlers() {
     }
   })
   ipcMain.handle('export:cancelTask', (_e, taskId: string) => {
-    exportTaskControlService.cancelTask(String(taskId || ''))
-    return { success: true }
+    const ok = exportTaskControlService.cancelTask(String(taskId || ''))
+    return { success: ok }
   })
   ipcMain.handle('export:getExportLog', (_e, outputRoot: string) => readExportLog(String(outputRoot || '')))
   ipcMain.handle('export:clearLibrary', (_e, outputRoot: string) => clearExportLibrary(String(outputRoot || '')))
+
+  // -------------------------------------------------------------------------
+  // v0.9 朋友圈（SNS）
+  // -------------------------------------------------------------------------
+  ipcMain.handle('sns:getTimeline', (_e, limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) =>
+    snsService.getTimeline(limit, offset, usernames, keyword, startTime, endTime))
+  ipcMain.handle('sns:getSnsUsernames', () => snsService.getSnsUsernames())
+  ipcMain.handle('sns:getUserPostCounts', (_e, options?: { preferCache?: boolean; forceRefresh?: boolean }) =>
+    snsService.getUserPostCounts(options))
+  ipcMain.handle('sns:getExportStats', (_e, options?: { allowTimelineFallback?: boolean; preferCache?: boolean; forceRefresh?: boolean }) =>
+    snsService.getExportStats(options))
+  ipcMain.handle('sns:getExportStatsFast', () => snsService.getExportStatsFast())
+  ipcMain.handle('sns:getUserPostStats', (_e, username: string) => snsService.getUserPostStats(String(username || '')))
+  ipcMain.handle('sns:debugResource', (_e, url: string) => snsService.debugResource(String(url || '')))
+  ipcMain.handle('sns:proxyImage', (_e, payload: string | { url: string; key?: string | number }) => {
+    const url = typeof payload === 'string' ? payload : payload?.url
+    const key = typeof payload === 'string' ? undefined : payload?.key
+    return snsService.proxyImage(url, key)
+  })
+  ipcMain.handle('sns:downloadImage', async (_e, payload: { url: string; key?: string | number }) => {
+    try {
+      const { url, key } = payload
+      const result = await snsService.downloadImage(url, key)
+      if (!result.success || !result.data) {
+        return { success: false, error: result.error || '下载图片失败' }
+      }
+      const ext = (result.contentType || '').split('/')[1] || 'jpg'
+      const defaultPath = `SNS_${Date.now()}.${ext}`
+      const filters = isVideoUrl(url)
+        ? [{ name: 'Videos', extensions: ['mp4', 'mov', 'avi', 'mkv'] }]
+        : [{ name: 'Images', extensions: [ext, 'jpg', 'jpeg', 'png', 'webp', 'gif'] }]
+      const { filePath, canceled } = await dialog.showSaveDialog(mainWindow!, { defaultPath, filters })
+      if (canceled || !filePath) return { success: false, error: '用户已取消' }
+      await writeFileAsync(filePath, result.data)
+      return { success: true, filePath }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+  ipcMain.handle('sns:exportTimeline', async (event, options: any) => {
+    const exportOptions = { ...(options || {}) }
+    const taskId = normalizeExportTaskId(exportOptions.taskId)
+    delete exportOptions.taskId
+    const taskControl = taskId
+      ? exportTaskControlService.createControl(taskId, String(exportOptions.outputDir || ''))
+      : undefined
+    try {
+      const result = await snsService.exportTimeline(
+        exportOptions,
+        (progress) => {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('sns:exportProgress', progress)
+          }
+        },
+        taskControl,
+      )
+      return await finalizeExportTaskControlResult(taskId, result)
+    } finally {
+      if (taskId) exportTaskControlService.releaseTask(taskId)
+    }
+  })
+  ipcMain.handle('sns:selectExportDir', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openDirectory', 'createDirectory'],
+      title: '选择导出目录',
+    })
+    if (result.canceled || !result.filePaths?.[0]) return { canceled: true }
+    return { canceled: false, filePath: result.filePaths[0] }
+  })
+  ipcMain.handle('sns:installBlockDeleteTrigger', () => snsService.installSnsBlockDeleteTrigger())
+  ipcMain.handle('sns:uninstallBlockDeleteTrigger', () => snsService.uninstallSnsBlockDeleteTrigger())
+  ipcMain.handle('sns:checkBlockDeleteTrigger', () => snsService.checkSnsBlockDeleteTrigger())
+  ipcMain.handle('sns:deleteSnsPost', (_e, postId: string) => snsService.deleteSnsPost(String(postId || '')))
+  ipcMain.handle('sns:downloadEmoji', (_e, params: { url: string; encryptUrl?: string; aesKey?: string }) =>
+    snsService.downloadSnsEmoji(params?.url, params?.encryptUrl, params?.aesKey))
+  ipcMain.handle('sns:getCacheMigrationStatus', async () => {
+    try {
+      const plan = await collectLegacySnsCacheMigrationPlan()
+      if (!plan) {
+        return { success: true, needed: false, inProgress: snsCacheMigrationInProgress, totalFiles: 0, items: [] }
+      }
+      return {
+        success: true,
+        needed: true,
+        inProgress: snsCacheMigrationInProgress,
+        totalFiles: plan.totalFiles,
+        legacyBaseDir: plan.legacyBaseDir,
+        currentBaseDir: plan.currentBaseDir,
+        items: plan.candidates,
+      }
+    } catch (error) {
+      return { success: false, needed: false, error: String((error as Error)?.message || error || '') }
+    }
+  })
+  ipcMain.handle('sns:startCacheMigration', async (event) => {
+    if (snsCacheMigrationInProgress) {
+      return { success: false, error: '迁移任务正在进行中' }
+    }
+    const sender = event.sender
+    let lastProgress: SnsCacheMigrationProgressPayload = {
+      status: 'running',
+      phase: 'copying',
+      current: 0,
+      total: 0,
+      copied: 0,
+      skipped: 0,
+      remaining: 0,
+    }
+    const emitProgress = (payload: SnsCacheMigrationProgressPayload) => {
+      lastProgress = payload
+      if (!sender.isDestroyed()) {
+        sender.send('sns:cacheMigrationProgress', payload)
+      }
+    }
+    try {
+      const plan = await collectLegacySnsCacheMigrationPlan()
+      if (!plan) {
+        emitProgress({ status: 'done', phase: 'done', current: 0, total: 0, copied: 0, skipped: 0, remaining: 0, message: '无需迁移' })
+        return { success: true, copied: 0, skipped: 0, totalFiles: 0, message: '无需迁移' }
+      }
+      snsCacheMigrationInProgress = true
+      const result = await runLegacySnsCacheMigration(plan, emitProgress)
+      return { success: true, ...result }
+    } catch (error) {
+      const message = String((error as Error)?.message || error || '')
+      emitProgress({ ...lastProgress, status: 'error', phase: 'error', message })
+      return { success: false, error: message }
+    } finally {
+      snsCacheMigrationInProgress = false
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // v0.9 全局分析（确定性统计）
+  // -------------------------------------------------------------------------
+  ipcMain.handle('analytics:getOverallStatistics', (_e, force?: boolean) => analyticsService.getOverallStatistics(force === true))
+  ipcMain.handle('analytics:getContactRankings', (_e, limit?: number, beginTimestamp?: number, endTimestamp?: number) =>
+    analyticsService.getContactRankings(limit, beginTimestamp, endTimestamp))
+  ipcMain.handle('analytics:getTimeDistribution', () => analyticsService.getTimeDistribution())
+  ipcMain.handle('analytics:getSelfSentDailyDistribution', (_e, beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
+    analyticsService.getSelfSentDailyDistribution(beginTimestamp, endTimestamp, force === true))
+  ipcMain.handle('analytics:getExcludedUsernames', () => analyticsService.getExcludedUsernames())
+  ipcMain.handle('analytics:setExcludedUsernames', (_e, usernames: string[]) =>
+    analyticsService.setExcludedUsernames((usernames || []).map(String)))
+  ipcMain.handle('analytics:getExcludeCandidates', () => analyticsService.getExcludeCandidates())
+  ipcMain.handle('cache:clearAnalytics', () => analyticsService.clearCache())
+
+  // -------------------------------------------------------------------------
+  // v0.9 群聊分析
+  // -------------------------------------------------------------------------
+  ipcMain.handle('groupAnalytics:getGroupChats', () => groupAnalyticsService.getGroupChats())
+  ipcMain.handle('groupAnalytics:getGroupMembers', (_e, chatroomId: string) =>
+    groupAnalyticsService.getGroupMembers(String(chatroomId || '')))
+  ipcMain.handle('groupAnalytics:getGroupMembersPanelData', (_e, chatroomId: string, options?: { forceRefresh?: boolean; includeMessageCounts?: boolean } | boolean) => {
+    const normalizedOptions = typeof options === 'boolean' ? { forceRefresh: options } : options
+    return groupAnalyticsService.getGroupMembersPanelData(String(chatroomId || ''), normalizedOptions)
+  })
+  ipcMain.handle('groupAnalytics:getGroupMessageRanking', (_e, chatroomId: string, limit?: number, startTime?: number, endTime?: number) =>
+    groupAnalyticsService.getGroupMessageRanking(String(chatroomId || ''), limit, startTime, endTime))
+  ipcMain.handle('groupAnalytics:getGroupActiveHours', (_e, chatroomId: string, startTime?: number, endTime?: number) =>
+    groupAnalyticsService.getGroupActiveHours(String(chatroomId || ''), startTime, endTime))
+  ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, startTime?: number, endTime?: number) =>
+    groupAnalyticsService.getGroupMediaStats(String(chatroomId || ''), startTime, endTime))
+  ipcMain.handle('groupAnalytics:getGroupMemberAnalytics', (_e, chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) =>
+    groupAnalyticsService.getGroupMemberAnalytics(String(chatroomId || ''), String(memberUsername || ''), startTime, endTime))
+  ipcMain.handle('groupAnalytics:getGroupMemberMessages', (_e, chatroomId: string, memberUsername: string, options?: { startTime?: number; endTime?: number; limit?: number; cursor?: number }) =>
+    groupAnalyticsService.getGroupMemberMessages(String(chatroomId || ''), String(memberUsername || ''), options))
+  ipcMain.handle('groupAnalytics:exportGroupMembers', (_e, chatroomId: string, outputPath: string) =>
+    groupAnalyticsService.exportGroupMembers(String(chatroomId || ''), String(outputPath || '')))
+  ipcMain.handle('groupAnalytics:exportGroupMemberMessages', (_e, chatroomId: string, memberUsername: string, outputPath: string, startTime?: number, endTime?: number) =>
+    groupAnalyticsService.exportGroupMemberMessages(String(chatroomId || ''), String(memberUsername || ''), String(outputPath || ''), startTime, endTime))
+
+  // -------------------------------------------------------------------------
+  // v0.9 年度报告
+  // -------------------------------------------------------------------------
+  ipcMain.handle('annualReport:getAvailableYears', () =>
+    annualReportService.getAvailableYears({
+      dbPath: String(configService?.get('dbPath') || ''),
+      decryptKey: String(configService?.get('decryptKey') || ''),
+      wxid: String(configService?.getMyWxidCleaned() || ''),
+    }))
+  ipcMain.handle('annualReport:startAvailableYearsLoad', async (event) => {
+    const cfg = configService
+    if (!cfg) return { success: false, error: '配置服务未就绪' }
+
+    const dbPath = cfg.get('dbPath')
+    const decryptKey = cfg.get('decryptKey')
+    const wxid = cfg.get('myWxid')
+    const cacheKey = buildAnnualReportYearsCacheKey(dbPath, wxid)
+
+    const runningTaskId = annualReportYearsTaskByCacheKey.get(cacheKey)
+    if (runningTaskId) {
+      const runningTask = annualReportYearsLoadTasks.get(runningTaskId)
+      if (runningTask && !runningTask.done) {
+        return { success: true, taskId: runningTaskId, reused: true, snapshot: runningTask.snapshot }
+      }
+      annualReportYearsTaskByCacheKey.delete(cacheKey)
+    }
+
+    const taskId = `years_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const initialSnapshot: AnnualReportYearsProgressPayload = {
+      years: [],
+      done: false,
+      strategy: 'native',
+      phase: 'native',
+      statusText: '准备使用原生快速模式加载年份...',
+    }
+
+    annualReportYearsLoadTasks.set(taskId, {
+      cacheKey,
+      canceled: false,
+      done: false,
+      snapshot: { ...initialSnapshot },
+      updatedAt: Date.now(),
+    })
+    annualReportYearsTaskByCacheKey.set(cacheKey, taskId)
+
+    void (async () => {
+      try {
+        const result = await annualReportService.getAvailableYears({
+          dbPath,
+          decryptKey,
+          wxid,
+          onProgress: (progress: any) => {
+            if (isYearsLoadCanceled(taskId)) return
+            const task = annualReportYearsLoadTasks.get(taskId)
+            if (!task) return
+            task.snapshot = { ...task.snapshot, ...progress, done: false }
+            task.updatedAt = Date.now()
+            broadcastAnnualReportYearsProgress(taskId, task.snapshot)
+          },
+          shouldCancel: () => isYearsLoadCanceled(taskId),
+        })
+
+        const canceled = isYearsLoadCanceled(taskId)
+        const task = annualReportYearsLoadTasks.get(taskId)
+        if (!task) return
+        task.snapshot = canceled
+          ? { ...task.snapshot, done: true, canceled: true, phase: 'done', statusText: '已取消年份加载' }
+          : result.success
+            ? {
+                years: result.data || [],
+                done: true,
+                strategy: result.meta?.strategy,
+                phase: 'done',
+                statusText: result.meta?.statusText || '年份数据加载完成',
+              }
+            : {
+                years: result.data || [],
+                done: true,
+                error: result.error || '加载年度数据失败',
+                strategy: result.meta?.strategy,
+                phase: 'done',
+                statusText: result.meta?.statusText || '年份数据加载失败',
+              }
+        task.done = true
+        task.updatedAt = Date.now()
+        broadcastAnnualReportYearsProgress(taskId, task.snapshot)
+      } catch (e) {
+        const task = annualReportYearsLoadTasks.get(taskId)
+        if (task) {
+          task.snapshot = { done: true, error: String(e), phase: 'done', statusText: '年份数据加载失败', years: task.snapshot.years }
+          task.done = true
+          task.updatedAt = Date.now()
+          broadcastAnnualReportYearsProgress(taskId, task.snapshot)
+        }
+      } finally {
+        annualReportYearsTaskByCacheKey.delete(cacheKey)
+        annualReportYearsLoadTasks.delete(taskId)
+      }
+    })()
+
+    return { success: true, taskId, reused: false, snapshot: initialSnapshot }
+  })
+  ipcMain.handle('annualReport:cancelAvailableYearsLoad', (_e, taskId: string) => {
+    const key = String(taskId || '').trim()
+    if (!key) return { success: false, error: '任务ID不能为空' }
+    const task = annualReportYearsLoadTasks.get(key)
+    if (!task) return { success: true }
+    task.canceled = true
+    annualReportYearsLoadTasks.set(key, task)
+    return { success: true }
+  })
+  ipcMain.handle('annualReport:generateReport', async (_e, year: number) => {
+    const cfg = configService
+    if (!cfg) return { success: false, error: '配置服务未就绪' }
+    return generateAnnualReportInWorker(Number(year) || 0, (progress) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('annualReport:progress', progress)
+        }
+      }
+    })
+  })
+  ipcMain.handle('annualReport:exportImages', async (_e, payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) => {
+    try {
+      const { baseDir, folderName, images } = payload
+      if (!baseDir || !folderName || !Array.isArray(images) || images.length === 0) {
+        return { success: false, error: '导出参数无效' }
+      }
+      let targetDir = join(String(baseDir), String(folderName))
+      if (existsSync(targetDir)) {
+        let idx = 2
+        while (existsSync(`${targetDir}_${idx}`)) idx++
+        targetDir = `${targetDir}_${idx}`
+      }
+      await mkdirAsync(targetDir, { recursive: true })
+      for (const img of images) {
+        const dataUrl = img.dataUrl || ''
+        const commaIndex = dataUrl.indexOf(',')
+        if (commaIndex <= 0) continue
+        const base64 = dataUrl.slice(commaIndex + 1)
+        const buffer = Buffer.from(base64, 'base64')
+        await writeFileAsync(join(targetDir, img.name), buffer)
+      }
+      return { success: true, dir: targetDir }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+  ipcMain.handle('annualReport:captureCurrentWindow', async (event) => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win || win.isDestroyed()) {
+        return { success: false, error: '窗口不可用' }
+      }
+      const image = await win.webContents.capturePage()
+      return { success: true, dataUrl: image.toDataURL(), size: image.getSize() }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
 
   // 通知弹窗（测试）
   ipcMain.handle('notification:showTest', async () => {
@@ -1092,7 +2062,11 @@ function registerIpcHandlers() {
   })
 
   // 截图模式：用演示数据覆盖会暴露个人信息的通道（真实配置/微信数据绝不进截图）
-  if (isScreenshotMode) installScreenshotDemoHandlers()
+  if (isScreenshotMode) {
+    installScreenshotDemoHandlers()
+    // v0.9 页面（朋友圈 / 分析 / 设置）也需要演示数据才能渲染截图
+    installV09DemoHandlers()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,6 +2093,8 @@ function demoConfigValue(key: string): unknown {
       return { [DEMO_WXID]: { decryptKey: DEMO_DECRYPT_KEY, updatedAt: 0 } }
     case 'lastTab':
       return 'connect'
+    case 'colorMode':
+      return 'colorful'
     case 'messagePushEnabled':
       return true
     case 'notificationEnabled':
@@ -1274,6 +2250,808 @@ function installScreenshotDemoHandlers() {
   override('ai:clearDebugLog', () => ({ success: true }))
   override('ai:send', () => ({ success: true }))
   override('ai:abort', () => ({ success: true }))
+}
+
+// ---------------------------------------------------------------------------
+// QA v0.9 演示数据 + UI 转储模式（WEPORT_V09_DUMP=1）
+// 用脱敏演示数据驱动 朋友圈 / 分析（全局+群聊+年度报告）真实页面渲染，
+// 断言关键 DOM 节点存在后把摘要写入 JSON（无头验证 UI 端到端）。
+// 与截图模式同一原则：演示数据绝不写进真实配置。
+// ---------------------------------------------------------------------------
+function demoSnsAvatarUrl(name: string): string {
+  const hue = [...name].reduce((acc, ch) => acc + ch.charCodeAt(0), 0) % 360
+  return `data:image/svg+xml;utf8,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" rx="12" fill="hsl(${hue},28%,24%)"/><text x="40" y="52" font-size="34" text-anchor="middle" fill="#f4f4f5" font-family="sans-serif">${name.slice(0, 1)}</text></svg>`,
+  )}`
+}
+
+function demoSnsPosts(): any[] {
+  const mk = (over: Record<string, unknown>): any => ({
+    id: `demo-${Math.random().toString(36).slice(2, 10)}`,
+    tid: `demo-tid-${Math.random().toString(36).slice(2, 10)}`,
+    username: 'wxid_zhangwei',
+    nickname: '张伟',
+    avatarUrl: demoSnsAvatarUrl('张伟'),
+    createTime: Math.floor(Date.now() / 1000) - 86400 * 3,
+    contentDesc: '',
+    type: 1,
+    media: [],
+    likes: [],
+    comments: [],
+    rawXml: '',
+    ...over,
+  })
+  return [
+    mk({
+      username: 'wxid_zhangwei',
+      nickname: '张伟',
+      createTime: Math.floor(Date.now() / 1000) - 86400 * 2,
+      contentDesc: '周末去爬山，山顶的日出真的太美了！\n顺便记录一下这周的运动量 💪',
+      location: { country: '中国', city: '杭州', poiName: '北高峰' },
+      likes: ['李娜', '王强', '陈晨', '赵敏'],
+      comments: [
+        { id: 'c1', nickname: '李娜', content: '好美！下次带我一个', refCommentId: '' },
+        { id: 'c2', nickname: '王强', content: '你这体能可以啊', refCommentId: '' },
+        { id: 'c3', nickname: '赵敏', content: '回复 李娜：一起一起', refCommentId: 'c1', refNickname: '李娜' },
+      ],
+      media: [
+        { url: demoSnsAvatarUrl('山1'), thumb: demoSnsAvatarUrl('山1'), key: '' },
+        { url: demoSnsAvatarUrl('山2'), thumb: demoSnsAvatarUrl('山2'), key: '' },
+        { url: demoSnsAvatarUrl('山3'), thumb: demoSnsAvatarUrl('山3'), key: '' },
+        { url: demoSnsAvatarUrl('山4'), thumb: demoSnsAvatarUrl('山4'), key: '' },
+      ],
+    }),
+    mk({
+      username: 'wxid_lina',
+      nickname: '李娜',
+      createTime: Math.floor(Date.now() / 1000) - 86400 * 5,
+      contentDesc: '分享一篇文章：如何高效阅读',
+      type: 3,
+      linkTitle: '如何高效阅读：一份写给普通人的方法论',
+      linkUrl: 'https://example.com/reading',
+      media: [{ url: demoSnsAvatarUrl('文'), thumb: demoSnsAvatarUrl('文'), key: '' }],
+      likes: ['张伟'],
+      comments: [{ id: 'c1', nickname: '张伟', content: '收藏了', refCommentId: '' }],
+    }),
+    mk({
+      username: 'wxid_wangqiang',
+      nickname: '王强',
+      createTime: Math.floor(Date.now() / 1000) - 86400 * 1,
+      contentDesc: '新到的键盘，手感不错 ⌨️',
+      media: [{ url: demoSnsAvatarUrl('键'), thumb: demoSnsAvatarUrl('键'), key: '' }],
+      likes: ['张伟', '李娜'],
+      comments: [],
+    }),
+    mk({
+      username: 'wxid_demo',
+      nickname: '我',
+      createTime: Math.floor(Date.now() / 1000) - 86400 * 8,
+      contentDesc: '（演示）我的动态：v0.9 朋友圈模块',
+      likes: ['李娜'],
+      comments: [],
+      media: [],
+    }),
+    mk({
+      username: 'wxid_chenchen',
+      nickname: '陈晨',
+      createTime: Math.floor(Date.now() / 1000) - 86400 * 12,
+      contentDesc: '深夜加班，窗外灯火通明',
+      location: { city: '上海' },
+      media: [
+        { url: demoSnsAvatarUrl('夜1'), thumb: demoSnsAvatarUrl('夜1'), key: '' },
+        { url: demoSnsAvatarUrl('夜2'), thumb: demoSnsAvatarUrl('夜2'), key: '' },
+      ],
+      likes: [],
+      comments: [{ id: 'c1', nickname: '王强', content: '注意身体', refCommentId: '' }],
+    }),
+  ]
+}
+
+function demoAnalyticsData(): Record<string, unknown> {
+  const hourly: Record<number, number> = {}
+  for (let h = 0; h < 24; h += 1) hourly[h] = Math.round(120 * Math.exp(-((h - 21) ** 2) / 30) + 15)
+  const weekday: Record<number, number> = {}
+  for (let d = 0; d < 7; d += 1) weekday[d] = 800 + Math.round(300 * Math.sin(d * 1.7) + 300 * Math.cos(d))
+  const monthly: Record<string, number> = {}
+  for (let m = 1; m <= 12; m += 1) monthly[`${m}月`] = 2200 + Math.round(1200 * Math.sin(m * 0.9))
+  const daily: Record<string, number> = {}
+  const today = new Date()
+  for (let i = 180; i >= 0; i -= 1) {
+    const d = new Date(today)
+    d.setDate(d.getDate() - i)
+    daily[`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`] = Math.round(40 + 80 * Math.random())
+  }
+  return {
+    stats: {
+      totalMessages: 48213,
+      textMessages: 32108,
+      imageMessages: 8123,
+      voiceMessages: 4312,
+      videoMessages: 1204,
+      emojiMessages: 1921,
+      otherMessages: 545,
+      sentMessages: 20512,
+      receivedMessages: 27701,
+      firstMessageTime: Math.floor(new Date('2022-03-14').getTime() / 1000),
+      lastMessageTime: Math.floor(Date.now() / 1000),
+      activeDays: 1421,
+      messageTypeCounts: { 1: 32108, 3: 8123, 34: 4312, 43: 1204, 47: 1921, 49: 545 },
+    },
+    timeDistribution: { hourlyDistribution: hourly, weekdayDistribution: weekday, monthlyDistribution: monthly },
+    selfSent: { unit: 'day', dailyDistribution: daily, totalMessages: 20512, firstMessageTime: 0, lastMessageTime: 0, beginTimestamp: 0, endTimestamp: 0 },
+    rankings: [
+      { username: 'wxid_lina', displayName: '李娜', avatarUrl: demoSnsAvatarUrl('李娜'), messageCount: 8632, sentCount: 4211, receivedCount: 4421, lastMessageTime: Math.floor(Date.now() / 1000) },
+      { username: 'wxid_zhangwei', displayName: '张伟', avatarUrl: demoSnsAvatarUrl('张伟'), messageCount: 7418, sentCount: 3602, receivedCount: 3816, lastMessageTime: Math.floor(Date.now() / 1000) },
+      { username: 'wxid_wangqiang', displayName: '王强', avatarUrl: demoSnsAvatarUrl('王强'), messageCount: 5301, sentCount: 2504, receivedCount: 2797, lastMessageTime: Math.floor(Date.now() / 1000) },
+      { username: 'wxid_chenchen', displayName: '陈晨', avatarUrl: demoSnsAvatarUrl('陈晨'), messageCount: 4210, sentCount: 2098, receivedCount: 2112, lastMessageTime: Math.floor(Date.now() / 1000) },
+      { username: 'wxid_zhaomin', displayName: '赵敏', avatarUrl: demoSnsAvatarUrl('赵敏'), messageCount: 3188, sentCount: 1602, receivedCount: 1586, lastMessageTime: Math.floor(Date.now() / 1000) },
+      { username: 'wxid_liuyang', displayName: '刘洋', avatarUrl: demoSnsAvatarUrl('刘洋'), messageCount: 2754, sentCount: 1301, receivedCount: 1453, lastMessageTime: Math.floor(Date.now() / 1000) },
+    ],
+    excluded: ['gh_official_demo'],
+    candidates: [
+      { username: 'gh_official_demo', displayName: '演示公众号', avatarUrl: '' },
+      { username: 'wxid_liuyang', displayName: '刘洋', avatarUrl: demoSnsAvatarUrl('刘洋') },
+    ],
+  }
+}
+
+function demoGroupData(): Record<string, unknown> {
+  const member = (username: string, name: string, count: number, isOwner = false, isFriend = true): Record<string, unknown> => ({
+    username,
+    displayName: name,
+    avatarUrl: demoSnsAvatarUrl(name),
+    nickname: name,
+    alias: '',
+    remark: '',
+    groupNickname: name,
+    isOwner,
+    isFriend,
+    messageCount: count,
+  })
+  const members = [
+    member('wxid_demo', '我', 1520),
+    member('wxid_zhangwei', '张伟', 2301, true),
+    member('wxid_lina', '李娜', 1988, false, true),
+    member('wxid_wangqiang', '王强', 1204),
+    member('wxid_chenchen', '陈晨', 902, false, false),
+    member('wxid_zhaomin', '赵敏', 640),
+  ]
+  const hourly: Record<number, number> = {}
+  for (let h = 0; h < 24; h += 1) hourly[h] = Math.round(80 * Math.exp(-((h - 20) ** 2) / 40) + 5)
+  return {
+    groups: [
+      { username: 'family@chatroom', displayName: '一家人', memberCount: 6, avatarUrl: demoSnsAvatarUrl('家') },
+      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', memberCount: 18, avatarUrl: demoSnsAvatarUrl('项') },
+      { username: 'alumni@chatroom', displayName: '老同学', memberCount: 42, avatarUrl: demoSnsAvatarUrl('同') },
+    ],
+    members,
+    ranking: members.map((m) => ({ member: m, messageCount: m.messageCount as number })),
+    activeHours: { hourlyDistribution: hourly },
+    mediaStats: {
+      typeCounts: [
+        { type: 1, name: '文字', count: 6120 },
+        { type: 3, name: '图片', count: 1520 },
+        { type: 34, name: '语音', count: 810 },
+        { type: 43, name: '视频', count: 215 },
+        { type: 47, name: '表情', count: 390 },
+        { type: 49, name: '文件', count: 108 },
+      ],
+      total: 9163,
+    },
+    memberAnalytics: {
+      statistics: {
+        totalMessages: 2301,
+        sentMessages: 1104,
+        receivedMessages: 1197,
+        activeDays: 412,
+        textMessages: 1601,
+        imageMessages: 320,
+        voiceMessages: 180,
+        videoMessages: 90,
+      },
+      timeDistribution: hourly,
+      commonPhrases: [
+        { phrase: '收到', count: 182 },
+        { phrase: '好的', count: 156 },
+        { phrase: '哈哈', count: 143 },
+        { phrase: '辛苦了', count: 96 },
+        { phrase: '这个方案不错', count: 51 },
+      ],
+      commonEmojis: [
+        { emoji: '😄', count: 88 },
+        { emoji: '👍', count: 76 },
+        { emoji: '🙏', count: 44 },
+        { emoji: '😅', count: 39 },
+      ],
+    },
+    memberMessages: {
+      messages: Array.from({ length: 12 }, (_, i) => ({
+        localId: i,
+        createTime: Math.floor(Date.now() / 1000) - i * 3600 * 5,
+        parsedContent: ['收到，马上处理', '好的，明天见', '这个方案我再看看', '哈哈笑死', '辛苦大家了'][i % 5],
+        localType: 1,
+      })),
+      hasMore: true,
+      nextCursor: 12,
+    },
+  }
+}
+
+function demoAnnualReport(year: number): Record<string, unknown> {
+  const heatmap: number[][] = Array.from({ length: 7 }, () =>
+    Array.from({ length: 24 }, () => (Math.random() < 0.55 ? Math.round(Math.random() * 40) : 0)),
+  )
+  return {
+    year,
+    totalMessages: 18234,
+    totalFriends: 128,
+    coreFriends: [
+      { username: 'wxid_lina', displayName: '李娜', avatarUrl: demoSnsAvatarUrl('李娜'), messageCount: 3210, sentCount: 1602, receivedCount: 1608 },
+      { username: 'wxid_zhangwei', displayName: '张伟', avatarUrl: demoSnsAvatarUrl('张伟'), messageCount: 2804, sentCount: 1411, receivedCount: 1393 },
+      { username: 'wxid_wangqiang', displayName: '王强', avatarUrl: demoSnsAvatarUrl('王强'), messageCount: 1988, sentCount: 990, receivedCount: 998 },
+      { username: 'wxid_chenchen', displayName: '陈晨', avatarUrl: demoSnsAvatarUrl('陈晨'), messageCount: 1540, sentCount: 762, receivedCount: 778 },
+      { username: 'wxid_zhaomin', displayName: '赵敏', avatarUrl: demoSnsAvatarUrl('赵敏'), messageCount: 1123, sentCount: 560, receivedCount: 563 },
+    ],
+    monthlyTopFriends: Array.from({ length: 12 }, (_, i) => ({
+      month: i + 1,
+      displayName: ['李娜', '张伟', '王强', '李娜', '张伟', '陈晨', '李娜', '张伟', '王强', '李娜', '张伟', '李娜'][i],
+      messageCount: 180 + Math.round(Math.random() * 240),
+    })),
+    peakDay: { date: `${year}-08-16`, messageCount: 412, topFriend: '李娜', topFriendCount: 120 },
+    longestStreak: { friendName: '李娜', days: 67, startDate: `${year}-03-01`, endDate: `${year}-05-06` },
+    activityHeatmap: { data: heatmap },
+    midnightKing: { displayName: '张伟', count: 88, percentage: 34.2 },
+    mutualFriend: { displayName: '李娜', avatarUrl: demoSnsAvatarUrl('李娜'), sentCount: 1602, receivedCount: 1608, ratio: 49.9 },
+    socialInitiative: { initiatedChats: 1204, receivedChats: 962, initiativeRate: 55.6, topInitiatedFriend: '李娜', topInitiatedCount: 188 },
+    responseSpeed: { avgResponseTime: 96, fastestFriend: '王强', fastestTime: 12 },
+    topPhrases: [
+      { phrase: '哈哈', count: 612 },
+      { phrase: '收到', count: 540 },
+      { phrase: '好的', count: 488 },
+      { phrase: '可以', count: 402 },
+      { phrase: '辛苦了', count: 301 },
+      { phrase: '晚安', count: 256 },
+      { phrase: '加油', count: 214 },
+      { phrase: '在吗', count: 198 },
+      { phrase: '周末', count: 176 },
+      { phrase: '吃饭', count: 155 },
+    ],
+    snsStats: { totalPosts: 86, typeCounts: { '1': 62, '3': 12, '15': 9, '5': 3 } },
+    lostFriend: { username: 'wxid_liuyang', displayName: '刘洋', avatarUrl: demoSnsAvatarUrl('刘洋'), earlyCount: 412, lateCount: 38, periodDesc: '上半年无话不谈，下半年逐渐沉默' },
+  }
+}
+
+function installV09DemoHandlers() {
+  const override = (channel: string, handler: (...args: any[]) => unknown) => {
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, handler)
+  }
+
+  const posts = demoSnsPosts()
+  const authors = Array.from(new Set(posts.map((p) => p.username)))
+  const analytics = demoAnalyticsData()
+  const group = demoGroupData()
+  const avatarMap: Record<string, string> = {
+    wxid_zhangwei: demoSnsAvatarUrl('张伟'),
+    wxid_lina: demoSnsAvatarUrl('李娜'),
+    wxid_wangqiang: demoSnsAvatarUrl('王强'),
+    wxid_chenchen: demoSnsAvatarUrl('陈晨'),
+    wxid_zhaomin: demoSnsAvatarUrl('赵敏'),
+    wxid_liuyang: demoSnsAvatarUrl('刘洋'),
+  }
+  const nameMap: Record<string, string> = {
+    wxid_zhangwei: '张伟',
+    wxid_lina: '李娜',
+    wxid_wangqiang: '王强',
+    wxid_chenchen: '陈晨',
+    wxid_zhaomin: '赵敏',
+    wxid_liuyang: '刘洋',
+    wxid_demo: '我',
+  }
+
+  // 基础：解锁页签 + 连接成功
+  override('config:get', (_e, key: string) => demoConfigValue(String(key || '')))
+  override('config:set', async () => ({ success: true }))
+  override('dbpath:scanWxids', () => [{ wxid: DEMO_WXID, nickname: '演示账号', modifiedTime: 0, avatarUrl: '' }])
+  override('chat:connect', () => ({ success: true }))
+  override('chat:getContactAvatar', (_e, username: string) => ({
+    avatarUrl: avatarMap[username] || '',
+    displayName: nameMap[username] || username,
+  }))
+  override('chat:enrichSessionsContactInfo', (_e, usernames: string[]) => {
+    // 演示用：若磁盘存在真实头像缓存文件，用真实 weport-media:// URL 驱动
+    // Avatar 组件，验证「协议 → 文件」渲染链路（demo 断言检查 naturalWidth）
+    let realLocalAvatar = ''
+    let debugInfo = ''
+    try {
+      const avatarDir = join(configService!.getCacheBasePath(), 'avatars')
+      const files = readdirSync(avatarDir).filter((f: string) => f.endsWith('.jpg'))
+      if (files.length > 0) realLocalAvatar = toProtocolUrl(join(avatarDir, files[0]))
+      debugInfo = `dir=${avatarDir} files=${files.length}`
+    } catch (e) {
+      debugInfo = `err=${String(e)}`
+    }
+    console.log(`[v09demo] enrich avatar: ${debugInfo} local=${realLocalAvatar.slice(0, 60)}`)
+    const contacts: Record<string, { displayName?: string; avatarUrl?: string }> = {}
+    for (const u of usernames || []) {
+      contacts[u] = {
+        displayName: nameMap[u] || u,
+        avatarUrl: realLocalAvatar || avatarMap[u] || '',
+      }
+    }
+    return { success: true, contacts }
+  })
+
+  // 朋友圈
+  const countMap: Record<string, number> = {}
+  for (const p of posts) countMap[p.username] = (countMap[p.username] || 0) + 1
+  override('sns:getSnsUsernames', () => ({ success: true, usernames: authors }))
+  override('sns:getUserPostCounts', () => ({ success: true, counts: countMap }))
+  override('sns:getExportStats', () => ({
+    success: true,
+    data: { totalPosts: posts.length, totalFriends: 4, myPosts: 1 },
+  }))
+  override('sns:getExportStatsFast', () => ({
+    success: true,
+    data: { totalPosts: posts.length, totalFriends: 4, myPosts: 1 },
+  }))
+  override('sns:getUserPostStats', (_e, username: string) => ({
+    success: true,
+    data: { username, totalPosts: countMap[username] || 0 },
+  }))
+  override('sns:getTimeline', (_e, limit: number, offset: number, usernames?: string[], keyword?: string) => {
+    let list = [...posts]
+    if (usernames && usernames.length > 0) list = list.filter((p) => usernames.includes(p.username))
+    if (keyword) list = list.filter((p) => String(p.contentDesc || '').includes(keyword) || String(p.nickname || '').includes(keyword))
+    list = list.sort((a, b) => b.createTime - a.createTime)
+    const page = list.slice(offset, offset + limit)
+    return { success: true, timeline: page }
+  })
+  override('sns:proxyImage', (_e, payload: any) => {
+    const url = typeof payload === 'string' ? payload : payload?.url
+    if (url?.startsWith('data:')) return { success: true, dataUrl: url }
+    return { success: true, dataUrl: demoSnsAvatarUrl('图') }
+  })
+  override('sns:downloadEmoji', () => ({ success: true, localPath: '' }))
+  override('sns:checkBlockDeleteTrigger', () => ({ success: true, installed: true }))
+  override('sns:installBlockDeleteTrigger', () => ({ success: true, alreadyInstalled: true }))
+  override('sns:uninstallBlockDeleteTrigger', () => ({ success: true }))
+  override('sns:deleteSnsPost', () => ({ success: true }))
+  override('sns:getCacheMigrationStatus', () => ({ success: true, needed: false, inProgress: false, totalFiles: 0, items: [] }))
+  override('sns:startCacheMigration', () => ({ success: true, copied: 0, skipped: 0, totalFiles: 0 }))
+  override('sns:selectExportDir', () => ({ canceled: false, filePath: 'D:\\demo\\weport-export' }))
+  override('sns:exportTimeline', async () => {
+    await new Promise((r) => setTimeout(r, 300))
+    return { success: true, filePath: 'D:\\demo\\weport-export\\sns_export.json', postCount: posts.length, mediaCount: 9 }
+  })
+  override('sns:downloadImage', () => ({ success: false, error: '演示模式' }))
+  override('sns:debugResource', () => ({ success: true, status: 200, headers: {} }))
+
+  // 全局分析
+  override('analytics:getOverallStatistics', () => ({ success: true, data: analytics.stats }))
+  override('analytics:getTimeDistribution', () => ({ success: true, data: analytics.timeDistribution }))
+  override('analytics:getSelfSentDailyDistribution', () => ({ success: true, data: analytics.selfSent }))
+  override('analytics:getContactRankings', () => ({ success: true, data: analytics.rankings }))
+  override('analytics:getExcludedUsernames', () => ({ success: true, data: analytics.excluded }))
+  override('analytics:setExcludedUsernames', (_e, usernames: string[]) => ({ success: true, data: usernames }))
+  override('analytics:getExcludeCandidates', () => ({ success: true, data: analytics.candidates }))
+  override('cache:clearAnalytics', () => ({ success: true }))
+
+  // 群聊分析
+  override('groupAnalytics:getGroupChats', () => ({ success: true, data: group.groups }))
+  override('groupAnalytics:getGroupMembersPanelData', () => ({ success: true, data: group.members }))
+  override('groupAnalytics:getGroupMessageRanking', () => ({ success: true, data: group.ranking }))
+  override('groupAnalytics:getGroupActiveHours', () => ({ success: true, data: group.activeHours }))
+  override('groupAnalytics:getGroupMediaStats', () => ({ success: true, data: group.mediaStats }))
+  override('groupAnalytics:getGroupMemberAnalytics', () => ({ success: true, data: group.memberAnalytics }))
+  override('groupAnalytics:getGroupMemberMessages', () => ({ success: true, data: group.memberMessages }))
+  override('groupAnalytics:exportGroupMembers', () => ({ success: true, filePath: 'D:\\demo\\group_members.csv' }))
+  override('groupAnalytics:exportGroupMemberMessages', () => ({ success: true, filePath: 'D:\\demo\\member_messages.csv' }))
+
+  // 年度报告
+  override('annualReport:startAvailableYearsLoad', (event) => {
+    setTimeout(() => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('annualReport:availableYearsProgress', {
+          taskId: 'years_demo',
+          snapshot: { years: [2024, 2025], done: true, phase: 'done', statusText: '年份数据加载完成' },
+        })
+      }
+    }, 400)
+    return { success: true, taskId: 'years_demo', reused: false, snapshot: { years: [2024, 2025], done: true, statusText: '年份数据加载完成' } }
+  })
+  override('annualReport:cancelAvailableYearsLoad', () => ({ success: true }))
+  override('annualReport:generateReport', async (event, year: number) => {
+    for (let i = 1; i <= 4; i += 1) {
+      await new Promise((r) => setTimeout(r, 150))
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('annualReport:progress', { status: `正在统计（${i}/4）…`, progress: i * 25 })
+      }
+    }
+    return { success: true, data: demoAnnualReport(Number(year) || 2025) }
+  })
+  override('annualReport:exportImages', () => ({ success: true, dir: 'D:\\demo\\年度报告_2025' }))
+  override('annualReport:captureCurrentWindow', () => ({ success: true, dataUrl: '', size: [0, 0] }))
+}
+
+async function runV09DumpMode() {
+  const outDir = process.env.WEPORT_V09_DUMP_OUT || join(app.getPath('temp'), 'weport-v09-dump')
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'v09-dump.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try {
+      appendFileSync(logFile, line + '\n')
+    } catch { /* noop */ }
+  }
+
+  installV09DemoHandlers()
+
+  for (let i = 0; i < 40 && mainWindow && mainWindow.webContents.isLoading(); i += 1) {
+    await sleep(250)
+  }
+  await sleep(2500)
+
+  const wc = mainWindow?.webContents
+  if (!wc) {
+    log('FAIL: 主窗口不存在')
+    app.exit(1)
+    return
+  }
+
+  const consoleErrors: string[] = []
+  const onConsole = (_event: Electron.Event, level: string, message: string) => {
+    if (level === 'error') consoleErrors.push(message)
+  }
+  wc.on('console-message', onConsole as any)
+
+  const results: Record<string, unknown> = { consoleErrors: [] }
+  const clickTab = async (label: string) => {
+    const r = await wc.executeJavaScript(`
+      (() => {
+        const buttons = Array.from(document.querySelectorAll('.tab'));
+        const b = buttons.find((x) => x.textContent.includes(${JSON.stringify(label)}));
+        if (!b) return { ok: false, tabs: buttons.map((x) => x.textContent.trim()) };
+        b.click();
+        return { ok: true };
+      })()
+    `)
+    await sleep(2200)
+    return r
+  }
+  const dumpDom = async (tag: string, selectors: Record<string, string>) => {
+    const payload: Record<string, unknown> = {}
+    for (const [key, selector] of Object.entries(selectors)) {
+      payload[key] = await wc.executeJavaScript(`
+        (() => {
+          const nodes = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
+          if (nodes.length === 0) return null;
+          if (nodes.length === 1) {
+            const t = nodes[0].textContent?.trim().slice(0, 200) ?? '';
+            return { count: 1, text: t };
+          }
+          return { count: nodes.length, first: (nodes[0].textContent || '').trim().slice(0, 120), last: (nodes[nodes.length - 1].textContent || '').trim().slice(0, 120) };
+        })()
+      `)
+    }
+    results[tag] = payload
+    log(`${tag} = ${JSON.stringify(payload)}`)
+  }
+  const probe = async () => {
+    const p = await wc.executeJavaScript(`
+      (() => ({
+        reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        countText: document.querySelector('.v09-stats b')?.textContent ?? null,
+        countRect: (() => { const r = document.querySelector('.v09-stats b')?.getBoundingClientRect(); return r ? { t: Math.round(r.top), b: Math.round(r.bottom), w: Math.round(r.width) } : null; })(),
+      }))()
+    `)
+    log(`probe = ${JSON.stringify(p)}`)
+    return p
+  }
+
+  // 1) 朋友圈页签
+  const snsTab = await clickTab('朋友圈')
+  log(`snsTab = ${JSON.stringify(snsTab)}`)
+  if (!snsTab?.ok) { results.fail = 'sns tab missing'; log('FAIL: 未找到朋友圈页签'); app.exit(1); return }
+  await sleep(500)
+  await probe()
+  await dumpDom('sns', {
+    toolbarStats: '.sns-sidebar-stats .v09-stat',
+    posts: '.sns-post-item',
+    authors: '.sns-author',
+    authorCounts: '.sns-author-count',
+    antideleteChip: '.sns-sidebar-actions .chip',
+    mediaItems: '.sns-media-item',
+    linkCards: '.post-link-card',
+    likes: '.likes-block',
+    comments: '.comment-row',
+    location: '.post-location',
+    feedEnd: '.sns-feed-end',
+  })
+  const snsDom = results.sns as Record<string, any>
+  const snsOk = (snsDom.posts?.count ?? 0) >= 4 && (snsDom.authors?.count ?? 0) >= 3 && (snsDom.mediaItems?.count ?? 0) >= 3
+  log(`sns checks: posts>=4 authors>=3 media>=3 → ${snsOk}`)
+  if (!snsOk) { results.fail = 'sns assertions failed'; app.exit(1); return }
+
+  // 1.5) 本地协议头像渲染验证：真实磁盘头像文件经 weport-media:// 渲染
+  await sleep(2500)
+  const rendererReceived = await wc.executeJavaScript(`
+    window.electronAPI.chat.enrichSessionsContactInfo(['wxid_zhangwei']).then((r) => ({ ok: r.success, contact: r.contacts && r.contacts['wxid_zhangwei'] }))
+  `)
+  log(`rendererReceived = ${JSON.stringify(rendererReceived)}`)
+  // 协议本身可用性：直接注入 <img> 加载一个真实缓存头像文件
+  const protocolProbe = await wc.executeJavaScript(`
+    new Promise((resolve) => {
+      const img = new Image();
+      const url = ${JSON.stringify(toProtocolUrl('C:/Users/admin/AppData/Roaming/weport/cache/avatars/004fa5c04b39faf3f904896649b08a0057271f93.jpg'))};
+      img.onload = () => resolve({ ok: true, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight });
+      img.onerror = () => resolve({ ok: false, reason: 'img error', url });
+      img.src = url;
+      setTimeout(() => resolve({ ok: false, reason: 'timeout', url }), 5000);
+    })
+  `)
+  log(`protocolProbe = ${JSON.stringify(protocolProbe)}`)
+  results.protocolProbe = protocolProbe
+  const avatarRender = await wc.executeJavaScript(`
+    (() => {
+      const imgs = Array.from(document.querySelectorAll('.sns-author .avatar-image'));
+      const srcs = imgs.map((i) => i.getAttribute('src') || '');
+      const protocolSrcs = srcs.filter((s) => s.startsWith('weport-media://'));
+      if (protocolSrcs.length === 0) {
+        return { ok: false, reason: 'no protocol src', allSrcs: srcs.slice(0, 5), authorHtml: (document.querySelector('.sns-author')?.outerHTML || '').slice(0, 400) };
+      }
+      return new Promise((resolve) => {
+        const first = imgs.find((i) => (i.getAttribute('src') || '').startsWith('weport-media://'));
+        const check = () => resolve({ ok: !!first && first.naturalWidth > 0, src: (first.getAttribute('src') || '').slice(0, 100), naturalWidth: first.naturalWidth || 0 });
+        if (first && first.naturalWidth > 0) check();
+        else { first.addEventListener('load', check); first.addEventListener('error', () => resolve({ ok: false, reason: 'img error', naturalWidth: 0 })); setTimeout(() => check(), 6000); }
+      });
+    })()
+  `)
+  log(`avatarRender = ${JSON.stringify(avatarRender)}`)
+  results.avatarRender = avatarRender
+  if (!avatarRender?.ok) { results.fail = 'avatar protocol render failed'; log('FAIL: weport-media:// 头像渲染失败'); app.exit(1); return }
+
+  // 2) 分析页签 → 两个大按钮
+  const anaTab = await clickTab('分析')
+  log(`anaTab = ${JSON.stringify(anaTab)}`)
+  if (!anaTab?.ok) { results.fail = 'analytics tab missing'; log('FAIL: 未找到分析页签'); app.exit(1); return }
+  await dumpDom('hub', {
+    bigCards: '.analytics-big-card',
+    bigTitles: '.analytics-big-title',
+    bigIcons: '.analytics-big-icon',
+  })
+  const hubDom = results.hub as Record<string, any>
+  if ((hubDom.bigCards?.count ?? 0) < 2) { results.fail = 'hub cards missing'; log('FAIL: 分析入口大按钮不足 2 个'); app.exit(1); return }
+
+  // 3) 全局分析
+  await wc.executeJavaScript(`(() => { const b = document.querySelector('.analytics-big-card'); b?.click(); return !!b; })()`)
+  await sleep(2600)
+  await dumpDom('global', {
+    statCards: '.stat-card',
+    mediaTypes: '.media-type-cell',
+    charts: '.echarts-for-react',
+    rankingRows: '.ranking-row',
+    rankingNames: '.ranking-name',
+    excludeItems: '.exclude-item',
+  })
+  const globalDom = results.global as Record<string, any>
+  const globalOk = (globalDom.statCards?.count ?? 0) >= 4 && (globalDom.charts?.count ?? 0) >= 4 && (globalDom.rankingRows?.count ?? 0) >= 3
+  log(`global checks: statCards>=4 charts>=4 ranking>=3 → ${globalOk}`)
+  if (!globalOk) { results.fail = 'global analytics assertions failed'; app.exit(1); return }
+
+  // 4) 年度报告
+  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.chip')).find((x) => x.textContent.includes('年度报告')); b?.click(); return !!b; })()`)
+  await sleep(1800)
+  await dumpDom('annualYears', { yearChips: '.annual-year-row .chip' })
+  const annualYearsDom = results.annualYears as Record<string, any>
+  if ((annualYearsDom.yearChips?.count ?? 0) < 2) { results.fail = 'annual years missing'; log('FAIL: 年度报告年份不足'); app.exit(1); return }
+  await wc.executeJavaScript(`(() => { const b = document.querySelector('.annual-year-row .chip'); b?.click(); return !!b; })()`)
+  await sleep(2400)
+  await dumpDom('annual', {
+    hero: '.annual-hero',
+    heroYear: '.annual-hero-year',
+    statCards: '.annual-hero .stat-card',
+    friendCards: '.annual-friend-card',
+    heatmap: '.annual-report-body .echarts-for-react',
+    funSections: '.annual-fun-grid .v09-panel',
+    phrases: '.phrase-row',
+    snsStats: '.annual-sns-total b',
+    exportBtn: '.annual-actions .ghost-btn',
+  })
+  const annualDom = results.annual as Record<string, any>
+  const annualOk =
+    (annualYearsDom.yearChips?.count ?? 0) >= 2 &&
+    !!annualDom.hero &&
+    (annualDom.heroYear?.text ?? '') !== '' &&
+    (annualDom.friendCards?.count ?? 0) >= 3 &&
+    (annualDom.funSections?.count ?? 0) >= 3 &&
+    (annualDom.phrases?.count ?? 0) >= 5
+  log(`annual checks: years>=2 hero ok friends>=3 → ${annualOk}`)
+  if (!annualOk) { results.fail = 'annual report assertions failed'; app.exit(1); return }
+
+  // 5) 关闭年度报告 → 返回选择 → 群聊分析
+  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.annual-actions .icon-btn-ghost')); b[0]?.click(); return b.length; })()`)
+  await sleep(1000)
+  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.v09-actions .chip')).find((x) => x.textContent.includes('返回选择')); b?.click(); return !!b; })()`)
+  await sleep(1200)
+  await wc.executeJavaScript(`(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[1]?.click(); return cards.length; })()`)
+  await sleep(2200)
+  await dumpDom('groupList', { groups: '.group-item', groupNames: '.group-item-name' })
+  const groupListDom = results.groupList as Record<string, any>
+  if ((groupListDom.groups?.count ?? 0) < 2) { results.fail = 'group list missing'; log('FAIL: 群聊列表不足'); app.exit(1); return }
+
+  await wc.executeJavaScript(`(() => { const g = document.querySelector('.group-item'); g?.click(); return !!g; })()`)
+  await sleep(2600)
+  await dumpDom('groupDetail', {
+    memberRows: '.group-member-row',
+    ownerBadges: '.member-badge.owner',
+    memberCounts: '.group-member-count',
+    tabs: '.group-tabs .chip',
+    memberBar: '.member-bar',
+  })
+  const groupDetailDom = results.groupDetail as Record<string, any>
+  const groupOk = (groupDetailDom.memberRows?.count ?? 0) >= 4 && (groupDetailDom.tabs?.count ?? 0) >= 4
+  log(`group checks: members>=4 tabs>=4 → ${groupOk}`)
+  if (!groupOk) { results.fail = 'group detail assertions failed'; app.exit(1); return }
+
+  // 6) 成员画像对话框
+  await wc.executeJavaScript(`(() => { const r = document.querySelector('.group-member-row'); r?.click(); return !!r; })()`)
+  await sleep(2200)
+  await dumpDom('memberDialog', {
+    dialog: '.member-dialog',
+    dialogStats: '.member-dialog .stat-card',
+    phrases: '.member-dialog .phrase-row',
+    emojis: '.member-dialog .emoji-tag',
+    messages: '.member-msg-row',
+    exportBtn: '.member-dialog .ghost-btn',
+  })
+  const memberDom = results.memberDialog as Record<string, any>
+  const memberOk = !!memberDom.dialog && (memberDom.dialogStats?.count ?? 0) >= 3 && (memberDom.messages?.count ?? 0) >= 5
+  log(`member dialog checks: dialog stats>=3 messages>=5 → ${memberOk}`)
+  await wc.executeJavaScript(`(() => { const b = document.querySelector('.member-dialog .wp-dialog-head .icon-btn-ghost'); b?.click(); return !!b; })()`)
+  await sleep(800)
+
+  // 7) 设置页：色彩主题切换（colorful ↔ mono）+ 主题持久化
+  const settingsTab = await clickTab('设置')
+  log(`settingsTab = ${JSON.stringify(settingsTab)}`)
+  if (!settingsTab?.ok) { results.fail = 'settings tab missing'; log('FAIL: 未找到设置页签'); app.exit(1); return }
+  await dumpDom('settings', {
+    themeCards: '.theme-card',
+    themeChecks: '.theme-card-check',
+    startupRows: '.setting-row',
+    swatches: '.theme-swatches span',
+  })
+  const settingsDom = results.settings as Record<string, any>
+  if ((settingsDom.themeCards?.count ?? 0) < 2) { results.fail = 'theme cards missing'; log('FAIL: 主题卡片不足 2 个'); app.exit(1); return }
+  const themeToggle = await wc.executeJavaScript(`
+    (() => {
+      const cards = Array.from(document.querySelectorAll('.theme-card'));
+      const mono = cards.find((c) => c.textContent.includes('黑白'));
+      mono?.click();
+      return !!mono;
+    })()
+  `)
+  await sleep(800)
+  const themeApplied = await wc.executeJavaScript(`
+    (() => ({
+      theme: document.documentElement.dataset.theme || null,
+      saved: null,
+    }))()
+  `)
+  themeApplied.saved = await wc.executeJavaScript(`window.electronAPI.config.get('colorMode').then((v) => v || null)`)
+  log(`themeToggle = ${JSON.stringify(themeToggle)} applied = ${JSON.stringify(themeApplied)}`)
+  results.themeApplied = themeApplied
+  // 演示模式 config:set 被吞（不落盘），因此只断言主题已应用；保存逻辑由真实模式验证
+  if (themeApplied.theme !== 'mono') {
+    results.fail = 'theme mono not applied'
+    log('FAIL: 黑白主题未生效')
+    app.exit(1)
+    return
+  }
+  await wc.executeJavaScript(`(() => { const cards = Array.from(document.querySelectorAll('.theme-card')); const c = cards.find((x) => x.textContent.includes('浅蓝')); c?.click(); return !!c; })()`)
+  await sleep(800)
+  const themeBack = await wc.executeJavaScript(`document.documentElement.dataset.theme || null`)
+  log(`themeBack = ${themeBack}`)
+  results.themeBack = themeBack
+  if (themeBack !== 'colorful') {
+    results.fail = 'theme colorful not restored'
+    log('FAIL: 浅蓝主题未恢复')
+    app.exit(1)
+    return
+  }
+
+  // 8) 非全屏布局韧性：缩小窗口后关键布局不得塌陷
+  const layoutProbe = async (width: number, height: number) => {
+    mainWindow?.setSize(width, height)
+    await sleep(700)
+    const snsClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab')).find((x) => x.textContent.includes('朋友圈')); b?.click(); return !!b; })()`)
+    await sleep(1200)
+    const sns = await wc.executeJavaScript(`
+      (() => {
+        const main = document.querySelector('.sns-main');
+        const cols = main ? getComputedStyle(main).gridTemplateColumns.split(' ').length : 0;
+        const feed = document.querySelector('.sns-feed');
+        const sidebar = document.querySelector('.sns-sidebar');
+        return { cols, feedW: feed ? Math.round(feed.getBoundingClientRect().width) : 0, sidebarW: sidebar ? Math.round(sidebar.getBoundingClientRect().width) : 0, viewport: window.innerWidth };
+      })()
+    `)
+    const anaClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab')).find((x) => x.textContent.trim() === '分析'); b?.click(); return !!b; })()`)
+    await sleep(1500)
+    const afterAna = await wc.executeJavaScript(`
+      (() => {
+        const ws = document.querySelector('.workspace');
+        const active = document.querySelector('.tab[data-active="true"]');
+        return {
+          workspaceText: ws ? (ws.textContent || '').trim().slice(0, 120) : null,
+          activeTab: active ? active.textContent.trim() : null,
+          bodyText: (document.body.textContent || '').trim().slice(0, 120),
+        };
+      })()
+    `)
+    log(`afterAnaClick = ${JSON.stringify(afterAna)}`)
+    // 分析模块会记住上次进入的视图（全局/群聊）——若不在入口页，先返回入口
+    await wc.executeJavaScript(`(() => {
+      const back = Array.from(document.querySelectorAll('.v09-actions .chip, .v09-toolbar .chip')).find((x) => x.textContent.includes('返回选择'));
+      back?.click();
+      return !!back;
+    })()`)
+    await sleep(900)
+    const cardClick = await wc.executeJavaScript(`(() => { const c = document.querySelector('.analytics-big-card'); c?.click(); return !!c; })()`)
+    await sleep(2000)
+    const global = await wc.executeJavaScript(`
+      (() => {
+        const cards = document.querySelector('.stat-cards');
+        const n = cards ? cards.children.length : 0;
+        const charts = Array.from(document.querySelectorAll('.echarts-for-react')).filter((c) => c.getBoundingClientRect().width > 200).length;
+        return {
+          statCards: n,
+          wideCharts: charts,
+          viewport: window.innerWidth,
+          globalPresent: !!document.querySelector('.analytics-global'),
+          hubPresent: !!document.querySelector('.analytics-hub'),
+          loading: !!document.querySelector('.analytics-global .wp-loading'),
+          error: document.querySelector('.analytics-global .wp-error') ? (document.querySelector('.analytics-global .wp-error').textContent || '').slice(0, 120) : null,
+        };
+      })()
+    `)
+    return { snsClick, anaClick, cardClick, sns, global }
+  }
+  const medium = await layoutProbe(1000, 680)
+  log(`layout@1000 = ${JSON.stringify(medium)}`)
+  results.layout1000 = medium
+  if (medium.sns.cols !== 2 || medium.sns.sidebarW < 200) {
+    results.fail = 'layout 1000px broken'
+    log('FAIL: 1000px 宽度下朋友圈布局塌陷')
+    app.exit(1)
+    return
+  }
+  if (medium.global.statCards < 3) {
+    results.fail = 'layout stat cards broken'
+    log('FAIL: 1000px 宽度下统计卡片塌陷')
+    app.exit(1)
+    return
+  }
+  const small = await layoutProbe(930, 640)
+  log(`layout@930 = ${JSON.stringify(small)}`)
+  results.layout930 = small
+  if (small.sns.cols !== 2 || small.sns.sidebarW < 200) {
+    results.fail = 'layout 930px broken'
+    log('FAIL: 930px 宽度下朋友圈布局塌陷（窗口最小宽度 920 之上应保持双栏）')
+    app.exit(1)
+    return
+  }
+  mainWindow?.setSize(1080, 720)
+
+  results.consoleErrors = consoleErrors.slice(0, 20)
+  const summary = { ...results, snsOk, globalOk, annualOk, groupOk, memberOk, consoleErrorCount: consoleErrors.length }
+  log(`RESULT = ${JSON.stringify(summary)}`)
+  try {
+    writeFileSync(join(outDir, 'v09-dump.json'), JSON.stringify(summary, null, 2), 'utf8')
+  } catch { /* noop */ }
+  app.exit(summary.consoleErrorCount > 0 || !(snsOk && globalOk && annualOk && groupOk && memberOk) ? 1 : 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1564,6 +3342,84 @@ async function runScreenshotMode() {
   } catch (e) {
     console.warn('[screenshot] popup capture failed:', e)
   }
+
+  // 7) v0.9 页面截图（演示数据，无真实个人信息）
+  const captureV09 = async (label: string, fileName: string, selectors: string[], pre?: () => Promise<unknown>, settleMs = 900) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      if (pre) await pre()
+      const ok = await waitForDom(selectors[0])
+      if (!ok) {
+        console.warn(`[screenshot] ${label} did not render`)
+        return
+      }
+      await sleep(settleMs)
+      await saveStable(mainWindow, fileName, 12, 30)
+      await dumpRects(`${fileName.replace('.png', '')}-rects.json`, selectors)
+      console.log(`[screenshot] ${fileName} captured`)
+    } catch (e) {
+      console.warn(`[screenshot] ${label} capture failed:`, e)
+    }
+  }
+
+  // 7.1) 朋友圈
+  await captureV09('sns', 'sns.png', ['.sns-post-item', '.sns-author'], async () => {
+    await clickTab('朋友圈')
+  })
+  // 7.2) 分析入口（两个大卡片并排）
+  await captureV09('analytics-hub', 'analytics-hub.png', ['.analytics-big-card'], async () => {
+    await clickTab('分析')
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const back = Array.from(document.querySelectorAll('.v09-actions .chip, .v09-toolbar .chip')).find((x) => x.textContent.includes('返回选择')); back?.click(); return !!back; })()`,
+      true,
+    ).catch(() => false)
+  })
+  // 7.3) 全局分析（统计卡片 + 图表）
+  await captureV09('global', 'analytics-global.png', ['.analytics-global .stat-cards'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const c = document.querySelector('.analytics-big-card'); c?.click(); return !!c; })()`,
+      true,
+    ).catch(() => false)
+  }, 1600)
+  // 7.4) 年度报告
+  await captureV09('annual', 'annual-report.png', ['.annual-hero'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const chips = Array.from(document.querySelectorAll('.v09-toolbar .chip, .v09-actions .chip')); const b = chips.find((x) => x.textContent.includes('年度报告')); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const c = document.querySelector('.annual-year-row .chip'); c?.click(); return !!c; })()`,
+      true,
+    ).catch(() => false)
+  }, 2000)
+  // 7.5) 群聊分析（群列表 + 成员面板）
+  await captureV09('group', 'analytics-group.png', ['.group-member-row'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const b = Array.from(document.querySelectorAll('.annual-actions .icon-btn-ghost')); b[0]?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(700)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const back = Array.from(document.querySelectorAll('.v09-actions .chip, .v09-toolbar .chip')).find((x) => x.textContent.includes('返回选择')); back?.click(); return !!back; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[1]?.click(); return !!cards[1]; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(700)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const g = document.querySelector('.group-item'); g?.click(); return !!g; })()`,
+      true,
+    ).catch(() => false)
+  }, 1600)
+  // 7.6) 设置（主题选择 + 启动行为）
+  await captureV09('settings', 'settings.png', ['.theme-card'], async () => {
+    await clickTab('设置')
+  })
 
   console.log('[screenshot] captures done, shutting down services...')
   try { messagePushService?.stop() } catch { /* noop */ }
@@ -2247,11 +4103,15 @@ function startApp() {
     return
   }
 
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
     // 静默启动（--background）时忽略第二实例：开机自启的双实例竞争
     // （历史版本残留多个 Run 键）曾通过这里把隐藏的主窗口带出来。
     // 若用户已手动打开过窗口，则仅聚焦不重复显示。
-    if (startHidden) {
+    // 注意：startHidden 是本进程启动时的常量；用户在后台实例已运行时
+    // 手动双击启动 Weport，新实例的 argv 没有 --background —— 此时必须
+    // 把后台窗口带出来，否则用户的启动看起来毫无反应。
+    const newInstanceIsBackground = Array.isArray(argv) && argv.includes('--background')
+    if (startHidden && newInstanceIsBackground) {
       if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
         mainWindow.focus()
       }
@@ -2272,6 +4132,29 @@ function startApp() {
     process.env.WEPORT_USER_DATA_PATH = app.getPath('userData')
 
     configService = ConfigService.getInstance()
+
+    // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
+    avatarCacheService.init(configService.getCacheBasePath())
+
+    // weport-media://local/<encodeURIComponent(绝对路径)>：本地媒体只读协议
+    // （仅允许文件存在时返回；用于朋友圈视频/图片预览 + 头像磁盘缓存）
+    try {
+      protocol.handle('weport-media', async (request) => {
+        try {
+          const url = new URL(request.url)
+          const rawPath = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+          if (!rawPath || !existsSync(rawPath)) {
+            return new Response('Not Found', { status: 404 })
+          }
+          const fileUrl = pathToFileURL(rawPath).toString()
+          return await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true })
+        } catch {
+          return new Response('Not Found', { status: 404 })
+        }
+      })
+    } catch (e) {
+      console.warn('[Weport] 注册本地媒体协议失败:', e)
+    }
 
     // One-time key bootstrap is needed by both the normal UI and the isolated
     // AI harness. It stays local and never writes the secret to diagnostics.
@@ -2372,6 +4255,17 @@ function startApp() {
       return
     }
 
+    if (process.env.WEPORT_V09_DUMP === '1') {
+      await runV09DumpMode()
+      return
+    }
+
+    // 真实数据转储：读取真实配置与真实数据库做只读验证（无任何演示数据）
+    if (process.env.WEPORT_REAL_DUMP === '1') {
+      await runRealDataDump()
+      return
+    }
+
     // 更新器自检：拉取更新源 latest.yml 并报告结果（用于发布前验证管道）
     if (process.env.WEPORT_UPDATETEST === '1') {
       const result = await checkForUpdatesManual()
@@ -2436,3 +4330,4 @@ const shutdownAppServices = async (): Promise<void> => {
 }
 
 export { startApp }
+

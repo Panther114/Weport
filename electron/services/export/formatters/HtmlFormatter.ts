@@ -62,6 +62,9 @@ export class HtmlFormatter {
       )
 
       // 如果没有消息,不创建文件
+      if (collected.error) {
+        return { success: false, error: collected.error }
+      }
       if (collected.rows.length === 0) {
         return { success: false, error: await this.exportService.buildNoMessagesError(sessionId, collected) }
       }
@@ -237,7 +240,7 @@ export class HtmlFormatter {
       const exportMeta = this.exportService.getExportMeta(sessionId, sessionInfo, isGroup)
       const htmlStyles = this.exportService.loadExportHtmlStyles()
       await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-      const stream = fs.createWriteStream(outputPath, { encoding: 'utf-8' })
+      const { stream, commit, abort } = this.exportService.createAtomicWriteTarget(outputPath)
 
       const writePromise = (str: string) => {
         return new Promise<void>((resolve, reject) => {
@@ -580,28 +583,23 @@ export class HtmlFormatter {
   </body>
 </html>`);
 
-      return new Promise((resolve, reject) => {
-        stream.on('error', (err) => {
-          // 确保在流错误时销毁流，释放文件句柄
-          stream.destroy()
-          reject(err)
-        })
-        
-        stream.end(() => {
-          onProgress?.({
-            current: 100,
-            total: 100,
-            currentSession: sessionInfo.displayName,
-            phase: 'complete',
-            estimatedTotalMessages: totalMessages,
-            collectedMessages: totalMessages,
-            exportedMessages: totalMessages,
-            writtenFiles: 1
-          })
-          resolve({ success: true })
-        })
-        stream.on('error', reject)
+      try {
+        await commit()
+      } catch (e) {
+        abort()
+        throw e
+      }
+      onProgress?.({
+        current: 100,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'complete',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages,
+        writtenFiles: 1
       })
+      return { success: true }
 
     } catch (e) {
       if (this.exportService.isStopError(e)) {

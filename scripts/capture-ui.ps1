@@ -1,4 +1,4 @@
-# Weport UI capture harness (Electron)
+﻿# Weport UI capture harness (Electron)
 # Captures the main window + notification popup via the app's own
 # WEPORT_SCREENSHOT_POPUP mode, then asserts the popup is non-blank.
 # A blank popup (broken renderer / unwired viewport) fails the build.
@@ -80,12 +80,24 @@ $exportPng = Join-Path $OutputDir 'export.png'
 $antirecallPng = Join-Path $OutputDir 'antirecall.png'
 $notificationsPng = Join-Path $OutputDir 'notifications.png'
 $aiPng = Join-Path $OutputDir 'ai.png'
+$snsPng = Join-Path $OutputDir 'sns.png'
+$hubPng = Join-Path $OutputDir 'analytics-hub.png'
+$globalPng = Join-Path $OutputDir 'analytics-global.png'
+$annualPng = Join-Path $OutputDir 'annual-report.png'
+$groupPng = Join-Path $OutputDir 'analytics-group.png'
+$settingsPng = Join-Path $OutputDir 'settings.png'
 if (-not (Test-Path $mainPng)) { throw "main.png missing - main window capture failed" }
 if (-not (Test-Path $popupPng)) { throw "popup.png missing - notification window capture failed" }
 if (-not (Test-Path $exportPng)) { throw "export.png missing - export tab capture failed" }
 if (-not (Test-Path $antirecallPng)) { throw "antirecall.png missing - antirecall tab capture failed" }
 if (-not (Test-Path $notificationsPng)) { throw "notifications.png missing - notifications tab capture failed" }
 if (-not (Test-Path $aiPng)) { throw "ai.png missing - WeportAI tab capture failed" }
+if (-not (Test-Path $snsPng)) { throw "sns.png missing - moments capture failed" }
+if (-not (Test-Path $hubPng)) { throw "analytics-hub.png missing - analytics hub capture failed" }
+if (-not (Test-Path $globalPng)) { throw "analytics-global.png missing - global analytics capture failed" }
+if (-not (Test-Path $annualPng)) { throw "annual-report.png missing - annual report capture failed" }
+if (-not (Test-Path $groupPng)) { throw "analytics-group.png missing - group analytics capture failed" }
+if (-not (Test-Path $settingsPng)) { throw "settings.png missing - settings capture failed" }
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
@@ -93,6 +105,12 @@ Assert-ImageHasContent $exportPng 'export tab'
 Assert-ImageHasContent $antirecallPng 'antirecall tab'
 Assert-ImageHasContent $notificationsPng 'notifications tab'
 Assert-ImageHasContent $aiPng 'WeportAI tab'
+Assert-ImageHasContent $snsPng 'moments'
+Assert-ImageHasContent $hubPng 'analytics hub'
+Assert-ImageHasContent $globalPng 'global analytics'
+Assert-ImageHasContent $annualPng 'annual report'
+Assert-ImageHasContent $groupPng 'group analytics'
+Assert-ImageHasContent $settingsPng 'settings'
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {
@@ -104,5 +122,11 @@ if ($PublishToDocs) {
   Copy-Item $notificationsPng (Join-Path $docsDir "notifications.png") -Force
   Copy-Item $aiPng (Join-Path $docsDir "ai.png") -Force
   Copy-Item $popupPng (Join-Path $docsDir "popup.png") -Force
+  Copy-Item $snsPng (Join-Path $docsDir "sns.png") -Force
+  Copy-Item $hubPng (Join-Path $docsDir "analytics-hub.png") -Force
+  Copy-Item $globalPng (Join-Path $docsDir "analytics-global.png") -Force
+  Copy-Item $annualPng (Join-Path $docsDir "annual-report.png") -Force
+  Copy-Item $groupPng (Join-Path $docsDir "analytics-group.png") -Force
+  Copy-Item $settingsPng (Join-Path $docsDir "settings.png") -Force
   Write-Output "Published screenshots to $docsDir"
 }
