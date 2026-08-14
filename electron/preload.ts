@@ -2,8 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // 事件订阅统一模式：返回"只移除本回调"的退订函数。
 // 用 removeAllListeners 会把同频道的其他订阅者（多组件）一并清掉。
+// 注意：contextBridge 代理的函数 .length 恒为 0，绝不能靠形参个数判断签名。
+// 兼容两种回调签名：(payload) 与 (event, payload) —— 同时传 (payload, payload)：
+// 1 参回调取第一个参数，2 参回调（如通知弹窗 handleShow(_event, data)）取第二个。
 function subscribe(channel: string, callback: (...args: any[]) => void): () => void {
-  const listener = (_: unknown, ...args: any[]) => callback(...args)
+  const listener = (_: unknown, ...args: any[]) => {
+    const payload = args[0]
+    callback(payload, payload)
+  }
   ipcRenderer.on(channel, listener)
   return () => {
     ipcRenderer.removeListener(channel, listener)

@@ -1269,6 +1269,10 @@
   justify-content: center;
   animation: wp-hub-icon 2.4s ease-in-out infinite;
 }
+/* 截图模式冻结无限动画：两帧校验永不静止会直接导致该页截图缺失 */
+.screenshot-mode .analytics-hub-icon {
+  animation: none;
+}
 @keyframes wp-hub-icon {
   0%, 100% { transform: translateY(0) scale(1); }
   50% { transform: translateY(-4px) scale(1.06); }

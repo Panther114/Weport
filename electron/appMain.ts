@@ -3083,11 +3083,27 @@ async function runScreenshotMode() {
     return max - min < threshold
   }
 
+  // 渲染进程 console 转发：截图模式失败时把主/弹窗渲染器错误打进 stdout，
+  // CI 日志可直接定位「空白捕获」是渲染器异常还是采集问题
+  const forwardConsole = (wc: Electron.WebContents, label: string) => {
+    wc.on('console-message', (e, level, message, line, sourceId) => {
+      console.log(`[renderer:${label}] ${message} (${sourceId}:${line})`)
+    })
+  }
+
   // 等待渲染进程加载完成
   for (let i = 0; i < 30; i += 1) {
     if (mainWindow && !mainWindow.webContents.isLoading()) break
     await sleep(250)
   }
+  // 截图模式下冻结无限循环动画（如分析入口的浮动图标），否则两帧永不静止
+  try {
+    await mainWindow?.webContents.executeJavaScript(
+      `document.documentElement.classList.add('screenshot-mode'); true`,
+      true,
+    ).catch(() => false)
+  } catch { /* noop */ }
+  if (mainWindow) forwardConsole(mainWindow.webContents, 'main')
   // 等「找到 N 个账号」之类的 toast 过期 + 字体/首屏稳定，避免入画
   await sleep(4000)
 
@@ -3312,14 +3328,25 @@ async function runScreenshotMode() {
       try {
         popup.setContentProtection(false)
       } catch { /* noop */ }
+      forwardConsole(popup.webContents, 'popup')
 
       // 等待渲染器加载完成
       for (let i = 0; i < 30 && popup.webContents.isLoading(); i += 1) {
         await sleep(250)
       }
+      // 等待弹窗卡片真正挂载：渲染器空窗期直接捕获会得到空帧（popup.png 缺失）
+      for (let i = 0; i < 40; i += 1) {
+        const mounted = await popup.webContents
+          .executeJavaScript(`!!document.querySelector('.notification-toast-container')`, true)
+          .catch(() => false)
+        if (mounted) break
+        await sleep(300)
+      }
       // 等卡片入场动画 + 玻璃面板就绪；若指定了真实头像，多等 CDN 加载完成
       await sleep(payload.avatarUrl ? 5000 : 1500)
-      await saveStable(popup, 'popup.png', 40, 40)
+      // 阈值与其他 11 张截图一致（12）：CI 桌面快照可能为黑底，
+      // 40 的阈值会把「有真实内容但背景暗」的弹窗误判为空白
+      await saveStable(popup, 'popup.png', 12, 40)
       try {
         const rects = await popup.webContents.executeJavaScript(
           `(() => {

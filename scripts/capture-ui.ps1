@@ -24,6 +24,8 @@ if (-not $Executable) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+# 清空历史截图：旧文件会让断言「假通过」（文件存在但本次根本没写成功）
+Get-ChildItem -Path $OutputDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 Add-Type -AssemblyName System.Drawing
 
@@ -58,17 +60,28 @@ $env:WEPORT_SCREENSHOT_OUT = $OutputDir
 Remove-Item Env:ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue
 
 Write-Output "Launching $Executable (screenshot mode)..."
+$appLog = Join-Path $OutputDir 'app.log'
+$appOut = Join-Path $OutputDir 'app.stdout.log'
+$appErr = Join-Path $OutputDir 'app.stderr.log'
 if ($ProjectRootArg) {
-  $p = Start-Process -FilePath $Executable -ArgumentList $ProjectRootArg -PassThru
+  $p = Start-Process -FilePath $Executable -ArgumentList $ProjectRootArg -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
 } else {
-  $p = Start-Process -FilePath $Executable -PassThru
+  $p = Start-Process -FilePath $Executable -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
 }
-if (-not $p.WaitForExit(120000)) {
+$waited = $p.WaitForExit(120000)
+if (-not $waited) {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-  throw "Weport screenshot mode timed out after 120s"
+  throw "Weport screenshot mode timed out after 120s (see $appOut / $appErr)"
 }
-if ($p.ExitCode -ne 0) {
-  throw "Weport screenshot mode exited with code $($p.ExitCode)"
+$code = $p.ExitCode
+if ($null -eq $code) {
+  # 重定向标准输出时部分 PowerShell 版本拿不到 ExitCode；
+  # 以 stdout 里的完成标记为准
+  $stdout = Get-Content $appOut -Raw -ErrorAction SilentlyContinue
+  if ($stdout -match 'forcing process.exit') { $code = 0 } else { $code = -1 }
+}
+if ($code -ne 0) {
+  throw "Weport screenshot mode exited with code $code (see $appOut / $appErr)"
 }
 
 Remove-Item Env:WEPORT_SCREENSHOT_POPUP -ErrorAction SilentlyContinue
