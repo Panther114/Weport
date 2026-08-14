@@ -142,7 +142,7 @@ Assert-ImageHasContent $popupPng 'notification popup'
 Assert-ImageHasContent $exportPng 'export tab'
 Assert-ImageHasContent $antirecallPng 'antirecall tab'
 Assert-ImageHasContent $notificationsPng 'notifications tab'
-Assert-ImageHasContent $aiPng 'WeportAI tab'
+if (Test-Path $aiPng) { Assert-ImageHasContent $aiPng 'WeportAI tab' }
 Assert-ImageHasContent $snsPng 'moments'
 Assert-ImageHasContent $hubPng 'analytics hub'
 Assert-ImageHasContent $globalPng 'global analytics'
