@@ -3110,7 +3110,15 @@ async function runScreenshotMode() {
   // 稳定帧捕获：轮询直到画面非空，再隔 400ms 复拍一帧；
   // 两帧 PNG 字节完全一致 = 画面已静止（入场动画/滚动/渐隐/半透明帧都会失败重试）。
   // 这样 README 里的截图永远不会是淡出中的残影帧
-  const saveStable = async (win: BrowserWindow, file: string, threshold = 12, maxAttempts = 24) => {
+  const saveStable = async (win: BrowserWindow, file: string, threshold = 12, maxAttempts = 40) => {
+    // 输入框获得焦点时光标闪烁会让两帧永远不一致（CI 软渲染下尤其明显），
+    // 拍照前统一失焦
+    try {
+      await win.webContents.executeJavaScript(
+        `(() => { const el = document.activeElement; if (el && typeof el.blur === 'function') el.blur(); return true })()`,
+        true,
+      ).catch(() => false)
+    } catch { /* noop */ }
     let prev: Buffer | null = null
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const image = await captureWithTimeout(win, 8000)

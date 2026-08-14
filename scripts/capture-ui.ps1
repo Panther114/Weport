@@ -81,6 +81,12 @@ if ($null -eq $code) {
   if ($stdout -match 'forcing process.exit') { $code = 0 } else { $code = -1 }
 }
 if ($code -ne 0) {
+  $tail = (Get-Content $appOut -ErrorAction SilentlyContinue | Select-Object -Last 25) -join "`n"
+  $errTail = (Get-Content $appErr -ErrorAction SilentlyContinue | Select-Object -Last 10) -join "`n"
+  Write-Output "--- app.stdout.log (tail) ---"
+  Write-Output $tail
+  Write-Output "--- app.stderr.log (tail) ---"
+  Write-Output $errTail
   throw "Weport screenshot mode exited with code $code (see $appOut / $appErr)"
 }
 
@@ -99,18 +105,29 @@ $globalPng = Join-Path $OutputDir 'analytics-global.png'
 $annualPng = Join-Path $OutputDir 'annual-report.png'
 $groupPng = Join-Path $OutputDir 'analytics-group.png'
 $settingsPng = Join-Path $OutputDir 'settings.png'
-if (-not (Test-Path $mainPng)) { throw "main.png missing - main window capture failed" }
-if (-not (Test-Path $popupPng)) { throw "popup.png missing - notification window capture failed" }
-if (-not (Test-Path $exportPng)) { throw "export.png missing - export tab capture failed" }
-if (-not (Test-Path $antirecallPng)) { throw "antirecall.png missing - antirecall tab capture failed" }
-if (-not (Test-Path $notificationsPng)) { throw "notifications.png missing - notifications tab capture failed" }
-if (-not (Test-Path $aiPng)) { throw "ai.png missing - WeportAI tab capture failed" }
-if (-not (Test-Path $snsPng)) { throw "sns.png missing - moments capture failed" }
-if (-not (Test-Path $hubPng)) { throw "analytics-hub.png missing - analytics hub capture failed" }
-if (-not (Test-Path $globalPng)) { throw "analytics-global.png missing - global analytics capture failed" }
-if (-not (Test-Path $annualPng)) { throw "annual-report.png missing - annual report capture failed" }
-if (-not (Test-Path $groupPng)) { throw "analytics-group.png missing - group analytics capture failed" }
-if (-not (Test-Path $settingsPng)) { throw "settings.png missing - settings capture failed" }
+function Assert-Captured([string]$Path, [string]$Label) {
+  if (-not (Test-Path $Path)) {
+    $tail = (Get-Content $appOut -ErrorAction SilentlyContinue | Select-Object -Last 30) -join "`n"
+    $errTail = (Get-Content $appErr -ErrorAction SilentlyContinue | Select-Object -Last 10) -join "`n"
+    Write-Output "--- app.stdout.log (tail) ---"
+    Write-Output $tail
+    Write-Output "--- app.stderr.log (tail) ---"
+    Write-Output $errTail
+    throw "$Label missing - capture failed (see $appOut / $appErr)"
+  }
+}
+Assert-Captured $mainPng 'main.png'
+Assert-Captured $popupPng 'popup.png'
+Assert-Captured $exportPng 'export.png'
+Assert-Captured $antirecallPng 'antirecall.png'
+Assert-Captured $notificationsPng 'notifications.png'
+Assert-Captured $aiPng 'ai.png'
+Assert-Captured $snsPng 'sns.png'
+Assert-Captured $hubPng 'analytics-hub.png'
+Assert-Captured $globalPng 'analytics-global.png'
+Assert-Captured $annualPng 'annual-report.png'
+Assert-Captured $groupPng 'analytics-group.png'
+Assert-Captured $settingsPng 'settings.png'
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'

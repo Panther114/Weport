@@ -1273,6 +1273,9 @@
 .screenshot-mode .analytics-hub-icon {
   animation: none;
 }
+.screenshot-mode .ai-input {
+  caret-color: transparent;
+}
 @keyframes wp-hub-icon {
   0%, 100% { transform: translateY(0) scale(1); }
   50% { transform: translateY(-4px) scale(1.06); }
