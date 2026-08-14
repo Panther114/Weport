@@ -3066,7 +3066,8 @@ async function runScreenshotMode() {
   // 独立于 stdout 的日志文件：CI 上重定向拿不到 GUI 应用的控制台输出，
   // 截图失败时靠这个文件定位（harness 失败分支会打印它的尾部）
   const logFile = join(outDir, 'screenshot.log')
-  const log = (msg: string) => {
+  const log = (...msgs: unknown[]) => {
+    const msg = msgs.map((m) => String(m)).join(' ')
     console.log(msg)
     try { appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`) } catch { /* noop */ }
   }
