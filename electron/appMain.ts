@@ -71,6 +71,15 @@ let shutdownPromise: Promise<void> | null = null
 const startHidden = process.argv.includes('--background')
 /** QA 截图模式（scripts/capture-ui.ps1 驱动）：全程使用脱敏演示数据，不读取真实配置 */
 const isScreenshotMode = process.env.WEPORT_SCREENSHOT_POPUP === '1'
+/** 任一 QA/自测模式（截图 / v0.9 转储 / 真实数据转储 / UI 转储 / 自测 / AI 自测）：
+ *  这些模式下不执行隐藏窗口内存回收等会影响断言稳定性的行为 */
+const isAnyQaMode =
+  isScreenshotMode ||
+  process.env.WEPORT_V09_DUMP === '1' ||
+  process.env.WEPORT_REAL_DUMP === '1' ||
+  process.env.WEPORT_UI_DUMP === '1' ||
+  process.env.WEPORT_SELFTEST === '1' ||
+  process.env.WEPORT_AI_SELFTEST === '1'
 
 // ---------------------------------------------------------------------------
 // 资源路径（wcdb / key / runtime DLL）
@@ -732,6 +741,8 @@ function createWindow(autoShow: boolean): BrowserWindow {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // 关闭拼写检查：省去拼写服务与词典内存（本应用无文本编辑需求）
+      spellcheck: false,
     },
   })
 
@@ -742,9 +753,10 @@ function createWindow(autoShow: boolean): BrowserWindow {
 
   // 导航守卫：渲染层只能停留在应用页面；外链一律交给系统浏览器。
   // (AI 聊天若输出恶意链接，preventDefault 保证不会在应用窗口内导航/开新窗)
+  // about:blank 是隐藏窗口内存回收（discard）的卸载页，必须放行
   win.webContents.on('will-navigate', (event, url) => {
     const devServer = process.env.VITE_DEV_SERVER_URL || ''
-    const allowed = devServer ? url.startsWith(devServer) : url.startsWith('file://')
+    const allowed = url === 'about:blank' || (devServer ? url.startsWith(devServer) : url.startsWith('file://'))
     if (!allowed) event.preventDefault()
   })
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -795,26 +807,80 @@ function createWindow(autoShow: boolean): BrowserWindow {
     }
   })
 
-  if (isDev) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL!)
-  } else {
-    win.loadFile(join(__dirname, '../dist/index.html'))
-  }
+  loadMainWindowPage(win)
   // 默认最大化启动（QA 模式保持固定窗口尺寸，保证截图/断言稳定）
-  const isQaMode =
-    isScreenshotMode ||
-    process.env.WEPORT_V09_DUMP === '1' ||
-    process.env.WEPORT_REAL_DUMP === '1' ||
-    process.env.WEPORT_UI_DUMP === '1' ||
-    process.env.WEPORT_SELFTEST === '1' ||
-    process.env.WEPORT_AI_SELFTEST === '1'
-  if (!isQaMode && autoShow) {
+  if (!isAnyQaMode && autoShow) {
     win.maximize()
   }
   // 主窗口创建即注册微信 CDN 请求头拦截（幂等；首窗口/弹窗两条路径共用）。
   // 静默启动不建窗口时不注册，避免开机即初始化网络栈拉起网络服务子进程
   ensureWeChatRequestHeaderInterceptor()
   return win
+}
+
+/** 加载主窗口应用页面（createWindow 与隐藏窗口恢复共用） */
+function loadMainWindowPage(win: BrowserWindow): void {
+  if (isDev) {
+    win.loadURL(process.env.VITE_DEV_SERVER_URL!)
+  } else {
+    win.loadFile(join(__dirname, '../dist/index.html'))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 隐藏窗口内存回收（v0.9.3）：主窗口隐藏到托盘超过 5 分钟 → 卸载渲染层
+// （about:blank），省掉渲染进程堆与 GPU 缓冲；托盘点击恢复时重新加载应用页。
+// 应用状态全部在主进程侧（config / 联系人缓存 / AI 会话 / 导出任务），
+// 渲染层每次启动都从 IPC 重建，因此卸载不会丢失任何功能。
+// ---------------------------------------------------------------------------
+const MAIN_WINDOW_DISCARD_DELAY_MS = Math.max(
+  1000,
+  Number(process.env.WEPORT_DISCARD_DELAY_MS || 5 * 60 * 1000)
+)
+let mainWindowDiscarded = false
+let mainWindowDiscardTimer: NodeJS.Timeout | null = null
+
+/** 常驻诊断：隐藏窗口内存回收/恢复路径写入 userData/discard.log（每轮仅 1-2 行） */
+function discardDiag(msg: string): void {
+  try {
+    appendFileSync(join(app.getPath('userData'), 'discard.log'), `${new Date().toISOString()} ${msg}\n`, 'utf8')
+  } catch { /* noop */ }
+}
+
+function scheduleMainWindowDiscard(): void {
+  discardDiag(`schedule delay=${MAIN_WINDOW_DISCARD_DELAY_MS}`)
+  if (mainWindowDiscardTimer) {
+    clearTimeout(mainWindowDiscardTimer)
+    mainWindowDiscardTimer = null
+  }
+  if (isAppQuitting || isAnyQaMode) return
+  if (exportTaskControlService.hasActiveTasks()) {
+    // 导出中不卸载渲染层（进度事件目标需存活），导出结束后再试
+    scheduleMainWindowDiscard()
+    return
+  }
+  mainWindowDiscardTimer = setTimeout(() => {
+    mainWindowDiscardTimer = null
+    discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode}`)
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
+    if (isAppQuitting || isAnyQaMode) return
+    if (exportTaskControlService.hasActiveTasks()) {
+      scheduleMainWindowDiscard()
+      return
+    }
+    try {
+      mainWindowDiscarded = true
+      void mainWindow.loadURL('about:blank').then(
+        () => discardDiag('discard load ok'),
+        (e) => discardDiag(`discard load rejected: ${String(e)}`)
+      )
+      console.log('[Weport] 主窗口隐藏超时，已卸载渲染层回收内存 (about:blank)')
+    } catch (e) {
+      discardDiag(`discard exception: ${String(e)}`)
+      mainWindowDiscarded = false
+    }
+  }, MAIN_WINDOW_DISCARD_DELAY_MS)
+  mainWindowDiscardTimer.unref?.()
 }
 
 /** 隐藏到托盘：必须同时移除任务栏按钮，否则关闭后窗口仍留在任务栏 */
@@ -824,6 +890,7 @@ function hideMainWindowToTray() {
     mainWindow.setSkipTaskbar(true)
   } catch { /* noop */ }
   mainWindow.hide()
+  scheduleMainWindowDiscard()
 }
 
 function showMainWindow() {
@@ -839,6 +906,33 @@ function showMainWindow() {
     if (!isScreenshotMode) {
       checkForUpdatesOnStartup()
     }
+    return
+  }
+  if (mainWindowDiscarded) {
+    // 渲染层已被内存回收：先重载应用页，就绪后再显示（避免黑屏闪烁）。
+    // ready-to-show 在隐藏窗口的后续导航上可能不再触发，用 did-finish-load
+    // 兜底（短延时等首帧），保证恢复路径在任何情况下都能把窗口带回前台
+    mainWindowDiscarded = false
+    loadMainWindowPage(mainWindow)
+    discardDiag('restore: reloading app page')
+    console.log('[Weport] 恢复主窗口渲染层')
+    let restoreTimer: NodeJS.Timeout | null = null
+    const showRestored = () => {
+      if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      mainWindowReady = true
+      mainWindow.show()
+      try {
+        mainWindow.setSkipTaskbar(false)
+      } catch { /* noop */ }
+      mainWindow.focus()
+      discardDiag('restore: window shown')
+    }
+    mainWindow.once('ready-to-show', showRestored)
+    mainWindow.webContents.once('did-finish-load', () => {
+      restoreTimer = setTimeout(showRestored, 250)
+      restoreTimer.unref?.()
+    })
     return
   }
   if (!mainWindow.isVisible()) {
@@ -3322,6 +3416,8 @@ async function runScreenshotMode() {
         ])
       } else {
         log('WARN [screenshot] AI tab did not render')
+        // 注意：executeJavaScript 解析的是纯 JS —— 字符串里不能带 TS 类型注解，
+        // 否则探针本身报 SyntaxError（曾把真实原因掩盖成页面脚本错误）
         const aiState = await mainWindow?.webContents
           .executeJavaScript(
             `(() => {
@@ -3330,9 +3426,9 @@ async function runScreenshotMode() {
               const active = document.querySelector('.tab[data-active="true"]')
               return JSON.stringify({
                 tabFound: !!tab,
-                tabDisabled: tab ? (tab as HTMLButtonElement).disabled : null,
+                tabDisabled: tab ? tab.disabled : null,
                 activeTab: active ? (active.textContent || '').trim() : null,
-                wsChildren: workspace ? Array.from(workspace.children).map((c: Element) => (c.className || c.tagName).toString()).slice(0, 4) : null,
+                wsChildren: workspace ? Array.from(workspace.children).map((c) => (c.className || c.tagName).toString()).slice(0, 4) : null,
                 wsText: workspace ? (workspace.textContent || '').slice(0, 120) : null
               })
             })()`,
@@ -4135,6 +4231,32 @@ function startApp() {
   if (process.platform !== 'win32' && process.platform !== 'darwin') {
     console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS）')
   }
+
+  // ---------------------------------------------------------------------------
+  // Chromium 内存调优（v0.9.3，须在 app ready 前生效）
+  // - js-flags: V8 堆封顶（默认按进程 ~2GB old space，384MB 足够本应用，
+  //   提前触发 GC 降低稳态内存；4MB 半空间对渲染层/主进程均合适）
+  // - disk-cache-size: HTTP 磁盘/内存缓存上限（头像已走 avatarCacheService
+  //   本地磁盘缓存，CDN 缓存仅需极少量兜底）
+  // 注意：不要用 appendSwitch('disable-features', …) 追加特性裁剪 ——
+  // AppendSwitch 会整体覆盖 Electron 自身的默认 disable-features（含
+  // SpareRendererForSitePerProcess 等），可能反而多出一个备用渲染进程。
+  // ---------------------------------------------------------------------------
+  try {
+    app.commandLine.appendSwitch('js-flags', '--max-old-space-size=384 --max-semi-space-size=4')
+    app.commandLine.appendSwitch('disk-cache-size', '16777216')
+  } catch { /* noop */ }
+
+  // 静默启动（--background 托盘常驻）无窗口渲染需求：关闭硬件加速，
+  // 省掉 GPU 进程（实测 ~130MB 工作集 / ~312MB 私有提交）。
+  // 窗口显示走软件光栅（文本/列表/ECharts 足够流畅）；通知弹窗在
+  // Windows 走原生玻璃面板（D3D11 在原生侧，不受 Chromium GPU 影响）。
+  if (startHidden) {
+    try {
+      app.disableHardwareAcceleration()
+    } catch { /* noop */ }
+  }
+
 
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
   if (aiSelfTest) {

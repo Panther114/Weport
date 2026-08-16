@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -18,10 +18,10 @@
     "dev": "node scripts/prepare-electron-runtime.cjs && vite",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vite build && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
-    "build": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && electron-builder --publish never",
-    "build:dir": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && electron-builder --dir --publish never",
-    "build:mac": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && electron-builder --mac dmg zip --arm64 --publish never",
-    "package": "node scripts/clean-dist-electron.cjs && vite build && electron-builder --publish never"
+    "build": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && electron-builder --publish never",
+    "build:dir": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && electron-builder --dir --publish never",
+    "build:mac": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
+    "package": "node scripts/clean-dist-electron.cjs && vite build && node scripts/prepare-host-bundle.cjs && electron-builder --publish never"
   },
   "dependencies": {
     "@hicccc77/electron-liquid-glass": "^0.3.0",
@@ -109,6 +109,10 @@
         {
           "from": "electron/assets/wasm/",
           "to": "assets/wasm/"
+        },
+        {
+          "from": "resources/host",
+          "to": "host"
         }
       ]
     },
@@ -157,8 +161,8 @@
           "to": "resources/runtime/win32"
         },
         {
-          "from": "electron/assets/wasm/",
-          "to": "assets/wasm/"
+          "from": "resources/host",
+          "to": "host"
         }
       ]
     },

@@ -30,6 +30,9 @@ release
 tmp/
 *.tsbuildinfo
 
+# WCDB 宿主 bundle 构建产物（scripts/prepare-host-bundle.cjs 生成，打包时再复制）
+resources/host/
+
 # Database
 *.db
 *.db-shm

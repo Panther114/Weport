@@ -228,6 +228,8 @@ export function createNotificationWindow() {
       preload: join(__dirname, "preload.js"), // FIX: Use correct relative path (same dir in dist)
       contextIsolation: true,
       nodeIntegration: false,
+      // 关闭拼写检查（弹窗无文本输入，省词典内存）
+      spellcheck: false,
       // devTools: true // Enable DevTools
     },
   });
@@ -247,9 +249,11 @@ export function createNotificationWindow() {
   // 实际上，我们希望窗口可点击。
   // 我们将在显示时将忽略鼠标事件设为 false。
 
+  // v0.9.3 起使用独立瘦身入口 popup.html（不加载 App/ECharts 主包），
+  // 渲染进程内存更低、首条通知出现更快
   const loadUrl = isDev
-    ? `${process.env.VITE_DEV_SERVER_URL}#/notification-window`
-    : `file://${join(__dirname, "../dist/index.html")}#/notification-window`;
+    ? `${process.env.VITE_DEV_SERVER_URL}/popup.html`
+    : `file://${join(__dirname, "../dist/popup.html")}`;
 
   console.log("[NotificationWindow] Loading URL:", loadUrl);
   notificationWindow.loadURL(loadUrl);

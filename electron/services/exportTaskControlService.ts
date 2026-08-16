@@ -88,6 +88,14 @@ class ExportTaskControlService {
     return this.tasks.get(normalizedTaskId)?.state || null
   }
 
+  /** 是否存在运行中的导出任务（v0.9.3：隐藏窗口内存回收据此跳过卸载） */
+  hasActiveTasks(): boolean {
+    for (const record of this.tasks.values()) {
+      if (record.state === 'running') return true
+    }
+    return false
+  }
+
   releaseTask(taskId: string): void {
     const normalizedTaskId = this.normalizeTaskId(taskId)
     if (!normalizedTaskId) return

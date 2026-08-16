@@ -1,8 +1,10 @@
 /**
- * WCDB 宿主进程入口（Electron IPC 消息协议）。
+ * WCDB 宿主进程入口（v0.9.3 起以纯 Node 模式运行）。
  *
  * wcdb_api.dll 的安全检查（-1006）要求宿主可执行文件名为 WeFlow.exe。
  * 主进程通过"硬链接 WeFlow.exe -> 当前 exe"（同目录，零磁盘开销）启动本进程，
+ * 并以 ELECTRON_RUN_AS_NODE=1 让同一二进制按纯 Node.js 运行（见
+ * wcdbHostClient.ts）—— 不初始化 Chromium，省掉宿主侧 GPU/网络等子进程。
  * 本进程只做 WCDB 工作，不创建可见窗口。
  *
  * 传输层说明：Electron 主进程的 process.stdin 在 Windows 上会立即 EOF
@@ -15,6 +17,8 @@
  * 监控事件: { id: -1, type: 'monitor', payload: { type, json } }
  *
  * 由主进程以 env WEFLOW_WORKER=1 启动（config.ts 据此跳过 electron 导入）。
+ * 下方 require('electron') 整段包在 try/catch 中：纯 Node 模式下不可用，
+ * 自动跳过（Electron 模式仍兼容，可手动以 --wcdb-host 拉起）。
  */
 import { WcdbCore } from './services/wcdbCore'
 

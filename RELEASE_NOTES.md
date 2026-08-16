@@ -1,3 +1,43 @@
+# Weport v0.9.3
+
+## 内存优化（实测常驻 ≈524 MB，较 v0.9.2 的 ≈844 MB 下降 38%）
+
+### WCDB 宿主进程改为纯 Node 模式
+
+- 宿主仍由硬链接 `WeFlow.exe` 启动（-1006 文件名检查不变），但以 `ELECTRON_RUN_AS_NODE=1` 运行 —— 同一二进制按纯 Node.js 执行，不再初始化 Chromium 浏览器进程
+- 实测：宿主工作集 104.1 MB + 网络服务子进程 50.6 MB → **44.9 MB 单进程**（省 ≈110 MB）
+- koffi（N-API）无需重编译；打包版宿主脚本与 koffi 复制到 `resources/host/`（纯 Node 读不了 app.asar），经 `NODE_PATH` 解析
+
+### 隐藏窗口内存回收（托盘模式）
+
+- 主窗口隐藏到托盘超过 5 分钟 → 卸载渲染层（`about:blank`），省掉渲染进程堆与 GPU 缓冲；托盘点击 / 二次启动即恢复（重载后约 0.5s 显示）
+- 导出进行中不回收（进度事件目标需存活）；QA/截图模式不回收；状态全部在主进程/配置侧，恢复无功能丢失
+
+### `--background` 关闭硬件加速
+
+- 开机自启托盘常驻时调用 `app.disableHardwareAcceleration()`：GPU 进程消失（实测省 ≈130 MB 工作集 / ≈312 MB 私有提交），窗口走软件光栅；Windows 通知弹窗的原生玻璃面板不受影响（D3D11 在原生侧）
+
+### Chromium 基础调优
+
+- `js-flags --max-old-space-size=384 --max-semi-space-size=4`：V8 堆封顶，提前触发 GC 降低稳态内存
+- `disk-cache-size 16MB`：HTTP 缓存上限（头像已走本地磁盘缓存）
+- 两个窗口 `spellcheck: false`：关闭拼写服务与词典内存
+
+### 通知弹窗独立瘦身入口
+
+- 弹窗改加载 `dist/popup.html`（独立 vite 入口，仅 NotificationWindow 依赖），不再解析含 ECharts/html2canvas 的整包 —— 弹窗渲染进程堆显著下降，首条通知出现更快
+- 弹窗字体与主应用保持一致（`popupBase.css`，修复此前字体回退到系统默认的问题）
+
+## 修复
+
+- 截图 QA 的 AI 面板诊断探针曾内嵌 TypeScript 类型注解（`as`/`: Element`），探针本身报 SyntaxError 掩盖真实原因 —— 已改为纯 JS
+
+## 验证
+
+- 类型检查 + 完整截图冒烟（12 屏全通过，弹窗 stddev ≥ 60）
+- 宿主纯 Node 冒烟：`wcdb_init [SecurityStatus:0]`（-1006 文件名检查通过）
+- 实测内存（托盘 + 开窗 + 推送常开）：主进程 137 + 渲染 105 + 弹窗 77 + 宿主 77 + 工具进程 128 ≈ **524 MB**（v0.9.2 同场景 ≈844 MB）
+
 # Weport v0.9.2
 
 ## 稳定性与安全加固（25 项问题审查 + 修复）

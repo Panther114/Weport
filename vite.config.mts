@@ -50,6 +50,13 @@ export default defineConfig(({ mode }) => ({
     chunkSizeWarningLimit: 900,
     commonjsOptions: {
       ignoreDynamicRequires: true
+    },
+    rollupOptions: {
+      input: {
+        index: resolve(import.meta.dirname, 'index.html'),
+        // 通知弹窗独立入口：只打包 NotificationWindow 依赖，渲染进程内存更低
+        popup: resolve(import.meta.dirname, 'popup.html')
+      }
     }
   },
   plugins: [

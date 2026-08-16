@@ -33,11 +33,22 @@ engine in a **subprocess**:
 - `electron/wcdbHostClient.ts` creates a hardlink `WeFlow[.exe]` next to the
   current exe (NTFS / APFS, zero disk cost, same dir so
   `electron.dll`/`Electron.framework`/resources resolve), then spawns it with
-  `--wcdb-host`.
-- `electron/main.ts` detects `--wcdb-host` and loads `wcdbHost.js`
-  (separate vite entry); that process runs `wcdbHost.ts` — a stdio-free WCDB
-  loop speaking the worker_threads-style message protocol over the **Node IPC
-  channel** (`process.send` / `process.on('message')`).
+  **`ELECTRON_RUN_AS_NODE=1`** (v0.9.3+) so the same binary runs as pure
+  Node.js — no Chromium browser process, no network utility child
+  (host RSS ≈ 45 MB vs ≈ 105 MB + 50 MB child in Electron mode). The `-1006`
+  check only inspects the exe filename, not the runtime.
+- Host script path: dev `dist-electron/wcdbHost.js` (koffi resolves from the
+  project `node_modules`); packaged `resources/host/wcdbHost.js` — plain Node
+  cannot read `app.asar`, so `scripts/prepare-host-bundle.cjs` copies the
+  script + `koffi` + `@koromix/koffi-*` platform binaries into
+  `resources/host/libs/` (NOT `node_modules/` — electron-builder's
+  extraResources copy filter hard-excludes root-level `node_modules`), and
+  `wcdbHostClient` sets `NODE_PATH=<resources>/host/libs` for resolution.
+- `electron/wcdbHost.ts` runs the stdio-free WCDB loop speaking the
+  worker_threads-style message protocol over the **Node IPC channel**
+  (`process.send` / `process.on('message')`). The `require('electron')`
+  block is try/catch-guarded and skipped in Node mode; `--wcdb-host` in
+  `main.ts` still works for manual Electron-mode launches.
 - `electron/services/wcdbService.ts` proxies to it exactly like WeFlow's
   `wcdbService` proxied to `wcdbWorker`.
 
@@ -47,6 +58,10 @@ engine in a **subprocess**:
   binary (any platform).
 - stdio JSON-lines transport — **Electron's main-process stdin hits EOF
   immediately on Windows even with a real pipe** (verified). IPC channel only.
+- Spawning the host without `ELECTRON_RUN_AS_NODE=1` — that resurrects the
+  full second Chromium instance (~155 MB with its utility child).
+- Root-level `node_modules` inside any `extraResources` copy — electron-builder
+  silently drops it (use `libs/` + `NODE_PATH`).
 - A zero-window Electron process without a `window-all-closed` listener and a
   hidden 1×1 keep-alive `BrowserWindow` — Electron quits at `ready` otherwise.
 
@@ -60,6 +75,15 @@ when hidden). Renderer: `src/pages/NotificationWindow.tsx` +
 `@hicccc77/electron-liquid-glass` panel with Chromium desktop-stream fallback;
 the native glass panel is **Windows-only** — on macOS only the Chromium
 fallback path runs).
+
+**v0.9.3+: slim entry.** The popup loads `dist/popup.html` →
+`src/popup-main.tsx` (a dedicated vite input), NOT `index.html#/notification-window`
+— it renders only `NotificationWindow` and its deps (no App/ECharts parse in the
+popup renderer, ~50 MB less heap). Global font comes from
+`src/styles/popupBase.css` (`@font-face` "Weport" + body font stack — keep it
+in sync with `src/styles.css` `--font`). Never reintroduce loading the full
+app bundle into the popup, and never drop `popupBase.css` (the popup falls
+back to the system default font).
 
 Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChange`
 → `emitPush` → `appMain.ts` `buildPopupData` → `showNotification`.
@@ -79,6 +103,24 @@ Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChan
 - Unlike winit, `BrowserWindow.hide()` does **not** stop the event loop, so the
   popup keeps working while tray-hidden — this is why the v0.6.x
   "minimize + hide-from-taskbar" workaround is obsolete.
+- **v0.9.3+: hidden-window memory reclamation.** When the main window stays
+  hidden to the tray for `WEPORT_DISCARD_DELAY_MS` (default 5 min), the
+  renderer is unloaded (`loadURL('about:blank')`); tray click / second
+  instance reloads the app page and shows it again (`appMain.ts`
+  `scheduleMainWindowDiscard` / `showMainWindow`). Skips while an export task
+  is running (`exportTaskControlService.hasActiveTasks`) and in all QA modes.
+  The restore path relies on `webContents` `did-finish-load` (not just
+  `ready-to-show`, which may not re-fire on hidden-window navigation). `about:blank`
+  is allowed by the `will-navigate` guard. State lives in the main process /
+  config, so nothing is lost on discard.
+- **v0.9.3+: Chromium memory tuning (appMain.ts `startApp`, before ready):**
+  `js-flags --max-old-space-size=384 --max-semi-space-size=4`, `disk-cache-size
+  16MB`, `spellcheck: false` on both windows. Do NOT use
+  `appendSwitch('disable-features', …)` — it *replaces* Electron's default
+  disable-features list (incl. `SpareRendererForSitePerProcess`) and can spawn
+  an extra spare renderer. `--background` also calls
+  `app.disableHardwareAcceleration()` (no GPU process, ~130 MB); the native
+  glass panel is unaffected (D3D11 on the native side).
 
 ## Self-sent Message Filtering
 
@@ -188,8 +230,8 @@ nicknames instead of raw wxid codes.
 npm install                                   # postinstall: electron-builder install-app-deps + runtime DLL sync
 npm run dev                                   # vite dev + electron (vite-plugin-electron)
 npm run typecheck                             # renderer + electron typecheck
-npm run build                                 # clean → tsc → vite build → electron-builder (NSIS, Windows)
-npm run build:dir                             # unpacked build (faster iteration)
+npm run build                                 # clean → tsc → vite build → prepare-host-bundle → electron-builder (NSIS, Windows)
+npm run build:dir                             # unpacked build (faster iteration; same chain)
 npm run build:mac                             # macOS DMG + ZIP (arm64, 需在 macOS 上执行)
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 ```

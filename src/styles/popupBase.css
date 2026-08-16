@@ -1,0 +1,19 @@
+/**
+ * 通知弹窗独立入口的基础样式（v0.9.3）。
+ *
+ * 弹窗此前经 index.html 加载完整 styles.css 获得全局字体；瘦身入口
+ * 不再引入整包，这里只补上与主应用一致的字体声明，保持弹窗排版与
+ * 主窗口/WeFlow 弹窗一致。字体栈须与 src/styles.css 的 --font 保持同步。
+ */
+@font-face {
+  font-family: "Weport";
+  src: url("/src/assets/fonts/weport.ttf") format("truetype");
+  font-display: swap;
+}
+
+body {
+  font-family: "Weport", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
