@@ -38,6 +38,9 @@ import { chatService } from './services/chatService'
 import { wcdbService } from './services/wcdbService'
 import { exportService } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
+import { backupService } from './services/backupService'
+import { httpService } from './services/httpService'
+import { windowsHelloService } from './services/windowsHelloService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
 import { KeyServiceMac } from './services/keyServiceMac'
@@ -382,7 +385,6 @@ const cleanupLegacyAutostartEntries = () => {
 // ---------------------------------------------------------------------------
 // 更新（electron-updater + GitHub Releases）
 // ---------------------------------------------------------------------------
-let isDownloadInProgress = false
 let updateCheckTimer: NodeJS.Timeout | null = null
 
 const getUpdaterFeedUrl = (): string => {
@@ -473,30 +475,69 @@ function checkForUpdatesOnStartup() {
   updateCheckTimer.unref?.()
 }
 
-async function downloadAndInstall(): Promise<{ success: boolean; error?: string }> {
+/** 下载完成后是否已触发安装（避免重复 quitAndInstall） */
+let updateInstallTriggered = false
+
+/** 是否正在下载/安装更新（渲染层据此禁用更新按钮） */
+let isDownloadInProgress = false
+
+/**
+ * 下载并安装更新。
+ *
+ * 下载完成后（update-downloaded）：
+ * 1. 通知渲染层切换为「正在安装」状态；
+ * 2. 调用 autoUpdater.quitAndInstall(true, true)：
+ *    - isSilent=true  → NSIS 以 /S 静默安装（macOS 由 Squirrel.Mac 处理，忽略该参数）；
+ *    - isForceRunAfter=true → 安装完成后自动重新启动应用。
+ * 此前版本只下载不安装：用户点「立即更新」后应用既不退出也不重启，
+ * 更新要等用户手动退出应用才会装上（autoInstallOnAppQuit），
+ * 而托盘模式下窗口关闭不等于退出，绝大多数用户永远不会走到这一步。
+ */
+async function downloadAndInstall(): Promise<{ success: boolean; restarting?: boolean; error?: string }> {
   if (!app.isPackaged) return { success: false, error: '开发模式不可更新' }
   if (isDownloadInProgress) return { success: false, error: '正在下载中' }
   applyUpdaterChannel()
   isDownloadInProgress = true
+  updateInstallTriggered = false
   try {
     return await new Promise((resolve) => {
       const onProgress = (info: { percent?: number; transferred?: number; total?: number }) => {
         mainWindow?.webContents.send('app:downloadProgress', info)
       }
+      const onDownloaded = () => {
+        autoUpdater.removeListener('download-progress', onProgress)
+        autoUpdater.removeListener('update-downloaded', onDownloaded)
+        isDownloadInProgress = false
+        // 先让渲染层把按钮切到「正在安装…」并停止交互，再退出应用
+        mainWindow?.webContents.send('app:updateDownloaded')
+        resolve({ success: true, restarting: true })
+        // 给渲染层 ~250ms 绘制安装状态，随后退出 → 静默安装 → 自动重启
+        setTimeout(() => {
+          if (updateInstallTriggered) return
+          updateInstallTriggered = true
+          try {
+            autoUpdater.quitAndInstall(true, true)
+          } catch (e) {
+            console.error('[Weport] 触发安装失败:', e)
+          }
+        }, 250)
+      }
+      const onError = (e: Error) => {
+        autoUpdater.removeListener('download-progress', onProgress)
+        autoUpdater.removeListener('update-downloaded', onDownloaded)
+        isDownloadInProgress = false
+        updateInstallTriggered = false
+        resolve({ success: false, error: String(e?.message || e) })
+      }
       autoUpdater.on('download-progress', onProgress)
-      autoUpdater.once('update-downloaded', () => {
-        autoUpdater.removeListener('download-progress', onProgress)
-        resolve({ success: true })
-      })
-      autoUpdater.once('error', (e) => {
-        autoUpdater.removeListener('download-progress', onProgress)
-        resolve({ success: false, error: String(e?.message || e) })
-      })
+      autoUpdater.once('update-downloaded', onDownloaded)
+      autoUpdater.once('error', onError)
       void autoUpdater.downloadUpdate().catch((e) => {
-        resolve({ success: false, error: String(e?.message || e) })
+        onError(e as Error)
       })
     })
   } finally {
+    // 下载失败时恢复；成功路径已在 onDownloaded 里提前复位
     isDownloadInProgress = false
   }
 }
@@ -639,6 +680,8 @@ function setupNotificationPipeline() {
 // （wxid_xxx / xxx@chatroom 等）。启动时异步把前 600 个会话的显示名与头像
 // 拉取并持久化到 contactCache，之后所有展示路径都能拿到真实昵称。
 let contactWarmupTimer: NodeJS.Timeout | null = null
+let timelineWarmupTimer: NodeJS.Timeout | null = null
+let groupWarmupTimer: NodeJS.Timeout | null = null
 /** 静默启动（--background）时跳过开机预热，标记为延迟到主窗口首次创建时补跑 */
 let contactWarmupDeferred = false
 
@@ -661,8 +704,59 @@ async function warmupContactNames(): Promise<void> {
     if (usernames.length === 0) return
     await chatService.enrichSessionsContactInfo(usernames)
     console.log(`[Weport] 联系人预热完成: ${usernames.length} 个会话`)
+    // 让会话/头像预热先释放 WCDB 队列，再预取 SNS 和群成员数据，
+    // 避免冷启动时多个全量查询争抢同一个串行宿主。
+    if (timelineWarmupTimer) clearTimeout(timelineWarmupTimer)
+    timelineWarmupTimer = setTimeout(() => {
+      timelineWarmupTimer = null
+      void snsService.warmupTimeline()
+    }, 200)
+    timelineWarmupTimer.unref?.()
+    if (groupWarmupTimer) clearTimeout(groupWarmupTimer)
+    groupWarmupTimer = setTimeout(() => {
+      groupWarmupTimer = null
+      void warmupGroupMembers(sessionsResult.sessions as Array<{ username: string }>)
+    }, 900)
+    groupWarmupTimer.unref?.()
   } catch (e) {
     console.warn('[Weport] 联系人预热失败:', e)
+  }
+}
+
+/** 群成员预热上限：最多预热 12 个群 / 1500 名成员（预算耗尽即停止） */
+const GROUP_WARMUP_MAX = 12
+const GROUP_WARMUP_MEMBER_BUDGET = 1500
+
+/**
+ * 预生成群成员面板数据（includeMessageCounts=false，不触发全历史聚合）。
+ * 成员头像与显示名进入持久化/内存缓存，后续任何入口（群聊分析面板、
+ * 排行、成员画像）都命中本地文件与 LRU，零宿主调用。
+ * 单群失败不阻塞；纯后台任务，不等待。
+ */
+async function warmupGroupMembers(existingSessions?: Array<{ username: string }>): Promise<void> {
+  try {
+    const sessions = existingSessions || (await chatService.getSessions()).sessions
+    if (!Array.isArray(sessions)) return
+    const groupIds = sessions
+      .map((s) => String(s?.username || '').trim())
+      .filter((u) => u.includes('@chatroom'))
+      .slice(0, GROUP_WARMUP_MAX)
+    if (groupIds.length === 0) return
+    let budget = GROUP_WARMUP_MEMBER_BUDGET
+    let warmedGroups = 0
+    for (const gid of groupIds) {
+      if (budget <= 0) break
+      try {
+        const r = await groupAnalyticsService.getGroupMembersPanelData(gid, { includeMessageCounts: false })
+        if (r.success && Array.isArray(r.data)) budget -= r.data.length
+        warmedGroups += 1
+      } catch {
+        // 单群失败不阻塞其余预热
+      }
+    }
+    console.log(`[Weport] 群成员预热完成: ${warmedGroups} 个群，头像定位缓存 ${avatarCacheService.getHeadImageCacheStats().entries} 条`)
+  } catch (e) {
+    console.warn('[Weport] 群成员预热失败:', e)
   }
 }
 
@@ -856,7 +950,11 @@ function scheduleMainWindowDiscard(): void {
   if (isAppQuitting || isAnyQaMode) return
   if (exportTaskControlService.hasActiveTasks()) {
     // 导出中不卸载渲染层（进度事件目标需存活），导出结束后再试
-    scheduleMainWindowDiscard()
+    mainWindowDiscardTimer = setTimeout(() => {
+      mainWindowDiscardTimer = null
+      scheduleMainWindowDiscard()
+    }, MAIN_WINDOW_DISCARD_DELAY_MS)
+    mainWindowDiscardTimer.unref?.()
     return
   }
   mainWindowDiscardTimer = setTimeout(() => {
@@ -901,6 +999,9 @@ function showMainWindow() {
     if (contactWarmupDeferred) {
       contactWarmupDeferred = false
       void warmupContactNames()
+    } else if (!isScreenshotMode) {
+      // 静默启动跳过的朋友圈预加载，随窗口首次创建补跑（幂等，内部有节流）
+      void snsService.warmupTimeline()
     }
     // 静默启动跳过的更新检查，随窗口首次创建补跑（幂等）
     if (!isScreenshotMode) {
@@ -1389,6 +1490,15 @@ async function runRealDataDump() {
   })) && ok
   ok = (await run('snsUserPostCounts', () => snsService.getUserPostCounts({ preferCache: false, forceRefresh: true }))) && ok
   // 2.5) 朋友圈解密探针：真实媒体 URL + key 走完整解密管线，量化耗时
+  await run('snsKeystreamProbe', async () => {
+    const available = await snsService.isKeystreamAvailable()
+    return {
+      available,
+      note: available
+        ? 'wasm keystream 可用（正确且快速的解密路径）'
+        : 'wasm keystream 不可用（解密将失败，请检查 wasm 打包）',
+    }
+  })
   await run('snsDecryptProbe', async () => {
     const tl = await snsService.getTimeline(40, 0)
     const posts = tl.success ? (tl.timeline || []) : []
@@ -1498,6 +1608,7 @@ async function runRealDataDump() {
       filesOnDisk,
       avatarDir,
       sampleLocal,
+      headImageLocator: avatarCacheService.getHeadImageCacheStats(),
     }
   })
 
@@ -1507,7 +1618,51 @@ async function runRealDataDump() {
   if (groups.length > 0) {
     const first = groups[0]?.username as string
     await run('groupMembers', () => groupAnalyticsService.getGroupMembersPanelData(first, { includeMessageCounts: true, forceRefresh: true }))
+    // 二次打开（无 forceRefresh）：应命中成员面板缓存 + 头像定位缓存 → 毫秒级
+    await run('groupMembersReopen', () => groupAnalyticsService.getGroupMembersPanelData(first, { includeMessageCounts: true }))
     await run('groupRanking', () => groupAnalyticsService.getGroupMessageRanking(first, 5, 0, 0))
+  // 4.5) 模拟页面打开时的 4 面板并行加载（成员/排行/活跃时段/消息类型），
+  // 验证 getGroupStats 共享缓存把 4 次全历史聚合合并为 1 次
+  await run('groupPanelParallel', async () => {
+    const t0 = Date.now()
+    const [membersRes, rankRes, hoursRes, mediaRes] = await Promise.all([
+      groupAnalyticsService.getGroupMembersPanelData(first, { includeMessageCounts: true, forceRefresh: true }),
+      groupAnalyticsService.getGroupMessageRanking(first, 5, 0, 0),
+      groupAnalyticsService.getGroupActiveHours(first, 0, 0),
+      groupAnalyticsService.getGroupMediaStats(first, 0, 0),
+    ])
+    return {
+      elapsedMs: Date.now() - t0,
+      members: membersRes.success ? membersRes.data?.length : membersRes.error,
+      ranking: rankRes.success ? rankRes.data?.length : rankRes.error,
+      hours: hoursRes.success ? Object.keys(hoursRes.data?.hourlyDistribution || {}).length : hoursRes.error,
+      media: mediaRes.success ? mediaRes.data?.total : mediaRes.error,
+    }
+  })
+  // 4.6) 多群 getGroupStats 原始结果探针（诊断「聚合失败」是否群相关）
+  await run('groupStatsProbe', async () => {
+    const results: Array<{ group: string; success: boolean; error?: string; senders?: number; total?: number; ms: number }> = []
+    const { wcdbService: wsvc } = await import('./services/wcdbService')
+    for (const g of groups.slice(0, 3)) {
+      const t0 = Date.now()
+      try {
+        const r = await wsvc.getGroupStats(String(g?.username || ''), 0, 0)
+        const ms = Date.now() - t0
+        const sd = r?.data?.sessions?.[String(g?.username || '')]
+        results.push({
+          group: String(g?.username || '').slice(0, 30),
+          success: !!r?.success,
+          error: r?.error,
+          senders: sd?.senders ? Object.keys(sd.senders).length : undefined,
+          total: sd?.total ?? r?.data?.total,
+          ms,
+        })
+      } catch (e) {
+        results.push({ group: String(g?.username || '').slice(0, 30), success: false, error: String(e), ms: Date.now() - t0 })
+      }
+    }
+    return results
+  })
   } else {
     log('groupChats: 无群聊（可能无数据）')
   }
@@ -1524,6 +1679,61 @@ async function runRealDataDump() {
     ok = (await run(`annualReport_${year}`, () => generateAnnualReportInWorker(year, (progress) => {
       log(`  annualReport progress: ${progress.status} (${progress.progress}%)`)
     }))) && ok
+    // 4.7) 双人报告探针：取排行第一的好友，在独立 worker 中生成
+    await run('dualReport', async () => {
+      const rankings = await analyticsService.getContactRankings(1, 0, 0)
+      const friend = rankings.success && rankings.data && rankings.data[0]
+      if (!friend) return { success: false, error: '无可选好友' }
+      const cfg = configService
+      if (!cfg) return { success: false, error: '配置服务未就绪' }
+      const dbPath = cfg.get('dbPath')
+      const decryptKey = cfg.get('decryptKey')
+      const wxid = cfg.getMyWxidCleaned()
+      const logEnabled = cfg.get('logEnabled')
+      const resourcesPath = resolveResourcesPath()
+      const userDataPath = app.getPath('userData')
+      const workerPath = join(__dirname, 'dualReportWorker.js')
+      const excludeWords = cfg.get('wordCloudExcludeWords') || []
+      return new Promise((resolve) => {
+        const worker = new Worker(workerPath, {
+          workerData: { year: 0, friendUsername: friend.username, dbPath, decryptKey, myWxid: wxid, resourcesPath, userDataPath, logEnabled, excludeWords },
+        })
+        const cleanup = () => worker.removeAllListeners()
+        worker.on('message', (msg: any) => {
+          if (msg?.type === 'dualReport:progress') return
+          if (msg?.type === 'dualReport:result' || msg?.type === 'done') {
+            cleanup()
+            void worker.terminate()
+            const d = msg.data ?? msg.result
+            resolve({
+              success: !!d?.success,
+              error: d?.error,
+              friend: d?.data?.friendName,
+              totalMessages: d?.data?.stats?.totalMessages,
+              topPhrases: d?.data?.topPhrases?.length,
+              heatmap: d?.data?.heatmap ? 'present' : 'missing',
+              initiative: d?.data?.initiative,
+            })
+            return
+          }
+          if (msg?.type === 'dualReport:error' || msg?.type === 'error') {
+            cleanup()
+            void worker.terminate()
+            resolve({ success: false, error: msg.error || '双人报告生成失败' })
+          }
+        })
+        worker.on('error', (err) => {
+          cleanup()
+          resolve({ success: false, error: String(err) })
+        })
+        worker.on('exit', (code) => {
+          if (code !== 0) {
+            cleanup()
+            resolve({ success: false, error: `双人报告线程异常退出: ${code}` })
+          }
+        })
+      })
+    })
   } else {
     log('annualYears: 无可用年份')
   }
@@ -1601,6 +1811,43 @@ function registerIpcHandlers() {
     configService?.set('ignoredUpdateVersion', String(version || ''))
     return { success: true }
   })
+
+  // 数据备份（v0.9.4：本地聊天数据库快照备份/恢复）
+  ipcMain.handle('backup:create', async (_e, payload: { outputPath: string; options?: { includeImages?: boolean; includeVideos?: boolean; includeFiles?: boolean } }) => {
+    try {
+      return await backupService.createBackup(String(payload?.outputPath || ''), {
+        includeImages: payload?.options?.includeImages === true,
+        includeVideos: payload?.options?.includeVideos === true,
+        includeFiles: payload?.options?.includeFiles === true,
+      })
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+  ipcMain.handle('backup:inspect', async (_e, payload: { archivePath: string }) => {
+    try {
+      return await backupService.inspectBackup(String(payload?.archivePath || ''))
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+  ipcMain.handle('backup:restore', async (_e, payload: { archivePath: string }) => {
+    try {
+      return await backupService.restoreBackup(String(payload?.archivePath || ''))
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+
+  // 本地 HTTP API（v0.9.4 只读接口，配置 httpApiEnabled/httpApiPort/httpApiToken）
+  ipcMain.handle('http:start', async () => {
+    const port = Number(configService?.get('httpApiPort') || 5031)
+    const host = String(configService?.get('httpApiHost') || '127.0.0.1')
+    return httpService.start(port, host)
+  })
+  ipcMain.handle('http:stop', () => httpService.stop())
+  ipcMain.handle('http:getStatus', () => httpService.getStatus())
+  ipcMain.handle('auth:verifyHello', (_e, message: string) => windowsHelloService.verify(String(message || '请验证您的身份')))
 
   // 数据库路径
   ipcMain.handle('dbpath:autoDetect', () => dbPathService.autoDetect())
@@ -1782,11 +2029,14 @@ function registerIpcHandlers() {
   ipcMain.handle('sns:getExportStatsFast', () => snsService.getExportStatsFast())
   ipcMain.handle('sns:getUserPostStats', (_e, username: string) => snsService.getUserPostStats(String(username || '')))
   ipcMain.handle('sns:debugResource', (_e, url: string) => snsService.debugResource(String(url || '')))
-  ipcMain.handle('sns:proxyImage', (_e, payload: string | { url: string; key?: string | number }) => {
+  ipcMain.handle('sns:proxyImage', (_e, payload: string | { url: string; key?: string | number; skipFailedCache?: boolean }) => {
     const url = typeof payload === 'string' ? payload : payload?.url
     const key = typeof payload === 'string' ? undefined : payload?.key
-    return snsService.proxyImage(url, key)
+    const skipFailedCache = typeof payload === 'string' ? undefined : payload?.skipFailedCache
+    return snsService.proxyImage(url, key, { skipFailedCache: skipFailedCache === true })
   })
+  ipcMain.handle('sns:warmupTimeline', () => snsService.warmupTimeline())
+  ipcMain.handle('sns:peekNewestTimeline', () => snsService.peekNewestTimeline())
   ipcMain.handle('sns:downloadImage', async (_e, payload: { url: string; key?: string | number }) => {
     try {
       const { url, key } = payload
@@ -2062,6 +2312,71 @@ function registerIpcHandlers() {
       }
     })
   })
+  ipcMain.handle('dualReport:generateReport', async (_e, payload: { friendUsername: string; year: number }) => {
+    const cfg = configService
+    if (!cfg) return { success: false, error: '配置服务未就绪' }
+
+    const dbPath = cfg.get('dbPath')
+    const decryptKey = cfg.get('decryptKey')
+    const wxid = cfg.getMyWxidCleaned()
+    const logEnabled = cfg.get('logEnabled')
+    const friendUsername = payload?.friendUsername
+    const year = payload?.year ?? 0
+    const excludeWords = cfg.get('wordCloudExcludeWords') || []
+
+    if (!friendUsername) {
+      return { success: false, error: '缺少好友用户名' }
+    }
+
+    const resourcesPath = resolveResourcesPath()
+    const userDataPath = app.getPath('userData')
+    const workerPath = join(__dirname, 'dualReportWorker.js')
+
+    return await new Promise((resolve) => {
+      const worker = new Worker(workerPath, {
+        workerData: { year, friendUsername, dbPath, decryptKey, myWxid: wxid, resourcesPath, userDataPath, logEnabled, excludeWords },
+      })
+
+      const cleanup = () => {
+        worker.removeAllListeners()
+      }
+
+      worker.on('message', (msg: any) => {
+        if (msg && msg.type === 'dualReport:progress') {
+          for (const win of BrowserWindow.getAllWindows()) {
+            if (!win.isDestroyed()) {
+              win.webContents.send('dualReport:progress', msg.data)
+            }
+          }
+          return
+        }
+        if (msg && (msg.type === 'dualReport:result' || msg.type === 'done')) {
+          cleanup()
+          void worker.terminate()
+          resolve(msg.data ?? msg.result)
+          return
+        }
+        if (msg && (msg.type === 'dualReport:error' || msg.type === 'error')) {
+          cleanup()
+          void worker.terminate()
+          resolve({ success: false, error: msg.error || '双人报告生成失败' })
+        }
+      })
+
+      worker.on('error', (err) => {
+        cleanup()
+        resolve({ success: false, error: String(err) })
+      })
+
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          cleanup()
+          resolve({ success: false, error: `双人报告线程异常退出: ${code}` })
+        }
+      })
+    })
+  })
+
   ipcMain.handle('annualReport:exportImages', async (_e, payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) => {
     try {
       const { baseDir, folderName, images } = payload
@@ -4398,6 +4713,12 @@ function startApp() {
     syncLaunchAtStartupPreference()
     cleanupLegacyAutostartEntries()
     applyUpdaterChannel()
+    // 本地 HTTP API：配置开启时随应用启动（只读接口，默认仅 127.0.0.1）
+    if (configService.get('httpApiEnabled') === true) {
+      const port = Number(configService.get('httpApiPort') || 5031)
+      const host = String(configService.get('httpApiHost') || '127.0.0.1')
+      void httpService.start(port, host)
+    }
 
     registerIpcHandlers()
     setupNotificationPipeline()
@@ -4469,19 +4790,76 @@ function startApp() {
       return
     }
 
-    // 更新器自检：拉取更新源 latest.yml 并报告结果（用于发布前验证管道）
+    // 备份自检：连接真实库并把核心表快照打包到临时目录（只读验证 + 写临时文件）
+    if (process.env.WEPORT_BACKUPTEST === '1') {
+      const outDir = process.env.WEPORT_BACKUPTEST_OUT || join(app.getPath('temp'), 'weport-backuptest')
+      try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+      const logFile = join(outDir, 'backup-test.log')
+      const log = (msg: string) => {
+        const line = `${new Date().toISOString()} ${msg}`
+        console.log(line)
+        try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+      }
+      try {
+        const connectResult = await chatService.connect()
+        if (!connectResult.success) {
+          log(`FAIL: connect -> ${connectResult.error}`)
+          app.exit(1)
+          return
+        }
+        const archive = join(outDir, 'backup-test.zip')
+        const r = await backupService.createBackup(archive, { includeImages: false, includeVideos: false, includeFiles: false })
+        log(`create = ${JSON.stringify(r)}`)
+        if (!r.success) {
+          app.exit(1)
+          return
+        }
+        const inspect = await backupService.inspectBackup(archive)
+        log(`inspect = ${JSON.stringify(inspect)}`)
+        app.exit(inspect.success ? 0 : 1)
+      } catch (e) {
+        log(`FAIL: ${String(e)}`)
+        app.exit(1)
+      }
+      return
+    }
+
+    // 更新器自检：拉取更新源 latest.yml 并报告结果（用于发布前验证管道）。
+    // WEPORT_UPDATETEST_INSTALL=1 时继续走完整下载 → 安装 → 自动重启流程
+    // （本地测试源 + 同版本安装包模拟；验证 quitAndInstall 全链路）。
     if (process.env.WEPORT_UPDATETEST === '1') {
       const result = await checkForUpdatesManual()
       console.log('[updatetest] feed =', getUpdaterFeedUrl())
       console.log('[updatetest] version =', APP_VERSION)
       console.log('[updatetest] result =', JSON.stringify(result))
-      try {
-        const { appendFileSync } = require('fs')
-        appendFileSync(
-          process.env.WEPORT_UPDATETEST_OUT || join(app.getPath('temp'), 'weport-updatetest.log'),
-          JSON.stringify({ appVersion: APP_VERSION, feed: getUpdaterFeedUrl(), result, at: new Date().toISOString() }) + '\n',
-        )
-      } catch { /* noop */ }
+      const writeLog = (extra: Record<string, unknown> = {}) => {
+        try {
+          const { appendFileSync } = require('fs')
+          appendFileSync(
+            process.env.WEPORT_UPDATETEST_OUT || join(app.getPath('temp'), 'weport-updatetest.log'),
+            JSON.stringify({ appVersion: APP_VERSION, feed: getUpdaterFeedUrl(), result, ...extra, at: new Date().toISOString() }) + '\n',
+          )
+        } catch { /* noop */ }
+      }
+      if (process.env.WEPORT_UPDATETEST_INSTALL === '1') {
+        if (!result.hasUpdate) {
+          writeLog({ install: 'skipped-no-update' })
+          isAppQuitting = true
+          app.exit(2)
+          return
+        }
+        // 走完整下载流程；完成后 downloadAndInstall 内部会触发 quitAndInstall
+        // （退出 → 静默安装 → --force-run 重启），此处不 app.exit，交给更新器
+        console.log('[updatetest] starting download+install...')
+        const dl = await downloadAndInstall()
+        writeLog({ install: dl })
+        if (!dl.success) {
+          isAppQuitting = true
+          app.exit(3)
+        }
+        return
+      }
+      writeLog()
       isAppQuitting = true
       app.exit(result.hasUpdate ? 0 : 2)
       return

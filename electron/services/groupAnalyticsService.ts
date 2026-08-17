@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
-import { avatarCacheService } from './avatarCacheService'
+import { avatarCacheService, protocolUrlToPath } from './avatarCacheService'
 import type { Message } from './chatService'
 import type { ChatStatistics } from './analyticsService'
 
@@ -87,6 +87,100 @@ class GroupAnalyticsService {
     Promise<{ success: boolean; data?: GroupMembersPanelEntry[]; error?: string; fromCache?: boolean; updatedAt?: number }>
   >()
   private readonly friendExcludeNames = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
+
+  /**
+   * getGroupStats 共享缓存：群聊分析页打开一个群时，成员面板 / 消息排行 /
+   * 活跃时段 / 消息类型 四个面板各自调用一次 wcdbGetGroupStats（全历史聚合），
+   * 而 WCDB 宿主进程串行执行请求——4 次全历史扫描被串行排队，成为页面卡顿主因。
+   * 这里把同一群 + 同一时间窗的聚合结果合并为一次查询，其余面板复用。
+   * TTL 5 分钟（与既有面板缓存一致），并发请求自动去重（in-flight）。
+   */
+  private readonly groupStatsCacheTtlMs = 5 * 60 * 1000
+  private readonly groupStatsCache = new Map<string, { updatedAt: number; data: any }>()
+  private readonly groupStatsInFlight = new Map<string, Promise<any>>()
+
+  /**
+   * 显示名 LRU：群成员面板 / 排行 / 成员画像每次都要 getDisplayNames（宿主调用，
+   * 且宿主串行执行）。不同群高度共享成员，缓存后跨群打开成员面板零宿主调用。
+   * TTL 10 分钟；负缓存（无显示名）同样记录避免重复查询。
+   */
+  private readonly displayNameCache = new Map<string, string>()
+  private readonly displayNameCheckedAt = new Map<string, number>()
+  private readonly displayNameCacheTtlMs = 10 * 60 * 1000
+  private readonly displayNameCacheMax = 4000
+
+  private async getDisplayNamesCached(usernames: string[]): Promise<Map<string, string>> {
+    const map = new Map<string, string>()
+    const missing: string[] = []
+    const now = Date.now()
+    for (const raw of usernames) {
+      const u = String(raw || '').trim()
+      if (!u) continue
+      const hit = this.displayNameCache.get(u)
+      const at = this.displayNameCheckedAt.get(u) || 0
+      if (hit !== undefined && now - at < this.displayNameCacheTtlMs) {
+        if (hit) map.set(u, hit)
+        continue
+      }
+      missing.push(u)
+    }
+    if (missing.length > 0) {
+      const res = await wcdbService.getDisplayNames(missing)
+      if (res.success && res.map) {
+        for (const [u, name] of Object.entries(res.map)) {
+          const n = String(name || '').trim()
+          this.displayNameCache.set(u, n)
+          this.displayNameCheckedAt.set(u, now)
+          if (n) map.set(u, n)
+        }
+      }
+      if (this.displayNameCache.size > this.displayNameCacheMax) {
+        let drop = this.displayNameCache.size - this.displayNameCacheMax
+        for (const [k] of this.displayNameCache) {
+          if (drop <= 0) break
+          this.displayNameCache.delete(k)
+          this.displayNameCheckedAt.delete(k)
+          drop -= 1
+        }
+      }
+    }
+    return map
+  }
+
+  private async getGroupStatsCached(chatroomId: string, startTime: number, endTime: number): Promise<any> {
+    const key = `${chatroomId}|${startTime}|${endTime}`
+    const now = Date.now()
+    const cached = this.groupStatsCache.get(key)
+    if (cached && now - cached.updatedAt < this.groupStatsCacheTtlMs) {
+      // 注意：调用方期望完整的 { success, data } 结构 —— 只返回 data 会让
+      // 所有缓存命中方误判 success=false（此前「聚合失败」的根因）
+      return { success: true, data: cached.data }
+    }
+    const inflight = this.groupStatsInFlight.get(key)
+    if (inflight) return inflight
+    const task = (async () => {
+      let result = await wcdbService.getGroupStats(chatroomId, startTime, endTime)
+      // 宿主调用偶发瞬态失败（并发查询竞争），重试一次再放弃
+      if (!result.success && !result.data) {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        result = await wcdbService.getGroupStats(chatroomId, startTime, endTime)
+      }
+      if (result.success && result.data) {
+        this.groupStatsCache.set(key, { updatedAt: Date.now(), data: result.data })
+        if (this.groupStatsCache.size > 128) {
+          const oldestKey = this.groupStatsCache.keys().next().value as string | undefined
+          if (oldestKey) this.groupStatsCache.delete(oldestKey)
+        }
+      }
+      return result
+    })()
+    this.groupStatsInFlight.set(key, task)
+    try {
+      return await task
+    } finally {
+      this.groupStatsInFlight.delete(key)
+    }
+  }
 
   constructor() {
     this.configService = new ConfigService()
@@ -650,7 +744,7 @@ class GroupAnalyticsService {
 
   private async buildGroupMessageCountLookup(chatroomId: string): Promise<Map<string, number>> {
     const lookup = new Map<string, number>()
-    const result = await wcdbService.getGroupStats(chatroomId, 0, 0)
+    const result = await this.getGroupStatsCached(chatroomId, 0, 0)
     if (!result.success || !result.data) return lookup
 
     const sessionData = result.data?.sessions?.[chatroomId]
@@ -1155,18 +1249,24 @@ class GroupAnalyticsService {
       .filter(Boolean)
     if (usernames.length === 0) return { success: true, data: [] }
 
-    const displayNamesPromise = wcdbService.getDisplayNames(usernames)
+    const displayNamesPromise = this.getDisplayNamesCached(usernames)
     const contactLookupPromise = this.buildGroupMemberContactLookup(usernames)
     const ownerPromise = this.detectGroupOwnerUsername(chatroomId, members)
     const messageCountLookupPromise = includeMessageCounts
       ? this.buildGroupMessageCountLookup(chatroomId)
       : Promise.resolve(new Map<string, number>())
     // 本地头像优先（与聊天模块一致）：head_image.db → 磁盘缓存 → weport-media://
+    // 命中头像定位缓存（headImages.json 持久化）的用户零宿主调用，
+    // 只有未命中的用户才走 head_image.db 查询 + 落盘，并回填缓存
     const localAvatarPromise = (async () => {
       const localMap: Record<string, string> = {}
+      const { missing, map } = avatarCacheService.getLocalizedHeadAvatars(usernames)
+      Object.assign(localMap, map)
+      if (missing.length === 0) return localMap
+
       const dataUrls: Record<string, string> = {}
-      for (let i = 0; i < usernames.length; i += 60) {
-        const batch = usernames.slice(i, i + 60)
+      for (let i = 0; i < missing.length; i += 60) {
+        const batch = missing.slice(i, i + 60)
         const res = await wcdbService.getHeadImageBuffers(batch)
         if (res.success && res.map) {
           for (const [u, hex] of Object.entries(res.map)) {
@@ -1178,21 +1278,33 @@ class GroupAnalyticsService {
             } catch { /* noop */ }
           }
         }
+        for (const u of batch) {
+          if (!(u in dataUrls)) avatarCacheService.recordHeadAvatar(u, '')
+        }
       }
-      await Promise.all(
-        Object.entries(dataUrls).map(async ([u, dataUrl]) => {
-          const local = await avatarCacheService.persistDataUrl(dataUrl)
-          if (local) localMap[u] = local
-        }),
-      )
+      const entries = Object.entries(dataUrls)
+      // 落盘并发受限（数百成员时避免一次性上百个并发 fs 写）
+      const limit = 16
+      for (let i = 0; i < entries.length; i += limit) {
+        await Promise.all(
+          entries.slice(i, i + limit).map(async ([u, dataUrl]) => {
+            const local = await avatarCacheService.persistDataUrl(dataUrl)
+            if (local) {
+              localMap[u] = local
+              avatarCacheService.recordHeadAvatar(u, protocolUrlToPath(local) || '')
+            }
+          }),
+        )
+      }
       return localMap
     })()
 
-    const [displayNames, contactLookup, ownerUsername, messageCountLookup] = await Promise.all([
+    const [displayNames, contactLookup, ownerUsername, messageCountLookup, localAvatarMap] = await Promise.all([
       displayNamesPromise,
       contactLookupPromise,
       ownerPromise,
-      messageCountLookupPromise
+      messageCountLookupPromise,
+      localAvatarPromise,
     ])
 
     const nicknameCandidates = this.buildIdCandidates([
@@ -1231,9 +1343,9 @@ class GroupAnalyticsService {
           lookupCandidates.push(myWxid)
         }
         const groupNickname = this.resolveGroupNicknameByCandidates(groupNicknames, lookupCandidates)
-        const displayName = displayNames.success && displayNames.map ? (displayNames.map[wxid] || wxid) : wxid
+        const displayName = displayNames.get(wxid) || wxid
         const rawAvatar = member.avatarUrl
-        const localAvatar = avatarCacheService.localUrlOrOriginal(rawAvatar)
+        const localAvatar = localAvatarMap[wxid] || avatarCacheService.localUrlOrOriginal(rawAvatar)
         if (rawAvatar && localAvatar === rawAvatar) {
           void avatarCacheService.ensure(rawAvatar)
         }
@@ -1343,7 +1455,7 @@ class GroupAnalyticsService {
       }>
       const usernames = members.map((m) => m.username).filter(Boolean)
 
-      const displayNamesPromise = wcdbService.getDisplayNames(usernames)
+      const displayNamesPromise = this.getDisplayNamesCached(usernames)
 
       const contactMap = new Map<string, {
         remark?: string
@@ -1389,7 +1501,7 @@ class GroupAnalyticsService {
       const ownerUsername = await this.detectGroupOwnerUsername(chatroomId, members)
       const data: GroupMember[] = members.map((m) => {
         const wxid = m.username || ''
-        const displayName = displayNames.success && displayNames.map ? (displayNames.map[wxid] || wxid) : wxid
+        const displayName = displayNames.get(wxid) || wxid
         const contact = contactMap.get(wxid)
         const nickname = contact?.nickName || ''
         const remark = contact?.remark || ''
@@ -1437,7 +1549,7 @@ class GroupAnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success) return { success: false, error: conn.error }
 
-      const result = await wcdbService.getGroupStats(chatroomId, startTime || 0, endTime || 0)
+      const result = await this.getGroupStatsCached(chatroomId, startTime || 0, endTime || 0)
       if (!result.success || !result.data) return { success: false, error: result.error || '聚合失败' }
 
       const d = result.data
@@ -1461,14 +1573,13 @@ class GroupAnalyticsService {
       // 批量获取显示名称和头像
       const usernames = rankings.map(r => r.member.username)
       const [names, avatars] = await Promise.all([
-        wcdbService.getDisplayNames(usernames),
+        this.getDisplayNamesCached(usernames),
         wcdbService.getAvatarUrls(usernames)
       ])
 
       for (const rank of rankings) {
-        if (names.success && names.map && names.map[rank.member.username]) {
-          rank.member.displayName = names.map[rank.member.username]
-        }
+        const cachedName = names.get(rank.member.username)
+        if (cachedName) rank.member.displayName = cachedName
         if (avatars.success && avatars.map && avatars.map[rank.member.username]) {
           rank.member.avatarUrl = avatarCacheService.localUrlOrOriginal(avatars.map[rank.member.username])
           if (rank.member.avatarUrl && !rank.member.avatarUrl.startsWith('weport-media://')) {
@@ -1490,7 +1601,7 @@ class GroupAnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success) return { success: false, error: conn.error }
 
-      const result = await wcdbService.getGroupStats(chatroomId, startTime || 0, endTime || 0)
+      const result = await this.getGroupStatsCached(chatroomId, startTime || 0, endTime || 0)
       if (!result.success || !result.data) return { success: false, error: result.error || '聚合失败' }
 
       const hourlyDistribution: Record<number, number> = {}
@@ -1509,7 +1620,7 @@ class GroupAnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success) return { success: false, error: conn.error }
 
-      const result = await wcdbService.getGroupStats(chatroomId, startTime || 0, endTime || 0)
+      const result = await this.getGroupStatsCached(chatroomId, startTime || 0, endTime || 0)
       if (!result.success || !result.data) return { success: false, error: result.error || '聚合失败' }
 
       const typeCountsRaw = result.data.typeCounts as Record<string, number>
@@ -1728,13 +1839,9 @@ class GroupAnalyticsService {
       const exportGenerator = 'WeFlow'
       const exportPlatform = 'wechat'
 
-      const groupDisplay = await wcdbService.getDisplayNames([normalizedChatroomId, normalizedMemberUsername])
-      const groupName = groupDisplay.success && groupDisplay.map
-        ? (groupDisplay.map[normalizedChatroomId] || normalizedChatroomId)
-        : normalizedChatroomId
-      const defaultMemberDisplayName = groupDisplay.success && groupDisplay.map
-        ? (groupDisplay.map[normalizedMemberUsername] || normalizedMemberUsername)
-        : normalizedMemberUsername
+      const groupDisplay = await this.getDisplayNamesCached([normalizedChatroomId, normalizedMemberUsername])
+      const groupName = groupDisplay.get(normalizedChatroomId) || normalizedChatroomId
+      const defaultMemberDisplayName = groupDisplay.get(normalizedMemberUsername) || normalizedMemberUsername
 
       let memberDisplayName = defaultMemberDisplayName
       let memberAlias = ''
@@ -1885,10 +1992,8 @@ class GroupAnalyticsService {
       const exportGenerator = 'WeFlow'
       const exportPlatform = 'wechat'
 
-      const groupDisplay = await wcdbService.getDisplayNames([chatroomId])
-      const groupName = groupDisplay.success && groupDisplay.map
-        ? (groupDisplay.map[chatroomId] || chatroomId)
-        : chatroomId
+      const groupDisplay = await this.getDisplayNamesCached([chatroomId])
+      const groupName = groupDisplay.get(chatroomId) || chatroomId
 
       const groupContact = await wcdbService.getContact(chatroomId)
       const sessionRemark = (groupContact.success && groupContact.contact)
@@ -1910,7 +2015,7 @@ class GroupAnalyticsService {
       }
 
       const usernames = members.map((m) => m.username).filter(Boolean)
-      const displayNamesPromise = wcdbService.getDisplayNames(usernames)
+      const displayNamesPromise = this.getDisplayNamesCached(usernames)
 
       const contactMap = new Map<string, {
         remark?: string
@@ -1964,7 +2069,7 @@ class GroupAnalyticsService {
         const wxid = member.username
         const normalizedWxid = this.cleanAccountDirName(wxid || '')
         const contact = contactMap.get(wxid)
-        const fallbackName = displayNames.success && displayNames.map ? (displayNames.map[wxid] || '') : ''
+        const fallbackName = displayNames.get(wxid) || ''
         const nickName = contact?.nickName || fallbackName || ''
         const remark = contact?.remark || ''
         const alias = contact?.alias || ''

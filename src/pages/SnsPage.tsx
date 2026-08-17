@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   CalendarDays,
   CheckSquare,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Download,
   Images,
   Loader2,
@@ -14,6 +16,7 @@ import {
   Users2,
   X,
 } from 'lucide-react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import type { SnsPost } from '../types/sns'
 import { Avatar } from '../components/Avatar'
 import { CountUp } from '../components/CountUp'
@@ -26,6 +29,10 @@ import { EmptyState } from '../components/EmptyState'
 import { isSnsVideoUrl } from '../utils/snsParse'
 
 const PAGE_SIZE = 20
+const SNS_PAGE_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const SNS_PAGE_CACHE_POST_LIMIT = 200
+const SNS_AUTHOR_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const SNS_PAGE_CACHE_SCOPE_FALLBACK = '__default__'
 
 interface SnsAuthor {
   username: string
@@ -47,7 +54,22 @@ interface CacheMigrationStatus {
   items: { label: string; fileCount: number }[]
 }
 
+interface SnsPageCachePayload {
+  updatedAt: number
+  overviewStats?: OverviewStats
+  posts: unknown[]
+}
+
+interface SnsAuthorCachePayload {
+  updatedAt: number
+  authors: SnsAuthor[]
+}
+
 const toDayStart = (ts: number) => Math.floor(new Date(ts * 1000).setHours(0, 0, 0, 0) / 1000)
+const toDayKey = (ts: number) => {
+  const d = new Date(ts * 1000)
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
+}
 
 export default function SnsPage() {
   const [authors, setAuthors] = useState<SnsAuthor[]>([])
@@ -55,8 +77,8 @@ export default function SnsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [keyword, setKeyword] = useState('')
   const [keywordDraft, setKeywordDraft] = useState('')
+  const [searchComments, setSearchComments] = useState(false)
   const [dateJump, setDateJump] = useState<{ start: number; end: number } | null>(null)
-  const [dateDraft, setDateDraft] = useState('')
   const [posts, setPosts] = useState<SnsPost[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [feedLoading, setFeedLoading] = useState(false)
@@ -72,18 +94,101 @@ export default function SnsPage() {
   const [debugPost, setDebugPost] = useState<SnsPost | null>(null)
   const [previewItems, setPreviewItems] = useState<Array<{ src: string; isVideo?: boolean }>>([])
   const [previewIndex, setPreviewIndex] = useState(-1)
-  const sentinelRef = useRef<HTMLDivElement>(null)
-  const feedRef = useRef<HTMLDivElement>(null)
+  const [hasNewer, setHasNewer] = useState(false)
+  const [refreshSpin, setRefreshSpin] = useState(false)
+  const [showJumpPopover, setShowJumpPopover] = useState(false)
+  const [jumpPopoverDate, setJumpPopoverDate] = useState<Date>(new Date())
+  const [jumpDateCounts, setJumpDateCounts] = useState<Record<string, number>>({})
+  const [jumpDateCountsLoading, setJumpDateCountsLoading] = useState(false)
+  const postsRef = useRef(posts)
+  postsRef.current = posts
+  const feedRef = useRef<HTMLDivElement | null>(null)
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const loadingRef = useRef(false)
+  const transientRetryRef = useRef(0)
   const requestSeqRef = useRef(0)
+  const scrollAdjustmentRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  const autoRefreshScheduledRef = useRef(false)
   // 媒体解密产物注册表：postId:mediaIndex → 本地可显示地址（灯箱复用）
   const previewSrcsRef = useRef<Map<string, { src: string; isVideo?: boolean }>>(new Map())
+  // 时间跳转月份计数缓存（monthKey → 日期计数）
+  const jumpDateCountsCacheRef = useRef<Map<string, Record<string, number>>>(new Map())
+  // 朋友圈页缓存作用域（按账号隔离）
+  const cacheScopeRef = useRef<string | null>(null)
+  const feedElRef = useRef<HTMLElement | null>(null)
 
   const activeUsernames = useMemo(() => Array.from(selected), [selected])
   const scopeKey = useMemo(
-    () => `${activeUsernames.join(',')}|${keyword}|${dateJump ? `${dateJump.start}-${dateJump.end}` : ''}`,
-    [activeUsernames, keyword, dateJump],
+    () => `${activeUsernames.join(',')}|${keyword}|${searchComments ? 'c' : ''}|${dateJump ? `${dateJump.start}-${dateJump.end}` : ''}`,
+    [activeUsernames, keyword, searchComments, dateJump],
   )
+
+  // ------------------------------------------------------------------ 页缓存
+  const ensureCacheScope = useCallback(async (): Promise<string> => {
+    if (cacheScopeRef.current) return cacheScopeRef.current
+    let wxid = ''
+    try {
+      wxid = String((await window.electronAPI.config.get('myWxid')) || '').trim()
+    } catch { /* noop */ }
+    cacheScopeRef.current = `sns_page:${wxid || SNS_PAGE_CACHE_SCOPE_FALLBACK}`
+    return cacheScopeRef.current
+  }, [])
+
+  const persistPageCache = useCallback(async () => {
+    if (selected.size > 0 || keyword || dateJump) return
+    try {
+      const scope = await ensureCacheScope()
+      const existing = await window.electronAPI.config.get('snsPageCacheMap')
+      const map = existing && typeof existing === 'object' ? { ...(existing as Record<string, unknown>) } : {}
+      const cached = (map[scope] as SnsPageCachePayload | undefined) || null
+      const postsToStore = postsRef.current.slice(0, SNS_PAGE_CACHE_POST_LIMIT)
+      if (postsToStore.length === 0 && cached && Array.isArray(cached.posts)) {
+        return
+      }
+      map[scope] = {
+        updatedAt: Date.now(),
+        overviewStats: overview || cached?.overviewStats,
+        posts: postsToStore,
+      }
+      await window.electronAPI.config.set('snsPageCacheMap', map)
+    } catch {
+      /* 缓存失败不影响主流程 */
+    }
+  }, [selected, keyword, dateJump, overview, ensureCacheScope])
+
+  /** 从页缓存即时恢复上次浏览内容（秒开），随后由真实查询替换 */
+  const hydratePageCache = useCallback(async (): Promise<boolean> => {
+    try {
+      const scope = await ensureCacheScope()
+      const existing = await window.electronAPI.config.get('snsPageCacheMap')
+      const map = existing && typeof existing === 'object' ? (existing as Record<string, unknown>) : {}
+      const cached = map[scope] as SnsPageCachePayload | undefined
+      if (!cached || typeof cached !== 'object') return false
+      if (Date.now() - Number(cached.updatedAt || 0) > SNS_PAGE_CACHE_TTL_MS) return false
+      if (cached.overviewStats && typeof cached.overviewStats === 'object') {
+        const o = cached.overviewStats as OverviewStats
+        setOverview({
+          totalPosts: Math.max(0, Number(o.totalPosts) || 0),
+          totalFriends: Math.max(0, Number(o.totalFriends) || 0),
+          myPosts: typeof o.myPosts === 'number' && o.myPosts >= 0 ? Math.floor(o.myPosts) : null,
+        })
+      }
+      if (Array.isArray(cached.posts)) {
+        const valid = (cached.posts as unknown[])
+          .filter((raw): raw is SnsPost => !!raw && typeof raw === 'object' && typeof (raw as SnsPost).id === 'string' && typeof (raw as SnsPost).createTime === 'number')
+          .slice(0, SNS_PAGE_CACHE_POST_LIMIT)
+          .sort((a, b) => b.createTime - a.createTime)
+        if (valid.length > 0) {
+          setPosts(valid)
+          setHasMore(true)
+          return true
+        }
+      }
+      return false
+    } catch {
+      return false
+    }
+  }, [ensureCacheScope])
 
   // ------------------------------------------------------------------ 概览
   const loadOverview = useCallback(async () => {
@@ -97,63 +202,156 @@ export default function SnsPage() {
 
   // ------------------------------------------------------------------ 作者
   const loadAuthors = useCallback(async () => {
-    setAuthorsLoading(true)
+    let hydrated = false
     try {
-      const [usersRes, countsRes] = await Promise.all([
-        window.electronAPI.sns.getSnsUsernames(),
-        window.electronAPI.sns.getUserPostCounts({ preferCache: true }),
-      ])
+      const scope = await ensureCacheScope()
+      const existing = await window.electronAPI.config.get('snsAuthorCacheMap')
+      const map = existing && typeof existing === 'object' ? (existing as Record<string, unknown>) : {}
+      const cached = map[scope] as SnsAuthorCachePayload | undefined
+      if (
+        cached &&
+        Date.now() - Number(cached.updatedAt || 0) <= SNS_AUTHOR_CACHE_TTL_MS &&
+        Array.isArray(cached.authors) &&
+        cached.authors.length > 0
+      ) {
+        setAuthors(cached.authors)
+        hydrated = true
+      }
+    } catch {
+      /* cached author data is optional */
+    }
+    setAuthorsLoading(!hydrated)
+    try {
+      // Author names/avatars are useful immediately; a cold full-timeline
+      // count scan must not block the profile sidebar from rendering.
+      const countsPromise = window.electronAPI.sns.getUserPostCounts({ preferCache: true })
+      const usersRes = await window.electronAPI.sns.getSnsUsernames()
       const usernames = usersRes.success ? usersRes.usernames || [] : []
-      const counts = countsRes.success ? countsRes.counts || {} : {}
       const enriched: Record<string, { displayName?: string; avatarUrl?: string }> = {}
       if (usernames.length > 0) {
         const enr = await window.electronAPI.chat.enrichSessionsContactInfo(usernames)
         if (enr.success && enr.contacts) Object.assign(enriched, enr.contacts)
       }
-      const list: SnsAuthor[] = usernames
-        .filter((u) => enriched[u]?.displayName)
-        .map((u) => ({
-          username: u,
-          displayName: enriched[u]?.displayName || u,
-          avatarUrl: enriched[u]?.avatarUrl,
-          postCount: typeof counts[u] === 'number' ? counts[u] : undefined,
-        }))
-        .sort((a, b) => (b.postCount ?? 0) - (a.postCount ?? 0))
-      setAuthors(list)
+      let authorCacheWrite: Promise<void> = Promise.resolve()
+      const applyAuthors = (counts: Record<string, number>) => {
+        const list: SnsAuthor[] = usernames
+          .filter((u) => enriched[u]?.displayName)
+          .map((u) => ({
+            username: u,
+            displayName: enriched[u]?.displayName || u,
+            avatarUrl: enriched[u]?.avatarUrl,
+            postCount: typeof counts[u] === 'number' ? counts[u] : undefined,
+          }))
+          .sort((a, b) => (b.postCount ?? 0) - (a.postCount ?? 0))
+        setAuthors(list)
+        authorCacheWrite = authorCacheWrite.catch(() => undefined).then(async () => {
+          try {
+            const scope = await ensureCacheScope()
+            const existing = await window.electronAPI.config.get('snsAuthorCacheMap')
+            const map = existing && typeof existing === 'object' ? { ...(existing as Record<string, unknown>) } : {}
+            map[scope] = { updatedAt: Date.now(), authors: list }
+            await window.electronAPI.config.set('snsAuthorCacheMap', map)
+          } catch {
+            /* cache failure does not affect the live sidebar */
+          }
+        })
+      }
+      applyAuthors({})
+      void countsPromise.then((countsRes) => {
+        if (countsRes.success) applyAuthors(countsRes.counts || {})
+      }).catch(() => {})
     } catch {
       /* noop */
     } finally {
       setAuthorsLoading(false)
     }
-  }, [])
+  }, [ensureCacheScope])
 
   // ------------------------------------------------------------------ 时间线
+  /**
+   * 取回一批帖子（支持按时间窗分页 + 评论搜索客户端过滤）。
+   * 评论搜索开启时 DLL 关键词只匹配正文，这里按 200 条分块拉取后
+   * 在渲染层同时匹配正文与评论，与 WeFlow 行为一致。
+   */
+  const fetchChunk = useCallback(
+    async (limitToFetch: number, fromStartTs: number | undefined, fromEndTs: number | undefined): Promise<SnsPost[]> => {
+      const kw = keyword || undefined
+      if (searchComments && kw) {
+        let accumulated: SnsPost[] = []
+        let loopEndTs = fromEndTs
+        let loops = 0
+        const chunkSize = 200
+        const lowerKw = kw.toLowerCase()
+        while (accumulated.length < limitToFetch && loops < 50) {
+          loops += 1
+          const res = await window.electronAPI.sns.getTimeline(
+            chunkSize,
+            0,
+            activeUsernames.length > 0 ? activeUsernames : undefined,
+            '',
+            fromStartTs ?? 0,
+            loopEndTs ?? 0,
+          )
+          if (!res.success || !res.timeline || res.timeline.length === 0) break
+          const matching = res.timeline.filter((p) => {
+            if ((p.contentDesc || '').toLowerCase().includes(lowerKw)) return true
+            if (Array.isArray(p.comments)) {
+              return p.comments.some((c: { content?: string }) => (c.content || '').toLowerCase().includes(lowerKw))
+            }
+            return false
+          })
+          accumulated = [...accumulated, ...matching]
+          if (res.timeline.length < chunkSize) break
+          loopEndTs = res.timeline[res.timeline.length - 1].createTime - 1
+        }
+        return accumulated.slice(0, limitToFetch)
+      }
+      const result = await window.electronAPI.sns.getTimeline(
+        limitToFetch,
+        0,
+        activeUsernames.length > 0 ? activeUsernames : undefined,
+        kw,
+        fromStartTs ?? 0,
+        fromEndTs ?? 0,
+      )
+      return result.success ? result.timeline || [] : []
+    },
+    [activeUsernames, keyword, searchComments],
+  )
+
   const loadTimeline = useCallback(
     async (reset: boolean) => {
       if (loadingRef.current) return
       if (!reset && !hasMore) return
       loadingRef.current = true
       setFeedLoading(true)
-      if (reset) setFeedError(null)
+      if (reset) {
+        setFeedError(null)
+        setHasNewer(false)
+      }
       const seq = ++requestSeqRef.current
       try {
-        const offset = reset ? 0 : posts.length
-        const result = await window.electronAPI.sns.getTimeline(
-          PAGE_SIZE,
-          offset,
-          activeUsernames.length > 0 ? activeUsernames : undefined,
-          keyword || undefined,
-          dateJump?.start ?? 0,
-          dateJump?.end ?? 0,
-        )
-        if (seq !== requestSeqRef.current) return
-        if (result.success) {
-          const list = result.timeline || []
-          setPosts((prev) => (reset ? list : [...prev, ...list]))
-          setHasMore(list.length >= PAGE_SIZE)
-        } else {
-          setFeedError(result.error || '加载失败')
+        const currentPosts = postsRef.current
+        let startTs: number | undefined = undefined
+        let endTs: number | undefined = undefined
+        if (reset && dateJump) {
+          startTs = dateJump.start
+          endTs = dateJump.end
+        } else if (!reset && currentPosts.length > 0) {
+          // 时间窗分页：从当前最旧一条继续往前（与评论搜索共用，避免 offset 漂移）
+          endTs = currentPosts[currentPosts.length - 1].createTime - 1
         }
+        const list = await fetchChunk(PAGE_SIZE, startTs, endTs)
+        if (seq !== requestSeqRef.current) return
+        if (list.length > 0 || reset) {
+          const merged = reset ? list : [...currentPosts, ...list]
+          setPosts(merged)
+          setHasMore(list.length >= PAGE_SIZE)
+          if (reset) {
+            void persistPageCache()
+          }
+        }
+        if (list.length === 0 && !reset) setHasMore(false)
       } catch (e) {
         if (seq === requestSeqRef.current) setFeedError(String(e))
       } finally {
@@ -163,8 +361,43 @@ export default function SnsPage() {
         }
       }
     },
-    [activeUsernames, keyword, dateJump, hasMore, posts.length],
+    [hasMore, dateJump, fetchChunk, persistPageCache],
   )
+
+  /** 拉取时间线顶部的更新并前置合并（保留滚动位置，WeFlow 同款） */
+  const loadNewer = useCallback(async () => {
+    if (loadingRef.current) return
+    const currentPosts = postsRef.current
+    if (currentPosts.length === 0) return
+    loadingRef.current = true
+    try {
+      const topTs = currentPosts[0].createTime
+      const newer = await fetchChunk(PAGE_SIZE, topTs + 1, undefined)
+      if (newer.length === 0) {
+        setHasNewer(false)
+        return
+      }
+      const existingIds = new Set(currentPosts.map((p) => p.id))
+      const unique = newer.filter((p) => !existingIds.has(p.id))
+      if (unique.length > 0) {
+        const scroller = feedElRef.current
+        if (scroller) {
+          scrollAdjustmentRef.current = {
+            scrollHeight: scroller.scrollHeight,
+            scrollTop: scroller.scrollTop,
+          }
+        }
+        const merged = [...unique, ...currentPosts].sort((a, b) => b.createTime - a.createTime)
+        setPosts(merged)
+        void persistPageCache()
+      }
+      setHasNewer(unique.length >= PAGE_SIZE)
+    } catch {
+      /* 静默 */
+    } finally {
+      loadingRef.current = false
+    }
+  }, [fetchChunk, persistPageCache])
 
   // 筛选条件变化 → 重置并重新加载
   useEffect(() => {
@@ -176,7 +409,7 @@ export default function SnsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey])
 
-  // 首次挂载
+  // 首次挂载：先秒开页缓存，再加载真实数据
   useEffect(() => {
     void loadOverview()
     void loadAuthors()
@@ -186,23 +419,130 @@ export default function SnsPage() {
     void window.electronAPI.sns.getCacheMigrationStatus().then((r) => {
       if (r.success) setMigration({ needed: r.needed, inProgress: r.inProgress, totalFiles: r.totalFiles || 0, items: r.items || [] })
     })
+    void hydratePageCache().then((hydrated) => {
+      if (hydrated) void loadTimeline(true)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadOverview, loadAuthors])
 
-  // 无限滚动
+  // 前置合并后修正滚动位置（新内容插入列表顶部导致视口下移）
+  useLayoutEffect(() => {
+    const snapshot = scrollAdjustmentRef.current
+    if (snapshot && feedElRef.current) {
+      const el = feedElRef.current
+      const addedHeight = el.scrollHeight - snapshot.scrollHeight
+      if (addedHeight > 0) {
+        el.scrollTop = snapshot.scrollTop + addedHeight
+      }
+      scrollAdjustmentRef.current = null
+    }
+  }, [posts])
+
+  // ------------------------------------------------------------------ 新动态
+  const checkNewer = useCallback(async () => {
+    if (loadingRef.current) return
+    try {
+      const currentTop = postsRef.current[0]
+      if (!currentTop) return
+      const topTs = currentTop.createTime
+      const newest = await fetchChunk(1, topTs + 1, undefined)
+      if (newest.length === 0) return
+      const top = newest[0]
+      if (String(top.id) !== String(currentTop.id) || Number(top.createTime) > Number(currentTop.createTime)) {
+        setHasNewer(true)
+        if (autoRefreshScheduledRef.current) return
+        autoRefreshScheduledRef.current = true
+        window.setTimeout(() => {
+          autoRefreshScheduledRef.current = false
+          if (!document.hidden) void loadNewer()
+        }, 1500)
+      }
+    } catch {
+      /* 轮询失败静默 */
+    }
+  }, [fetchChunk, loadNewer])
+
   useEffect(() => {
-    const node = sentinelRef.current
-    if (!node) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting && hasMore && !loadingRef.current) {
-          void loadTimeline(false)
+    setHasNewer(false)
+    const timer = window.setInterval(() => void checkNewer(), 15000)
+    const onFocus = () => void checkNewer()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [checkNewer])
+
+  // ------------------------------------------------------------------ 时间跳转
+  const loadJumpDateCounts = useCallback(async (monthDate: Date) => {
+    const monthKey = `${monthDate.getFullYear()}-${monthDate.getMonth() + 1}`
+    const cached = jumpDateCountsCacheRef.current.get(monthKey)
+    if (cached) {
+      setJumpDateCounts(cached)
+      return
+    }
+    setJumpDateCountsLoading(true)
+    setJumpDateCounts({})
+    try {
+      const year = monthDate.getFullYear()
+      const month = monthDate.getMonth()
+      const startTs = Math.floor(new Date(year, month, 1).getTime() / 1000)
+      const endTs = Math.floor(new Date(year, month + 1, 1).getTime() / 1000) - 1
+      const counts: Record<string, number> = {}
+      let offset = 0
+      for (let i = 0; i < 50; i += 1) {
+        const res = await window.electronAPI.sns.getTimeline(200, offset, undefined, '', startTs, endTs)
+        if (!res.success || !res.timeline || res.timeline.length === 0) break
+        for (const p of res.timeline) {
+          const key = toDayKey(p.createTime)
+          counts[key] = (counts[key] || 0) + 1
         }
-      },
-      { root: feedRef.current, rootMargin: '400px' },
-    )
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [hasMore, loadTimeline])
+        if (res.timeline.length < 200) break
+        offset += res.timeline.length
+      }
+      jumpDateCountsCacheRef.current.set(monthKey, counts)
+      if (jumpDateCountsCacheRef.current.size > 24) {
+        const oldestKey = jumpDateCountsCacheRef.current.keys().next().value as string | undefined
+        if (oldestKey) jumpDateCountsCacheRef.current.delete(oldestKey)
+      }
+      setJumpDateCounts(counts)
+    } finally {
+      setJumpDateCountsLoading(false)
+    }
+  }, [])
+
+  const openJumpPopover = useCallback(() => {
+    const nextDate = dateJump ? new Date(dateJump.start * 1000) : new Date()
+    setJumpPopoverDate(nextDate)
+    void loadJumpDateCounts(nextDate)
+    setShowJumpPopover((prev) => !prev)
+  }, [dateJump, loadJumpDateCounts])
+
+  const jumpToDate = useCallback((day: Date) => {
+    const start = Math.floor(new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime() / 1000)
+    setDateJump({ start, end: start + 86399 })
+    setShowJumpPopover(false)
+  }, [])
+
+  const shiftJumpMonth = useCallback(
+    (delta: number) => {
+      const next = new Date(jumpPopoverDate.getFullYear(), jumpPopoverDate.getMonth() + delta, 1)
+      setJumpPopoverDate(next)
+      void loadJumpDateCounts(next)
+    },
+    [jumpPopoverDate, loadJumpDateCounts],
+  )
+
+  const jumpCalendarDays = useMemo(() => {
+    const year = jumpPopoverDate.getFullYear()
+    const month = jumpPopoverDate.getMonth()
+    const firstWeekday = new Date(year, month, 1).getDay()
+    const daysInMonth = new Date(year, month + 1, 0).getDate()
+    const cells: Array<Date | null> = []
+    for (let i = 0; i < firstWeekday; i += 1) cells.push(null)
+    for (let d = 1; d <= daysInMonth; d += 1) cells.push(new Date(year, month, d))
+    return cells
+  }, [jumpPopoverDate])
 
   // ------------------------------------------------------------------ 交互
   const toggleAuthor = (username: string) => {
@@ -218,22 +558,12 @@ export default function SnsPage() {
     setKeyword(keywordDraft.trim())
   }
 
-  const applyDateJump = () => {
-    if (!dateDraft) {
-      setDateJump(null)
-      return
-    }
-    const day = new Date(`${dateDraft}T00:00:00`)
-    if (Number.isNaN(day.getTime())) return
-    setDateJump({ start: toDayStart(day.getTime() / 1000), end: Math.floor(day.getTime() / 1000 + 86399) })
-  }
-
   const clearFilters = () => {
     setSelected(new Set())
     setKeyword('')
     setKeywordDraft('')
+    setSearchComments(false)
     setDateJump(null)
-    setDateDraft('')
   }
 
   const toggleAntiDelete = async () => {
@@ -273,9 +603,17 @@ export default function SnsPage() {
     }
   }
 
+  const handleRefresh = async () => {
+    if (refreshSpin) return
+    setRefreshSpin(true)
+    try {
+      await Promise.all([loadTimeline(true), loadOverview(), loadAuthors()])
+    } finally {
+      window.setTimeout(() => setRefreshSpin(false), 300)
+    }
+  }
+
   // 预览：构建跨帖媒体列表并定位（稳定回调，配合 React.memo 减少重渲染）
-  const postsRef = useRef(posts)
-  postsRef.current = posts
   const handlePreviewPost = useCallback((post: SnsPost, src: string, isVideo?: boolean, _live?: string, mediaIndex?: number) => {
     if (typeof mediaIndex === 'number') {
       // 记录该条媒体的解密产物（全图本地文件/视频本地文件）：
@@ -330,10 +668,54 @@ export default function SnsPage() {
   )
 
   useEscape(() => setDebugPost(null), !!debugPost)
+  useEscape(() => setShowJumpPopover(false), showJumpPopover)
 
   const selectAllAuthors = () => {
     setSelected(new Set(authors.map((a) => a.username)))
   }
+
+  // Virtuoso 头尾部件
+  const snsVirtuosoComponents = useMemo(
+    () => ({
+      Header: () => (
+        <>
+          {hasNewer && (
+            <button type="button" className="sns-newer-pill" onClick={() => void loadNewer()}>
+              <RefreshCw size={13} />
+              有新动态，点击刷新
+            </button>
+          )}
+        </>
+      ),
+      Footer: () => (
+        <div className="sns-feed-sentinel">
+          {feedLoading && (
+            <div className="wp-loading">
+              <Loader2 className="spin" size={16} />
+              加载中…
+            </div>
+          )}
+          {!feedLoading && !hasMore && posts.length > 0 && <div className="sns-feed-end">已加载全部 {posts.length} 条动态</div>}
+        </div>
+      ),
+    }),
+    [hasNewer, feedLoading, hasMore, posts.length, loadNewer],
+  )
+
+  const renderPostItem = useCallback(
+    (index: number, post: SnsPost) => (
+      <SnsPostItem
+        key={post.id}
+        post={post}
+        onPreview={(src, isVideo, live, mediaIndex) => handlePreviewPost(post, src, isVideo, live, mediaIndex)}
+        onDecrypt={(mediaIndex, src, isVideo) => previewSrcsRef.current.set(`${post.id}:${mediaIndex}`, { src, isVideo })}
+        onDebug={setDebugPost}
+        onDelete={handlePostDelete}
+        onOpenAuthorPosts={handleOpenAuthor}
+      />
+    ),
+    [handlePreviewPost, handlePostDelete, handleOpenAuthor],
+  )
 
   return (
     <div className="v09-page sns-page">
@@ -364,7 +746,7 @@ export default function SnsPage() {
         </div>
       )}
 
-      {(selected.size > 0 || keyword || dateJump) && (
+      {(selected.size > 0 || keyword || searchComments || dateJump) && (
         <div className="sns-filter-summary">
           <span className="sns-filter-summary-label">当前筛选</span>
           {selected.size > 0 && (
@@ -377,12 +759,12 @@ export default function SnsPage() {
           {keyword && (
             <button className="chip chip-active" onClick={() => { setKeyword(''); setKeywordDraft('') }} title="清除关键词">
               <Search size={12} />
-              “{keyword}”
+              “{keyword}”{searchComments ? '（含评论）' : ''}
               <X size={11} />
             </button>
           )}
           {dateJump && (
-            <button className="chip chip-active" onClick={() => { setDateJump(null); setDateDraft('') }} title="清除日期筛选">
+            <button className="chip chip-active" onClick={() => { setDateJump(null); setShowJumpPopover(false) }} title="清除日期筛选">
               <CalendarDays size={12} />
               {new Date(dateJump.start * 1000).toLocaleDateString('zh-CN')}
               <X size={11} />
@@ -437,6 +819,10 @@ export default function SnsPage() {
                 <Download size={13} />
                 导出
               </button>
+              <button type="button" className="chip" onClick={() => void handleRefresh()} title="刷新动态流与统计">
+                <RefreshCw size={13} className={refreshSpin ? 'spin' : ''} />
+                刷新
+              </button>
             </div>
           </div>
 
@@ -456,21 +842,76 @@ export default function SnsPage() {
               </button>
             )}
           </div>
+          <label className="sns-search-comments" title="开启后同时搜索正文与评论（数据量大时稍慢）">
+            <input
+              type="checkbox"
+              checked={searchComments}
+              onChange={(e) => {
+                setSearchComments(e.target.checked)
+                if (keyword) setKeyword(keyword.trim() || '')
+              }}
+            />
+            <span>同时搜索评论</span>
+          </label>
 
           <div className="sns-sidebar-date">
             <CalendarDays size={14} />
-            <input
-              type="date"
-              value={dateDraft}
-              onChange={(e) => setDateDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') applyDateJump()
-              }}
-            />
+            <button
+              type="button"
+              className={`sns-date-jump-btn ${dateJump ? 'active' : ''}`}
+              onClick={openJumpPopover}
+              title={dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
+            >
+              {dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
+            </button>
             {dateJump && (
-              <button className="sns-sidebar-clear" title="清除日期筛选" onClick={() => { setDateJump(null); setDateDraft('') }}>
+              <button className="sns-sidebar-clear" title="清除日期筛选" onClick={() => { setDateJump(null); setShowJumpPopover(false) }}>
                 <X size={13} />
               </button>
+            )}
+            {showJumpPopover && (
+              <div className="sns-calendar-popover">
+                <div className="sns-calendar-head">
+                  <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(-1)} title="上个月">
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span className="sns-calendar-title">
+                    {jumpPopoverDate.getFullYear()}年{jumpPopoverDate.getMonth() + 1}月
+                  </span>
+                  <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(1)} title="下个月">
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+                <div className="sns-calendar-grid">
+                  {['日', '一', '二', '三', '四', '五', '六'].map((w) => (
+                    <span key={w} className="sns-calendar-weekday">
+                      {w}
+                    </span>
+                  ))}
+                  {jumpCalendarDays.map((day, idx) =>
+                    day ? (
+                      <button
+                        key={idx}
+                        type="button"
+                        className={`sns-calendar-day ${dateJump && toDayKey(dateJump.start) === toDayKey(day.getTime() / 1000) ? 'selected' : ''}`}
+                        onClick={() => jumpToDate(day)}
+                      >
+                        {day.getDate()}
+                        {(jumpDateCounts[toDayKey(day.getTime() / 1000)] || 0) > 0 && <i className="sns-calendar-dot" />}
+                      </button>
+                    ) : (
+                      <span key={idx} className="sns-calendar-empty" />
+                    ),
+                  )}
+                </div>
+                <div className="sns-calendar-foot">
+                  {jumpDateCountsLoading ? (
+                    <Loader2 size={12} className="spin" />
+                  ) : (
+                    <span>点击日期跳转到当天动态</span>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 
@@ -492,7 +933,7 @@ export default function SnsPage() {
                 <CheckSquare size={12} />
                 全选
               </button>
-              {(selected.size > 0 || keyword || dateJump) && (
+              {(selected.size > 0 || keyword || searchComments || dateJump) && (
                 <button className="sns-sidebar-reset" onClick={clearFilters}>
                   <X size={12} />
                   重置
@@ -519,44 +960,42 @@ export default function SnsPage() {
           </div>
         </aside>
 
-        {/* 动态流 */}
-        <div className="sns-feed" ref={feedRef}>
+        {/* 动态流（虚拟滚动：长列表仅渲染可视区域，显著降低 DOM 与内存占用） */}
+        <div className="sns-feed">
           {feedError && <div className="wp-error">{feedError}</div>}
           {posts.length === 0 && !feedLoading && !feedError && (
             <EmptyState
               icon={Images}
-              title={selected.size > 0 || keyword || dateJump ? '没有匹配的动态' : '暂无朋友圈数据'}
-              hint={selected.size > 0 || keyword || dateJump ? '试试调整筛选条件' : '请确认已连接微信账号'}
+              title={selected.size > 0 || keyword || searchComments || dateJump ? '没有匹配的动态' : '暂无朋友圈数据'}
+              hint={selected.size > 0 || keyword || searchComments || dateJump ? '试试调整筛选条件' : '请确认已连接微信账号'}
             />
           )}
 
-          {posts.map((post) => (
-            <SnsPostItem
-              key={post.id}
-              post={post}
-              onPreview={(src, isVideo, live, mediaIndex) => handlePreviewPost(post, src, isVideo, live, mediaIndex)}
-              onDecrypt={(mediaIndex, src, isVideo) => previewSrcsRef.current.set(`${post.id}:${mediaIndex}`, { src, isVideo })}
-              onDebug={setDebugPost}
-              onDelete={handlePostDelete}
-              onOpenAuthorPosts={handleOpenAuthor}
+          {posts.length > 0 && (
+            <Virtuoso
+              ref={virtuosoRef}
+              className="sns-feed-scroll"
+              data={posts}
+              computeItemKey={(_, post) => post.id}
+              itemContent={renderPostItem}
+              components={snsVirtuosoComponents}
+              endReached={() => {
+                if (hasMore && !loadingRef.current) void loadTimeline(false)
+              }}
+              scrollerRef={(ref) => {
+                feedElRef.current = ref instanceof HTMLElement ? ref : null
+              }}
+              defaultItemHeight={240}
+              increaseViewportBy={{ top: 300, bottom: 600 }}
+              overscan={{ main: 1000, reverse: 500 }}
             />
-          ))}
-
-          <div ref={sentinelRef} className="sns-feed-sentinel">
-            {feedLoading && (
-              <div className="wp-loading">
-                <Loader2 className="spin" size={16} />
-                加载中…
-              </div>
-            )}
-            {!feedLoading && !hasMore && posts.length > 0 && <div className="sns-feed-end">已加载全部 {posts.length} 条动态</div>}
-          </div>
+          )}
 
           {posts.length > 30 && (
             <button
               className="sns-back-top"
               title="回到顶部"
-              onClick={() => feedRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
+              onClick={() => feedElRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
             >
               <ChevronDown size={16} style={{ transform: 'rotate(180deg)' }} />
             </button>
@@ -608,5 +1047,3 @@ export default function SnsPage() {
     </div>
   )
 }
-
-

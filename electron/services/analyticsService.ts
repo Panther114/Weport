@@ -713,12 +713,18 @@ class AnalyticsService {
       const usernames = Object.keys(sessions)
       // 头像走与聊天模块一致的本地化链路（head_image.db → 磁盘缓存 → weport-media://），
       // 保证排行榜头像即时显示而非回退 CDN
-      const [displayNames, avatarUrls, aliasMap, enriched] = await Promise.all([
+      const [displayNames, aliasMap, enriched] = await Promise.all([
         wcdbService.getDisplayNames(usernames),
-        wcdbService.getAvatarUrls(usernames),
         this.getAliasMap(usernames),
         chatService.enrichSessionsContactInfo(usernames, { skipDisplayName: true }).catch(() => null),
       ])
+      // enrichSessionsContactInfo already performs the head-image/CDN lookup.
+      // Only fall back for the rare usernames it could not resolve, instead of
+      // issuing a second avatar query for the entire ranking.
+      const missingAvatarUsernames = usernames.filter((username) => !enriched?.success || !enriched.contacts?.[username]?.avatarUrl)
+      const avatarUrls = missingAvatarUsernames.length > 0
+        ? await wcdbService.getAvatarUrls(missingAvatarUsernames)
+        : { success: true, map: {} as Record<string, string> }
 
       const rankings: ContactRanking[] = usernames
         .map((username) => {

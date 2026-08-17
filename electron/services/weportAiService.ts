@@ -339,6 +339,59 @@ function normalizeIdentityName(s: string): string {
     .replace(/\bWeport\s*AI\b/gi, 'WeportAI')
 }
 
+function chatCompletionsUrl(rawBaseUrl: string): string {
+  const normalized = String(rawBaseUrl || '').trim().replace(/\/+$/, '')
+  try {
+    const parsed = new URL(normalized)
+    const pathname = parsed.pathname.replace(/\/+$/, '')
+    if (!/\/chat\/completions$/i.test(pathname)) {
+      parsed.pathname = `${pathname}/chat/completions`.replace(/^\/\//, '/')
+    } else {
+      parsed.pathname = pathname
+    }
+    return parsed.toString()
+  } catch {
+    return `${normalized}/chat/completions`
+  }
+}
+
+function isDeepSeekProvider(baseUrl: string, model: string): boolean {
+  if (/^deepseek(?:[-_/]|$)/i.test(String(model || '').trim())) return true
+  try {
+    return new URL(baseUrl).hostname.toLowerCase().endsWith('deepseek.com')
+  } catch {
+    return false
+  }
+}
+
+function providerErrorDetail(payload: unknown): string {
+  if (typeof payload === 'string') {
+    const text = payload.trim()
+    if (text.startsWith('{') || text.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(text) as unknown
+        if (parsed && typeof parsed === 'object') return providerErrorDetail(parsed)
+      } catch { /* plain-text response */ }
+    }
+  }
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>
+    const nested = record.error
+    if (typeof nested === 'string' && nested.trim()) return nested.trim()
+    if (nested && typeof nested === 'object') {
+      const nestedRecord = nested as Record<string, unknown>
+      for (const value of [nestedRecord.message, nestedRecord.detail, nestedRecord.error]) {
+        if (typeof value === 'string' && value.trim()) return value.trim()
+      }
+    }
+    for (const value of [record.message, record.detail]) {
+      if (typeof value === 'string' && value.trim()) return value.trim()
+    }
+  }
+  const text = String(payload || '').trim()
+  return text.slice(0, 1200)
+}
+
 function dateKeyOf(sec: number): string {
   const d = new Date(sec * 1000)
   const pad = (x: number) => String(x).padStart(2, '0')
@@ -2009,6 +2062,8 @@ class WeportAiService {
             error = '请求过于频繁（429），请稍后再试'
           } else if (stepResult.httpStatus === 400) {
             error = `请求参数错误（400）：${stepResult.error || ''}`
+          } else if (stepResult.httpStatus && stepResult.httpStatus >= 500) {
+            error = `模型服务端错误（${stepResult.httpStatus}）：${stepResult.error || '请稍后重试'}`
           }
           break
         }
@@ -2213,8 +2268,34 @@ class WeportAiService {
   // 模型调用（OpenAI 兼容 / streaming）
   // -------------------------------------------------------------------------
 
-  private buildApiMessages(history: AiMessage[], compressed: string | undefined, systemContent: string): Array<Record<string, unknown>> {
+  private buildApiMessages(
+    history: AiMessage[],
+    compressed: string | undefined,
+    systemContent: string,
+    options: { preserveReasoning?: boolean } = {},
+  ): Array<Record<string, unknown>> {
     const out: Array<Record<string, unknown>> = [{ role: 'system', content: systemContent }]
+    const completeAssistantIndexes = new Set<number>()
+    const completeToolCallIds = new Set<string>()
+
+    // A crash can persist an assistant tool-call message before its tool
+    // results. Never send a partial tool turn: strict providers reject orphan
+    // tool calls/results with HTTP 400.
+    for (let i = 0; i < history.length; i += 1) {
+      const message = history[i]
+      if (message.role !== 'assistant' || !Array.isArray(message.toolCalls) || message.toolCalls.length === 0) continue
+      const calls = message.toolCalls
+      if (!calls.every((call) => String(call.id || '').trim() && String(call.name || '').trim())) continue
+      const resultIds = new Set<string>()
+      for (let j = i + 1; j < history.length && history[j]?.role === 'tool'; j += 1) {
+        const id = String(history[j]?.toolCallId || '').trim()
+        if (id) resultIds.add(id)
+      }
+      if (!calls.every((call) => resultIds.has(String(call.id).trim()))) continue
+      completeAssistantIndexes.add(i)
+      for (const call of calls) completeToolCallIds.add(String(call.id).trim())
+    }
+
     if (compressed) {
       out.push({
         role: 'system',
@@ -2231,23 +2312,32 @@ class WeportAiService {
     // the loop grows past the limit, every request would discard a different
     // leading message and collapse DeepSeek's prefix hit to the static system
     // prompt. Keep the in-run transcript strictly append-only instead.
-    for (const m of history) {
+    for (let index = 0; index < history.length; index += 1) {
+      const m = history[index]
       if (m.role === 'user') {
         out.push({ role: 'user', content: sanitizeForApi(normalizeIdentityName(m.content)) })
       } else if (m.role === 'assistant') {
         const item: Record<string, unknown> = { role: 'assistant', content: sanitizeForApi(normalizeIdentityName(m.content || '')) }
-        // 思考模式约束：携带工具调用的轮次必须回传 reasoning_content
-        if (m.reasoning) item.reasoning_content = sanitizeForApi(normalizeIdentityName(m.reasoning))
-        if (m.toolCalls && m.toolCalls.length > 0) {
+        const completeToolTurn = completeAssistantIndexes.has(index)
+        if (options.preserveReasoning && m.reasoning && (completeToolTurn || !m.toolCalls?.length)) {
+          // DeepSeek requires the original reasoning_content for tool turns;
+          // do not rewrite it as display text during provider replay.
+          item.reasoning_content = sanitizeForApi(m.reasoning)
+        }
+        if (completeToolTurn && m.toolCalls) {
           item.tool_calls = m.toolCalls.map((c) => ({
             id: c.id,
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
           }))
         }
+        if (!item.content && !item.tool_calls && !item.reasoning_content) continue
         out.push(item)
       } else if (m.role === 'tool') {
-        out.push({ role: 'tool', tool_call_id: m.toolCallId || '', content: sanitizeForApi(m.content || '') })
+        const toolCallId = String(m.toolCallId || '').trim()
+        if (toolCallId && completeToolCallIds.has(toolCallId)) {
+          out.push({ role: 'tool', tool_call_id: toolCallId, content: sanitizeForApi(m.content || '') })
+        }
       }
     }
     return out
@@ -2268,26 +2358,32 @@ class WeportAiService {
       const model = String(this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim()
       const apiKey = String(this.configService.get('weportAiApiKey') || '').trim()
       if (!apiKey) return null
-      const resp = await fetch(`${baseUrl}/chat/completions`, {
+      const deepSeek = isDeepSeekProvider(baseUrl, model)
+      const requestBody: Record<string, unknown> = {
+        model,
+        stream: false,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你负责为对话生成标题。要求：1) 不超过 8 个汉字（英文不超过 16 字符）；2) 概括用户的意图（用户想做什么），而不是复述问题原文；3) 专业、简洁。示例：用户问「分析我是什么人」→「人格画像」；「8月8日发生了什么」→「8月8日复盘」；「我和小明的聊天关系怎么样」→「关系分析」；「找出所有提到搬家的话」→「搬家事件追查」。只输出标题本身，不要引号、不要标点、不要解释。',
+          },
+          { role: 'user', content: sanitizeForApi(String(userText || '').slice(0, 2000)) },
+        ],
+        max_tokens: 24,
+      }
+      if (deepSeek) requestBody.thinking = { type: 'disabled' }
+      const resp = await fetch(chatCompletionsUrl(baseUrl), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          stream: false,
-          messages: [
-            {
-              role: 'system',
-              content:
-                '你负责为对话生成标题。要求：1) 不超过 8 个汉字（英文不超过 16 字符）；2) 概括用户的意图（用户想做什么），而不是复述问题原文；3) 专业、简洁。示例：用户问「分析我是什么人」→「人格画像」；「8月8日发生了什么」→「8月8日复盘」；「我和小明的聊天关系怎么样」→「关系分析」；「找出所有提到搬家的话」→「搬家事件追查」。只输出标题本身，不要引号、不要标点、不要解释。',
-            },
-            { role: 'user', content: sanitizeForApi(String(userText || '').slice(0, 2000)) },
-          ],
-          max_tokens: 24,
-          thinking: { type: 'disabled' },
-        }),
+        body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(15000),
       })
-      if (!resp.ok) return null
+      if (!resp.ok) {
+        const detail = providerErrorDetail(await resp.text())
+        this.appendDebugLog({ kind: 'title_error', httpStatus: resp.status, model, url: chatCompletionsUrl(baseUrl), error: detail || `HTTP ${resp.status}` })
+        return null
+      }
       const j = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> }
       const title = String(j?.choices?.[0]?.message?.content || '')
         .trim()
@@ -2382,20 +2478,26 @@ class WeportAiService {
     const baseUrl = String(this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim().replace(/\/+$/, '')
     const model = String(this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim()
     const apiKey = String(this.configService.get('weportAiApiKey') || '').trim()
-    const maxTokens = Number(this.configService.get('weportAiMaxTokens')) || 8192
+    const maxTokens = Number(this.configService.get('weportAiMaxTokens')) || 32768
     const reasoningEffort = this.configService.get('weportAiReasoningEffort') || 'high'
-    const url = `${baseUrl}/chat/completions`
+    const deepSeek = isDeepSeekProvider(baseUrl, model)
+    const url = chatCompletionsUrl(baseUrl)
 
-    const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent)
+    const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: deepSeek })
     const tools = requestShape.tools
     const body: Record<string, unknown> = {
       model,
       messages: apiMessages,
-      tools,
       stream: true,
-      stream_options: { include_usage: true },
       max_tokens: maxTokens,
-      reasoning_effort: reasoningEffort,
+    }
+    if (tools.length > 0) body.tools = tools
+    // These fields are accepted by DeepSeek but rejected by a number of
+    // otherwise OpenAI-compatible gateways. Keep generic providers on the
+    // portable request subset instead of making every user opt out manually.
+    if (deepSeek) {
+      body.stream_options = { include_usage: true }
+      body.reasoning_effort = reasoningEffort
     }
 
     const startedAt = Date.now()
@@ -2469,8 +2571,7 @@ class WeportAiService {
     if (!resp.ok) {
       let detail = ''
       try {
-        const j = (await resp.json()) as { error?: { message?: string } }
-        detail = j?.error?.message || ''
+        detail = providerErrorDetail(await resp.text())
       } catch { /* noop */ }
       this.appendDebugLog({
         kind: 'error',

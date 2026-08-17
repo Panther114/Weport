@@ -7,6 +7,8 @@ import {
   Eye,
   EyeOff,
   ChevronDown,
+  Archive,
+  HardDrive,
   FileText,
   Braces,
   Code2,
@@ -209,6 +211,11 @@ export default function App() {
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateProgress, setUpdateProgress] = useState<{ percent: number; transferred?: number; total?: number } | null>(null)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupIncludeMedia, setBackupIncludeMedia] = useState(false)
+  const [httpApiEnabled, setHttpApiEnabled] = useState(false)
+  const [httpApiRunning, setHttpApiRunning] = useState(false)
+  const [httpApiPort, setHttpApiPort] = useState(5031)
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
@@ -441,6 +448,15 @@ export default function App() {
         if (typeof fmt === 'string' && FORMATS.some((f) => f.value === fmt)) setFormat(fmt as Format)
         const notif = await api.config.get('notificationEnabled')
         setNotificationsEnabled(notif === true)
+        try {
+          const httpOn = await api.config.get('httpApiEnabled')
+          setHttpApiEnabled(httpOn === true)
+          if (httpOn === true) {
+            const status = await api.http.getStatus().catch(() => null)
+            setHttpApiRunning(status?.running === true)
+            if (status?.running) setHttpApiPort(status.port)
+          }
+        } catch { /* noop */ }
         const silent = await api.config.get('silentStartup')
         setSilentStartup(silent === true)
         const close = await api.config.get('windowCloseBehavior')
@@ -512,6 +528,11 @@ export default function App() {
       }),
       api.app.onDownloadProgress((p) => {
         setUpdateProgress({ percent: Number(p?.percent) || 0, transferred: p?.transferred, total: p?.total })
+      }),
+      api.app.onUpdateDownloaded(() => {
+        // 下载完成：应用即将退出安装并自动重启，禁用更新按钮
+        setUpdateBusy(true)
+        setUpdateProgress({ percent: 100, total: 1, transferred: 1 })
       })
     ]
 
@@ -699,11 +720,20 @@ export default function App() {
   async function installUpdate() {
     setUpdateBusy(true)
     setUpdateProgress({ percent: 0 })
+    let restarting = false
     try {
       const result = await api.app.downloadAndInstall()
       if (result.success) {
-        setUpdateProgress(null)
-        pushToast('ok', '更新已下载', '重启应用完成安装')
+        if (result.restarting) {
+          // 主进程已触发 quitAndInstall：应用即将退出 → 静默安装 → 自动重启，
+          // 保持「正在安装并重启…」状态直到进程退出
+          restarting = true
+          setUpdateBusy(true)
+          setUpdateProgress(null)
+        } else {
+          setUpdateProgress(null)
+          pushToast('ok', '更新已下载', '重启应用完成安装')
+        }
       } else {
         setUpdateProgress(null)
         pushToast('err', '更新失败', result.error || '未知错误', 10000)
@@ -712,7 +742,63 @@ export default function App() {
       setUpdateProgress(null)
       pushToast('err', '更新失败', String(e), 10000)
     } finally {
-      setUpdateBusy(false)
+      if (!restarting) setUpdateBusy(false)
+    }
+  }
+
+  async function createBackup() {
+    setBackupBusy(true)
+    try {
+      const dir = await api.dialog.openDirectory()
+      if (!dir) return
+      pushToast('info', '正在创建备份…', '数据库表快照打包中，请稍候')
+      const r = await api.backup.create({
+        outputPath: dir,
+        options: { includeImages: backupIncludeMedia, includeVideos: backupIncludeMedia, includeFiles: backupIncludeMedia },
+      })
+      if (r.success) pushToast('ok', '备份完成', r.filePath || '')
+      else pushToast('err', '备份失败', r.error || '未知错误', 10000)
+    } catch (e) {
+      pushToast('err', '备份失败', String(e), 10000)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  async function restoreBackup() {
+    setBackupBusy(true)
+    try {
+      const file = await api.dialog.openFile({
+        filters: [{ name: 'Weport 备份', extensions: ['zip'] }],
+      })
+      if (!file) return
+      pushToast('info', '正在恢复备份…', '将覆盖当前数据库中的对应表')
+      const r = await api.backup.restore(file)
+      if (r.success) pushToast('ok', '恢复完成', '请重启应用以重新加载数据')
+      else pushToast('err', '恢复失败', r.error || '未知错误', 10000)
+    } catch (e) {
+      pushToast('err', '恢复失败', String(e), 10000)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  async function toggleHttpApi(on: boolean) {
+    setHttpApiEnabled(on)
+    await api.config.set('httpApiEnabled', on)
+    try {
+      const port = Number((await api.config.get('httpApiPort')) || 5031)
+      setHttpApiPort(port)
+      if (on) {
+        const r = await api.http.start()
+        setHttpApiRunning(r.success)
+        if (!r.success) pushToast('err', 'HTTP API 启动失败', r.error || '', 8000)
+      } else {
+        await api.http.stop()
+        setHttpApiRunning(false)
+      }
+    } catch {
+      setHttpApiRunning(false)
     }
   }
 
@@ -978,7 +1064,7 @@ export default function App() {
             )}
           </div>
           <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-            {updateBusy ? (updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : '更新中…') : '立即更新'}
+            {updateBusy ? (updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : '正在安装并重启…') : '立即更新'}
           </button>
         </div>
       )}
@@ -1779,6 +1865,92 @@ export default function App() {
             <section className="panel">
               <div className="panel-head">
                 <h2>
+                  <Archive size={15} />
+                  数据备份
+                </h2>
+                <span>本地聊天数据库快照 · 可恢复</span>
+              </div>
+              <div className="setting-row backup-row">
+                <div className="setting-label">
+                  <HardDrive size={14} />
+                  <div>
+                    <strong>创建备份</strong>
+                    <span className="hint">把消息/联系人/朋友圈等数据库表快照打包为压缩存档（可选包含图片视频文件）</span>
+                  </div>
+                </div>
+                <div className="backup-actions">
+                  <label className="ghost-btn backup-media-toggle" title="同时备份图片/视频/文件附件（体积可能很大）">
+                    <input
+                      type="checkbox"
+                      checked={backupIncludeMedia}
+                      onChange={(e) => setBackupIncludeMedia(e.target.checked)}
+                    />
+                    含附件
+                  </label>
+                  <button
+                    className="primary-btn"
+                    type="button"
+                    disabled={backupBusy || !allReady}
+                    onClick={() => void createBackup()}
+                  >
+                    {backupBusy ? '备份中…' : '开始备份'}
+                  </button>
+                </div>
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <RotateCcw size={14} />
+                  <div>
+                    <strong>恢复备份</strong>
+                    <span className="hint">从备份存档恢复数据库表（会覆盖当前数据，请先确认）</span>
+                  </div>
+                </div>
+                <div className="backup-actions">
+                  <button
+                    className="secondary-btn"
+                    type="button"
+                    disabled={backupBusy || !allReady}
+                    onClick={() => void restoreBackup()}
+                  >
+                    恢复…
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Database size={15} />
+                  本地 HTTP API
+                </h2>
+                <span>只读接口 · 仅本机可访问</span>
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Code2 size={14} />
+                  <div>
+                    <strong>启用本地 HTTP API</strong>
+                    <span className="hint">
+                      提供 /api/sessions、/api/messages、/api/sns/timeline 等只读接口
+                      {httpApiRunning ? ` · 运行中 http://127.0.0.1:${httpApiPort}` : ' · 默认端口 5031'}
+                    </span>
+                  </div>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={httpApiEnabled}
+                    onChange={(e) => void toggleHttpApi(e.target.checked)}
+                  />
+                  <span className="track" />
+                </label>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
                   <Palette size={15} />
                   色彩主题
                 </h2>
@@ -1850,7 +2022,7 @@ export default function App() {
                 </button>
                 {updateInfo && (
                   <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                    {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : `安装 v${updateInfo.version}`}
+                    {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
                   </button>
                 )}
               </div>
@@ -2051,7 +2223,7 @@ export default function App() {
               </button>
               {updateInfo && (
                 <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                  {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : `安装 v${updateInfo.version}`}
+                  {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
                 </button>
               )}
               <button className="secondary-btn" type="button" onClick={() => setAboutOpen(false)}>

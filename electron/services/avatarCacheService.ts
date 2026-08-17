@@ -13,7 +13,7 @@
  */
 import { net } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, renameSync, readFileSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { createHash } from 'crypto'
 import { ConfigService } from './config'
@@ -50,6 +50,23 @@ class AvatarCacheService {
   private maxConcurrent = 6
   private pending: Array<() => void> = []
 
+  /**
+   * head_image.db 头像定位缓存（username → 本地头像文件路径）。
+   *
+   * 群成员面板 / 会话列表每次查询都会重新读 head_image.db（hex 解码 +
+   * 落盘），数百人群首开时串行执行 10+ 次宿主调用。这里把「已从
+   * head_image.db 落盘的头像」持久化映射（headImages.json），之后任何
+   * 模块（群成员 / 排行榜 / 朋友圈作者 / 会话）都先查映射：
+   * 命中即 weport-media:// 直接渲染，零宿主调用、零磁盘写。
+   * 负缓存（该用户无本地头像）带 24h TTL，避免反复查询已知缺失项。
+   */
+  private headImageCache = new Map<string, { path: string; savedAt: number }>()
+  private headImageCacheDirty = false
+  private headImageCacheFile = ''
+  private headImageCacheLoadAt = 0
+  private readonly headImageNegativeTtlMs = 24 * 60 * 60 * 1000
+  private readonly headImageCacheFlushMs = 2000
+
   /** 由 appMain 在 ready 后调用（cacheBasePath 即 contacts.json 所在目录） */
   init(cacheBasePath?: string): void {
     if (this.cacheDir) return
@@ -57,6 +74,10 @@ class AvatarCacheService {
       ? cacheBasePath
       : ConfigService.getInstance().getCacheBasePath()
     this.cacheDir = join(base, 'avatars')
+    this.headImageCacheFile = join(base, 'headImages.json')
+    try {
+      this.loadHeadImageCache()
+    } catch { /* noop */ }
     try {
       mkdirSync(this.cacheDir, { recursive: true })
     } catch { /* noop */ }
@@ -255,6 +276,94 @@ class AvatarCacheService {
       if (isDataUrl(normalized)) void this.persistDataUrl(normalized)
       else if (isCdnUrl(normalized)) void this.download(normalized)
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // head_image.db 头像定位缓存（内存 + headImages.json 持久化）
+  // -------------------------------------------------------------------------
+
+  private loadHeadImageCache(): void {
+    if (!this.headImageCacheFile || !existsSync(this.headImageCacheFile)) return
+    try {
+      const raw = readFileSync(this.headImageCacheFile, 'utf8')
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') return
+      const entries = parsed.entries
+      if (!entries || typeof entries !== 'object') return
+      let loaded = 0
+      for (const [username, entry] of Object.entries(entries)) {
+        const e = entry as { path?: string; savedAt?: number }
+        if (!username || typeof e.path !== 'string') continue
+        // 只加载仍存在的文件；负缓存（path === ''）照常加载（由 TTL 兜底）
+        if (e.path && !existsSync(e.path)) continue
+        this.headImageCache.set(username, { path: e.path, savedAt: Number(e.savedAt) || 0 })
+        loaded += 1
+      }
+      this.headImageCacheLoadAt = Date.now()
+      if (loaded > 0) console.log(`[AvatarCache] headImage 定位缓存载入 ${loaded} 条`)
+    } catch (e) {
+      console.warn('[AvatarCache] 载入 headImage 定位缓存失败:', e)
+    }
+  }
+
+  private scheduleHeadImageCacheFlush(): void {
+    if (this.headImageCacheDirty) return
+    this.headImageCacheDirty = true
+    const timer = setTimeout(() => {
+      this.headImageCacheDirty = false
+      try {
+        if (!this.headImageCacheFile) return
+        const payload = {
+          version: 1,
+          savedAt: Date.now(),
+          entries: Object.fromEntries(this.headImageCache),
+        }
+        writeFile(this.headImageCacheFile, JSON.stringify(payload), 'utf8').catch(() => { /* noop */ })
+      } catch { /* noop */ }
+    }, this.headImageCacheFlushMs)
+    timer.unref?.()
+  }
+
+  /**
+   * 批量定位一组用户的本地头像：
+   * - 命中（缓存 + 文件存在）→ map[username] = weport-media:// URL
+   * - 未命中 → 加入 missing，由调用方走 head_image.db 查询后 recordHeadAvatar 回填
+   */
+  getLocalizedHeadAvatars(usernames: string[]): { missing: string[]; map: Record<string, string> } {
+    const map: Record<string, string> = {}
+    const missing: string[] = []
+    const now = Date.now()
+    for (const raw of usernames) {
+      const username = String(raw || '').trim()
+      if (!username) continue
+      const entry = this.headImageCache.get(username)
+      if (entry && entry.path) {
+        if (existsSync(entry.path)) {
+          map[username] = toProtocolUrl(entry.path)
+          continue
+        }
+        this.headImageCache.delete(username)
+        this.scheduleHeadImageCacheFlush()
+      }
+      if (entry && now - entry.savedAt < this.headImageNegativeTtlMs) {
+        continue // 已知无本地头像，24h 内不再查询
+      }
+      missing.push(username)
+    }
+    return { missing, map }
+  }
+
+  /** 记录一条 head_image.db 落盘结果（path 为空表示确认该用户无本地头像） */
+  recordHeadAvatar(username: string, path: string): void {
+    const key = String(username || '').trim()
+    if (!key) return
+    this.headImageCache.set(key, { path: path || '', savedAt: Date.now() })
+    this.scheduleHeadImageCacheFlush()
+  }
+
+  /** head_image.db 定位缓存大小（诊断用） */
+  getHeadImageCacheStats(): { entries: number; loadedAt: number } {
+    return { entries: this.headImageCache.size, loadedAt: this.headImageCacheLoadAt }
   }
 }
 

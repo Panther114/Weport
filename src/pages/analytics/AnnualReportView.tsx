@@ -7,6 +7,7 @@ import { CountUp } from '../../components/CountUp'
 import { useColorMode } from '../../utils/colorMode'
 import { useEscape } from '../../utils/useEscape'
 import { axisCommon, baseChartTheme, blueRamp, tooltipCommon } from '../../utils/echartsTheme'
+import { DualReportView } from './DualReportView'
 
 interface AnnualReportData {
   year: number
@@ -57,6 +58,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
   const [progress, setProgress] = useState<{ status: string; progress: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
+  const [dualOpen, setDualOpen] = useState(false)
   const reportRef = useRef<HTMLDivElement>(null)
   const sectionRefs = useRef<Array<HTMLDivElement | null>>([])
 
@@ -218,18 +220,33 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
           <p className="v09-sub">基于本地聊天记录生成的年度回顾 · 数据不出本机</p>
         </div>
         <div className="annual-actions">
-          {report && (
+          {!dualOpen && report && (
             <button type="button" className="ghost-btn" disabled={exporting} onClick={() => void exportImages()}>
               <Camera size={14} />
               {exporting ? '导出中…' : '导出报告图片'}
             </button>
           )}
+          <button
+            type="button"
+            className={`chip ${dualOpen ? 'chip-active' : ''}`}
+            onClick={() => {
+              setDualOpen((prev) => !prev)
+              setError(null)
+            }}
+          >
+            <Users size={13} />
+            {dualOpen ? '返回年度报告' : '双人报告'}
+          </button>
           <button type="button" className="icon-btn-ghost" onClick={onClose}>
             <X size={16} />
           </button>
         </div>
       </div>
 
+      {dualOpen ? (
+        <DualReportView onBack={() => setDualOpen(false)} defaultYear={selectedYear || 0} />
+      ) : (
+        <>
       {error && <div className="wp-error">{error}</div>}
 
       {yearsLoading ? (
@@ -496,6 +513,8 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
             报告由 Weport 本地生成 · 数据仅存储在你的设备
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   )

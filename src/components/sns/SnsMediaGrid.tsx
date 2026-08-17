@@ -77,11 +77,12 @@ const MediaItem = memo(
     const [loading, setLoading] = useState(true)
     const [thumbSrc, setThumbSrc] = useState('')
     const [videoPath, setVideoPath] = useState('')
-    const [cachePath, setCachePath] = useState('')
+    const [fullCachePath, setFullCachePath] = useState('')
     const [liveVideoPath, setLiveVideoPath] = useState('')
     const [isDecrypting, setIsDecrypting] = useState(false)
     const [isGeneratingCover, setIsGeneratingCover] = useState(false)
     const retryCount = useRef(0)
+    const retrySkipFailedCache = useRef(false)
     const [retryKey, setRetryKey] = useState(0)
     // onDecrypt 用 ref 持有：load() 依赖数组不想包含回调
     const onDecryptRef = useRef(onDecrypt)
@@ -128,6 +129,8 @@ const MediaItem = memo(
       e.stopPropagation()
       retryCount.current = 0
       setError(false)
+      // 跳过主进程 5 分钟失败缓存，显式重试立即重新走下载解密管线
+      retrySkipFailedCache.current = true
       setRetryKey((k) => k + 1)
     }
 
@@ -164,42 +167,51 @@ const MediaItem = memo(
       const load = async () => {
         try {
           if (!isVideo) {
-            const result = await window.electronAPI.sns.proxyImage({
+            const res = await window.electronAPI.sns.proxyImage({
+              // The grid only needs the thumbnail. Fetch the encrypted full
+              // asset when the user opens or downloads it.
               url: targetUrl,
               key: skipDecrypt ? undefined : media.key,
+              skipFailedCache: retrySkipFailedCache.current,
             })
             if (cancelled) return
-            if (result.success) {
-              if (result.dataUrl) {
-                setThumbSrc(result.dataUrl)
-                if (result.cachePath) setCachePath(result.cachePath)
-              } else if (result.videoPath) setThumbSrc(toLocalUrl(result.videoPath))
-              // 解密完成即上报可用的全图本地地址：灯箱打开时无需再解密，
-              // 点击后立刻显示完整图片（此前灯箱直接用 CDN 密文 URL → 无法显示）
-              if (typeof mediaIndex === 'number') {
-                const best = result.cachePath ? toLocalUrl(result.cachePath) : result.dataUrl || ''
-                if (best) onDecryptRef.current?.(mediaIndex, best, false)
+            if (res.success) {
+              if (res.dataUrl) {
+                setThumbSrc(res.dataUrl)
+              } else if (res.videoPath) setThumbSrc(toLocalUrl(res.videoPath))
+              // If no separate thumbnail exists, this response is already the
+              // full asset and can be reused by the lightbox.
+              if (targetUrl === media.url) {
+                if (res.cachePath) setFullCachePath(res.cachePath)
+                if (typeof mediaIndex === 'number') {
+                  const best = res.cachePath ? toLocalUrl(res.cachePath) : res.dataUrl || ''
+                  if (best) onDecryptRef.current?.(mediaIndex, best, false)
+                }
               }
             } else {
-              imageRetryOrFail(result.status)
+              imageRetryOrFail(res.status)
             }
-
-            if (isLive && media.livePhoto?.url) {
-              window.electronAPI.sns
-                .proxyImage({
-                  url: media.livePhoto.url,
-                  key: skipDecrypt ? undefined : media.livePhoto.key || media.key,
-                })
-                .then((res: any) => {
-                  if (!cancelled && res.success && res.videoPath) setLiveVideoPath(toLocalUrl(res.videoPath))
-                })
-                .catch(() => {})
+          } else if (targetUrl && targetUrl !== media.url && !isSnsVideoUrl(targetUrl)) {
+            // Video posts usually carry an image thumbnail. Do not download
+            // and decrypt the full MP4 just to paint a grid tile.
+            const res = await window.electronAPI.sns.proxyImage({
+              url: targetUrl,
+              key: skipDecrypt ? undefined : media.key,
+              skipFailedCache: retrySkipFailedCache.current,
+            })
+            if (cancelled) return
+            if (res.success) {
+              if (res.dataUrl) setThumbSrc(res.dataUrl)
+              else if (res.videoPath) setThumbSrc(toLocalUrl(res.videoPath))
+            } else {
+              videoRetryOrDelete(res.status)
             }
           } else {
             setIsGeneratingCover(true)
             const result = await window.electronAPI.sns.proxyImage({
               url: media.url,
               key: skipDecrypt ? undefined : media.key,
+              skipFailedCache: retrySkipFailedCache.current,
             })
             if (cancelled) return
             if (result.success && result.videoPath) {
@@ -260,8 +272,44 @@ const MediaItem = memo(
           onPreview(videoPath, true, undefined, mediaIndex)
         }
       } else {
-        // 全图优先走本地文件（weport-media://，磁盘已缓存 → 灯箱即时显示全图）
-        const fullSrc = cachePath ? toLocalUrl(cachePath) : ''
+        // The grid may have loaded only a thumbnail. Resolve the full image
+        // on demand, then keep its local path for subsequent lightbox opens.
+        let fullSrc = fullCachePath ? toLocalUrl(fullCachePath) : ''
+        if (!fullSrc && media.url && media.url !== targetUrl) {
+          setIsDecrypting(true)
+          try {
+            const res = await window.electronAPI.sns.proxyImage({
+              url: media.url,
+              key: skipDecrypt ? undefined : media.key,
+              skipFailedCache: retrySkipFailedCache.current,
+            })
+            if (res.success) {
+              if (res.cachePath) {
+                setFullCachePath(res.cachePath)
+                fullSrc = toLocalUrl(res.cachePath)
+              } else if (res.dataUrl) {
+                fullSrc = res.dataUrl
+              }
+              if (fullSrc && typeof mediaIndex === 'number') {
+                onDecryptRef.current?.(mediaIndex, fullSrc, false)
+              }
+            }
+          } finally {
+            setIsDecrypting(false)
+          }
+        }
+        if (isLive && media.livePhoto?.url && !liveVideoPath) {
+          void window.electronAPI.sns
+            .proxyImage({
+              url: media.livePhoto.url,
+              key: skipDecrypt ? undefined : media.livePhoto.key || media.key,
+              skipFailedCache: retrySkipFailedCache.current,
+            })
+            .then((res: any) => {
+              if (res.success && res.videoPath) setLiveVideoPath(toLocalUrl(res.videoPath))
+            })
+            .catch(() => {})
+        }
         onPreview(fullSrc || thumbSrc || targetUrl, false, liveVideoPath, mediaIndex)
       }
     }

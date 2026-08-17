@@ -140,6 +140,19 @@ report before v0.9; the v0.9 work added the service + IPC + UI layers.
   `annualReportService.ts` + `electron/annualReportWorker.ts`,
   `electron/services/isaac64.ts` + `wasmService.ts` (SNS video/image keystream
   XOR; pure-TS fallback if wasm missing).
+- **Keystream wasm packaging (do not regress):** `electron/assets/wasm/` MUST
+  ship on Windows too — `package.json` `files` includes it (asar) AND
+  `win.extraResources` copies it to `resources/assets/wasm` (macOS has the
+  extraResources entry). `wasmService` resolves resources first, asar second.
+  The pure-TS `isaac64.ts` output is byte-different from the wasm (verified)
+  — never "fall back" to it for decryption (garbage → 加载失败); `snsService`
+  fails fast with a clear message instead.
+- **Avatar head-image locator (do not regress):** `avatarCacheService` keeps a
+  persistent `headImages.json` (username → local avatar file, negative-cache
+  24h TTL). Group member panels / rankings / SNS authors / session lists all
+  resolve avatars through it FIRST (zero host calls on hit); only misses query
+  `getHeadImageBuffers` (batch ≤ 60) and record back via `recordHeadAvatar`.
+  Without it, every group open re-reads head_image.db for every member.
 - IPC registration lives in `appMain.ts::registerIpcHandlers` (channels
   `sns:*`, `analytics:*`, `groupAnalytics:*`, `annualReport:*`), plus helpers
   `collectLegacySnsCacheMigrationPlan` / `runLegacySnsCacheMigration` and a

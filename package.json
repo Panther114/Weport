@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -38,6 +38,7 @@
     "marked": "^18.0.9",
     "react": "^19.2.3",
     "react-dom": "^19.2.7",
+    "react-virtuoso": "^4.18.11",
     "silk-wasm": "^3.7.1",
     "wechat-emojis": "^1.0.2"
   },
@@ -70,7 +71,8 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "assets/icons/**/*"
+      "assets/icons/**/*",
+      "electron/assets/wasm/**/*"
     ],
     "mac": {
       "target": [
@@ -159,6 +161,10 @@
         {
           "from": "resources/runtime/win32",
           "to": "resources/runtime/win32"
+        },
+        {
+          "from": "electron/assets/wasm/",
+          "to": "assets/wasm/"
         },
         {
           "from": "resources/host",

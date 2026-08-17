@@ -139,6 +139,22 @@ export default defineConfig(({ mode }) => ({
             }
           }
         }
+      },
+      {
+        entry: 'electron/dualReportWorker.ts',
+        onstart: handleElectronOnStart,
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: ['electron'],
+              output: {
+                entryFileNames: 'dualReportWorker.js',
+                codeSplitting: false
+              }
+            }
+          }
+        }
       }
     ])
   ],

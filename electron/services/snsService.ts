@@ -267,8 +267,6 @@ export const isVideoUrl = (url: string) => {
     return url.includes('snsvideodownload') || url.includes('video') || url.includes('.mp4')
 }
 
-import { Isaac64 } from './isaac64'
-
 const extractVideoKey = (xml: string): string | undefined => {
     if (!xml) return undefined
     // 匹配 <enc key="2105122989" ... /> 或 <enc key="2105122989">
@@ -417,6 +415,8 @@ class SnsService {
     private contactCache: ContactCacheService
     private imageCache = new Map<string, string>()
     private imageCacheMeta = new Map<string, number>()
+    /** 进行中的媒体解密请求（同资源并发去重：网格/灯箱/下载共享一次下载） */
+    private inflightMedia = new Map<string, Promise<{ success: boolean; dataUrl?: string; videoPath?: string; cachePath?: string; status?: number; error?: string }>>()
     // 已失败资源短期记忆：避免滚动重挂载后对死链反复重试（每次 3 连试 × 超时）
     private failedResourceCache = new Map<string, number>()
     private readonly failedResourceCacheTtlMs = 5 * 60 * 1000
@@ -424,6 +424,8 @@ class SnsService {
     private readonly imageCacheMaxEntries = 120
     private exportStatsCache: { totalPosts: number; totalFriends: number; myPosts: number | null; updatedAt: number } | null = null
     private userPostCountsCache: { counts: Record<string, number>; updatedAt: number } | null = null
+    private userPostCountsInFlight: Promise<{ success: boolean; counts?: Record<string, number>; error?: string }> | null = null
+    private snsEmojiInFlight = new Map<string, Promise<{ success: boolean; localPath?: string; error?: string }>>()
     private readonly exportStatsCacheTtlMs = 5 * 60 * 1000
     private readonly userPostCountsCacheTtlMs = 5 * 60 * 1000
     private lastTimelineFallbackAt = 0
@@ -437,6 +439,7 @@ class SnsService {
     clearMemoryCache(): void {
         this.imageCache.clear()
         this.imageCacheMeta.clear()
+        this.inflightMedia.clear()
     }
 
     private pruneImageCache(now: number = Date.now()): void {
@@ -502,6 +505,29 @@ class SnsService {
             return { mime: 'image/jpeg', base64: resized.toJPEG(82).toString('base64') }
         } catch {
             return null
+        }
+    }
+
+    /**
+     * 生成 ISAAC64 keystream（wasm 路径）。
+     * 注意：不要在这里回退到纯 TS Isaac64 —— 其输出与 wasm 语义不一致
+     * （已验证），回退会产生乱码解密结果（网格「加载失败」）。wasm 缺失时
+     * 直接抛出可读错误，由调用方快速失败。
+     */
+    private async generateKeystreamSafe(keyText: string, size: number): Promise<Buffer> {
+        const wasmService = WasmService.getInstance()
+        return wasmService.getKeystream(keyText, size)
+    }
+
+    /**
+     * 检查 keystream 组件是否可用（供启动自检使用；不改变运行时行为）
+     */
+    async isKeystreamAvailable(): Promise<boolean> {
+        try {
+            await this.generateKeystreamSafe('1', 8)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -1231,6 +1257,20 @@ class SnsService {
         preferCache?: boolean
         forceRefresh?: boolean
     }): Promise<{ success: boolean; counts?: Record<string, number>; error?: string }> {
+        if (this.userPostCountsInFlight) return this.userPostCountsInFlight
+        const promise = this.getUserPostCountsInternal(options)
+        this.userPostCountsInFlight = promise
+        try {
+            return await promise
+        } finally {
+            if (this.userPostCountsInFlight === promise) this.userPostCountsInFlight = null
+        }
+    }
+
+    private async getUserPostCountsInternal(options?: {
+        preferCache?: boolean
+        forceRefresh?: boolean
+    }): Promise<{ success: boolean; counts?: Record<string, number>; error?: string }> {
         const forceRefresh = options?.forceRefresh === true
         const preferCache = forceRefresh ? false : (options?.preferCache ?? true)
         const now = Date.now()
@@ -1427,6 +1467,43 @@ class SnsService {
         return { ...result, timeline: enrichedTimeline }
     }
 
+    /** 预加载节流：启动预热只跑一次，避免静默启动与通知弹窗竞争 */
+    private timelineWarmupAt = 0
+    private readonly timelineWarmupCooldownMs = 10 * 60 * 1000
+
+    /**
+     * 预取第一页时间线（不解析媒体/评论，只走 DLL 查询 + 内存缓存）：
+     * 提前把 sns.db 热进 DLL 的页缓存，用户首次打开朋友圈页时秒出结果。
+     * 幂等 + 节流：10 分钟内只执行一次；失败静默（不阻塞启动路径）。
+     */
+    async warmupTimeline(): Promise<void> {
+        const now = Date.now()
+        if (now - this.timelineWarmupAt < this.timelineWarmupCooldownMs) return
+        this.timelineWarmupAt = now
+        try {
+            const result = await wcdbService.getSnsTimeline(20, 0, [], '', 0, 0)
+            if (result.success && Array.isArray(result.timeline)) {
+                console.log(`[SnsService] 朋友圈预加载完成: ${result.timeline.length} 条`)
+            }
+        } catch (e) {
+            console.warn('[SnsService] 朋友圈预加载失败（静默）:', String(e))
+        }
+    }
+
+    /** 检查时间线顶部是否有更新的动态（轻量：只取 1 条对比） */
+    async peekNewestTimeline(): Promise<{ success: boolean; newestId?: string; newestTime?: number; error?: string }> {
+        try {
+            const result = await wcdbService.getSnsTimeline(1, 0, [], '', 0, 0)
+            if (!result.success || !result.timeline || result.timeline.length === 0) {
+                return { success: true }
+            }
+            const top = result.timeline[0]
+            return { success: true, newestId: String(top?.id || ''), newestTime: Number(top?.createTime || 0) }
+        } catch (e) {
+            return { success: false, error: String(e) }
+        }
+    }
+
     async debugResource(url: string): Promise<{ success: boolean; status?: number; headers?: any; error?: string }> {
         return new Promise((resolve) => {
             try {
@@ -1471,16 +1548,28 @@ class SnsService {
 
 
 
-    async proxyImage(url: string, key?: string | number): Promise<{ success: boolean; dataUrl?: string; videoPath?: string; cachePath?: string; status?: number; error?: string }> {
+    async proxyImage(url: string, key?: string | number, options?: { skipFailedCache?: boolean }): Promise<{ success: boolean; dataUrl?: string; videoPath?: string; cachePath?: string; status?: number; error?: string }> {
         if (!url) return { success: false, error: 'url 不能为空' }
         const cacheKey = `${this.normalizeCacheUrl(url)}|${key ?? ''}`
 
-        // 死链/坏钥短期快速失败：不重复下载重试（滚动重挂载会反复触发）
-        const failedAt = this.failedResourceCache.get(cacheKey)
-        if (failedAt && Date.now() - failedAt < this.failedResourceCacheTtlMs) {
-            return { success: false, error: '该资源暂时不可用（失败已被缓存，5 分钟后再试）' }
+        // 死链/坏钥短期快速失败：不重复下载重试（滚动重挂载会反复触发）。
+        // 用户显式点击「重试」时（skipFailedCache）绕过，允许立即重新尝试
+        if (options?.skipFailedCache !== true) {
+            const failedAt = this.failedResourceCache.get(cacheKey)
+            if (failedAt && Date.now() - failedAt < this.failedResourceCacheTtlMs) {
+                return { success: false, error: '该资源暂时不可用（失败已被缓存，5 分钟后再试）' }
+            }
+            if (failedAt) this.failedResourceCache.delete(cacheKey)
+        } else {
+            this.failedResourceCache.delete(cacheKey)
         }
-        if (failedAt) this.failedResourceCache.delete(cacheKey)
+
+        // 并发去重：同一资源（网格 + 灯箱 + 下载同时请求）只发起一次下载，
+        // 其余请求共享同一结果（此前每个请求各自走一遍完整下载解密管线）
+        const inflight = this.inflightMedia.get(cacheKey)
+        if (inflight) {
+            return inflight
+        }
 
         const cachedDataUrl = this.imageCache.get(cacheKey) || ''
         if (cachedDataUrl) {
@@ -1511,33 +1600,37 @@ class SnsService {
             this.imageCacheMeta.delete(cacheKey)
         }
 
-        const result = await this.fetchAndDecryptImage(url, key)
-        if (result.success) {
-            this.failedResourceCache.delete(cacheKey)
-            // 如果是视频，返回本地文件路径 (需配合 weport-media:// 自定义协议)
-            if (result.contentType?.startsWith('video/')) {
-                // Return cachePath directly for video
-                // 注意：fetchAndDecryptImage 需要修改以返回 cachePath
-                return { success: true, videoPath: result.cachePath }
-            }
-
-            if (result.data && result.contentType) {
-                if (!detectImageMime(result.data, '').startsWith('image/')) {
-                    this.rememberFailedResource(cacheKey)
-                    return { success: false, error: '无效图片数据（可能密钥不匹配或缓存损坏）' }
+        const task = this.fetchAndDecryptImage(url, key).then((result) => {
+            if (result.success) {
+                this.failedResourceCache.delete(cacheKey)
+                // 如果是视频，返回本地文件路径 (需配合 weport-media:// 自定义协议)
+                if (result.contentType?.startsWith('video/')) {
+                    // Return cachePath directly for video
+                    // 注意：fetchAndDecryptImage 需要修改以返回 cachePath
+                    return { success: true, videoPath: result.cachePath }
                 }
-                // 网格缩略图：大图经 nativeImage 缩到 720px 再传渲染层，
-                // IPC 载荷与渲染内存降低 20~50 倍（全图已写入磁盘缓存，
-                // 灯箱预览用 cachePath → weport-media:// 本地即时读取全图）
-                const thumb = this.makeGridThumbnail(result.data, result.contentType)
-                const dataUrl = thumb
-                    ? `data:${thumb.mime};base64,${thumb.base64}`
-                    : `data:${result.contentType};base64,${result.data.toString('base64')}`
-                this.rememberImageCache(cacheKey, dataUrl)
-                return { success: true, dataUrl, cachePath: result.cachePath }
+
+                if (result.data && result.contentType) {
+                    if (!detectImageMime(result.data, '').startsWith('image/')) {
+                        this.rememberFailedResource(cacheKey)
+                        return { success: false, error: '无效图片数据（可能密钥不匹配或缓存损坏）' }
+                    }
+                    // 网格缩略图：大图经 nativeImage 缩到 720px 再传渲染层，
+                    // IPC 载荷与渲染内存降低 20~50 倍（全图已写入磁盘缓存，
+                    // 灯箱预览用 cachePath → weport-media:// 本地即时读取全图）
+                    const thumb = this.makeGridThumbnail(result.data, result.contentType)
+                    const dataUrl = thumb
+                        ? `data:${thumb.mime};base64,${thumb.base64}`
+                        : `data:${result.contentType};base64,${result.data.toString('base64')}`
+                    this.rememberImageCache(cacheKey, dataUrl)
+                    return { success: true, dataUrl, cachePath: result.cachePath }
+                }
             }
-        }
-        return { success: false, status: result.status, error: result.error }
+            return { success: false, status: result.status, error: result.error }
+        }).catch((error) => ({ success: false, error: String(error) }))
+            .finally(() => this.inflightMedia.delete(cacheKey))
+        this.inflightMedia.set(cacheKey, task)
+        return task
     }
 
     async downloadImage(url: string, key?: string | number): Promise<{ success: boolean; data?: Buffer; contentType?: string; cachePath?: string; error?: string }> {
@@ -2298,13 +2391,14 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                                         let keystream: Buffer
 
                                         try {
-                                            const wasmService = WasmService.getInstance()
-                                            // 只需要前 128KB (131072 bytes) 用于解密头部
-                                            keystream = await wasmService.getKeystream(keyText, 131072)
+                                            keystream = await this.generateKeystreamSafe(keyText, 131072)
                                         } catch (wasmErr) {
-                                            // 打包漏带 wasm 或 wasm 初始化异常时，回退到纯 TS ISAAC64
-                                            const isaac = new Isaac64(keyText)
-                                            keystream = isaac.generateKeystreamBE(131072)
+                                            resolve({
+                                                success: false,
+                                                error: `视频解密组件不可用: ${String((wasmErr as Error)?.message || wasmErr)}`,
+                                            })
+                                            try { await import('fs/promises').then(fs => fs.unlink(tmpPath)) } catch { /* noop */ }
+                                            return
                                         }
 
                                         const decryptLen = Math.min(keystream.length, raw.length)
@@ -2409,8 +2503,7 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                                 if (/^\d+$/.test(keyStr)) {
                                     // 使用 WASM 版本的 Isaac64 解密图片
                                     // 修正逻辑：使用带 reverse 且修正了 8字节对齐偏移的 getKeystream
-                                    const wasmService = WasmService.getInstance()
-                                    const keystream = await wasmService.getKeystream(keyStr, raw.length)
+                                    const keystream = await this.generateKeystreamSafe(keyStr, raw.length)
 
                                     const decrypted = Buffer.allocUnsafe(raw.length)
                                     // XOR 解密（32 位字级运算，约 4 倍速于逐字节循环）
@@ -2424,7 +2517,11 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                                     }
                                 }
                             } catch (e) {
-                                console.error('[SnsService] TS Decrypt Error:', e)
+                                // keystream 组件不可用是确定性问题：直接快速失败，
+                                // 不回退到纯 TS ISAAC64（与 wasm 语义不一致 → 乱码）
+                                this.rememberFailedResource(failKey)
+                                resolve({ success: false, error: `图片解密组件不可用: ${String((e as Error)?.message || e)}` })
+                                return
                             }
                         }
 
@@ -2717,6 +2814,17 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
      * 下载朋友圈评论中的表情包（多种解密算法，移植自 ciphertalk）
      */
     async downloadSnsEmoji(url: string, encryptUrl?: string, aesKey?: string): Promise<{ success: boolean; localPath?: string; error?: string }> {
+        const requestKey = `${url || ''}|${encryptUrl || ''}|${aesKey || ''}`
+        const pending = this.snsEmojiInFlight.get(requestKey)
+        if (pending) return pending
+        const task = this.downloadSnsEmojiInternal(url, encryptUrl, aesKey)
+            .catch((error) => ({ success: false, error: String(error) }))
+            .finally(() => this.snsEmojiInFlight.delete(requestKey))
+        this.snsEmojiInFlight.set(requestKey, task)
+        return task
+    }
+
+    private async downloadSnsEmojiInternal(url: string, encryptUrl?: string, aesKey?: string): Promise<{ success: boolean; localPath?: string; error?: string }> {
         if (!url && !encryptUrl) return { success: false, error: 'url 不能为空' }
 
         const fs = require('fs')
