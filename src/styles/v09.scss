@@ -2601,8 +2601,10 @@
   flex-shrink: 0;
 }
 .dual-report-friend-id {
+  display: block;
   font-size: 11px;
   color: var(--text-faint);
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

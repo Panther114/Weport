@@ -1078,9 +1078,83 @@ button:disabled {
 
 /* v0.9.6 export session selection */
 .export-session-picker {
-  padding: 14px 0;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  position: relative;
+  padding: 0 0 14px;
+  z-index: 4;
+}
+
+.export-scope-trigger {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.export-scope-trigger:hover {
+  border-color: var(--accent);
+  background: var(--elevated);
+}
+
+.export-scope-trigger:active {
+  transform: scale(0.98);
+}
+
+.export-scope-trigger > svg:first-child {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.export-scope-trigger-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.export-scope-trigger-copy strong {
+  font-size: 12px;
+}
+
+.export-scope-trigger-copy span {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-scope-trigger-chevron {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+
+.export-session-picker.is-open .export-scope-trigger-chevron {
+  transform: rotate(180deg);
+}
+
+.export-session-popover {
+  position: absolute;
+  top: calc(100% - 6px);
+  left: 0;
+  width: min(680px, calc(100vw - 48px));
+  max-height: min(580px, calc(100vh - 120px));
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.16);
+  z-index: 20;
 }
 
 .export-session-picker-head,

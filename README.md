@@ -65,7 +65,7 @@ Weport 把微信 4.x 的本地聊天数据变成你自己的文件与洞察：�
 
 **WeportAI** —— 对聊天记录提问：工具调用、思考过程与 Markdown 结论，右侧为长期记忆与笔记：
 
-![WexportAI 分析助手](docs/screenshots/ai.png)
+![WeportAI 分析助手](docs/screenshots/ai.png)
 
 **设置** —— 开机自启、启动行为与色彩主题（浅蓝 / 黑白）：
 
@@ -105,7 +105,7 @@ Weport 把微信 4.x 的本地聊天数据变成你自己的文件与洞察：�
 
 ## 🤖 WeportAI · 聊天历史分析助手
 
-WexportAI 把 DeepSeek V4 Flash 与 17 个本地检索工具组合成一个**可推理的 agent**——不用写查询，直接用自然语言问自己的聊天记录（v0.8 起）。
+WeportAI 把 DeepSeek V4 Flash 与 17 个本地检索工具组合成一个**可推理的 agent**——不用写查询，直接用自然语言问自己的聊天记录（v0.8 起）。
 
 **可以这样问：**
 
@@ -128,7 +128,7 @@ WexportAI 把 DeepSeek V4 Flash 与 17 个本地检索工具组合成一个**可
 
 ## 🖼️ 朋友圈（v0.9）
 
-微信的本地 `sns.db` 存着你的全部朋友圈，Wexport 直接读它，离线就能翻任意历史动态：
+微信的本地 `sns.db` 存着你的全部朋友圈，Weport 直接读它，离线就能翻任意历史动态：
 
 - **全量浏览** — 分页时间线，按发布者、关键词、日期快速筛选；点击发布者可查看其全部动态
 - **媒体解密** — 图片/实况照片/视频经本地解密后直接预览（内存缓存 + 磁盘缓存加速，无需重新下载）
@@ -200,12 +200,12 @@ $env:WEPORT_V09_DUMP_OUT = "$env:TEMP\v09-dump"
 |------|------|
 | `electron/appMain.ts` | 主进程：窗口、托盘、IPC、更新、导出、通知管线、朋友圈/分析/年度报告 IPC、QA 截图与 v0.9 转储模式 |
 | `electron/services/` | 引擎（WeFlow WCDB 栈的 TypeScript 移植）：会话、WCDB、密钥、导出、推送、朋友圈（`snsService.ts`）、全局分析（`analyticsService.ts`）、群聊分析（`groupAnalyticsService.ts`）、年度报告（`annualReportService.ts` + `annualReportWorker.ts`）、媒体解密（`isaac64.ts` / `wasmService.ts`） |
-| `electron/services/weportAiService.ts` | WexportAI：agent 循环、工具调用、记忆/笔记工作区、脱敏日志 |
+| `electron/services/weportAiService.ts` | WeportAI：agent 循环、工具调用、记忆/笔记工作区、脱敏日志 |
 | `electron/wcdbHost.ts` | WCDB 宿主子进程（`WeFlow[.exe] --wcdb-host` 硬链接运行，IPC 通信） |
 | `electron/windows/notificationWindow.ts` | 通知弹窗（Windows 液态玻璃 / 跨平台 Chromium 桌面流回退） |
 | `src/pages/SnsPage.tsx` + `src/components/sns/` | 朋友圈界面：时间线、媒体网格、预览灯箱、作者动态、导出对话框 |
 | `src/pages/analytics/` | 分析界面：入口选择（全局/群聊）、全局统计、群聊分析、年度报告（ECharts 双主题：浅蓝 / 黑白） |
-| `src/` | React 渲染层（主界面 + 通知窗口 + WexportAI 面板） |
+| `src/` | React 渲染层（主界面 + 通知窗口 + WeportAI 面板） |
 | `resources/` | 各平台原生库：`wcdb` / `key` / `wedecrypt` / `welive` / `runtime`（win32 + macos） |
 
 ## 🧭 行为约定

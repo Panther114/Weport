@@ -4033,6 +4033,24 @@ async function runScreenshotMode() {
       await clickTab('导出数据')
       if (await waitForDom('.format-grid')) {
         await sleep(500)
+        const scopePopupOpened = await mainWindow.webContents
+          .executeJavaScript(
+            `(() => { const trigger = document.querySelector('.export-scope-trigger'); if (!trigger) return false; trigger.click(); return true })()`,
+            true,
+          )
+          .catch(() => false)
+        const scopePopupReady = scopePopupOpened && await waitForDom('.export-session-popover', isRealScreenshotMode ? 120 : 40)
+        if (scopePopupReady) {
+          await dumpRects('export-scope-rects.json', ['.export-scope-trigger', '.export-session-popover'])
+          await mainWindow.webContents
+            .executeJavaScript(
+              `(() => { const close = document.querySelector('[aria-label="关闭导出范围菜单"]'); close?.click(); return !!close })()`,
+              true,
+            )
+            .catch(() => false)
+        } else {
+          log('FAIL [screenshot] 导出范围弹出菜单未打开')
+        }
         await saveStable(mainWindow, 'export.png')
         await dumpRects('export-rects.json', [
           '.format-chip.layout-chip', '.format-grid .format-chip', '.media-check',

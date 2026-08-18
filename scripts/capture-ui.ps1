@@ -126,6 +126,7 @@ function Assert-Captured([string]$Path, [string]$Label) {
 Assert-Captured $mainPng 'main.png'
 Assert-Captured $popupPng 'popup.png'
 Assert-Captured $exportPng 'export.png'
+Assert-Captured (Join-Path $OutputDir 'export-scope-rects.json') 'export-scope-rects.json'
 Assert-Captured $antirecallPng 'antirecall.png'
 Assert-Captured $notificationsPng 'notifications.png'
 # AI 页截图在 CI 软渲染下偶发挂载超时（渲染进程忙），作为软性检查：

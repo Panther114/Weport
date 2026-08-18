@@ -4,8 +4,8 @@
 param(
   [string]$Executable = "",
   [string]$ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path,
-  [string]$OutputDir = (Join-Path $env:TEMP "weport-v096-dump"),
-  [string]$UserDataDir = (Join-Path $env:TEMP "weport-v096-user-data")
+  [string]$OutputDir = (Join-Path $env:TEMP "weport-v097-dump"),
+  [string]$UserDataDir = (Join-Path $env:TEMP "weport-v097-user-data")
 )
 
 $ErrorActionPreference = 'Stop'

@@ -7,7 +7,7 @@
 
 ## Tech Stack (Permanent)
 
-Wexport is an **Electron + React + Vite + TypeScript** desktop app for
+Weport is an **Electron + React + Vite + TypeScript** desktop app for
 **Windows and macOS (Apple Silicon, arm64)**. The engine
 (`electron/services/`) is a TypeScript port of WeFlow's WCDB stack (koffi FFI
 + native `wcdb_api.dll` / `libwcdb_api.dylib`). There is **no Rust, no Tauri,
@@ -54,7 +54,7 @@ engine in a **subprocess**:
 
 **Do not reintroduce:**
 
-- `worker_threads` for WCDB — the name check fails inside `Wexport`'s own
+- `worker_threads` for WCDB — the name check fails inside Weport's own
   binary (any platform).
 - stdio JSON-lines transport — **Electron's main-process stdin hits EOF
   immediately on Windows even with a real pipe** (verified). IPC channel only.

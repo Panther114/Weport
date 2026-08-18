@@ -1,5 +1,5 @@
 /**
- * Weport MCP Server（v0.9.5）
+ * Weport MCP Server（v0.9.7）
  *
  * 基于 @modelcontextprotocol/sdk 的本地 MCP 服务（Streamable HTTP，127.0.0.1）。
  * 只读：所有工具落到既有的只读服务方法（chatService / groupAnalyticsService /
@@ -277,7 +277,7 @@ class McpService {
   }
 
   private async createSession(): Promise<McpHttpSession> {
-    const server = new McpServer({ name: 'weport-mcp', version: '0.9.5' })
+    const server = new McpServer({ name: 'weport-mcp', version: '0.9.7' })
     this.registerTools(server)
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),

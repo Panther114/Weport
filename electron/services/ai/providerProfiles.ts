@@ -52,10 +52,12 @@ export class ProviderProfileService {
   private read(): ProviderProfileStore {
     const raw = String(this.config.get('weportAiProfilesBlob') || '').trim()
     let store: ProviderProfileStore = cloneStore(EMPTY_STORE)
+    let hasValidProfileStore = false
     if (raw) {
       try {
         const parsed = JSON.parse(raw) as Partial<ProviderProfileStore>
         if (parsed && parsed.version === 1 && Array.isArray(parsed.profiles)) {
+          hasValidProfileStore = true
           store = {
             version: 1,
             activeProfileId: String(parsed.activeProfileId || ''),
@@ -66,7 +68,11 @@ export class ProviderProfileService {
         console.warn('[WeportAI] provider profile blob 无法解析，保留旧配置:', error)
       }
     }
-    if (store.profiles.length === 0) {
+    // An empty, valid profile blob is an intentional user state (for example
+    // after deleting the last provider). Only migrate the legacy fields when
+    // no provider-profile blob exists yet; otherwise every read would
+    // resurrect the deleted legacy profile.
+    if (store.profiles.length === 0 && !hasValidProfileStore) {
       const migrated = this.migrateLegacyProfile()
       if (migrated) {
         store = { version: 1, activeProfileId: migrated.id, profiles: [migrated] }
