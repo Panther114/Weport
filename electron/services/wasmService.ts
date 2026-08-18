@@ -73,20 +73,35 @@ export class WasmService {
 
         this.initPromise = new Promise((resolve, reject) => {
             try {
-                // For dev, files are in electron/assets/wasm
-                // __dirname in dev (from dist-electron) is .../dist-electron
-                // So we need to go up one level and then into electron/assets/wasm
+                // wasm 解析顺序（按打包布局逐级兜底，保证任何环境下都能加载，
+                // 否则朋友圈媒体解密会退回纯 TS ISAAC64 —— 与 wasm 语义不一致，
+                // 解密产物为乱码 → 网格「加载失败」）：
+                // 1. dev: dist-electron/../electron/assets/wasm
+                // 2. packaged extraResources: <resources>/assets/wasm
+                // 3. packaged asar: <app.asar>/assets/wasm（Electron 的 fs 可读 asar）
                 const isDev = !app.isPackaged;
-                const basePath = isDev
-                    ? path.join(__dirname, '../electron/assets/wasm')
-                    : path.join(process.resourcesPath, 'assets/wasm'); // Adjust as needed for production build
+                const candidates = isDev
+                    ? [path.join(__dirname, '../electron/assets/wasm')]
+                    : [
+                        path.join(process.resourcesPath, 'assets/wasm'),
+                        path.join(app.getAppPath(), 'assets/wasm'),
+                      ]
 
-                const wasmPath = path.join(basePath, 'wasm_video_decode.wasm');
-                const jsPath = path.join(basePath, 'wasm_video_decode.js');
-
-
-                if (!fs.existsSync(wasmPath) || !fs.existsSync(jsPath)) {
-                    throw new Error(`WASM files not found at ${basePath}`);
+                let basePath = ''
+                let wasmPath = ''
+                let jsPath = ''
+                for (const candidate of candidates) {
+                    const w = path.join(candidate, 'wasm_video_decode.wasm')
+                    const j = path.join(candidate, 'wasm_video_decode.js')
+                    if (fs.existsSync(w) && fs.existsSync(j)) {
+                        basePath = candidate
+                        wasmPath = w
+                        jsPath = j
+                        break
+                    }
+                }
+                if (!basePath) {
+                    throw new Error(`WASM files not found (tried: ${candidates.join(', ')})`);
                 }
 
                 const wasmBinary = fs.readFileSync(wasmPath);

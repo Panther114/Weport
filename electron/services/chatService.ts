@@ -12,7 +12,7 @@ import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
-import { avatarCacheService } from './avatarCacheService'
+import { avatarCacheService, protocolUrlToPath } from './avatarCacheService'
 import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStats } from './sessionStatsCacheService'
 import { FILE_APP_LOCAL_TYPE_SET } from './export/constants'
 import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from './groupMyMessageCountCacheService'
@@ -457,6 +457,7 @@ class ChatService {
   private visibilityAnomalyLogState = new Map<string, { windowStart: number; total: number; suppressed: number }>()
   private readonly contactLabelNameMapCacheTtlMs = 10 * 60 * 1000
   private connectInFlight: Promise<{ success: boolean; error?: string }> | null = null
+  private sessionsLoadInFlight: Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> | null = null
   private contactsLoadInFlight: { mode: 'lite' | 'full'; promise: Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }> } | null = null
   private contactsMemoryCache = new Map<'lite' | 'full', { scope: string; updatedAt: number; contacts: ContactInfo[] }>()
   private readonly contactsMemoryCacheTtlMs = 3 * 60 * 1000
@@ -868,6 +869,17 @@ class ChatService {
    * 获取会话列表（优化：先返回基础数据，不等待联系人信息加载）
    */
   async getSessions(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
+    if (this.sessionsLoadInFlight) return this.sessionsLoadInFlight
+    const promise = this.getSessionsInternal()
+    this.sessionsLoadInFlight = promise
+    try {
+      return await promise
+    } finally {
+      if (this.sessionsLoadInFlight === promise) this.sessionsLoadInFlight = null
+    }
+  }
+
+  private async getSessionsInternal(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
     try {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) {
@@ -1642,6 +1654,9 @@ class ChatService {
 
   /**
    * 从 head_image.db 批量获取头像（转换为 base64 data URL）
+   * 命中头像定位缓存（headImages.json 持久化）的用户直接返回本地协议 URL，
+   * 只有未命中的用户才走宿主查询 + 落盘，随后回填缓存 ——
+   * 二次加载（含跨模块：群成员 / 排行榜 / 朋友圈作者）零宿主调用。
    */
   private async getAvatarsFromHeadImageDb(usernames: string[]): Promise<Record<string, string>> {
     const result: Record<string, string> = {}
@@ -1657,11 +1672,16 @@ class ChatService {
       )
       if (normalizedUsernames.length === 0) return result
 
+      // 先查定位缓存（同步，纯 existsSync）
+      const { missing, map } = avatarCacheService.getLocalizedHeadAvatars(normalizedUsernames)
+      Object.assign(result, map)
+      if (missing.length === 0) return result
+
       // 批量不宜过大：每条返回的 hex 头像可达几十 KB，IPC 通道大响应
       // 易截断/超时（实测 60 人/批稳定，320 人/批会丢数据 → 回退 CDN）
       const batchSize = 60
-      for (let i = 0; i < normalizedUsernames.length; i += batchSize) {
-        const batch = normalizedUsernames.slice(i, i + batchSize)
+      for (let i = 0; i < missing.length; i += batchSize) {
+        const batch = missing.slice(i, i + batchSize)
         if (batch.length === 0) continue
 
         const queryResult = await wcdbService.getHeadImageBuffers(batch)
@@ -1673,11 +1693,20 @@ class ChatService {
           try {
             const base64Data = Buffer.from(hex, 'hex').toString('base64')
             if (base64Data) {
-              result[username] = `data:image/jpeg;base64,${base64Data}`
+              const dataUrl = `data:image/jpeg;base64,${base64Data}`
+              const localUrl = await avatarCacheService.persistDataUrl(dataUrl)
+              if (localUrl) {
+                result[username] = localUrl
+                avatarCacheService.recordHeadAvatar(username, protocolUrlToPath(localUrl) || '')
+              }
             }
           } catch {
             // ignore invalid blob hex
           }
+        }
+        // 确认无本地头像的用户记负缓存（避免每次重查）
+        for (const username of batch) {
+          if (!(username in result)) avatarCacheService.recordHeadAvatar(username, '')
         }
       }
     } catch (e) {

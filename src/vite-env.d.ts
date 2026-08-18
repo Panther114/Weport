@@ -31,10 +31,24 @@ interface ElectronApi {
     getLaunchAtStartupStatus: () => Promise<{ enabled: boolean; supported: boolean; reason?: string }>
     setLaunchAtStartup: (enabled: boolean) => Promise<any>
     checkForUpdates: () => Promise<{ hasUpdate: boolean; version?: string; releaseNotes?: string; error?: string }>
-    downloadAndInstall: () => Promise<{ success: boolean; error?: string }>
+    downloadAndInstall: () => Promise<{ success: boolean; restarting?: boolean; error?: string }>
     ignoreUpdate: (version: string) => Promise<{ success: boolean }>
     onDownloadProgress: (callback: (progress: any) => void) => () => void
+    onUpdateDownloaded: (callback: () => void) => () => void
     onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string }) => void) => () => void
+  }
+  backup: {
+    create: (payload: { outputPath: string; options?: { includeImages?: boolean; includeVideos?: boolean; includeFiles?: boolean } }) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    inspect: (archivePath: string) => Promise<{ success: boolean; meta?: any; error?: string }>
+    restore: (archivePath: string) => Promise<{ success: boolean; error?: string }>
+  }
+  http: {
+    start: () => Promise<{ success: boolean; port?: number; error?: string }>
+    stop: () => Promise<void>
+    getStatus: () => Promise<{ running: boolean; port: number; host: string }>
+  }
+  auth: {
+    verifyHello: (message?: string) => Promise<{ success: boolean; error?: string }>
   }
   dbPath: {
     autoDetect: () => Promise<{ success: boolean; path?: string; error?: string }>
@@ -129,7 +143,9 @@ interface ElectronApi {
     getExportStatsFast: () => Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number; myPosts: number | null }; error?: string }>
     getUserPostStats: (username: string) => Promise<{ success: boolean; data?: { username: string; totalPosts: number }; error?: string }>
     debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
-    proxyImage: (payload: string | { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; videoPath?: string; cachePath?: string; status?: number; error?: string }>
+    proxyImage: (payload: string | { url: string; key?: string | number; skipFailedCache?: boolean }) => Promise<{ success: boolean; dataUrl?: string; videoPath?: string; cachePath?: string; status?: number; error?: string }>
+    warmupTimeline: () => Promise<void>
+    peekNewestTimeline: () => Promise<{ success: boolean; newestId?: string; newestTime?: number; error?: string }>
     downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; filePath?: string; error?: string }>
     exportTimeline: (options: any) => Promise<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; paused?: boolean; stopped?: boolean; error?: string }>
     selectExportDir: () => Promise<{ canceled: boolean; filePath?: string }>
@@ -151,6 +167,8 @@ interface ElectronApi {
     getExcludedUsernames: () => Promise<{ success: boolean; data?: string[]; error?: string }>
     setExcludedUsernames: (usernames: string[]) => Promise<{ success: boolean; data?: string[]; error?: string }>
     getExcludeCandidates: () => Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string }>; error?: string }>
+    getDailyActivity: (force?: boolean) => Promise<{ success: boolean; data?: { daily: Record<string, number>; sentDaily: Record<string, number> }; error?: string }>
+    getWordFrequency: (limit?: number, force?: boolean) => Promise<{ success: boolean; data?: { items: Array<{ word: string; count: number }>; scannedMessages: number; textMessages: number }; error?: string }>
     clearCache: () => Promise<{ success: boolean; error?: string }>
   }
   groupAnalytics: {
@@ -160,6 +178,7 @@ interface ElectronApi {
     getGroupMessageRanking: (chatroomId: string, limit?: number, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>
     getGroupActiveHours: (chatroomId: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: { hourlyDistribution: Record<number, number> }; error?: string }>
     getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: any; error?: string }>
+    getGroupActivityHeatmap: (chatroomId: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: { data: number[][]; total: number }; error?: string }>
     getGroupMemberAnalytics: (chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; data?: any; error?: string }>
     getGroupMemberMessages: (chatroomId: string, memberUsername: string, options?: any) => Promise<{ success: boolean; data?: { messages: any[]; hasMore: boolean; nextCursor: number }; error?: string }>
     exportGroupMembers: (chatroomId: string, outputPath: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
@@ -174,6 +193,10 @@ interface ElectronApi {
     captureCurrentWindow: () => Promise<{ success: boolean; dataUrl?: string; size?: number[]; error?: string }>
     onProgress: (callback: (payload: any) => void) => () => void
     onAvailableYearsProgress: (callback: (payload: any) => void) => () => void
+  }
+  dualReport: {
+    generateReport: (friendUsername: string, year: number) => Promise<{ success: boolean; data?: any; error?: string }>
+    onProgress: (callback: (payload: any) => void) => () => void
   }
   process: {
     platform: string

@@ -60,7 +60,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
     ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
     onDownloadProgress: (callback: (progress: any) => void) => subscribe('app:downloadProgress', callback),
+    onUpdateDownloaded: (callback: () => void) => subscribe('app:updateDownloaded', callback),
     onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string }) => void) => subscribe('app:updateAvailable', callback)
+  },
+
+  // 数据备份（v0.9.4）
+  backup: {
+    create: (payload: { outputPath: string; options?: { includeImages?: boolean; includeVideos?: boolean; includeFiles?: boolean } }) =>
+      ipcRenderer.invoke('backup:create', payload),
+    inspect: (archivePath: string) => ipcRenderer.invoke('backup:inspect', { archivePath }),
+    restore: (archivePath: string) => ipcRenderer.invoke('backup:restore', { archivePath })
+  },
+
+  // 本地 HTTP API（v0.9.4）
+  http: {
+    start: () => ipcRenderer.invoke('http:start'),
+    stop: () => ipcRenderer.invoke('http:stop'),
+    getStatus: () => ipcRenderer.invoke('http:getStatus')
+  },
+
+  // Windows Hello（v0.9.4 认证能力）
+  auth: {
+    verifyHello: (message?: string) => ipcRenderer.invoke('auth:verifyHello', message)
   },
 
   // 数据库路径
@@ -123,8 +144,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getExportStatsFast: () => ipcRenderer.invoke('sns:getExportStatsFast'),
     getUserPostStats: (username: string) => ipcRenderer.invoke('sns:getUserPostStats', username),
     debugResource: (url: string) => ipcRenderer.invoke('sns:debugResource', url),
-    proxyImage: (payload: string | { url: string; key?: string | number }) =>
+    proxyImage: (payload: string | { url: string; key?: string | number; skipFailedCache?: boolean }) =>
       ipcRenderer.invoke('sns:proxyImage', payload),
+    warmupTimeline: () => ipcRenderer.invoke('sns:warmupTimeline'),
+    peekNewestTimeline: () => ipcRenderer.invoke('sns:peekNewestTimeline'),
     downloadImage: (payload: { url: string; key?: string | number }) =>
       ipcRenderer.invoke('sns:downloadImage', payload),
     exportTimeline: (options: any) => ipcRenderer.invoke('sns:exportTimeline', options),
@@ -152,6 +175,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
     setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
     getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
+    getDailyActivity: (force?: boolean) => ipcRenderer.invoke('analytics:getDailyActivity', force),
+    getWordFrequency: (limit?: number, force?: boolean) => ipcRenderer.invoke('analytics:getWordFrequency', limit, force),
     clearCache: () => ipcRenderer.invoke('cache:clearAnalytics')
   },
 
@@ -167,6 +192,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('groupAnalytics:getGroupActiveHours', chatroomId, startTime, endTime),
     getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) =>
       ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime),
+    getGroupActivityHeatmap: (chatroomId: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupActivityHeatmap', chatroomId, startTime, endTime),
     getGroupMemberAnalytics: (chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) =>
       ipcRenderer.invoke('groupAnalytics:getGroupMemberAnalytics', chatroomId, memberUsername, startTime, endTime),
     getGroupMemberMessages: (chatroomId: string, memberUsername: string, options?: { startTime?: number; endTime?: number; limit?: number; cursor?: number }) =>
@@ -188,6 +215,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     captureCurrentWindow: () => ipcRenderer.invoke('annualReport:captureCurrentWindow'),
     onProgress: (callback: (payload: any) => void) => subscribe('annualReport:progress', callback),
     onAvailableYearsProgress: (callback: (payload: any) => void) => subscribe('annualReport:availableYearsProgress', callback)
+  },
+
+  // 双人报告（v0.9.4 新增：与好友的年度对话分析）
+  dualReport: {
+    generateReport: (friendUsername: string, year: number) => ipcRenderer.invoke('dualReport:generateReport', { friendUsername, year }),
+    onProgress: (callback: (payload: any) => void) => subscribe('dualReport:progress', callback)
   },
 
   // WeportAI（v0.8 聊天历史分析助手）

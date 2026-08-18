@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
-import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays } from 'lucide-react'
+import 'echarts-wordcloud'
+import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays, Radar as RadarIcon, CloudFog } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
 import { CountUp } from '../../components/CountUp'
 import { useColorMode } from '../../utils/colorMode'
-import { blueRamp, blueVerticalGradient } from '../../utils/echartsTheme'
+import { blueRamp, blueVerticalGradient, BLUE_STACK, MONO_STACK, CHART_TEXT, CHART_TEXT_DIM, CHART_GRID } from '../../utils/echartsTheme'
 import { animationCommon, axisCommon, baseChartTheme, tooltipCommon } from '../../utils/echartsTheme'
 
 interface ChatStatistics {
@@ -50,6 +51,16 @@ interface ContactRanking {
   lastMessageTime: number | null
 }
 
+interface DailyActivity {
+  daily: Record<string, number>
+  sentDaily: Record<string, number>
+}
+
+interface WordFreqItem {
+  word: string
+  count: number
+}
+
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 const MEDIA_LABELS: Array<{ key: keyof ChatStatistics; label: string; icon: React.ComponentType<{ size?: number | string }>; color: string }> = [
   { key: 'textMessages', label: '文字', icon: MessageSquareText, color: 'var(--accent)' },
@@ -73,8 +84,11 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
   const [timeDist, setTimeDist] = useState<TimeDistribution | null>(null)
   const [selfSent, setSelfSent] = useState<SelfSentDaily | null>(null)
   const [rankings, setRankings] = useState<ContactRanking[]>([])
-  const [excluded, setExcluded] = useState<string[]>([])
+const [excluded, setExcluded] = useState<string[]>([])
   const [excludeCandidates, setExcludeCandidates] = useState<Array<{ username: string; displayName: string; avatarUrl?: string }>>([])
+  const [dailyActivity, setDailyActivity] = useState<DailyActivity | null>(null)
+  const [wordFreq, setWordFreq] = useState<WordFreqItem[]>([])
+  const [wordFreqMeta, setWordFreqMeta] = useState<{ scannedMessages: number; textMessages: number } | null>(null)
   const [excludeSearch, setExcludeSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -83,13 +97,15 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
     setLoading(true)
     setError(null)
     try {
-      const [statsRes, timeRes, selfRes, rankRes, exclRes, candRes] = await Promise.all([
+      const [statsRes, timeRes, selfRes, rankRes, exclRes, candRes, dailyRes, wordRes] = await Promise.all([
         window.electronAPI.analytics.getOverallStatistics(force),
         window.electronAPI.analytics.getTimeDistribution(),
         window.electronAPI.analytics.getSelfSentDailyDistribution(undefined, undefined, force),
         window.electronAPI.analytics.getContactRankings(20, 0, 0),
         window.electronAPI.analytics.getExcludedUsernames(),
         window.electronAPI.analytics.getExcludeCandidates(),
+        window.electronAPI.analytics.getDailyActivity(force),
+        window.electronAPI.analytics.getWordFrequency(60, force),
       ])
       if (statsRes.success && statsRes.data) setStats(statsRes.data)
       else if (statsRes.error) setError(statsRes.error)
@@ -98,6 +114,11 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
       if (rankRes.success) setRankings(rankRes.data || [])
       if (exclRes.success) setExcluded(exclRes.data || [])
       if (candRes.success) setExcludeCandidates(candRes.data || [])
+      if (dailyRes.success && dailyRes.data) setDailyActivity(dailyRes.data)
+      if (wordRes.success && wordRes.data) {
+        setWordFreq(wordRes.data.items || [])
+        setWordFreqMeta({ scannedMessages: wordRes.data.scannedMessages, textMessages: wordRes.data.textMessages })
+      }
     } catch (e) {
       setError(String(e))
     } finally {
@@ -177,7 +198,7 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
     }
   }, [timeDist, colorMode])
 
-  const selfSentOption = useMemo(() => {
+const selfSentOption = useMemo(() => {
     const days = Object.keys(selfSent?.dailyDistribution || {}).sort()
     const data = days.map((d) => selfSent!.dailyDistribution[d])
     return {
@@ -198,6 +219,163 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
       ],
     }
   }, [selfSent, colorMode])
+
+  // ------------------------------------------------------------ 交流画像（雷达）
+  const radarOption = useMemo(() => {
+    if (!stats || !timeDist) return null
+    const total = Math.max(1, stats.totalMessages)
+    const typeCounts = stats.messageTypeCounts || {}
+    const share = (count: number) => Math.round((count / total) * 1000) / 10
+    const lateNight = [23, 0, 1, 2, 3, 4, 5].reduce((sum, h) => sum + (timeDist.hourlyDistribution[h] || 0), 0)
+    const indicators = [
+      { name: '文字', max: 100 },
+      { name: '图片', max: 100 },
+      { name: '语音', max: 100 },
+      { name: '视频', max: 100 },
+      { name: '表情', max: 100 },
+      { name: '深夜活跃', max: 100 },
+    ]
+    const values = [
+      share(typeCounts[1] || 0),
+      share(typeCounts[3] || 0),
+      share(typeCounts[34] || 0),
+      share(typeCounts[43] || 0),
+      share(typeCounts[47] || 0),
+      Math.round((lateNight / total) * 1000) / 10,
+    ]
+    const fill = blueVerticalGradient(colorMode)
+    return {
+      ...baseChartTheme(colorMode),
+      tooltip: {
+        ...tooltipCommon,
+        formatter: (params: any) => {
+          const p = params as { name: string; value: number }
+          return `${p.name}：<b>${p.value}%</b>`
+        },
+      },
+      radar: {
+        indicator: indicators,
+        radius: '64%',
+        center: ['50%', '54%'],
+        splitNumber: 4,
+        axisName: { color: CHART_TEXT, fontSize: 11 },
+        splitLine: { lineStyle: { color: CHART_GRID } },
+        splitArea: { areaStyle: { color: ['rgba(30,63,138,0.04)', 'rgba(30,63,138,0.08)'] } },
+        axisLine: { lineStyle: { color: CHART_GRID } },
+      },
+      series: [
+        {
+          type: 'radar' as const,
+          symbol: 'circle',
+          symbolSize: 4,
+          lineStyle: { color: blueRamp(0.35, colorMode), width: 2 },
+          itemStyle: { color: blueRamp(0.5, colorMode) },
+          areaStyle: { color: fill },
+          data: [{ name: '消息构成', value: values }],
+        },
+      ],
+    }
+  }, [stats, timeDist, colorMode])
+
+  // ------------------------------------------------------------ 全年活跃热力图
+  const calendarOption = useMemo(() => {
+    if (!dailyActivity || !stats) return null
+    const days = Object.keys(dailyActivity.daily).sort()
+    if (days.length === 0) return null
+    const values: Array<[string, number]> = days.map((d) => [d, dailyActivity.daily[d]])
+    const max = Math.max(1, ...values.map((v) => v[1]))
+
+    const end = new Date((stats.lastMessageTime || Math.floor(Date.now() / 1000)) * 1000)
+    end.setHours(0, 0, 0, 0)
+    const start = new Date(end)
+    start.setMonth(start.getMonth() - 11)
+    start.setDate(1)
+    const first = new Date(days[0])
+    const rangeStart = first < start ? first : start
+
+    const heatColors = colorMode === 'mono' ? MONO_STACK : BLUE_STACK
+    return {
+      ...baseChartTheme(colorMode),
+      tooltip: {
+        ...tooltipCommon,
+        formatter: (params: any) => {
+          const p = params as { value: [string, number] }
+          return `${p.value[0]}：<b>${p.value[1]}</b> 条`
+        },
+      },
+      calendar: {
+        range: [rangeStart.getFullYear() + '-' + (rangeStart.getMonth() + 1), end.getFullYear() + '-' + (end.getMonth() + 1)],
+        top: 28,
+        left: 48,
+        right: 16,
+        cellSize: ['auto', 13],
+        itemStyle: { color: 'rgba(30,63,138,0.06)', borderColor: CHART_GRID, borderWidth: 1 },
+        splitLine: { lineStyle: { color: CHART_GRID } },
+        dayLabel: { color: CHART_TEXT_DIM, fontSize: 10 },
+        monthLabel: { color: CHART_TEXT, fontSize: 11 },
+        yearLabel: { color: CHART_TEXT, fontSize: 11 },
+      },
+      visualMap: {
+        min: 0,
+        max,
+        calculable: false,
+        orient: 'horizontal',
+        left: 'center',
+        bottom: 0,
+        textStyle: { color: CHART_TEXT_DIM, fontSize: 10 },
+        inRange: { color: heatColors },
+      },
+      series: [
+        {
+          type: 'heatmap' as const,
+          coordinateSystem: 'calendar',
+          data: values,
+          itemStyle: { borderColor: CHART_GRID, borderWidth: 1, borderRadius: 2 },
+        },
+      ],
+    }
+  }, [dailyActivity, stats, colorMode])
+
+  // ------------------------------------------------------------ 高频词云
+  const wordCloudOption = useMemo(() => {
+    const max = Math.max(1, ...wordFreq.map((w) => w.count))
+    return {
+      ...baseChartTheme(colorMode),
+      tooltip: {
+        ...tooltipCommon,
+        formatter: (params: any) => {
+          const p = params as { name: string; value: number }
+          return `<b>${p.name}</b>：${p.value} 次`
+        },
+      },
+      series: [
+        {
+          type: 'wordCloud' as const,
+          shape: 'circle' as const,
+          gridSize: 8,
+          sizeRange: [12, 42],
+          rotationRange: [0, 0],
+          rotationStep: 0,
+          width: '100%',
+          height: '100%',
+          drawOutOfBound: false,
+          textStyle: {
+            fontFamily: 'inherit',
+            fontWeight: 'bold' as const,
+            color: (word: any) => blueRamp((word.value || 0) / max, colorMode),
+          },
+          emphasis: {
+            textStyle: {
+              color: colorMode === 'mono' ? '#f4f4f5' : '#ffffff',
+              textShadowBlur: 8,
+              textShadowColor: 'rgba(0,0,0,0.5)',
+            },
+          },
+          data: wordFreq.map((w) => ({ name: w.word, value: w.count })),
+        },
+      ],
+    }
+  }, [wordFreq, colorMode])
 
   const toggleExclude = async (username: string) => {
     const next = excluded.includes(username) ? excluded.filter((u) => u !== username) : [...excluded, username]
@@ -289,7 +467,7 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
         </div>
       </div>
 
-      {/* 媒体构成 */}
+{/* 媒体构成 */}
       <div className="v09-panel">
         <div className="v09-panel-head">
           <h3>消息类型构成</h3>
@@ -315,6 +493,56 @@ export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () 
             )
           })}
         </div>
+      </div>
+
+      {/* 交流画像 + 全年活跃热力图 */}
+      <div className="chart-grid-2">
+        <div className="v09-panel">
+          <div className="v09-panel-head">
+            <h3>
+              <RadarIcon size={14} />
+              交流画像
+            </h3>
+            <span className="v09-sub">消息构成占比 · 深夜为 23:00–05:59</span>
+          </div>
+          {radarOption ? (
+            <ReactECharts option={radarOption} style={{ height: 240 }} notMerge />
+          ) : (
+            <div className="wp-loading" style={{ height: 240 }}>暂无数据</div>
+          )}
+        </div>
+        <div className="v09-panel">
+          <div className="v09-panel-head">
+            <h3>
+              <CalendarDays size={14} />
+              活跃日历
+            </h3>
+            <span className="v09-sub">每日消息量 · 最多展示近 12 个月</span>
+          </div>
+          {calendarOption ? (
+            <ReactECharts option={calendarOption} style={{ height: 280 }} notMerge />
+          ) : (
+            <div className="wp-loading" style={{ height: 280 }}>暂无数据</div>
+          )}
+        </div>
+      </div>
+
+      {/* 高频词云 */}
+      <div className="v09-panel">
+        <div className="v09-panel-head">
+          <h3>
+            <CloudFog size={14} />
+            高频词云
+          </h3>
+          <span className="v09-sub">
+            文本消息热词 · 扫描 {wordFreqMeta ? formatNumber(wordFreqMeta.scannedMessages) : '–'} 条
+          </span>
+        </div>
+        {wordFreq.length > 0 ? (
+          <ReactECharts option={wordCloudOption} style={{ height: 300 }} notMerge />
+        ) : (
+          <div className="wp-loading" style={{ height: 300 }}>暂无文本消息</div>
+        )}
       </div>
 
       {/* 时段分布 */}
