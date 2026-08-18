@@ -216,6 +216,59 @@ persisted (config:set is swallowed) — keep it personal-info free.
 screens (sns / analytics-hub / analytics-global / annual-report /
 analytics-group / settings) — 12 captures total, all asserted non-blank.
 
+## v0.9.5 Modules — MCP 服务 / 分析新图表
+
+**MCP server (`electron/services/mcpService.ts`, do not regress):**
+- Streamable HTTP on `127.0.0.1:{mcpPort}` (default 5032, HTTP API is 5031),
+  Bearer auth via `mcpToken` (auto-generated 32-hex, safeStorage-encrypted,
+  fallback `httpApiToken`). 13 read-only tools proxying existing read-only
+  services (`chatService` / `snsService` / `analyticsService` /
+  `groupAnalyticsService`); no write/send/delete capability.
+- **Per-session `McpServer` instance is mandatory** — `Protocol.connect()`
+  throws "Already connected" after the first transport, so a single shared
+  server cannot serve two sessions. `createSession()` builds a fresh
+  `McpServer` + `StreamableHTTPServerTransport` per session and registers it in
+  the sessions map from the transport's `onsessioninitialized` callback (the
+  session id is generated lazily inside the first `handleRequest` — inserting
+  into the map earlier stores key `undefined` and silently loses the session).
+- `transport.handleRequest(req, res, body)` expects `parsedBody` to be an
+  **already-JSON-parsed object** (body-parser semantics), not a raw string —
+  passing a string yields `-32700 Parse error` from the SDK.
+- `client.request(request, resultSchema)` (bridge side) requires a real
+  `resultSchema` — undefined crashes with `Cannot read properties of undefined
+  (reading '_zod')` inside the SDK's response validation. The bridge passes
+  `z.any()` to forward arbitrary methods transparently.
+- Config keys (in `ConfigSchema` + defaults + `ENCRYPTED_STRING_KEYS` for
+  token): `mcpEnabled` (default true), `mcpPort` 5032, `mcpHost` 127.0.0.1,
+  `mcpToken` (''). IPC `mcp:getStatus`; `mcpService.stop()` in
+  `shutdownAppServices`; auto-start next to the httpService block in
+  `startApp`.
+- **stdio bridge packaging (do not regress):** `scripts/mcp-stdio-bridge.mjs`
+  (dev) is bundled by `scripts/prepare-mcp-bundle.cjs` (esbuild, CJS,
+  `--target=node18`) to `resources/mcp/mcp-stdio-bridge.cjs` — the AI host runs
+  it under its **own system Node**, so the SDK/zod deps must be inside the
+  single-file bundle, no NODE_PATH/ESM reliance. The prep script runs in
+  `build` / `build:dir` / `build:mac` / `package` before electron-builder, and
+  `resources/mcp → mcp` must stay in BOTH win and mac `extraResources`. The
+  shebang is prepended manually after the build (`--banner:js` puts it on line
+  2 → SyntaxError).
+- Claude Desktop config: `{"mcpServers": {"weport": {"command": "<install>/resources/mcp/mcp-stdio-bridge.cjs", "args": ["--port", "5032", "--token", "<mcpToken>"]}}}`; token is in the settings store (safeStorage-encrypted on disk) or via the settings UI when exposed.
+
+**v0.9.5 analytics charts (do not regress):**
+- Global: 交流画像 radar (6 dims incl. 深夜活跃 23:00–05:59), 活跃日历 calendar
+  (rolling ≤12 months, visualMap), 高频词云 wordCloud (`echarts-wordcloud@2.1.0`
+  — verified compatible with ECharts 6.1.0, registers on `echarts/lib/echarts`).
+- Group: 画像 tab (member radar + 24×7 heatmap), member dialog word cloud
+  (Top 40). Data: `analyticsService.getDailyActivity(force)` /
+  `getWordFrequency(limit, force)` (150k scanned-text cap, 10-min cache) /
+  `groupAnalyticsService.getGroupActivityHeatmap(...)` (7×24, 5-min cache +
+  in-flight dedup); tokenizer/stopwords shared in
+  `electron/services/wordFrequency.ts`.
+- Demo/QA: `demoAnalyticsData`/`demoGroupData` gained `dailyActivity` /
+  `wordFrequency` / `activityHeatmap` / member `wordCloud`; dump probes
+  `globalV095` (charts ≥ 7), `profileV095` (radar+heatmap), `memberWordCloudV095`.
+  Installed with `--legacy-peer-deps` (`echarts-wordcloud` peers `echarts ^5`).
+
 ## Export Layout
 
 GUI export (`appMain.ts` `export:exportSessions`) writes to `{out}/{FMT}/`
@@ -276,11 +329,31 @@ two-frame-identical settle check, so README popup.png can't be a fading frame.
   (used to backfill a mac installer onto an already-published version)
 - `.github/workflows/visual-smoke.yml` — runs the capture harness on push/PR
 
+## Releases
+
+When releasing a new version on GitHub, write the release body as
+**concise, natural Chinese bullet points** — short plain bullets, no English
+fluff, no boilerplate. Create the release with `gh release create` BEFORE the
+CI publish step finishes: release.yml passes `body_path: RELEASE_NOTES.md` with
+default `update_release_body: false`, so a pre-created release keeps its body
+and CI only attaches installers. Tag name must match `package.json` version
+(`v0.9.5` ↔ `0.9.5`) — the workflow fails otherwise.
+
 ## Reference Repos (on-disk only, never shipped)
 
-- `WeFlow/` — the upstream Electron app (source of the notification stack)
-- `RevokeMsgPatcher/` — reference for the old v0.6.x Weixin.dll patching
-  (superseded by per-session WCDB anti-revoke triggers)
-- `wechattweak/` — reference for macOS WeChat binary patching (sunnyyoung,
-  AGPL-3.0); not merged — the WCDB trigger approach covers macOS too
-  (`libwcdb_api.dylib` exports the anti-revoke API)
+All reference clones live under `reference-projects/` (git-ignored, see
+`reference-projects/README.md` for the index and per-repo notes):
+
+- `reference-projects/WeFlow/` — the upstream Electron app (source of the
+  notification stack; ported service layer)
+- `reference-projects/Reasonix/` — DeepSeek-Reasonix (Go coding agent engine;
+  source of the cache-aware context maintenance pattern in
+  `weportAiService.ts`)
+- `reference-projects/RevokeMsgPatcher/` — reference for the old v0.6.x
+  Weixin.dll patching (superseded by per-session WCDB anti-revoke triggers)
+- `reference-projects/wechattweak/` — reference for macOS WeChat binary
+  patching (sunnyyoung, AGPL-3.0); not merged — the WCDB trigger approach
+  covers macOS too (`libwcdb_api.dylib` exports the anti-revoke API)
+- `reference-projects/<others>/` — third-party WeChat tools cloned for study
+  (chat history exporters, moments/朋友圈 analyzers, bots/auto-repliers, …);
+  read-only, never shipped, never imported by the build

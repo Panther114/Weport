@@ -1,6 +1,7 @@
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
+import { topWordFrequency, tokenizeText, WordFrequencyItem } from './wordFrequency'
 import { join } from 'path'
 import { readFile, writeFile, rm } from 'fs/promises'
 import { app } from 'electron'
@@ -49,11 +50,24 @@ export interface ContactRanking {
   lastMessageTime: number | null
 }
 
+export interface DailyActivity {
+  daily: Record<string, number>
+  sentDaily: Record<string, number>
+}
+
+export interface WordFrequencyResult {
+  items: WordFrequencyItem[]
+  scannedMessages: number
+  textMessages: number
+}
+
 class AnalyticsService {
   private configService: ConfigService
   private fallbackAggregateCache: { key: string; data: any; updatedAt: number } | null = null
   private aggregateCache: { key: string; data: any; updatedAt: number } | null = null
   private selfSentDailyCache: { key: string; data: SelfSentDailyDistribution; updatedAt: number } | null = null
+  private dailyActivityCache: { key: string; data: DailyActivity; updatedAt: number } | null = null
+  private wordFrequencyCache: { key: string; data: WordFrequencyResult; updatedAt: number } | null = null
   private aggregatePromise: { key: string; promise: Promise<{ success: boolean; data?: any; source?: string; error?: string }> } | null = null
 
   constructor() {
@@ -842,10 +856,124 @@ class AnalyticsService {
     }
   }
 
+  /**
+   * 每日活跃度（日历热力图数据源）。
+   * 原生 DLL 聚合不保证带 daily 明细，缺失时退化为游标全量扫描（结果缓存 5 分钟）。
+   */
+  async getDailyActivity(force = false): Promise<{ success: boolean; data?: DailyActivity; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      if (sessionInfo.usernames.length === 0) {
+        return { success: false, error: '未找到消息会话' }
+      }
+
+      const cacheKey = `daily-activity-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0)}`
+      if (force) this.dailyActivityCache = null
+
+      if (!force && this.dailyActivityCache && this.dailyActivityCache.key === cacheKey) {
+        if (Date.now() - this.dailyActivityCache.updatedAt < 5 * 60 * 1000) {
+          return { success: true, data: this.dailyActivityCache.data }
+        }
+      }
+
+      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0, undefined, force)
+      const d = result.data
+      if (
+        result.success &&
+        d &&
+        typeof d.daily === 'object' &&
+        d.daily !== null &&
+        Object.keys(d.daily).length > 0
+      ) {
+        const data: DailyActivity = {
+          daily: this.sortDailyDistribution(d.daily),
+          sentDaily: this.sortDailyDistribution(d.sentDaily || {}),
+        }
+        this.dailyActivityCache = { key: cacheKey, data, updatedAt: Date.now() }
+        return { success: true, data }
+      }
+
+      // 原生聚合不提供每日明细 → 游标扫描（复用 computeAggregateByCursor 的口径）
+      const computed = await this.computeAggregateByCursor(sessionInfo.usernames)
+      const data: DailyActivity = {
+        daily: this.sortDailyDistribution(computed.daily),
+        sentDaily: this.sortDailyDistribution(computed.sentDaily),
+      }
+      this.dailyActivityCache = { key: cacheKey, data, updatedAt: Date.now() }
+      return { success: true, data }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 全局高频词云。游标扫描文本消息，抽样上限 15 万条（达上限即停，
+   * scannedMessages 标记实际扫描量）。结果缓存 10 分钟。
+   */
+  async getWordFrequency(limit = 60, force = false): Promise<{ success: boolean; data?: WordFrequencyResult; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      if (sessionInfo.usernames.length === 0) {
+        return { success: false, error: '未找到消息会话' }
+      }
+
+      const cacheKey = `word-freq-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0)}-${limit}`
+      if (force) this.wordFrequencyCache = null
+
+      if (!force && this.wordFrequencyCache && this.wordFrequencyCache.key === cacheKey) {
+        if (Date.now() - this.wordFrequencyCache.updatedAt < 10 * 60 * 1000) {
+          return { success: true, data: this.wordFrequencyCache.data }
+        }
+      }
+
+      const MAX_SCANNED = 150000
+      const textTypes = new Set([1, 244813135921])
+      const counts = new Map<string, number>()
+      let scannedMessages = 0
+      let textMessages = 0
+
+      for (const sessionId of sessionInfo.usernames) {
+        if (scannedMessages >= MAX_SCANNED) break
+        await this.iterateSessionMessages(sessionId, (row) => {
+          if (scannedMessages >= MAX_SCANNED) return
+          const localType = parseInt(row.local_type || row.type || '0', 10)
+          if (!textTypes.has(localType)) return
+          scannedMessages += 1
+
+          let content = String(row.StrContent || row.message_content || row.content || row.msg_content || '')
+          if (!content) return
+          content = content.replace(/^\s*([a-zA-Z0-9_@-]{4,}):(?!\/\/)\s*(?:\r?\n|<br\s*\/?>)/i, '')
+          textMessages += 1
+          for (const token of tokenizeText(content)) {
+            counts.set(token, (counts.get(token) || 0) + 1)
+          }
+        })
+      }
+
+      const data: WordFrequencyResult = {
+        items: topWordFrequency(counts, limit),
+        scannedMessages,
+        textMessages,
+      }
+      this.wordFrequencyCache = { key: cacheKey, data, updatedAt: Date.now() }
+      return { success: true, data }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async clearCache(): Promise<{ success: boolean; error?: string }> {
     this.aggregateCache = null
     this.fallbackAggregateCache = null
     this.selfSentDailyCache = null
+    this.dailyActivityCache = null
+    this.wordFrequencyCache = null
     this.aggregatePromise = null
     try {
       await rm(this.getCacheFilePath(), { force: true })

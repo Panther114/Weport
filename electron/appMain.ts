@@ -40,6 +40,7 @@ import { exportService } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { backupService } from './services/backupService'
 import { httpService } from './services/httpService'
+import { mcpService } from './services/mcpService'
 import { windowsHelloService } from './services/windowsHelloService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
@@ -1847,6 +1848,7 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
+  ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
   ipcMain.handle('auth:verifyHello', (_e, message: string) => windowsHelloService.verify(String(message || '请验证您的身份')))
 
   // 数据库路径
@@ -2162,7 +2164,10 @@ function registerIpcHandlers() {
   ipcMain.handle('analytics:getExcludedUsernames', () => analyticsService.getExcludedUsernames())
   ipcMain.handle('analytics:setExcludedUsernames', (_e, usernames: string[]) =>
     analyticsService.setExcludedUsernames((usernames || []).map(String)))
-  ipcMain.handle('analytics:getExcludeCandidates', () => analyticsService.getExcludeCandidates())
+ipcMain.handle('analytics:getExcludeCandidates', () => analyticsService.getExcludeCandidates())
+  ipcMain.handle('analytics:getDailyActivity', (_e, force?: boolean) => analyticsService.getDailyActivity(force === true))
+  ipcMain.handle('analytics:getWordFrequency', (_e, limit?: number, force?: boolean) =>
+    analyticsService.getWordFrequency(Number(limit) || 60, force === true))
   ipcMain.handle('cache:clearAnalytics', () => analyticsService.clearCache())
 
   // -------------------------------------------------------------------------
@@ -2179,8 +2184,10 @@ function registerIpcHandlers() {
     groupAnalyticsService.getGroupMessageRanking(String(chatroomId || ''), limit, startTime, endTime))
   ipcMain.handle('groupAnalytics:getGroupActiveHours', (_e, chatroomId: string, startTime?: number, endTime?: number) =>
     groupAnalyticsService.getGroupActiveHours(String(chatroomId || ''), startTime, endTime))
-  ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, startTime?: number, endTime?: number) =>
+ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, startTime?: number, endTime?: number) =>
     groupAnalyticsService.getGroupMediaStats(String(chatroomId || ''), startTime, endTime))
+  ipcMain.handle('groupAnalytics:getGroupActivityHeatmap', (_e, chatroomId: string, startTime?: number, endTime?: number) =>
+    groupAnalyticsService.getGroupActivityHeatmap(String(chatroomId || ''), startTime, endTime))
   ipcMain.handle('groupAnalytics:getGroupMemberAnalytics', (_e, chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) =>
     groupAnalyticsService.getGroupMemberAnalytics(String(chatroomId || ''), String(memberUsername || ''), startTime, endTime))
   ipcMain.handle('groupAnalytics:getGroupMemberMessages', (_e, chatroomId: string, memberUsername: string, options?: { startTime?: number; endTime?: number; limit?: number; cursor?: number }) =>
@@ -2796,11 +2803,81 @@ function demoAnalyticsData(): Record<string, unknown> {
       { username: 'wxid_zhaomin', displayName: '赵敏', avatarUrl: demoSnsAvatarUrl('赵敏'), messageCount: 3188, sentCount: 1602, receivedCount: 1586, lastMessageTime: Math.floor(Date.now() / 1000) },
       { username: 'wxid_liuyang', displayName: '刘洋', avatarUrl: demoSnsAvatarUrl('刘洋'), messageCount: 2754, sentCount: 1301, receivedCount: 1453, lastMessageTime: Math.floor(Date.now() / 1000) },
     ],
-    excluded: ['gh_official_demo'],
+excluded: ['gh_official_demo'],
     candidates: [
       { username: 'gh_official_demo', displayName: '演示公众号', avatarUrl: '' },
       { username: 'wxid_liuyang', displayName: '刘洋', avatarUrl: demoSnsAvatarUrl('刘洋') },
     ],
+    dailyActivity: {
+      daily,
+      sentDaily: daily,
+    },
+    wordFrequency: {
+      items: [
+        { word: '明天', count: 1284 },
+        { word: '项目', count: 1105 },
+        { word: '方案', count: 942 },
+        { word: '会议', count: 861 },
+        { word: '版本', count: 743 },
+        { word: '发布', count: 689 },
+        { word: '测试', count: 632 },
+        { word: '代码', count: 590 },
+        { word: '客户', count: 552 },
+        { word: '需求', count: 521 },
+        { word: '问题', count: 498 },
+        { word: '工作', count: 475 },
+        { word: '周末', count: 441 },
+        { word: '吃饭', count: 420 },
+        { word: '电影', count: 398 },
+        { word: '旅行', count: 385 },
+        { word: '健康', count: 366 },
+        { word: '读书', count: 342 },
+        { word: '跑步', count: 310 },
+        { word: '音乐', count: 287 },
+        { word: '学习', count: 265 },
+        { word: '效率', count: 244 },
+        { word: '复盘', count: 230 },
+        { word: '目标', count: 205 },
+        { word: '季度', count: 188 },
+        { word: '汇报', count: 175 },
+        { word: '出差', count: 162 },
+        { word: '团建', count: 150 },
+        { word: '健身', count: 138 },
+        { word: '早睡', count: 126 },
+        { word: '沟通', count: 118 },
+        { word: '协作', count: 109 },
+        { word: '接口', count: 101 },
+        { word: '上线', count: 96 },
+        { word: '排期', count: 88 },
+        { word: '验收', count: 82 },
+        { word: '文档', count: 79 },
+        { word: '数据', count: 71 },
+        { word: '微信', count: 66 },
+        { word: '消息', count: 62 },
+        { word: '群聊', count: 58 },
+        { word: '朋友圈', count: 55 },
+        { word: '年度', count: 51 },
+        { word: '报告', count: 49 },
+        { word: '分析', count: 46 },
+        { word: '导出', count: 42 },
+        { word: '备份', count: 39 },
+        { word: '清理', count: 37 },
+        { word: '缓存', count: 34 },
+        { word: '升级', count: 31 },
+        { word: '稳定', count: 28 },
+        { word: '流畅', count: 25 },
+        { word: '点赞', count: 22 },
+        { word: '评论', count: 19 },
+        { word: '转发', count: 16 },
+        { word: '早安', count: 14 },
+        { word: '晚安', count: 12 },
+        { word: '加油', count: 10 },
+        { word: '辛苦', count: 9 },
+        { word: '感谢', count: 8 },
+      ],
+      scannedMessages: 48213,
+      textMessages: 32108,
+    },
   }
 }
 
@@ -2825,8 +2902,14 @@ function demoGroupData(): Record<string, unknown> {
     member('wxid_chenchen', '陈晨', 902, false, false),
     member('wxid_zhaomin', '赵敏', 640),
   ]
-  const hourly: Record<number, number> = {}
+const hourly: Record<number, number> = {}
   for (let h = 0; h < 24; h += 1) hourly[h] = Math.round(80 * Math.exp(-((h - 20) ** 2) / 40) + 5)
+  const heatmap: number[][] = Array.from({ length: 7 }, (_, d) =>
+    Array.from({ length: 24 }, (_, h) => {
+      const base = Math.round(70 * Math.exp(-((h - 20) ** 2) / 45) + 6)
+      return base * (d >= 1 && d <= 5 ? 1 : 0.55) + (Math.random() < 0.25 ? Math.round(Math.random() * 10) : 0)
+    }),
+  )
   return {
     groups: [
       { username: 'family@chatroom', displayName: '一家人', memberCount: 6, avatarUrl: demoSnsAvatarUrl('家') },
@@ -2836,6 +2919,7 @@ function demoGroupData(): Record<string, unknown> {
     members,
     ranking: members.map((m) => ({ member: m, messageCount: m.messageCount as number })),
     activeHours: { hourlyDistribution: hourly },
+    activityHeatmap: { data: heatmap, total: 9163 },
     mediaStats: {
       typeCounts: [
         { type: 1, name: '文字', count: 6120 },
@@ -2866,11 +2950,53 @@ function demoGroupData(): Record<string, unknown> {
         { phrase: '辛苦了', count: 96 },
         { phrase: '这个方案不错', count: 51 },
       ],
-      commonEmojis: [
+commonEmojis: [
         { emoji: '😄', count: 88 },
         { emoji: '👍', count: 76 },
         { emoji: '🙏', count: 44 },
         { emoji: '😅', count: 39 },
+      ],
+      wordCloud: [
+        { word: '方案', count: 132 },
+        { word: '项目', count: 118 },
+        { word: '会议', count: 96 },
+        { word: '版本', count: 84 },
+        { word: '发布', count: 71 },
+        { word: '测试', count: 66 },
+        { word: '代码', count: 58 },
+        { word: '客户', count: 49 },
+        { word: '需求', count: 45 },
+        { word: '排期', count: 38 },
+        { word: '验收', count: 33 },
+        { word: '文档', count: 29 },
+        { word: '数据', count: 26 },
+        { word: '接口', count: 24 },
+        { word: '上线', count: 21 },
+        { word: '复盘', count: 18 },
+        { word: '效率', count: 16 },
+        { word: '沟通', count: 14 },
+        { word: '协作', count: 12 },
+        { word: '目标', count: 10 },
+        { word: '季度', count: 9 },
+        { word: '汇报', count: 8 },
+        { word: '出差', count: 7 },
+        { word: '团建', count: 6 },
+        { word: '健身', count: 5 },
+        { word: '读书', count: 5 },
+        { word: '电影', count: 4 },
+        { word: '旅行', count: 4 },
+        { word: '音乐', count: 3 },
+        { word: '跑步', count: 3 },
+        { word: '学习', count: 3 },
+        { word: '早睡', count: 2 },
+        { word: '周末', count: 2 },
+        { word: '吃饭', count: 2 },
+        { word: '健康', count: 2 },
+        { word: '工作', count: 2 },
+        { word: '问题', count: 1 },
+        { word: '微信', count: 1 },
+        { word: '消息', count: 1 },
+        { word: '群聊', count: 1 },
       ],
     },
     memberMessages: {
@@ -3043,14 +3169,23 @@ function installV09DemoHandlers() {
   override('analytics:getContactRankings', () => ({ success: true, data: analytics.rankings }))
   override('analytics:getExcludedUsernames', () => ({ success: true, data: analytics.excluded }))
   override('analytics:setExcludedUsernames', (_e, usernames: string[]) => ({ success: true, data: usernames }))
-  override('analytics:getExcludeCandidates', () => ({ success: true, data: analytics.candidates }))
+override('analytics:getExcludeCandidates', () => ({ success: true, data: analytics.candidates }))
+  override('analytics:getDailyActivity', () => ({ success: true, data: analytics.dailyActivity }))
+  override('analytics:getWordFrequency', (_e, limit?: number) => ({
+    success: true,
+    data: {
+      ...(analytics.wordFrequency as Record<string, unknown>),
+      items: ((analytics.wordFrequency as any)?.items || []).slice(0, Number(limit) || 60),
+    },
+  }))
   override('cache:clearAnalytics', () => ({ success: true }))
 
   // 群聊分析
   override('groupAnalytics:getGroupChats', () => ({ success: true, data: group.groups }))
   override('groupAnalytics:getGroupMembersPanelData', () => ({ success: true, data: group.members }))
   override('groupAnalytics:getGroupMessageRanking', () => ({ success: true, data: group.ranking }))
-  override('groupAnalytics:getGroupActiveHours', () => ({ success: true, data: group.activeHours }))
+override('groupAnalytics:getGroupActiveHours', () => ({ success: true, data: group.activeHours }))
+  override('groupAnalytics:getGroupActivityHeatmap', () => ({ success: true, data: group.activityHeatmap }))
   override('groupAnalytics:getGroupMediaStats', () => ({ success: true, data: group.mediaStats }))
   override('groupAnalytics:getGroupMemberAnalytics', () => ({ success: true, data: group.memberAnalytics }))
   override('groupAnalytics:getGroupMemberMessages', () => ({ success: true, data: group.memberMessages }))
@@ -3246,10 +3381,29 @@ async function runV09DumpMode() {
     rankingNames: '.ranking-name',
     excludeItems: '.exclude-item',
   })
-  const globalDom = results.global as Record<string, any>
-  const globalOk = (globalDom.statCards?.count ?? 0) >= 4 && (globalDom.charts?.count ?? 0) >= 4 && (globalDom.rankingRows?.count ?? 0) >= 3
-  log(`global checks: statCards>=4 charts>=4 ranking>=3 → ${globalOk}`)
-  if (!globalOk) { results.fail = 'global analytics assertions failed'; app.exit(1); return }
+const globalDom = results.global as Record<string, any>
+  const globalV095 = await wc.executeJavaScript(`
+    (() => {
+      const titles = Array.from(document.querySelectorAll('.v09-panel-head h3')).map((x) => x.textContent.trim());
+      return {
+        hasRadar: titles.includes('交流画像'),
+        hasCalendar: titles.includes('活跃日历'),
+        hasWordCloud: titles.includes('高频词云'),
+        chartCount: document.querySelectorAll('.echarts-for-react').length,
+      };
+    })()
+  `)
+  log(`globalV095 = ${JSON.stringify(globalV095)}`)
+  results.globalV095 = globalV095
+  const globalOk =
+    (globalDom.statCards?.count ?? 0) >= 4 &&
+    (globalDom.charts?.count ?? 0) >= 7 &&
+    (globalDom.rankingRows?.count ?? 0) >= 3 &&
+    globalV095?.hasRadar === true &&
+    globalV095?.hasCalendar === true &&
+    globalV095?.hasWordCloud === true
+  log(`global checks: statCards>=4 charts>=7 ranking>=3 radar+calendar+wordcloud → ${globalOk}`)
+  if (!globalOk) { results.fail = 'global analytics assertions failed'; log('FAIL: 全局分析断言失败（含 v0.9.5 新增面板）'); app.exit(1); return }
 
   // 4) 年度报告
   await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.chip')).find((x) => x.textContent.includes('年度报告')); b?.click(); return !!b; })()`)
@@ -3301,10 +3455,30 @@ async function runV09DumpMode() {
     tabs: '.group-tabs .chip',
     memberBar: '.member-bar',
   })
-  const groupDetailDom = results.groupDetail as Record<string, any>
+const groupDetailDom = results.groupDetail as Record<string, any>
   const groupOk = (groupDetailDom.memberRows?.count ?? 0) >= 4 && (groupDetailDom.tabs?.count ?? 0) >= 4
   log(`group checks: members>=4 tabs>=4 → ${groupOk}`)
-  if (!groupOk) { results.fail = 'group detail assertions failed'; app.exit(1); return }
+  if (!groupOk) { results.fail = 'group detail assertions failed'; log('FAIL: 群聊详情断言失败'); app.exit(1); return }
+
+  // 5.5) 群聊画像页签：雷达 + 24×7 热力图（v0.9.5）
+  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.group-tabs .chip')).find((x) => x.textContent.includes('画像')); b?.click(); return !!b; })()`)
+  await sleep(2200)
+  const profileV095 = await wc.executeJavaScript(`
+    (() => {
+      const titles = Array.from(document.querySelectorAll('.v09-panel-head h3')).map((x) => x.textContent.trim());
+      return {
+        hasRadar: titles.includes('交流画像'),
+        hasHeatmap: titles.includes('活跃热力图'),
+        chartCount: document.querySelectorAll('.echarts-for-react').length,
+      };
+    })()
+  `)
+  log(`profileV095 = ${JSON.stringify(profileV095)}`)
+  results.profileV095 = profileV095
+  const profileOk = profileV095?.hasRadar === true && profileV095?.hasHeatmap === true && (profileV095?.chartCount ?? 0) >= 2
+  if (!profileOk) { results.fail = 'group profile tab assertions failed'; log('FAIL: 群聊画像页签断言失败'); app.exit(1); return }
+  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.group-tabs .chip')).find((x) => x.textContent.includes('成员')); b?.click(); return !!b; })()`)
+  await sleep(1000)
 
   // 6) 成员画像对话框
   await wc.executeJavaScript(`(() => { const r = document.querySelector('.group-member-row'); r?.click(); return !!r; })()`)
@@ -3318,8 +3492,21 @@ async function runV09DumpMode() {
     exportBtn: '.member-dialog .ghost-btn',
   })
   const memberDom = results.memberDialog as Record<string, any>
-  const memberOk = !!memberDom.dialog && (memberDom.dialogStats?.count ?? 0) >= 3 && (memberDom.messages?.count ?? 0) >= 5
-  log(`member dialog checks: dialog stats>=3 messages>=5 → ${memberOk}`)
+  const memberWordCloudCharts = await wc.executeJavaScript(`
+    (() => {
+      const titles = Array.from(document.querySelectorAll('.member-dialog .v09-panel-head h3')).map((x) => x.textContent.trim());
+      return { hasWordCloud: titles.includes('高频词云'), chartCount: document.querySelectorAll('.member-dialog .echarts-for-react').length };
+    })()
+  `)
+  log(`memberWordCloudV095 = ${JSON.stringify(memberWordCloudCharts)}`)
+  results.memberWordCloudV095 = memberWordCloudCharts
+  const memberOk =
+    !!memberDom.dialog &&
+    (memberDom.dialogStats?.count ?? 0) >= 3 &&
+    (memberDom.messages?.count ?? 0) >= 5 &&
+    memberWordCloudCharts?.hasWordCloud === true &&
+    (memberWordCloudCharts?.chartCount ?? 0) >= 2
+  log(`member dialog checks: dialog stats>=3 messages>=5 wordcloud → ${memberOk}`)
   await wc.executeJavaScript(`(() => { const b = document.querySelector('.member-dialog .wp-dialog-head .icon-btn-ghost'); b?.click(); return !!b; })()`)
   await sleep(800)
 
@@ -4719,6 +4906,12 @@ function startApp() {
       const host = String(configService.get('httpApiHost') || '127.0.0.1')
       void httpService.start(port, host)
     }
+    // 本地 MCP 服务（v0.9.5）：只读工具，Bearer token 认证，默认仅 127.0.0.1
+    if (configService.get('mcpEnabled') !== false) {
+      const port = Number(configService.get('mcpPort') || 5032)
+      const host = String(configService.get('mcpHost') || '127.0.0.1')
+      void mcpService.start(port, host)
+    }
 
     registerIpcHandlers()
     setupNotificationPipeline()
@@ -4890,9 +5083,11 @@ const shutdownAppServices = async (): Promise<void> => {
   shutdownPromise = (async () => {
     isAppQuitting = true
     if (updateCheckTimer) clearTimeout(updateCheckTimer)
-    try { tray?.destroy() } catch { /* noop */ }
+try { tray?.destroy() } catch { /* noop */ }
     tray = null
     destroyNotificationWindow()
+    try { await httpService.stop() } catch { /* noop */ }
+    try { await mcpService.stop() } catch { /* noop */ }
     messagePushService?.stop()
     for (const chatId of weportAiService.listChats().map((c) => c.id)) {
       weportAiService.abort(chatId)

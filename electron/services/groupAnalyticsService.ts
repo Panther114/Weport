@@ -5,6 +5,7 @@ import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import { avatarCacheService, protocolUrlToPath } from './avatarCacheService'
+import { tokenizeText, topWordFrequency } from './wordFrequency'
 import type { Message } from './chatService'
 import type { ChatStatistics } from './analyticsService'
 
@@ -41,6 +42,11 @@ export interface GroupActiveHours {
   hourlyDistribution: Record<number, number>
 }
 
+export interface GroupActivityHeatmap {
+  data: number[][]
+  total: number
+}
+
 export interface MediaTypeCount {
   type: number
   name: string
@@ -57,6 +63,7 @@ export interface GroupMemberAnalytics {
   timeDistribution: Record<number, number>
   commonPhrases?: Array<{ phrase: string; count: number }>
   commonEmojis?: Array<{ emoji: string; count: number }>
+  wordCloud?: Array<{ word: string; count: number }>
 }
 
 export interface GroupMemberMessagesPage {
@@ -1615,6 +1622,85 @@ class GroupAnalyticsService {
     }
   }
 
+  private readonly groupActivityHeatmapCacheTtlMs = 5 * 60 * 1000
+  private readonly groupActivityHeatmapCache = new Map<string, { updatedAt: number; data: GroupActivityHeatmap }>()
+  private readonly groupActivityHeatmapInFlight = new Map<string, Promise<{ success: boolean; data?: GroupActivityHeatmap; error?: string }>>()
+
+  /**
+   * 群聊 7×24 活跃热力图（周几 × 小时）。原生群聚合无二维矩阵，
+   * 需要游标全量扫描该群消息；结果缓存 5 分钟，并发去重。
+   */
+  async getGroupActivityHeatmap(chatroomId: string, startTime?: number, endTime?: number): Promise<{ success: boolean; data?: GroupActivityHeatmap; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success) return { success: false, error: conn.error }
+
+      const normalizedChatroomId = String(chatroomId || '').trim()
+      if (!normalizedChatroomId) return { success: false, error: '群聊ID不能为空' }
+
+      const cacheKey = `${normalizedChatroomId}:${this.normalizeCursorTimestamp(startTime || 0)}:${this.normalizeCursorTimestamp(endTime || 0)}`
+      const now = Date.now()
+      const cached = this.groupActivityHeatmapCache.get(cacheKey)
+      if (cached && now - cached.updatedAt < this.groupActivityHeatmapCacheTtlMs) {
+        return { success: true, data: cached.data }
+      }
+      const inFlight = this.groupActivityHeatmapInFlight.get(cacheKey)
+      if (inFlight) return inFlight
+
+      const promise = (async () => {
+        const matrix: number[][] = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0))
+        let total = 0
+        const cursorResult = await this.openMemberMessageCursor(
+          normalizedChatroomId,
+          10000,
+          true,
+          startTime || 0,
+          endTime || 0
+        )
+        if (!cursorResult.success || !cursorResult.cursor) {
+          return { success: false, error: cursorResult.error || '创建群消息游标失败' }
+        }
+        const cursor = cursorResult.cursor
+        try {
+          while (true) {
+            const batch = await wcdbService.fetchMessageBatch(cursor)
+            if (!batch.success) return { success: false, error: batch.error || '获取群消息失败' }
+            const rows = Array.isArray(batch.rows) ? (batch.rows as Record<string, any>[]) : []
+            if (rows.length === 0) break
+            for (const row of rows) {
+              const createTime = this.normalizeCursorTimestamp(parseInt(row.CreateTime || row.create_time || row.createTime || row.msg_time || '0', 10))
+              if (!createTime) continue
+              if (startTime && createTime < startTime) continue
+              if (endTime && createTime > endTime) continue
+              const d = new Date(createTime * 1000)
+              matrix[d.getDay()][d.getHours()] += 1
+              total += 1
+            }
+            if (!batch.hasMore) break
+          }
+        } finally {
+          await wcdbService.closeMessageCursor(cursor)
+        }
+        const data: GroupActivityHeatmap = { data: matrix, total }
+        this.groupActivityHeatmapCache.set(cacheKey, { updatedAt: Date.now(), data })
+        if (this.groupActivityHeatmapCache.size > 80) {
+          const oldest = Array.from(this.groupActivityHeatmapCache.entries()).sort((a, b) => a[1].updatedAt - b[1].updatedAt)[0]
+          if (oldest) this.groupActivityHeatmapCache.delete(oldest[0])
+        }
+        return { success: true, data }
+      })()
+
+      this.groupActivityHeatmapInFlight.set(cacheKey, promise)
+      try {
+        return await promise
+      } finally {
+        this.groupActivityHeatmapInFlight.delete(cacheKey)
+      }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async getGroupMediaStats(chatroomId: string, startTime?: number, endTime?: number): Promise<{ success: boolean; data?: GroupMediaStats; error?: string }> {
     try {
       const conn = await this.ensureConnected()
@@ -1716,6 +1802,7 @@ class GroupAnalyticsService {
 
       const phraseCounts = new Map<string, number>()
       const emojiCounts = new Map<string, number>()
+      const wordCounts = new Map<string, number>()
 
       const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
 
@@ -1764,6 +1851,9 @@ class GroupAnalyticsService {
                     emojiCounts.set(em, (emojiCounts.get(em) || 0) + 1)
                   }
                 }
+                for (const token of tokenizeText(text)) {
+                  wordCounts.set(token, (wordCounts.get(token) || 0) + 1)
+                }
               }
             }
             else if (msgType === 3) stats.imageMessages++
@@ -1804,7 +1894,9 @@ class GroupAnalyticsService {
         .slice(0, 10)
         .map(([emoji, count]) => ({ emoji, count }))
 
-      return { success: true, data: { statistics: stats, timeDistribution: hourlyDistribution, commonPhrases, commonEmojis } }
+      const wordCloud = topWordFrequency(wordCounts, 40)
+
+      return { success: true, data: { statistics: stats, timeDistribution: hourlyDistribution, commonPhrases, commonEmojis, wordCloud } }
     } catch (e) {
       return { success: false, error: String(e) }
     }

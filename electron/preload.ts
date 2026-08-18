@@ -175,6 +175,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
     setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
     getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
+    getDailyActivity: (force?: boolean) => ipcRenderer.invoke('analytics:getDailyActivity', force),
+    getWordFrequency: (limit?: number, force?: boolean) => ipcRenderer.invoke('analytics:getWordFrequency', limit, force),
     clearCache: () => ipcRenderer.invoke('cache:clearAnalytics')
   },
 
@@ -190,6 +192,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('groupAnalytics:getGroupActiveHours', chatroomId, startTime, endTime),
     getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) =>
       ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime),
+    getGroupActivityHeatmap: (chatroomId: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:getGroupActivityHeatmap', chatroomId, startTime, endTime),
     getGroupMemberAnalytics: (chatroomId: string, memberUsername: string, startTime?: number, endTime?: number) =>
       ipcRenderer.invoke('groupAnalytics:getGroupMemberAnalytics', chatroomId, memberUsername, startTime, endTime),
     getGroupMemberMessages: (chatroomId: string, memberUsername: string, options?: { startTime?: number; endTime?: number; limit?: number; cursor?: number }) =>
