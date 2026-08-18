@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "0.9.5",
+  "version": "0.9.7",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -30,7 +30,6 @@
     "@vscode/sudo-prompt": "^9.3.2",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
-    "echarts-wordcloud": "^2.1.0",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.9",
     "exceljs": "^4.4.0",

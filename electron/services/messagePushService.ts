@@ -43,6 +43,7 @@ const PUSH_CONFIG_KEYS = new Set([
   'messagePushEnabled',
   'messagePushFilterMode',
   'messagePushFilterList',
+  'antiRevokeAutoApplyNewGroups',
   'dbPath',
   'decryptKey',
   'myWxid'
@@ -67,14 +68,21 @@ export class MessagePushService {
   private readonly directRevokeScanLimit = 20
   /** 弹窗新鲜窗口：消息时间距今超过该秒数视为同步回填（不弹窗），避免打开微信后补弹旧消息 */
   private readonly freshPushWindowSeconds = 120
+  /** 防撤回自动应用只在显式开启后工作；新群聊发现后延迟处理，避免抢占消息同步。 */
+  private readonly antiRevokeNewGroupsDebounceMs = 1500
+  private readonly antiRevokeNewGroupsRetryDelaysMs = [5000, 15000, 60000]
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
+  private antiRevokeNewGroupsTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
+  private antiRevokeNewGroupsProcessing = false
   private rerunRequested = false
   private started = false
   private baselineReady = false
   private messageTableScanRequested = false
   private readonly pendingMessageTableNames = new Set<string>()
+  private readonly pendingAntiRevokeNewGroupsSessionIds = new Set<string>()
+  private readonly antiRevokeNewGroupsAttempts = new Map<string, number>()
   /** 兜底轮询：数据库监控管道失效时仍能发现新消息（30 秒一次，开销极低） */
   private fallbackPollTimer: ReturnType<typeof setInterval> | null = null
   private readonly fallbackPollIntervalMs = 30_000
@@ -178,6 +186,15 @@ export class MessagePushService {
 
   async handleConfigChanged(key: string): Promise<void> {
     if (!PUSH_CONFIG_KEYS.has(String(key || '').trim())) return
+    if (key === 'antiRevokeAutoApplyNewGroups' && !this.isAntiRevokeNewGroupsEnabled()) {
+      this.pendingAntiRevokeNewGroupsSessionIds.clear()
+      this.antiRevokeNewGroupsAttempts.clear()
+      if (this.antiRevokeNewGroupsTimer) {
+        clearTimeout(this.antiRevokeNewGroupsTimer)
+        this.antiRevokeNewGroupsTimer = null
+      }
+      return
+    }
     if (key === 'dbPath' || key === 'decryptKey' || key === 'myWxid') {
       this.resetRuntimeState()
       chatService.close()
@@ -194,6 +211,16 @@ export class MessagePushService {
     return this.configService.get('messagePushEnabled') === true
   }
 
+  /** The toggle is read at queue time so it never adds work to notifications. */
+  private isAntiRevokeNewGroupsEnabled(): boolean {
+    try {
+      const getConfigValue = (this.configService as unknown as { get: (key: string) => unknown }).get
+      return getConfigValue.call(this.configService, 'antiRevokeAutoApplyNewGroups') === true
+    } catch {
+      return false
+    }
+  }
+
   private resetRuntimeState(): void {
     this.sessionBaseline.clear()
     this.recentMessageKeys.clear()
@@ -204,6 +231,8 @@ export class MessagePushService {
     this.baselineReady = false
     this.messageTableScanRequested = false
     this.pendingMessageTableNames.clear()
+    this.pendingAntiRevokeNewGroupsSessionIds.clear()
+    this.antiRevokeNewGroupsAttempts.clear()
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer)
       this.debounceTimer = null
@@ -211,6 +240,10 @@ export class MessagePushService {
     if (this.messageTableRescanTimer) {
       clearTimeout(this.messageTableRescanTimer)
       this.messageTableRescanTimer = null
+    }
+    if (this.antiRevokeNewGroupsTimer) {
+      clearTimeout(this.antiRevokeNewGroupsTimer)
+      this.antiRevokeNewGroupsTimer = null
     }
   }
 
@@ -307,6 +340,11 @@ export class MessagePushService {
 
       const previousBaseline = new Map(this.sessionBaseline)
       const messageTableTargetSessionIds = this.resolveMessageTableTargetSessionIds(sessions, pendingMessageTableNames)
+
+      // Only a session absent from the previous sync is a newly observed
+      // group. Enqueue without awaiting so notification/session processing is
+      // never held up by anti-revoke trigger installation.
+      this.enqueueNewObservedAntiRevokeGroups(sessions, previousBaseline)
 
       const candidates = sessions.filter((session) => {
         const sessionId = String(session.username || '').trim()
@@ -416,6 +454,119 @@ export class MessagePushService {
     }
 
     return lastTimestamp > previous.lastTimestamp || unreadCount !== previous.unreadCount
+  }
+
+  private enqueueNewObservedAntiRevokeGroups(
+    sessions: ChatSession[],
+    previousBaseline: Map<string, SessionBaseline>
+  ): void {
+    if (!this.isAntiRevokeNewGroupsEnabled()) return
+
+    let queued = false
+    for (const session of sessions) {
+      const sessionId = String(session.username || '').trim()
+      if (!sessionId || !sessionId.toLowerCase().endsWith('@chatroom')) continue
+      if (previousBaseline.has(sessionId)) continue
+      if (this.pendingAntiRevokeNewGroupsSessionIds.has(sessionId)) continue
+      if (this.antiRevokeNewGroupsAttempts.has(sessionId)) continue
+
+      this.pendingAntiRevokeNewGroupsSessionIds.add(sessionId)
+      queued = true
+    }
+
+    if (queued) this.scheduleAntiRevokeNewGroupsApply()
+  }
+
+  private scheduleAntiRevokeNewGroupsApply(delayMs = this.antiRevokeNewGroupsDebounceMs): void {
+    if (!this.started || !this.isAntiRevokeNewGroupsEnabled()) return
+    if (this.pendingAntiRevokeNewGroupsSessionIds.size === 0) return
+
+    if (this.antiRevokeNewGroupsTimer) clearTimeout(this.antiRevokeNewGroupsTimer)
+    this.antiRevokeNewGroupsTimer = setTimeout(() => {
+      this.antiRevokeNewGroupsTimer = null
+      void this.flushAntiRevokeNewGroupsQueue()
+    }, delayMs)
+    this.antiRevokeNewGroupsTimer.unref?.()
+  }
+
+  private async flushAntiRevokeNewGroupsQueue(): Promise<void> {
+    if (!this.started || !this.isAntiRevokeNewGroupsEnabled()) {
+      this.pendingAntiRevokeNewGroupsSessionIds.clear()
+      return
+    }
+    if (this.pendingAntiRevokeNewGroupsSessionIds.size === 0) return
+
+    // Let the normal monitor flush finish first. If it is still active, defer
+    // this low-priority work instead of adding another WCDB request burst.
+    if (this.processing || this.antiRevokeNewGroupsProcessing) {
+      this.scheduleAntiRevokeNewGroupsApply()
+      return
+    }
+
+    const sessionIds = Array.from(this.pendingAntiRevokeNewGroupsSessionIds)
+    this.pendingAntiRevokeNewGroupsSessionIds.clear()
+    for (const sessionId of sessionIds) {
+      this.antiRevokeNewGroupsAttempts.set(sessionId, (this.antiRevokeNewGroupsAttempts.get(sessionId) || 0) + 1)
+    }
+
+    this.antiRevokeNewGroupsProcessing = true
+    let nextRetryDelay: number | null = null
+    try {
+      const check = await chatService.checkAntiRevokeTriggers(sessionIds)
+      if (!check.success) throw new Error(check.error || '检查防撤回触发器失败')
+      const checkedRows = new Map((check.rows || []).map((row) => [String(row.sessionId || '').trim(), row]))
+      const missingSessionIds = sessionIds.filter((sessionId) => checkedRows.get(sessionId)?.installed !== true)
+      for (const sessionId of sessionIds) {
+        if (!missingSessionIds.includes(sessionId)) this.antiRevokeNewGroupsAttempts.delete(sessionId)
+      }
+      if (missingSessionIds.length === 0) return
+
+      const result = await chatService.installAntiRevokeTriggers(missingSessionIds)
+      const rowsBySessionId = new Map((result.rows || []).map((row) => [String(row.sessionId || '').trim(), row]))
+      const retryIds: string[] = []
+
+      for (const sessionId of missingSessionIds) {
+        const row = rowsBySessionId.get(sessionId)
+        if (result.success && row?.success === true) {
+          this.antiRevokeNewGroupsAttempts.delete(sessionId)
+          continue
+        }
+
+        const attempt = this.antiRevokeNewGroupsAttempts.get(sessionId) || 1
+        if (attempt < this.antiRevokeNewGroupsRetryDelaysMs.length && this.started && this.isAntiRevokeNewGroupsEnabled()) {
+          this.pendingAntiRevokeNewGroupsSessionIds.add(sessionId)
+          retryIds.push(sessionId)
+        } else {
+          this.antiRevokeNewGroupsAttempts.delete(sessionId)
+          console.warn(`[MessagePushService] Auto anti-revoke apply failed for ${sessionId}:`, row?.error || result.error || 'unknown error')
+        }
+      }
+
+      if (retryIds.length > 0) {
+        const attempt = this.antiRevokeNewGroupsAttempts.get(retryIds[0]) || 1
+        nextRetryDelay = this.antiRevokeNewGroupsRetryDelaysMs[Math.min(attempt, this.antiRevokeNewGroupsRetryDelaysMs.length - 1)]
+      }
+    } catch (error) {
+      console.warn('[MessagePushService] Auto anti-revoke apply queue failed:', error)
+      let retryAttempt = 0
+      for (const sessionId of sessionIds) {
+        const attempt = this.antiRevokeNewGroupsAttempts.get(sessionId) || 1
+        if (attempt < this.antiRevokeNewGroupsRetryDelaysMs.length && this.started && this.isAntiRevokeNewGroupsEnabled()) {
+          this.pendingAntiRevokeNewGroupsSessionIds.add(sessionId)
+          retryAttempt = Math.max(retryAttempt, attempt)
+        } else {
+          this.antiRevokeNewGroupsAttempts.delete(sessionId)
+        }
+      }
+      if (retryAttempt > 0) {
+        nextRetryDelay = this.antiRevokeNewGroupsRetryDelaysMs[Math.min(retryAttempt, this.antiRevokeNewGroupsRetryDelaysMs.length - 1)]
+      }
+    } finally {
+      this.antiRevokeNewGroupsProcessing = false
+      if (this.pendingAntiRevokeNewGroupsSessionIds.size > 0) {
+        this.scheduleAntiRevokeNewGroupsApply(nextRetryDelay ?? this.antiRevokeNewGroupsDebounceMs)
+      }
+    }
   }
 
   private hasUnreadCountChanged(previous: SessionBaseline | undefined, session: ChatSession): boolean {

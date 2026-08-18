@@ -22,6 +22,10 @@ import { ConfigService } from './config'
 import { chatService } from './chatService'
 import { wcdbService } from './wcdbService'
 import type { ChatSession, Message } from './chatService'
+import { getProviderAdapter, makeDefaultProfile } from './ai/providerAdapters'
+import { getProviderCatalog, getProviderCatalogEntry } from './ai/providerCatalog'
+import { ProviderProfileService } from './ai/providerProfiles'
+import type { ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -72,16 +76,15 @@ export interface AiSetupInfo {
   baseUrl: string
   baseUrlError?: string
   model: string
-  maxTokens: number
   reasoningEffort: 'low' | 'high' | 'max'
-  maxSteps: number
   customPrompt: string
   workspaceRoot: string
   exportPath: string
   dbReady: boolean
   disabledTools: string[]
-  maxToolChars: number
-  conversationLimit: number
+  activeProfileId: string
+  profiles: ProviderProfileSummary[]
+  catalog: ReturnType<typeof getProviderCatalog>
 }
 
 export interface AiRunUsage {
@@ -339,59 +342,6 @@ function normalizeIdentityName(s: string): string {
     .replace(/\bWeport\s*AI\b/gi, 'WeportAI')
 }
 
-function chatCompletionsUrl(rawBaseUrl: string): string {
-  const normalized = String(rawBaseUrl || '').trim().replace(/\/+$/, '')
-  try {
-    const parsed = new URL(normalized)
-    const pathname = parsed.pathname.replace(/\/+$/, '')
-    if (!/\/chat\/completions$/i.test(pathname)) {
-      parsed.pathname = `${pathname}/chat/completions`.replace(/^\/\//, '/')
-    } else {
-      parsed.pathname = pathname
-    }
-    return parsed.toString()
-  } catch {
-    return `${normalized}/chat/completions`
-  }
-}
-
-function isDeepSeekProvider(baseUrl: string, model: string): boolean {
-  if (/^deepseek(?:[-_/]|$)/i.test(String(model || '').trim())) return true
-  try {
-    return new URL(baseUrl).hostname.toLowerCase().endsWith('deepseek.com')
-  } catch {
-    return false
-  }
-}
-
-function providerErrorDetail(payload: unknown): string {
-  if (typeof payload === 'string') {
-    const text = payload.trim()
-    if (text.startsWith('{') || text.startsWith('[')) {
-      try {
-        const parsed = JSON.parse(text) as unknown
-        if (parsed && typeof parsed === 'object') return providerErrorDetail(parsed)
-      } catch { /* plain-text response */ }
-    }
-  }
-  if (payload && typeof payload === 'object') {
-    const record = payload as Record<string, unknown>
-    const nested = record.error
-    if (typeof nested === 'string' && nested.trim()) return nested.trim()
-    if (nested && typeof nested === 'object') {
-      const nestedRecord = nested as Record<string, unknown>
-      for (const value of [nestedRecord.message, nestedRecord.detail, nestedRecord.error]) {
-        if (typeof value === 'string' && value.trim()) return value.trim()
-      }
-    }
-    for (const value of [record.message, record.detail]) {
-      if (typeof value === 'string' && value.trim()) return value.trim()
-    }
-  }
-  const text = String(payload || '').trim()
-  return text.slice(0, 1200)
-}
-
 function dateKeyOf(sec: number): string {
   const d = new Date(sec * 1000)
   const pad = (x: number) => String(x).padStart(2, '0')
@@ -439,6 +389,7 @@ function countMatchesInRange(
 
 class WeportAiService {
   private configService: ConfigService
+  private providerProfiles: ProviderProfileService
   private chats: AiChatMeta[] = []
   private chatsLoaded = false
   private dataDir = ''
@@ -455,6 +406,7 @@ class WeportAiService {
 
   constructor() {
     this.configService = ConfigService.getInstance()
+    this.providerProfiles = new ProviderProfileService(this.configService)
   }
 
   // -------------------------------------------------------------------------
@@ -907,14 +859,14 @@ class WeportAiService {
   }
 
   getSetup(): AiSetupInfo {
+    const active = this.providerProfiles.getActive()
+    const profiles = this.providerProfiles.list()
     return {
-      hasApiKey: String(this.configService.get('weportAiApiKey') || '').trim().length > 0,
-      baseUrl: String(this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim(),
+      hasApiKey: Boolean(active?.apiKey) || Boolean(active && getProviderCatalogEntry(active.providerId)?.apiKeyOptional),
+      baseUrl: String(active?.baseUrl || this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim(),
       baseUrlError: String(this.configService.get('weportAiBaseUrlError') || '').trim(),
-      model: String(this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim(),
-      maxTokens: Number(this.configService.get('weportAiMaxTokens')) || 32768,
+      model: String(active?.model || this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim(),
       reasoningEffort: this.configService.get('weportAiReasoningEffort') || 'high',
-      maxSteps: Number(this.configService.get('weportAiMaxSteps')) || 48,
       customPrompt: String(this.configService.get('weportAiCustomPrompt') || ''),
       workspaceRoot: this.getWorkspaceRoot(),
       exportPath: String(this.configService.get('exportPath') || ''),
@@ -922,57 +874,95 @@ class WeportAiService {
       disabledTools: Array.isArray(this.configService.get('weportAiDisabledTools'))
         ? (this.configService.get('weportAiDisabledTools') as string[])
         : [],
-      maxToolChars: Number(this.configService.get('weportAiMaxToolChars')) || 12000,
-      conversationLimit: Number(this.configService.get('weportAiConversationLimit')) || 60,
+      activeProfileId: active?.id || '',
+      profiles,
+      catalog: getProviderCatalog(),
     }
   }
 
-  updateSetup(patch: {
-    apiKey?: string
+  listProviders() {
+    return getProviderCatalog()
+  }
+
+  async fetchProviderModels(input: {
+    providerId: string
+    protocol?: ProviderProfileInput['protocol']
     baseUrl?: string
-    model?: string
-    maxTokens?: number
+    apiKey?: string
+  }): Promise<{ success: boolean; models?: string[]; error?: string; status?: number }> {
+    const catalog = getProviderCatalogEntry(String(input.providerId || ''))
+    const profile = makeDefaultProfile({
+      providerId: String(input.providerId || 'custom'),
+      protocol: input.protocol,
+      baseUrl: input.baseUrl || catalog?.baseUrl,
+      apiKey: String(input.apiKey || '').trim(),
+    })
+    if (!profile.baseUrl) return { success: false, error: '请先填写接口地址' }
+    if (!profile.apiKey && !catalog?.apiKeyOptional) return { success: false, error: '请先填写 API key' }
+    try {
+      const models = await getProviderAdapter(profile).listModels(profile, AbortSignal.timeout(15000))
+      if (models.length === 0) return { success: false, models: [], error: '接口未返回可用模型，请检查服务商、地址或权限' }
+      return { success: true, models }
+    } catch (error) {
+      const status = Number((error as { status?: number })?.status) || undefined
+      const detail = String((error as Error)?.message || '').trim()
+      const suffix = status === 401
+        ? 'API key 无效或已过期'
+        : status === 403
+          ? '当前 API key 没有模型列表权限'
+          : status === 429
+            ? '请求过于频繁，请稍后重试'
+            : /abort|timeout/i.test(detail)
+              ? '请求超时，请检查网络或接口地址'
+              : detail || '模型获取失败，请检查服务商配置'
+      return { success: false, error: suffix, status }
+    }
+  }
+
+  saveProviderProfile(input: ProviderProfileInput): { success: boolean; profile?: ProviderProfileSummary; error?: string } {
+    try {
+      return { success: true, profile: this.providerProfiles.save(input) }
+    } catch (error) {
+      return { success: false, error: String((error as Error)?.message || error) }
+    }
+  }
+
+  activateProviderProfile(id: string): { success: boolean; error?: string } {
+    return this.providerProfiles.activate(String(id || '').trim())
+      ? { success: true }
+      : { success: false, error: '找不到要启用的 AI 配置' }
+  }
+
+  deleteProviderProfile(id: string): { success: boolean; error?: string } {
+    return this.providerProfiles.remove(String(id || '').trim())
+      ? { success: true }
+      : { success: false, error: '找不到要删除的 AI 配置' }
+  }
+
+  updateSetup(patch: {
     reasoningEffort?: string
-    maxSteps?: number
     customPrompt?: string
     workspaceRoot?: string
     disabledTools?: string[]
-    maxToolChars?: number
-    conversationLimit?: number
+    profile?: ProviderProfileInput
+    activeProfileId?: string
+    deleteProfileId?: string
+    discoverProfileId?: string
   }): void {
-    if (typeof patch.apiKey === 'string') {
-      const trimmed = patch.apiKey.trim()
-      this.configService.set('weportAiApiKey', trimmed)
-    }
-    if (typeof patch.baseUrl === 'string' && patch.baseUrl.trim()) {
-      const raw = patch.baseUrl.trim()
-      // 安全校验：密钥以 Bearer 头发给 baseUrl，明文 http 会把密钥暴露在网络上。
-      // 仅允许 https；localhost/127.0.0.1/[::1]（本地代理如 LM Studio/Ollama）例外。
-      let parsed: URL | null = null
-      try { parsed = new URL(raw) } catch { parsed = null }
-      const host = parsed?.hostname?.toLowerCase() || ''
-      const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
-      const isSecure = parsed?.protocol === 'https:' || (parsed?.protocol === 'http:' && isLocalHost)
-      if (!parsed) {
-        this.configService.set('weportAiBaseUrlError', 'API 地址格式无效，应以 http(s):// 开头')
-      } else if (!isSecure) {
-        this.configService.set('weportAiBaseUrlError', 'API 地址必须使用 https（仅 localhost 可使用 http，避免密钥明文传输）')
-      } else {
+    if (patch.profile) {
+      try {
+        this.providerProfiles.save(patch.profile)
         this.configService.set('weportAiBaseUrlError', '')
-        this.configService.set('weportAiBaseUrl', raw)
+      } catch (error) {
+        this.configService.set('weportAiBaseUrlError', String((error as Error)?.message || error))
       }
     }
-    if (typeof patch.model === 'string' && patch.model.trim()) {
-      this.configService.set('weportAiModel', patch.model.trim())
-    }
-    if (typeof patch.maxTokens === 'number' && Number.isFinite(patch.maxTokens)) {
-      this.configService.set('weportAiMaxTokens', Math.max(256, Math.min(393216, Math.floor(patch.maxTokens))))
-    }
+    if (patch.activeProfileId) this.providerProfiles.activate(String(patch.activeProfileId))
+    if (patch.deleteProfileId) this.providerProfiles.remove(String(patch.deleteProfileId))
+    if (patch.discoverProfileId) void this.discoverProfileModels(String(patch.discoverProfileId))
+
     if (patch.reasoningEffort === 'low' || patch.reasoningEffort === 'high' || patch.reasoningEffort === 'max') {
       this.configService.set('weportAiReasoningEffort', patch.reasoningEffort)
-    }
-    if (typeof patch.maxSteps === 'number' && Number.isFinite(patch.maxSteps)) {
-      this.configService.set('weportAiMaxSteps', Math.max(4, Math.min(128, Math.floor(patch.maxSteps))))
     }
     if (typeof patch.customPrompt === 'string') {
       this.configService.set('weportAiCustomPrompt', patch.customPrompt)
@@ -984,11 +974,18 @@ class WeportAiService {
     if (Array.isArray(patch.disabledTools)) {
       this.configService.set('weportAiDisabledTools', patch.disabledTools.map(String).filter(Boolean).slice(0, 50))
     }
-    if (typeof patch.maxToolChars === 'number' && Number.isFinite(patch.maxToolChars)) {
-      this.configService.set('weportAiMaxToolChars', Math.max(1000, Math.min(100000, Math.floor(patch.maxToolChars))))
-    }
-    if (typeof patch.conversationLimit === 'number' && Number.isFinite(patch.conversationLimit)) {
-      this.configService.set('weportAiConversationLimit', Math.max(10, Math.min(200, Math.floor(patch.conversationLimit))))
+  }
+
+  private async discoverProfileModels(profileId: string): Promise<void> {
+    const profile = this.providerProfiles.getById(profileId)
+    if (!profile) return
+    try {
+      const models = await getProviderAdapter(profile).listModels(profile, AbortSignal.timeout(15000))
+      this.providerProfiles.recordDiscovery(profileId, models)
+    } catch (error) {
+      const status = Number((error as { status?: number })?.status)
+      const detail = String((error as Error)?.message || error).trim()
+      this.providerProfiles.recordDiscovery(profileId, [], `${status ? `HTTP ${status}：` : ''}${detail || '模型发现失败'}`)
     }
   }
 
@@ -1965,8 +1962,8 @@ class WeportAiService {
     const userText = String(text || '').trim()
     if (!userText) return { success: false, error: '消息为空' }
 
-    const apiKey = String(this.configService.get('weportAiApiKey') || '').trim()
-    if (!apiKey) return { success: false, error: '未配置 API 密钥，请在 WeportAI 设置中填写' }
+    const activeProfile = this.providerProfiles.getActive()
+    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
 
     const ctrl = new AbortController()
     this.running.set(chatId, ctrl)
@@ -2354,40 +2351,23 @@ class WeportAiService {
    */
   private async generateAITitle(userText: string): Promise<string | null> {
     try {
-      const baseUrl = String(this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim().replace(/\/+$/, '')
-      const model = String(this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim()
-      const apiKey = String(this.configService.get('weportAiApiKey') || '').trim()
-      if (!apiKey) return null
-      const deepSeek = isDeepSeekProvider(baseUrl, model)
-      const requestBody: Record<string, unknown> = {
-        model,
-        stream: false,
+      const profile = this.providerProfiles.getActive()
+      if (!profile || (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional)) return null
+      const result = await getProviderAdapter(profile).stream({
+        profile,
         messages: [
-          {
-            role: 'system',
-            content:
-              '你负责为对话生成标题。要求：1) 不超过 8 个汉字（英文不超过 16 字符）；2) 概括用户的意图（用户想做什么），而不是复述问题原文；3) 专业、简洁。示例：用户问「分析我是什么人」→「人格画像」；「8月8日发生了什么」→「8月8日复盘」；「我和小明的聊天关系怎么样」→「关系分析」；「找出所有提到搬家的话」→「搬家事件追查」。只输出标题本身，不要引号、不要标点、不要解释。',
-          },
+          { role: 'system', content: '为对话生成简短标题。只输出标题本身，不要引号、标点或解释；中文不超过 8 个汉字，英文不超过 16 个字符。' },
           { role: 'user', content: sanitizeForApi(String(userText || '').slice(0, 2000)) },
         ],
-        max_tokens: 24,
-      }
-      if (deepSeek) requestBody.thinking = { type: 'disabled' }
-      const resp = await fetch(chatCompletionsUrl(baseUrl), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(requestBody),
+        tools: [],
+        reasoningEffort: 'low',
         signal: AbortSignal.timeout(15000),
+        onReasoning: () => undefined,
+        onText: () => undefined,
       })
-      if (!resp.ok) {
-        const detail = providerErrorDetail(await resp.text())
-        this.appendDebugLog({ kind: 'title_error', httpStatus: resp.status, model, url: chatCompletionsUrl(baseUrl), error: detail || `HTTP ${resp.status}` })
-        return null
-      }
-      const j = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> }
-      const title = String(j?.choices?.[0]?.message?.content || '')
+      const title = String(result.content || '')
         .trim()
-        .replace(/["'“”『』]/g, '')
+        .replace(/["'“”「」]/g, '')
         .replace(/\s+/g, ' ')
       if (!title || title.length > 16) return null
       return title.slice(0, 12)
@@ -2395,8 +2375,6 @@ class WeportAiService {
       return null
     }
   }
-
-  /** 文本兜底标题：去掉常见请求前缀动词，截取前 8 个汉字 */
   private fallbackTitleFromText(text: string): string {
     const stripped = String(text || '')
       .trim()
@@ -2475,253 +2453,36 @@ class WeportAiService {
     error?: string
     httpStatus?: number
   }> {
-    const baseUrl = String(this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim().replace(/\/+$/, '')
-    const model = String(this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim()
-    const apiKey = String(this.configService.get('weportAiApiKey') || '').trim()
-    const maxTokens = Number(this.configService.get('weportAiMaxTokens')) || 32768
-    const reasoningEffort = this.configService.get('weportAiReasoningEffort') || 'high'
-    const deepSeek = isDeepSeekProvider(baseUrl, model)
-    const url = chatCompletionsUrl(baseUrl)
-
-    const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: deepSeek })
-    const tools = requestShape.tools
-    const body: Record<string, unknown> = {
-      model,
-      messages: apiMessages,
-      stream: true,
-      max_tokens: maxTokens,
-    }
-    if (tools.length > 0) body.tools = tools
-    // These fields are accepted by DeepSeek but rejected by a number of
-    // otherwise OpenAI-compatible gateways. Keep generic providers on the
-    // portable request subset instead of making every user opt out manually.
-    if (deepSeek) {
-      body.stream_options = { include_usage: true }
-      body.reasoning_effort = reasoningEffort
-    }
-
+    const profile = this.providerProfiles.getActive()
+    if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
+    if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在 WeportAI 设置中完善服务配置' }
+    const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: profile.providerId === 'deepseek' })
     const startedAt = Date.now()
-    // Compare the provider-visible conversation stream without JSON array
-    // closing syntax. An append-only message list is then an exact string
-    // prefix; tool-schema stability is tracked independently by shape.hash.
-    const serializedInput = apiMessages.map((message) => JSON.stringify(message)).join('\n')
-    const previousInput = this.previousApiInput.get(chatId) || ''
-    let commonPrefixChars = 0
-    const commonLimit = Math.min(previousInput.length, serializedInput.length)
-    while (
-      commonPrefixChars < commonLimit &&
-      previousInput.charCodeAt(commonPrefixChars) === serializedInput.charCodeAt(commonPrefixChars)
-    ) {
-      commonPrefixChars += 1
-    }
-    this.previousApiInput.set(chatId, serializedInput)
-    const estChars = JSON.stringify(body).length
-    const messagesChars = JSON.stringify(apiMessages).length
-    const toolsChars = JSON.stringify(tools).length
-    this.appendDebugLog({
-      kind: 'request',
-      chatId,
-      model,
-      url,
-      messages: history.length,
-      apiMessages: apiMessages.length,
-      estChars,
-      messagesChars,
-      toolsChars,
-      stablePrefixHash: requestShape.hash,
-      previousInputChars: previousInput.length,
-      commonPrefixChars,
-      commonPrefixRate: previousInput.length > 0
-        ? Math.round((commonPrefixChars / previousInput.length) * 10000) / 100
-        : null,
-      appendedChars: Math.max(0, serializedInput.length - commonPrefixChars),
-      maxTokens,
-      reasoningEffort,
-    })
-
-    // 看门狗：流中途长时间无新字节（代理/服务端挂起）时主动中止，避免无限等待。
-    // 本地 AbortController 链到调用方 signal（AbortSignal.any 不可用时退化为原 signal），
-    // 必须在 fetch 之前创建，否则中止无法传导到已发起的请求。
-    const idleCtrl = new AbortController()
-    let streamSignal: AbortSignal
     try {
-      streamSignal = AbortSignal.any([signal, idleCtrl.signal])
-    } catch {
-      streamSignal = signal
-    }
-
-    let resp: Response
-    try {
-      resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: streamSignal,
+      const result: ProviderStreamResult = await getProviderAdapter(profile).stream({
+        profile,
+        messages: apiMessages,
+        tools: requestShape.tools,
+        reasoningEffort: String(this.configService.get('weportAiReasoningEffort') || 'high'),
+        signal,
+        onReasoning: (delta) => this.emit({ type: 'reasoning_delta', chatId, delta }),
+        onText: (delta) => this.emit({ type: 'text_delta', chatId, delta }),
       })
-    } catch (e) {
+      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: profile.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt })
+      return {
+        ok: true,
+        content: result.content,
+        reasoning: result.reasoning,
+        toolCalls: result.toolCalls.map((call) => ({ id: call.id, name: call.name, args: call.args, friendly: '' })),
+        usage: result.usage,
+      }
+    } catch (error) {
       if (signal.aborted) return { ok: false, error: '已中止' }
-      if (idleCtrl.signal.aborted) return { ok: false, error: '请求超时（无响应）' }
-      this.appendDebugLog({ kind: 'error', chatId, error: String((e as Error)?.message || e), durationMs: Date.now() - startedAt })
-      return { ok: false, error: `网络请求失败：${String((e as Error)?.message || e)}` }
+      const status = Number((error as { status?: number })?.status)
+      const detail = String((error as Error)?.message || error).trim()
+      this.appendDebugLog({ kind: 'error', chatId, provider: profile.providerId, protocol: profile.protocol, httpStatus: status || undefined, error: detail, durationMs: Date.now() - startedAt })
+      return { ok: false, error: detail || '模型调用失败', httpStatus: status || undefined }
     }
-
-    if (!resp.ok) {
-      let detail = ''
-      try {
-        detail = providerErrorDetail(await resp.text())
-      } catch { /* noop */ }
-      this.appendDebugLog({
-        kind: 'error',
-        chatId,
-        httpStatus: resp.status,
-        error: detail || `HTTP ${resp.status}`,
-        durationMs: Date.now() - startedAt,
-        estChars,
-      })
-      return { ok: false, error: detail || `HTTP ${resp.status}`, httpStatus: resp.status }
-    }
-
-    if (!resp.body) return { ok: false, error: '响应流为空' }
-
-    // 流式解析 SSE
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-    let content = ''
-    let reasoning = ''
-    const toolAccums = new Map<number, { id?: string; name?: string; args: string }>()
-    let finishReason: string | null = null
-    // 仅在 handleSseLine 闭包内赋值：声明后若不加 `!`，TS 会把 usage 收窄为
-    // null 初始值，读取属性时报 never
-    let usage!: AiRunUsage | null
-    const SSE_IDLE_TIMEOUT_MS = 90_000
-    let idleTimer: NodeJS.Timeout | null = null
-    const armIdle = (): void => {
-      if (idleTimer) clearTimeout(idleTimer)
-      idleTimer = setTimeout(() => {
-        idleTimer = null
-        if (signal.aborted) return
-        console.warn(`[WeportAI] SSE ${SSE_IDLE_TIMEOUT_MS}ms 无数据，判定服务端挂起，中止本次请求`)
-        try { idleCtrl.abort() } catch { /* noop */ }
-      }, SSE_IDLE_TIMEOUT_MS)
-    }
-    const disarmIdle = (): void => {
-      if (idleTimer) clearTimeout(idleTimer)
-      idleTimer = null
-    }
-
-    const handleSseLine = (rawLine: string): void => {
-      const line = rawLine.trim()
-      if (!line || !line.startsWith('data:')) return
-      const data = line.slice(5).trim()
-      if (data === '[DONE]') return
-      let chunk: any
-      try {
-        chunk = JSON.parse(data)
-      } catch {
-        return
-      }
-      if (chunk?.usage) {
-        usage = {
-          promptTokens: chunk.usage.prompt_tokens || 0,
-          promptCacheHitTokens: chunk.usage.prompt_cache_hit_tokens || 0,
-          completionTokens: chunk.usage.completion_tokens || 0,
-          reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens || 0,
-          totalTokens: chunk.usage.total_tokens || 0,
-        }
-      }
-      const choice = chunk?.choices?.[0]
-      if (!choice) {
-        return
-      }
-      if (choice.finish_reason) finishReason = choice.finish_reason
-      const delta = choice.delta || {}
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-        reasoning += delta.reasoning_content
-        this.emit({ type: 'reasoning_delta', chatId, delta: delta.reasoning_content })
-      }
-      if (typeof delta.content === 'string' && delta.content) {
-        content += delta.content
-        this.emit({ type: 'text_delta', chatId, delta: delta.content })
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const index = Number(tc.index ?? 0)
-          const acc = toolAccums.get(index) || { args: '' }
-          if (tc.id) acc.id = tc.id
-          if (tc.function?.name) acc.name = tc.function.name
-          if (typeof tc.function?.arguments === 'string') acc.args += tc.function.arguments
-          toolAccums.set(index, acc)
-        }
-      }
-    }
-
-    try {
-      for (;;) {
-        armIdle()
-        const { done, value } = await reader.read()
-        disarmIdle()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let idx: number
-        while ((idx = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, idx)
-          buffer = buffer.slice(idx + 1)
-          handleSseLine(line)
-        }
-      }
-      // 流结束后缓冲区里可能残留未换行的最后一行，必须处理掉
-      // （此前直接丢弃：内容以 tool_calls/usage 结尾时会丢失最后一次增量）
-      if (buffer) {
-        handleSseLine(buffer)
-        buffer = ''
-      }
-    } catch (e) {
-      if (signal.aborted) return { ok: false, error: '已中止' }
-      if (idleCtrl.signal.aborted) return { ok: false, error: `流式响应超时（${SSE_IDLE_TIMEOUT_MS}ms 无数据）` }
-      throw e
-    } finally {
-      disarmIdle()
-    }
-
-    const toolCalls = Array.from(toolAccums.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([, acc]) => {
-        let args: Record<string, unknown> = {}
-        try {
-          args = acc.args ? JSON.parse(acc.args) : {}
-        } catch {
-          args = { _raw: acc.args }
-        }
-        return {
-          id: acc.id || `call_${randomUUID()}`,
-          name: acc.name || '',
-          args,
-          friendly: '',
-        }
-      })
-      .filter((c) => c.name)
-
-    this.appendDebugLog({
-      kind: 'response',
-      chatId,
-      ok: true,
-      contentChars: content.length,
-      reasoningChars: reasoning.length,
-      toolCalls: toolCalls.length,
-      finishReason: finishReason || undefined,
-      usage,
-      promptCacheMissTokens: usage ? Math.max(0, usage.promptTokens - usage.promptCacheHitTokens) : 0,
-      promptCacheHitRate: usage?.promptTokens
-        ? Math.round((usage.promptCacheHitTokens / usage.promptTokens) * 10000) / 100
-        : 0,
-      durationMs: Date.now() - startedAt,
-    })
-
-    return { ok: true, content, reasoning, toolCalls, usage: usage || undefined }
   }
 }
 

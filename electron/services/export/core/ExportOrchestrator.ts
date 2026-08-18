@@ -30,6 +30,7 @@ import { resolveGroupNicknameByCandidates, buildGroupNicknameIdCandidates, norma
 import { getAvatarFallback } from '../../export/contacts/avatarHelper';
 import { pathExists, ensureExportDir, copyFileOptimized, hardlinkOrCopyFile } from '../../export/media/fileCopy';
 import { getMediaFileStat } from '../../export/media/attachmentResolver';
+import { runBoundedPool } from '../../export/utils/parallelLimit';
 import { ExportContext } from "../core/ExportContext";
 import { ChatLabFormatter } from '../formatters/ChatLabFormatter';
 import { ExcelFormatter } from '../formatters/ExcelFormatter';
@@ -186,14 +187,20 @@ export class ExportOrchestrator {
             return Math.min(sessionIds.length, completedCount + activeRatioSum)
           }
           const isTextContentBatchExport = effectiveOptions.contentType === 'text' && !exportMediaEnabled
-          const defaultConcurrency = exportMediaEnabled ? 2 : (isTextContentBatchExport ? 1 : 4)
+          const defaultConcurrency = exportMediaEnabled ? 2 : 4
           const rawConcurrency = typeof effectiveOptions.exportConcurrency === 'number'
             ? Math.floor(effectiveOptions.exportConcurrency)
             : defaultConcurrency
-          const maxSessionConcurrency = isTextContentBatchExport ? 1 : 6
+          // Text exports are safe to overlap at the session boundary. Media
+          // exports keep a smaller outer pool because each formatter already
+          // has its own bounded media/voice pools.
+          const maxSessionConcurrency = exportMediaEnabled ? 2 : 10
           const clampedConcurrency = Math.max(1, Math.min(rawConcurrency, maxSessionConcurrency))
           const sessionConcurrency = clampedConcurrency
-          const queue = [...sessionIds]
+          this.context.configureSharedMediaConcurrency(exportMediaEnabled ? Math.min(6, Math.max(1, rawConcurrency)) : 1)
+          let activeSessionWorkers = 0
+          let peakSessionWorkers = 0
+          let queue = [...sessionIds]
           let pauseRequested = false
           let stopRequested = false
           const sessionMessageCountHints = new Map<string, number>()
@@ -430,6 +437,10 @@ export class ExportOrchestrator {
                 : claimedOutputPaths.has(preferredOutputPath)
                   ? await reserveUniqueOutputPath(preferredOutputPath, claimedOutputPaths)
                   : preferredOutputPath
+              // Reserve before the formatter awaits WCDB/file work. With a
+              // bounded pool, two same-named chats can otherwise choose the
+              // same path before either one records completion.
+              claimedOutputPaths.add(outputPath)
 
               let result: { success: boolean; error?: string }
               if (effectiveOptions.format === 'json' || effectiveOptions.format === 'arkme-json') {
@@ -465,7 +476,6 @@ export class ExportOrchestrator {
                 successCount++
                 successSessionIds.push(sessionId)
                 sessionOutputPaths[sessionId] = outputPath
-                claimedOutputPaths.add(outputPath)
                 if (typeof messageCountHint === 'number' && messageCountHint >= 0) {
                   exportRecordService.saveRecord(sessionId, effectiveOptions.format, messageCountHint, {
                     sourceLatestMessageTimestamp: typeof latestTimestampHint === 'number' && latestTimestampHint > 0
@@ -505,62 +515,31 @@ export class ExportOrchestrator {
             }
           }
 
-          if (isTextContentBatchExport) {
-            // 文本内容批量导出使用串行调度，降低数据库与文件系统抢占，行为更贴近 wxdaochu。
-            while (queue.length > 0) {
-              if (control?.shouldStop?.()) {
-                stopRequested = true
-                break
-              }
-              if (control?.shouldPause?.()) {
-                pauseRequested = true
-                break
-              }
-
-              const sessionId = queue.shift()
-              if (!sessionId) break
+          const poolResult = await runBoundedPool(queue, {
+            concurrency: sessionConcurrency,
+            shouldStop: () => control?.shouldStop?.() === true,
+            shouldPause: () => control?.shouldPause?.() === true,
+          }, async (sessionId) => {
+            activeSessionWorkers += 1
+            peakSessionWorkers = Math.max(peakSessionWorkers, activeSessionWorkers)
+            try {
               const runState = await runOne(sessionId)
-              await new Promise(resolve => setImmediate(resolve))
               if (runState === 'stopped') {
                 stopRequested = true
-                queue.unshift(sessionId)
-                break
+                return 'stopped'
               }
               if (runState === 'paused') {
                 pauseRequested = true
-                queue.unshift(sessionId)
-                break
+                return 'paused'
               }
+              return 'complete'
+            } finally {
+              activeSessionWorkers = Math.max(0, activeSessionWorkers - 1)
             }
-          } else {
-            const workers = Array.from({ length: Math.min(sessionConcurrency, queue.length) }, async () => {
-              while (queue.length > 0) {
-                if (control?.shouldStop?.()) {
-                  stopRequested = true
-                  break
-                }
-                if (control?.shouldPause?.()) {
-                  pauseRequested = true
-                  break
-                }
-
-                const sessionId = queue.shift()
-                if (!sessionId) break
-                const runState = await runOne(sessionId)
-                if (runState === 'stopped') {
-                  stopRequested = true
-                  queue.unshift(sessionId)
-                  break
-                }
-                if (runState === 'paused') {
-                  pauseRequested = true
-                  queue.unshift(sessionId)
-                  break
-                }
-              }
-            })
-            await Promise.all(workers)
-          }
+          })
+          queue = poolResult.pending
+          stopRequested ||= poolResult.stopped
+          pauseRequested ||= poolResult.paused
 
           const pendingSessionIds = [...queue]
           if (stopRequested && pendingSessionIds.length > 0) {
@@ -598,6 +577,7 @@ export class ExportOrchestrator {
             phase: 'complete'
           }, { force: true })
           progressEmitter.flush()
+          console.info(`[Export] session concurrency requested=${rawConcurrency} effective=${sessionConcurrency} peak=${peakSessionWorkers} sessions=${sessionIds.length}`)
 
           const allFailed = successCount === 0 && failCount > 0
           const failureSummary = allFailed

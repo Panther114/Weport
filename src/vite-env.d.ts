@@ -1,5 +1,33 @@
 /// <reference types="vite/client" />
 
+interface ExportRequest {
+  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
+  contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
+  dateRange?: { start: number; end: number } | null
+  senderUsername?: string
+  fileNameSuffix?: string
+  fileNamingMode?: 'classic' | 'date-range'
+  exportConflictStrategy?: 'incremental' | 'overwrite' | 'rename'
+  exportMedia?: boolean
+  exportAvatars?: boolean
+  exportImages?: boolean
+  exportVoices?: boolean
+  exportVideos?: boolean
+  exportEmojis?: boolean
+  exportFiles?: boolean
+  maxFileSizeMb?: number
+  exportVoiceAsText?: boolean
+  exportPathStyle?: 'auto' | 'posix' | 'windows'
+  excelCompactColumns?: boolean
+  txtColumns?: string[]
+  sessionLayout?: 'shared' | 'per-session'
+  exportWriteLayout?: 'A' | 'B' | 'C'
+  sessionNameWithTypePrefix?: boolean
+  displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency?: number
+  sessionIds?: string[]
+}
+
 interface ElectronApi {
   config: {
     get: (key: string) => Promise<any>
@@ -77,7 +105,7 @@ interface ElectronApi {
     uninstallAntiRevokeTriggers: (sessionIds: string[]) => Promise<{ success: boolean; rows?: Array<{ sessionId: string; success: boolean; error?: string }>; error?: string }>
   }
   export: {
-    exportSessions: (outputRoot: string, options?: any) => Promise<any>
+    exportSessions: (outputRoot: string, options?: ExportRequest) => Promise<any>
     cancelTask: (taskId: string) => Promise<{ success: boolean }>
     getExportLog: (outputRoot: string) => Promise<{ path: string; txt: string | null; json: string | null; exists: boolean }>
     clearLibrary: (outputRoot: string) => Promise<{ success: boolean; removed: string[]; error?: string }>
@@ -89,18 +117,46 @@ interface ElectronApi {
       baseUrl: string
       baseUrlError?: string
       model: string
-      maxTokens: number
       reasoningEffort: string
-      maxSteps: number
       customPrompt: string
       workspaceRoot: string
       exportPath: string
       dbReady: boolean
       disabledTools: string[]
-      maxToolChars: number
-      conversationLimit: number
+      activeProfileId: string
+      profiles: Array<{
+        id: string
+        name: string
+        displayName: string
+        providerId: string
+        protocol: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        apiKeyHint: string
+        updatedAt: number
+        discovery?: { models: string[]; fetchedAt: number; error?: string }
+      }>
+      catalog: Array<{
+        id: string
+        name: string
+        description: string
+        protocol: string
+        baseUrl: string
+        defaultModel: string
+        models: string[]
+        allowCustomBaseUrl?: boolean
+        protocolOptions?: string[]
+        apiKeyOptional?: boolean
+      }>
     }>
     setSetup: (patch: any) => Promise<{ success: boolean }>
+    listProviders: () => Promise<{ providers: any[] }>
+    fetchModels: (input: { providerId: string; protocol?: string; baseUrl?: string; apiKey?: string }) => Promise<{ success: boolean; models?: string[]; status?: number; error?: string }>
+    saveProfile: (input: any) => Promise<{ success: boolean; profile?: any; error?: string }>
+    activateProfile: (id: string) => Promise<{ success: boolean; error?: string }>
+    deleteProfile: (id: string) => Promise<{ success: boolean; error?: string }>
+    testProfile: (input: { providerId: string; protocol?: string; baseUrl?: string; apiKey?: string }) => Promise<{ success: boolean; models?: string[]; status?: number; error?: string }>
     listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number }> }>
     createChat: (title?: string) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number } }>
     renameChat: (chatId: string, title: string) => Promise<{ success: boolean }>
@@ -161,12 +217,12 @@ interface ElectronApi {
   }
   analytics: {
     getOverallStatistics: (force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
-    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) => Promise<{ success: boolean; data?: any[]; error?: string }>
     getTimeDistribution: () => Promise<{ success: boolean; data?: any; error?: string }>
     getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
     getExcludedUsernames: () => Promise<{ success: boolean; data?: string[]; error?: string }>
     setExcludedUsernames: (usernames: string[]) => Promise<{ success: boolean; data?: string[]; error?: string }>
-    getExcludeCandidates: () => Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string }>; error?: string }>
+    getExcludeCandidates: (options?: { includeGroupChats?: boolean }) => Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string }>; error?: string }>
     getDailyActivity: (force?: boolean) => Promise<{ success: boolean; data?: { daily: Record<string, number>; sentDaily: Record<string, number> }; error?: string }>
     getWordFrequency: (limit?: number, force?: boolean) => Promise<{ success: boolean; data?: { items: Array<{ word: string; count: number }>; scannedMessages: number; textMessages: number }; error?: string }>
     clearCache: () => Promise<{ success: boolean; error?: string }>

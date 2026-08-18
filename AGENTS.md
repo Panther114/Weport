@@ -7,7 +7,7 @@
 
 ## Tech Stack (Permanent)
 
-Wexport is an **Electron + React + Vite + TypeScript** desktop app for
+Weport is an **Electron + React + Vite + TypeScript** desktop app for
 **Windows and macOS (Apple Silicon, arm64)**. The engine
 (`electron/services/`) is a TypeScript port of WeFlow's WCDB stack (koffi FFI
 + native `wcdb_api.dll` / `libwcdb_api.dylib`). There is **no Rust, no Tauri,
@@ -54,7 +54,7 @@ engine in a **subprocess**:
 
 **Do not reintroduce:**
 
-- `worker_threads` for WCDB — the name check fails inside `Wexport`'s own
+- `worker_threads` for WCDB — the name check fails inside Weport's own
   binary (any platform).
 - stdio JSON-lines transport — **Electron's main-process stdin hits EOF
   immediately on Windows even with a real pipe** (verified). IPC channel only.
@@ -357,3 +357,18 @@ All reference clones live under `reference-projects/` (git-ignored, see
 - `reference-projects/<others>/` — third-party WeChat tools cloned for study
   (chat history exporters, moments/朋友圈 analyzers, bots/auto-repliers, …);
   read-only, never shipped, never imported by the build
+
+## v0.9.6 Reference-Study Policy
+
+Every requirement marked `***` in the v0.9.6 implementation brief MUST be
+implemented only after carefully studying the relevant read-only projects under
+`reference-projects/`. Each implementation handoff must record:
+
+- references studied;
+- patterns adopted;
+- patterns rejected; and
+- Weport-specific deviations and why they are necessary.
+
+Reference code and assets are evidence and design input only. They must never
+be copied or shipped blindly, and must not bypass Weport's WCDB host,
+packaging, security, or platform constraints.

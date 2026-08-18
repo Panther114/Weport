@@ -46,6 +46,7 @@ import {
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
+import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
@@ -222,6 +223,7 @@ export default function App() {
   const [antiRevokeSessions, setAntiRevokeSessions] = useState<AntiRevokeSession[]>([])
   const [antiRevokeInstalled, setAntiRevokeInstalled] = useState<Record<string, boolean>>({})
   const [antiRevokeBusy, setAntiRevokeBusy] = useState(false)
+  const [antiRevokeNewGroupsEnabled, setAntiRevokeNewGroupsEnabled] = useState(false)
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
   const colorMode = useColorMode()
@@ -240,6 +242,13 @@ export default function App() {
   const [exportConcurrency, setExportConcurrency] = useState(3)
   const [writeLayout, setWriteLayout] = useState<WriteLayout>('A')
   const [showAdvanced, setShowAdvanced] = useState(true)
+  const [exportSessions, setExportSessions] = useState<ExportSessionPickerItem[]>([])
+  const [selectedExportSessionIds, setSelectedExportSessionIds] = useState<Set<string>>(new Set())
+  const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('all')
+  const [exportSessionSearch, setExportSessionSearch] = useState('')
+  const [exportSessionType, setExportSessionType] = useState<ExportSessionType>('all')
+  const [exportSessionsLoading, setExportSessionsLoading] = useState(false)
+  const [exportSessionsLoaded, setExportSessionsLoaded] = useState(false)
 
   // 会话通知过滤
   const [notifyFilterOpen, setNotifyFilterOpen] = useState(false)
@@ -316,6 +325,7 @@ export default function App() {
     setExportConflict(EXPORT_DEFAULTS.conflict)
     setDisplayNamePref(EXPORT_DEFAULTS.namePref)
     setExportConcurrency(EXPORT_DEFAULTS.concurrency)
+    setExportSelectionMode('all')
     void saveExportOptions({
       format: EXPORT_DEFAULTS.format,
       layout: EXPORT_DEFAULTS.writeLayout,
@@ -341,6 +351,54 @@ export default function App() {
       setExportLog(null)
     }
   }, [api])
+
+  const loadExportSessions = useCallback(async () => {
+    setExportSessionsLoading(true)
+    try {
+      const result = await api.chat.getSessions()
+      const seen = new Set<string>()
+      const sessions: ExportSessionPickerItem[] = []
+      for (const raw of result?.sessions || []) {
+        const username = String(raw?.username || '').trim()
+        if (!username || username.toLowerCase().includes('placeholder_foldgroup') || seen.has(username)) continue
+        seen.add(username)
+        sessions.push({
+          username,
+          displayName: String(raw?.displayName || '').trim() || undefined,
+          summary: String(raw?.summary || '').trim() || undefined,
+          avatarUrl: String(raw?.avatarUrl || '').trim() || undefined,
+          messageCountHint: Number.isFinite(Number(raw?.messageCountHint)) ? Math.max(0, Math.floor(Number(raw?.messageCountHint))) : undefined,
+        })
+      }
+
+      const missingNames = sessions.filter((session) => !session.displayName).map((session) => session.username)
+      if (missingNames.length > 0) {
+        try {
+          const enriched = await api.chat.enrichSessionsContactInfo(missingNames)
+          for (const session of sessions) {
+            if (!session.displayName) {
+              session.displayName = String(enriched?.contacts?.[session.username]?.displayName || '').trim() || undefined
+            }
+          }
+        } catch { /* cached/raw username remains usable */ }
+      }
+
+      sessions.sort((a, b) => (a.displayName || a.username).localeCompare(b.displayName || b.username, 'zh-Hans-CN'))
+      setExportSessions(sessions)
+      setSelectedExportSessionIds((previous) => {
+        if (previous.size === 0) return previous
+        const available = new Set(sessions.map((session) => session.username))
+        return new Set(Array.from(previous).filter((id) => available.has(id)))
+      })
+    } catch (error) {
+      setExportSessions([])
+      setSelectedExportSessionIds(new Set())
+      pushToast('err', '加载导出会话失败', String(error))
+    } finally {
+      setExportSessionsLoaded(true)
+      setExportSessionsLoading(false)
+    }
+  }, [api, pushToast])
 
   const refreshAccounts = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -422,6 +480,10 @@ export default function App() {
 
   const selectAccount = useCallback((wxid: string) => {
     setSelectedWxid(wxid)
+    setExportSessions([])
+    setSelectedExportSessionIds(new Set())
+    setExportSelectionMode('all')
+    setExportSessionsLoaded(false)
     void persist({ wxid })
     void loadAccountKey(wxid)
   }, [persist, loadAccountKey])
@@ -461,6 +523,10 @@ export default function App() {
         setSilentStartup(silent === true)
         const close = await api.config.get('windowCloseBehavior')
         setCloseToTray(close !== 'quit')
+        try {
+          const autoApply = await api.config.get('antiRevokeAutoApplyNewGroups')
+          setAntiRevokeNewGroupsEnabled(autoApply === true)
+        } catch { /* default-off */ }
 
         // 导出选项
         try {
@@ -557,6 +623,51 @@ export default function App() {
   const accountReady = selectedWxid.length > 0
   const allReady = dbReady && accountReady && keyOk
 
+  useEffect(() => {
+    if (tab !== 'export' || !keyOk || exportSessionsLoaded || exportSessionsLoading) return
+    void loadExportSessions()
+  }, [tab, keyOk, exportSessionsLoaded, exportSessionsLoading, loadExportSessions])
+
+  const filteredExportSessions = useMemo(() => {
+    const keyword = exportSessionSearch.trim().toLowerCase()
+    return exportSessions.filter((session) => {
+      const isGroup = session.username.endsWith('@chatroom')
+      const isOfficial = session.username.startsWith('gh_')
+      if (exportSessionType === 'group' && !isGroup) return false
+      if (exportSessionType === 'private' && (isGroup || isOfficial)) return false
+      if (exportSessionType === 'official' && !isOfficial) return false
+      if (!keyword) return true
+      const name = String(session.displayName || '').toLowerCase()
+      const id = session.username.toLowerCase()
+      const summary = String(session.summary || '').toLowerCase()
+      return name.includes(keyword) || id.includes(keyword) || summary.includes(keyword)
+    })
+  }, [exportSessionSearch, exportSessionType, exportSessions])
+
+  const allVisibleExportSessionsSelected = filteredExportSessions.length > 0 &&
+    filteredExportSessions.every((session) => selectedExportSessionIds.has(session.username))
+
+  const toggleExportSession = useCallback((username: string) => {
+    setSelectedExportSessionIds((previous) => {
+      const next = new Set(previous)
+      if (next.has(username)) next.delete(username)
+      else next.add(username)
+      return next
+    })
+  }, [])
+
+  const toggleVisibleExportSessions = useCallback(() => {
+    setSelectedExportSessionIds((previous) => {
+      const next = new Set(previous)
+      if (allVisibleExportSessionsSelected) {
+        for (const session of filteredExportSessions) next.delete(session.username)
+      } else {
+        for (const session of filteredExportSessions) next.add(session.username)
+      }
+      return next
+    })
+  }, [allVisibleExportSessionsSelected, filteredExportSessions])
+
   async function pickDbFolder() {
     const selected = await api.dialog.openDirectory({ title: '选择微信数据目录 (xwechat_files)' })
     if (selected) {
@@ -621,14 +732,23 @@ export default function App() {
       pushToast('err', '请先提取或粘贴 64 位解密密钥')
       return
     }
+    if (exportSelectionMode === 'selected' && selectedExportSessionIds.size === 0) {
+      pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
+      return
+    }
 
     setBusy(true)
     setProgress({ current: 0, total: 0, phaseLabel: '准备中' })
     setExportTaskId(null)
-    setBusyLabel('开始导出全部会话…')
+    setBusyLabel(exportSelectionMode === 'all'
+      ? '开始导出全部会话…'
+      : `开始导出 ${selectedExportSessionIds.size} 个会话…`)
 
     const mediaEnabled = exportMedia.images || exportMedia.videos || exportMedia.voices || exportMedia.emojis || exportMedia.files
-    const options = {
+    const options: ExportRequest = {
+      // v0.9.6: the IPC integrator must scope the main-process session list to
+      // this explicit selection before calling exportService.exportSessions.
+      sessionIds: exportSelectionMode === 'selected' ? Array.from(selectedExportSessionIds) : undefined,
       format,
       exportImages: exportMedia.images,
       exportVideos: exportMedia.videos,
@@ -904,6 +1024,18 @@ export default function App() {
     } catch (e) {
       pushToast('err', '防撤回还原失败', String(e))
       setAntiRevokeBusy(false)
+    }
+  }
+
+  async function toggleAntiRevokeNewGroups(on: boolean) {
+    setAntiRevokeNewGroupsEnabled(on)
+    try {
+      const result = await api.config.set('antiRevokeAutoApplyNewGroups', on)
+      if (result?.success === false) throw new Error('配置保存失败')
+      pushToast('ok', on ? '已开启新群聊自动防撤回' : '已关闭新群聊自动防撤回')
+    } catch (e) {
+      setAntiRevokeNewGroupsEnabled(!on)
+      pushToast('err', '自动防撤回设置失败', String(e))
     }
   }
 
@@ -1278,7 +1410,7 @@ export default function App() {
                 导出数据
               </h2>
               <div className="panel-head-actions">
-                <span>全部联系人 + 群聊</span>
+                <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
                 <button
                   className="ghost-btn"
                   type="button"
@@ -1301,10 +1433,28 @@ export default function App() {
               </div>
             </div>
 
+            <ExportSessionPicker
+              sessions={filteredExportSessions}
+              totalSessions={exportSessions.length}
+              selectedIds={selectedExportSessionIds}
+              selectionMode={exportSelectionMode}
+              search={exportSessionSearch}
+              type={exportSessionType}
+              loading={exportSessionsLoading}
+              onSearchChange={setExportSessionSearch}
+              onTypeChange={setExportSessionType}
+              onSelectionModeChange={setExportSelectionMode}
+              onToggle={toggleExportSession}
+              onToggleVisible={toggleVisibleExportSessions}
+              onRefresh={() => void loadExportSessions()}
+              allVisibleSelected={allVisibleExportSessionsSelected}
+              disabled={busy}
+            />
+
             {/* 1. 输出设置 */}
             <div className="exp-section">
               <div className="exp-sec-head">
-                <span className="exp-num">1</span>
+                <span className="exp-num">2</span>
                 <FolderOpen size={14} />
                 输出设置
               </div>
@@ -1378,7 +1528,7 @@ export default function App() {
             {/* 2. 导出格式 */}
             <div className="exp-section">
               <div className="exp-sec-head">
-                <span className="exp-num">2</span>
+                <span className="exp-num">3</span>
                 <FileType size={14} />
                 导出格式
               </div>
@@ -1413,7 +1563,7 @@ export default function App() {
             {/* 3. 内容 */}
             <div className="exp-section">
               <div className="exp-sec-head">
-                <span className="exp-num">3</span>
+                <span className="exp-num">4</span>
                 <Paperclip size={14} />
                 内容（媒体与附件）
               </div>
@@ -1472,7 +1622,7 @@ export default function App() {
                 onClick={() => setShowAdvanced((v) => !v)}
                 aria-expanded={showAdvanced}
               >
-                <span className="exp-num">4</span>
+                <span className="exp-num">5</span>
                 <SettingsIcon size={14} />
                 高级选项
                 <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
@@ -1623,7 +1773,11 @@ export default function App() {
             <div className="export-actions">
               <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
                 <Download size={16} />
-                {busy && progress ? '导出中…' : '导出全部聊天记录'}
+                {busy && progress
+                  ? '导出中…'
+                  : exportSelectionMode === 'all'
+                    ? '导出全部聊天记录'
+                    : `导出已选聊天记录${selectedExportSessionIds.size ? `（${selectedExportSessionIds.size}）` : ''}`}
               </button>
               {busy && progress && progress.phase !== 'complete' && (
                 <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
@@ -1655,6 +1809,20 @@ export default function App() {
                 对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
                 安装/卸载针对具体会话，微信升级后一般无需重装。
               </p>
+              <div className="btn-row" style={{ alignItems: 'center' }}>
+                <label className="switch-label">
+                  <input
+                    type="checkbox"
+                    checked={antiRevokeNewGroupsEnabled}
+                    disabled={!allReady || antiRevokeBusy}
+                    onChange={(e) => void toggleAntiRevokeNewGroups(e.target.checked)}
+                  />
+                  <span>新群聊自动安装</span>
+                </label>
+                <span className="hint" style={{ margin: 0 }}>
+                  仅处理开启后首次观察到的 @chatroom，会延迟排队，不影响消息通知；默认关闭。
+                </span>
+              </div>
               <div className="btn-row">
                 <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
                   <RefreshCw size={14} />

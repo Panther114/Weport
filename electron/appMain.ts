@@ -47,6 +47,7 @@ import { KeyService } from './services/keyService'
 import { KeyServiceMac } from './services/keyServiceMac'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
+import { getProviderCatalog } from './services/ai/providerCatalog'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -71,10 +72,15 @@ let mainWindowReady = false
 let configService: ConfigService | null = null
 let messagePushService: MessagePushService | null = null
 let shutdownPromise: Promise<void> | null = null
+let fatalProcessError = false
 /** 是否以静默方式启动（开机自启 Run 键带 --background，主窗口保持隐藏） */
 const startHidden = process.argv.includes('--background')
-/** QA 截图模式（scripts/capture-ui.ps1 驱动）：全程使用脱敏演示数据，不读取真实配置 */
+/** QA 截图模式（scripts/capture-ui.ps1 驱动）。 */
 const isScreenshotMode = process.env.WEPORT_SCREENSHOT_POPUP === '1'
+/** README 截图模式：读取隔离的用户配置/数据库副本，并在渲染层统一模糊隐私字段。 */
+const isRealScreenshotMode = isScreenshotMode && process.env.WEPORT_REAL_SCREENSHOT === '1'
+/** 普通截图 QA 使用虚构数据；真实 README 截图只复用截图流程。 */
+const isDemoScreenshotMode = isScreenshotMode && !isRealScreenshotMode
 /** 任一 QA/自测模式（截图 / v0.9 转储 / 真实数据转储 / UI 转储 / 自测 / AI 自测）：
  *  这些模式下不执行隐藏窗口内存回收等会影响断言稳定性的行为 */
 const isAnyQaMode =
@@ -1000,12 +1006,12 @@ function showMainWindow() {
     if (contactWarmupDeferred) {
       contactWarmupDeferred = false
       void warmupContactNames()
-    } else if (!isScreenshotMode) {
+    } else if (!isAnyQaMode) {
       // 静默启动跳过的朋友圈预加载，随窗口首次创建补跑（幂等，内部有节流）
       void snsService.warmupTimeline()
     }
     // 静默启动跳过的更新检查，随窗口首次创建补跑（幂等）
-    if (!isScreenshotMode) {
+    if (!isAnyQaMode) {
       checkForUpdatesOnStartup()
     }
     return
@@ -1922,9 +1928,28 @@ function registerIpcHandlers() {
     if (!sessionsResult.success || !sessionsResult.sessions) {
       return { success: false, successCount: 0, failCount: 1, error: sessionsResult.error || '获取会话列表失败' }
     }
-    let sessionIds = (sessionsResult.sessions as Array<{ username: string }>)
+    const availableSessionIds: string[] = (sessionsResult.sessions as Array<{ username: string }>)
       .map((s) => String(s?.username || '').trim())
       .filter(Boolean)
+    const requestedSessionIds: string[] | undefined = Array.isArray(userOptions.sessionIds)
+      ? Array.from(new Set((userOptions.sessionIds as unknown[]).map((id) => String(id || '').trim()).filter(Boolean)))
+      : undefined
+    if (requestedSessionIds && requestedSessionIds.length === 0) {
+      return { success: false, successCount: 0, failCount: 0, error: '请至少选择一个会话' }
+    }
+    if (requestedSessionIds) {
+      const available = new Set(availableSessionIds)
+      const unknown = requestedSessionIds.filter((id) => !available.has(id))
+      if (unknown.length > 0) {
+        return {
+          success: false,
+          successCount: 0,
+          failCount: 0,
+          error: `所选会话已失效，请刷新会话列表后重试（${unknown.length} 个）`,
+        }
+      }
+    }
+    let sessionIds: string[] = requestedSessionIds || availableSessionIds
 
     // 过滤无消息会话（公众号/广告账号/空聊天室没有消息表，导出会报 -3 游标错误）。
     // 数量查询失败时回退为导出全部。
@@ -1971,6 +1996,7 @@ function registerIpcHandlers() {
       sessionLayout: 'shared',
       ...userOptions,
     }
+    if (requestedSessionIds) exportOptions.sessionIds = requestedSessionIds
     // 开启媒体导出时按 WeFlow 语义使用 per-session 布局
     if (exportOptions.exportMedia === true && exportOptions.sessionLayout === 'shared') {
       exportOptions.sessionLayout = 'per-session'
@@ -2156,15 +2182,16 @@ function registerIpcHandlers() {
   // v0.9 全局分析（确定性统计）
   // -------------------------------------------------------------------------
   ipcMain.handle('analytics:getOverallStatistics', (_e, force?: boolean) => analyticsService.getOverallStatistics(force === true))
-  ipcMain.handle('analytics:getContactRankings', (_e, limit?: number, beginTimestamp?: number, endTimestamp?: number) =>
-    analyticsService.getContactRankings(limit, beginTimestamp, endTimestamp))
+  ipcMain.handle('analytics:getContactRankings', (_e, limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) =>
+    analyticsService.getContactRankings(limit, beginTimestamp, endTimestamp, { includeGroupChats: options?.includeGroupChats === true }))
   ipcMain.handle('analytics:getTimeDistribution', () => analyticsService.getTimeDistribution())
   ipcMain.handle('analytics:getSelfSentDailyDistribution', (_e, beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
     analyticsService.getSelfSentDailyDistribution(beginTimestamp, endTimestamp, force === true))
   ipcMain.handle('analytics:getExcludedUsernames', () => analyticsService.getExcludedUsernames())
   ipcMain.handle('analytics:setExcludedUsernames', (_e, usernames: string[]) =>
     analyticsService.setExcludedUsernames((usernames || []).map(String)))
-ipcMain.handle('analytics:getExcludeCandidates', () => analyticsService.getExcludeCandidates())
+  ipcMain.handle('analytics:getExcludeCandidates', (_e, options?: { includeGroupChats?: boolean }) =>
+    analyticsService.getExcludeCandidates(options?.includeGroupChats === true))
   ipcMain.handle('analytics:getDailyActivity', (_e, force?: boolean) => analyticsService.getDailyActivity(force === true))
   ipcMain.handle('analytics:getWordFrequency', (_e, limit?: number, force?: boolean) =>
     analyticsService.getWordFrequency(Number(limit) || 60, force === true))
@@ -2440,6 +2467,17 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // WeportAI（v0.8 聊天历史分析助手）
   // -------------------------------------------------------------------------
   ipcMain.handle('ai:getSetup', () => weportAiService.getSetup())
+  ipcMain.handle('ai:listProviders', () => ({ providers: weportAiService.listProviders() }))
+  ipcMain.handle('ai:fetchModels', (_e, input: any) => weportAiService.fetchProviderModels({
+    providerId: String(input?.providerId || ''),
+    protocol: input?.protocol,
+    baseUrl: typeof input?.baseUrl === 'string' ? input.baseUrl : undefined,
+    apiKey: typeof input?.apiKey === 'string' ? input.apiKey : undefined,
+  }))
+  ipcMain.handle('ai:saveProfile', (_e, input: any) => weportAiService.saveProviderProfile(input || {}))
+  ipcMain.handle('ai:activateProfile', (_e, id: string) => weportAiService.activateProviderProfile(String(id || '')))
+  ipcMain.handle('ai:deleteProfile', (_e, id: string) => weportAiService.deleteProviderProfile(String(id || '')))
+  ipcMain.handle('ai:testProfile', (_e, input: any) => weportAiService.fetchProviderModels(input || {}))
   ipcMain.handle('ai:setSetup', (_e, patch: any) => {
     weportAiService.updateSetup(patch || {})
     return { success: true }
@@ -2477,8 +2515,9 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     return { success: true }
   })
 
-  // 截图模式：用演示数据覆盖会暴露个人信息的通道（真实配置/微信数据绝不进截图）
-  if (isScreenshotMode) {
+  // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
+  // 真实 README 截图模式读取隔离副本，不安装这些 IPC 覆盖。
+  if (isDemoScreenshotMode) {
     installScreenshotDemoHandlers()
     // v0.9 页面（朋友圈 / 分析 / 设置）也需要演示数据才能渲染截图
     installV09DemoHandlers()
@@ -2515,26 +2554,41 @@ function demoConfigValue(key: string): unknown {
       return true
     case 'notificationEnabled':
       return false
+    case 'antiRevokeAutoApplyNewGroups':
+      return false
     default:
       return (configService as any)?.get(key)
   }
 }
 
 function demoAiSetup() {
+  const profile = {
+    id: 'demo-profile-deepseek',
+    name: 'DeepSeek 演示配置',
+    displayName: 'DeepSeek 演示配置',
+    providerId: 'deepseek',
+    protocol: 'openai-compatible',
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+    hasApiKey: true,
+    apiKeyHint: 'sk•••demo',
+    createdAt: Date.now() - 86400000,
+    updatedAt: Date.now(),
+    discovery: { models: ['deepseek-v4-flash', 'deepseek-v4-pro'], fetchedAt: Date.now() },
+  }
   return {
     hasApiKey: true,
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
-    maxTokens: 32768,
     reasoningEffort: 'high',
-    maxSteps: 48,
     customPrompt: '',
     workspaceRoot: DEMO_WORKSPACE,
     exportPath: DEMO_EXPORT_PATH,
     dbReady: true,
     disabledTools: [],
-    maxToolChars: 12000,
-    conversationLimit: 60,
+    activeProfileId: profile.id,
+    profiles: [profile],
+    catalog: getProviderCatalog(),
   }
 }
 
@@ -2653,6 +2707,13 @@ function installScreenshotDemoHandlers() {
     rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
   }))
   override('ai:getSetup', () => demoAiSetup())
+  override('ai:setSetup', () => ({ success: true }))
+  override('ai:listProviders', () => ({ providers: demoAiSetup().catalog }))
+  override('ai:fetchModels', () => ({ success: true, models: ['deepseek-v4-flash', 'deepseek-v4-pro'] }))
+  override('ai:saveProfile', () => ({ success: true, profile: demoAiSetup().profiles[0] }))
+  override('ai:activateProfile', () => ({ success: true }))
+  override('ai:deleteProfile', () => ({ success: true }))
+  override('ai:testProfile', () => ({ success: true, models: ['deepseek-v4-flash', 'deepseek-v4-pro'] }))
   override('ai:listChats', () => ({ chats: [demoAiChatData().chat] }))
   override('ai:createChat', () => ({ chat: demoAiChatData().chat }))
   override('ai:getChat', () => demoAiChatData())
@@ -2775,7 +2836,7 @@ function demoAnalyticsData(): Record<string, unknown> {
   for (let i = 180; i >= 0; i -= 1) {
     const d = new Date(today)
     d.setDate(d.getDate() - i)
-    daily[`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`] = Math.round(40 + 80 * Math.random())
+    daily[`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`] = Math.round(40 + 40 * (1 + Math.sin(i * 1.37)) + 20 * (1 + Math.cos(i * 0.41)))
   }
   return {
     stats: {
@@ -2840,6 +2901,10 @@ excluded: ['gh_official_demo'],
         { word: '目标', count: 205 },
         { word: '季度', count: 188 },
         { word: '汇报', count: 175 },
+        { word: 'planning', count: 168 },
+        { word: 'release', count: 151 },
+        { word: 'family', count: 139 },
+        { word: 'health', count: 127 },
         { word: '出差', count: 162 },
         { word: '团建', count: 150 },
         { word: '健身', count: 138 },
@@ -3166,10 +3231,25 @@ function installV09DemoHandlers() {
   override('analytics:getOverallStatistics', () => ({ success: true, data: analytics.stats }))
   override('analytics:getTimeDistribution', () => ({ success: true, data: analytics.timeDistribution }))
   override('analytics:getSelfSentDailyDistribution', () => ({ success: true, data: analytics.selfSent }))
-  override('analytics:getContactRankings', () => ({ success: true, data: analytics.rankings }))
+  override('analytics:getContactRankings', (_e, limit?: number, _begin?: number, _end?: number, options?: { includeGroupChats?: boolean }) => {
+    const groupRanking = {
+      username: 'family@chatroom',
+      displayName: '一家人群聊',
+      avatarUrl: demoSnsAvatarUrl('家'),
+      messageCount: 9320,
+      sentCount: 3810,
+      receivedCount: 5510,
+      lastMessageTime: Math.floor(Date.now() / 1000),
+    }
+    const rankings = Array.isArray(analytics.rankings)
+      ? analytics.rankings as Array<typeof groupRanking>
+      : []
+    const data = options?.includeGroupChats ? [groupRanking, ...rankings] : rankings
+    return { success: true, data: data.slice(0, Math.max(1, Number(limit) || 20)) }
+  })
   override('analytics:getExcludedUsernames', () => ({ success: true, data: analytics.excluded }))
   override('analytics:setExcludedUsernames', (_e, usernames: string[]) => ({ success: true, data: usernames }))
-override('analytics:getExcludeCandidates', () => ({ success: true, data: analytics.candidates }))
+  override('analytics:getExcludeCandidates', () => ({ success: true, data: analytics.candidates }))
   override('analytics:getDailyActivity', () => ({ success: true, data: analytics.dailyActivity }))
   override('analytics:getWordFrequency', (_e, limit?: number) => ({
     success: true,
@@ -3243,6 +3323,18 @@ async function runV09DumpMode() {
     log('FAIL: 主窗口不存在')
     app.exit(1)
     return
+  }
+
+  const waitForSelector = async (selector: string, timeoutMs = 12000): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const present = await wc.executeJavaScript(
+        `document.querySelector(${JSON.stringify(selector)}) !== null`,
+      ).catch(() => false)
+      if (present) return true
+      await sleep(250)
+    }
+    return false
   }
 
   const consoleErrors: string[] = []
@@ -3368,7 +3460,7 @@ async function runV09DumpMode() {
     bigIcons: '.analytics-big-icon',
   })
   const hubDom = results.hub as Record<string, any>
-  if ((hubDom.bigCards?.count ?? 0) < 2) { results.fail = 'hub cards missing'; log('FAIL: 分析入口大按钮不足 2 个'); app.exit(1); return }
+  if ((hubDom.bigCards?.count ?? 0) < 4) { results.fail = 'hub cards missing'; log('FAIL: 分析入口未展示四个报告入口'); app.exit(1); return }
 
   // 3) 全局分析
   await wc.executeJavaScript(`(() => { const b = document.querySelector('.analytics-big-card'); b?.click(); return !!b; })()`)
@@ -3377,6 +3469,9 @@ async function runV09DumpMode() {
     statCards: '.stat-card',
     mediaTypes: '.media-type-cell',
     charts: '.echarts-for-react',
+    wordCloudStage: '.analytics-word-cloud__stage',
+    rankingControls: '.ranking-limit-segment',
+    excludeButton: '.ranking-exclude-btn',
     rankingRows: '.ranking-row',
     rankingNames: '.ranking-name',
     excludeItems: '.exclude-item',
@@ -3386,9 +3481,10 @@ const globalDom = results.global as Record<string, any>
     (() => {
       const titles = Array.from(document.querySelectorAll('.v09-panel-head h3')).map((x) => x.textContent.trim());
       return {
-        hasRadar: titles.includes('交流画像'),
+        radarRemoved: !titles.some((title) => title.includes('交流画像')) && !document.querySelector('[data-chart-type="radar"]'),
         hasCalendar: titles.includes('活跃日历'),
-        hasWordCloud: titles.includes('高频词云'),
+        hasWordCloud: titles.includes('高频词云') && !!document.querySelector('.analytics-word-cloud__stage'),
+        cloudInteractive: document.querySelectorAll('.analytics-word-cloud__word').length > 0,
         chartCount: document.querySelectorAll('.echarts-for-react').length,
       };
     })()
@@ -3397,17 +3493,23 @@ const globalDom = results.global as Record<string, any>
   results.globalV095 = globalV095
   const globalOk =
     (globalDom.statCards?.count ?? 0) >= 4 &&
-    (globalDom.charts?.count ?? 0) >= 7 &&
+    (globalDom.charts?.count ?? 0) >= 5 &&
+    (globalDom.wordCloudStage?.count ?? 0) >= 1 &&
+    (globalDom.rankingControls?.count ?? 0) >= 1 &&
+    (globalDom.excludeButton?.count ?? 0) >= 1 &&
     (globalDom.rankingRows?.count ?? 0) >= 3 &&
-    globalV095?.hasRadar === true &&
+    globalV095?.radarRemoved === true &&
     globalV095?.hasCalendar === true &&
-    globalV095?.hasWordCloud === true
-  log(`global checks: statCards>=4 charts>=7 ranking>=3 radar+calendar+wordcloud → ${globalOk}`)
+    globalV095?.hasWordCloud === true &&
+    globalV095?.cloudInteractive === true
+  log(`global checks: summary+charts+ranking+calendar+interactive-cloud+radar-removed → ${globalOk}`)
   if (!globalOk) { results.fail = 'global analytics assertions failed'; log('FAIL: 全局分析断言失败（含 v0.9.5 新增面板）'); app.exit(1); return }
 
   // 4) 年度报告
-  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.chip')).find((x) => x.textContent.includes('年度报告')); b?.click(); return !!b; })()`)
-  await sleep(1800)
+  await wc.executeJavaScript(`(() => { const b = document.querySelector('.analytics-page .v09-actions .chip'); b?.click(); return !!b; })()`)
+  await waitForSelector('.analytics-big-card')
+  await wc.executeJavaScript(`(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[2]?.click(); return cards.length; })()`)
+  await waitForSelector('.annual-year-row .chip')
   await dumpDom('annualYears', { yearChips: '.annual-year-row .chip' })
   const annualYearsDom = results.annualYears as Record<string, any>
   if ((annualYearsDom.yearChips?.count ?? 0) < 2) { results.fail = 'annual years missing'; log('FAIL: 年度报告年份不足'); app.exit(1); return }
@@ -3438,8 +3540,18 @@ const globalDom = results.global as Record<string, any>
   // 5) 关闭年度报告 → 返回选择 → 群聊分析
   await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.annual-actions .icon-btn-ghost')); b[0]?.click(); return b.length; })()`)
   await sleep(1000)
-  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.v09-actions .chip')).find((x) => x.textContent.includes('返回选择')); b?.click(); return !!b; })()`)
-  await sleep(1200)
+  await wc.executeJavaScript(`(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[3]?.click(); return cards.length; })()`)
+  await waitForSelector('.dual-report-friend')
+  await dumpDom('dualReport', {
+    friendRows: '.dual-report-friend',
+    yearChips: '.dual-report-year-row .chip',
+  })
+  const dualDom = results.dualReport as Record<string, any>
+  const dualOk = (dualDom.friendRows?.count ?? 0) >= 3 && (dualDom.yearChips?.count ?? 0) >= 2
+  log(`dual checks: friends>=3 years>=2 → ${dualOk}`)
+  if (!dualOk) { results.fail = 'dual report assertions failed'; log('FAIL: 双人报告入口断言失败'); app.exit(1); return }
+  await wc.executeJavaScript(`(() => { const b = document.querySelector('.dual-report-page .annual-actions .chip'); b?.click(); return !!b; })()`)
+  await sleep(1000)
   await wc.executeJavaScript(`(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[1]?.click(); return cards.length; })()`)
   await sleep(2200)
   await dumpDom('groupList', { groups: '.group-item', groupNames: '.group-item-name' })
@@ -3460,14 +3572,14 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   log(`group checks: members>=4 tabs>=4 → ${groupOk}`)
   if (!groupOk) { results.fail = 'group detail assertions failed'; log('FAIL: 群聊详情断言失败'); app.exit(1); return }
 
-  // 5.5) 群聊画像页签：雷达 + 24×7 热力图（v0.9.5）
-  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.group-tabs .chip')).find((x) => x.textContent.includes('画像')); b?.click(); return !!b; })()`)
+  // 5.5) 群聊活跃热力图页签：确认已移除画像雷达
+  await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.group-tabs .chip')).find((x) => x.textContent.includes('活跃热力图')); b?.click(); return !!b; })()`)
   await sleep(2200)
   const profileV095 = await wc.executeJavaScript(`
     (() => {
       const titles = Array.from(document.querySelectorAll('.v09-panel-head h3')).map((x) => x.textContent.trim());
       return {
-        hasRadar: titles.includes('交流画像'),
+        radarRemoved: !titles.some((title) => title.includes('交流画像')) && !document.querySelector('[data-chart-type="radar"]'),
         hasHeatmap: titles.includes('活跃热力图'),
         chartCount: document.querySelectorAll('.echarts-for-react').length,
       };
@@ -3475,7 +3587,7 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   `)
   log(`profileV095 = ${JSON.stringify(profileV095)}`)
   results.profileV095 = profileV095
-  const profileOk = profileV095?.hasRadar === true && profileV095?.hasHeatmap === true && (profileV095?.chartCount ?? 0) >= 2
+  const profileOk = profileV095?.radarRemoved === true && profileV095?.hasHeatmap === true && (profileV095?.chartCount ?? 0) >= 1
   if (!profileOk) { results.fail = 'group profile tab assertions failed'; log('FAIL: 群聊画像页签断言失败'); app.exit(1); return }
   await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.group-tabs .chip')).find((x) => x.textContent.includes('成员')); b?.click(); return !!b; })()`)
   await sleep(1000)
@@ -3495,7 +3607,11 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   const memberWordCloudCharts = await wc.executeJavaScript(`
     (() => {
       const titles = Array.from(document.querySelectorAll('.member-dialog .v09-panel-head h3')).map((x) => x.textContent.trim());
-      return { hasWordCloud: titles.includes('高频词云'), chartCount: document.querySelectorAll('.member-dialog .echarts-for-react').length };
+      return {
+        hasWordCloud: titles.includes('高频词云') && !!document.querySelector('.member-dialog .analytics-word-cloud__stage'),
+        cloudInteractive: document.querySelectorAll('.member-dialog .analytics-word-cloud__word').length > 0,
+        chartCount: document.querySelectorAll('.member-dialog .echarts-for-react').length,
+      };
     })()
   `)
   log(`memberWordCloudV095 = ${JSON.stringify(memberWordCloudCharts)}`)
@@ -3505,7 +3621,8 @@ const groupDetailDom = results.groupDetail as Record<string, any>
     (memberDom.dialogStats?.count ?? 0) >= 3 &&
     (memberDom.messages?.count ?? 0) >= 5 &&
     memberWordCloudCharts?.hasWordCloud === true &&
-    (memberWordCloudCharts?.chartCount ?? 0) >= 2
+    memberWordCloudCharts?.cloudInteractive === true &&
+    (memberWordCloudCharts?.chartCount ?? 0) >= 1
   log(`member dialog checks: dialog stats>=3 messages>=5 wordcloud → ${memberOk}`)
   await wc.executeJavaScript(`(() => { const b = document.querySelector('.member-dialog .wp-dialog-head .icon-btn-ghost'); b?.click(); return !!b; })()`)
   await sleep(800)
@@ -3599,8 +3716,8 @@ const groupDetailDom = results.groupDetail as Record<string, any>
     await sleep(2000)
     const global = await wc.executeJavaScript(`
       (() => {
-        const cards = document.querySelector('.stat-cards');
-        const n = cards ? cards.children.length : 0;
+        const cards = document.querySelectorAll('.analytics-summary-strip .stat-card');
+        const n = cards.length;
         const charts = Array.from(document.querySelectorAll('.echarts-for-react')).filter((c) => c.getBoundingClientRect().width > 200).length;
         return {
           statCards: n,
@@ -3696,6 +3813,111 @@ async function runScreenshotMode() {
     })
   }
 
+  // Real README captures run against a temporary copy of the user's profile,
+  // but the copy can still contain personal names, IDs, paths, messages, and
+  // avatars. Mask those values in the page before capture. This is deliberately
+  // renderer-side and selector-driven: it preserves layout/chart geometry and
+  // never writes a modified copy of the user's database or config.
+  const installScreenshotPrivacyMask = async (win: BrowserWindow, label: string) => {
+    if (!isRealScreenshotMode || win.isDestroyed()) return
+    const selectors = [
+      '[data-username]',
+      '[data-session-id]',
+      '[aria-label*="wxid"]',
+      '[title*="wxid"]',
+      '.account-item strong',
+      '.account-item > div > span',
+      '.account-item > span:not(.account-avatar)',
+      '.account-name',
+      '.account-id',
+      '.session-name',
+      '.session-id',
+      '.session-title',
+      '.contact-name',
+      '.contact-id',
+      '.display-name',
+      '.nickname',
+      '.username',
+      '.wxid',
+      '.group-item-name',
+      '.group-member-name',
+      '.group-detail-title',
+      '.member-name',
+      '.ranking-name',
+      '.export-session-copy strong',
+      '.export-session-copy > span',
+      '.author-name',
+      '.sns-author-name',
+      '.post-text',
+      '.post-location-text',
+      '.comment-user',
+      '.comment-content',
+      '.likes-text',
+      '.annual-friend-name',
+      '.annual-monthly-name',
+      '.annual-hero .stat-card:last-child .stat-sub',
+      '.annual-mutual > div > b',
+      '.dual-report-friend-name',
+      '.dual-report-friend-id',
+      '.media-image',
+      '.sns-media-item video',
+      '.sns-link-card img',
+      '.notification-title',
+      '.notification-body',
+    ]
+    try {
+      const installed = await win.webContents.executeJavaScript(
+        `(() => {
+          const selectors = ${JSON.stringify(selectors)};
+          const styleId = '__weport-real-screenshot-privacy-style';
+          const className = 'weport-real-screenshot-private';
+          const root = document.documentElement;
+          if (!root) return false;
+          let style = document.getElementById(styleId);
+          if (!style) {
+            style = document.createElement('style');
+            style.id = styleId;
+            style.textContent = '.' + className + ', ' + selectors.join(', ') + ' { filter: blur(9px) !important; }';
+            document.head.appendChild(style);
+          }
+          const redact = (node) => {
+            if (!(node instanceof Element) || node.classList.contains(className)) return;
+            for (const selector of selectors) {
+              try {
+                if (node.matches(selector)) {
+                  node.classList.add(className);
+                  break;
+                }
+              } catch (_) { /* ignore an unsupported selector */ }
+            }
+          };
+          const mark = (node) => {
+            if (!node || typeof node.querySelectorAll !== 'function') return;
+            redact(node);
+            for (const selector of selectors) {
+              try { node.querySelectorAll(selector).forEach(redact); } catch (_) { /* noop */ }
+            }
+          };
+          mark(document);
+          if (!window.__weportRealScreenshotPrivacyObserver) {
+            const observer = new MutationObserver((mutations) => {
+              for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) mark(node);
+              }
+            });
+            observer.observe(root, { childList: true, subtree: true });
+            window.__weportRealScreenshotPrivacyObserver = observer;
+          }
+          return true;
+        })()`,
+        true,
+      )
+      if (!installed) log(`[privacy:${label}] document not ready`)
+    } catch (error) {
+      log(`[privacy:${label}] mask install failed:`, error)
+    }
+  }
+
   // 等待渲染进程加载完成
   for (let i = 0; i < 30; i += 1) {
     if (mainWindow && !mainWindow.webContents.isLoading()) break
@@ -3708,6 +3930,7 @@ async function runScreenshotMode() {
       true,
     ).catch(() => false)
   } catch { /* noop */ }
+  if (mainWindow) await installScreenshotPrivacyMask(mainWindow, 'main')
   if (mainWindow) forwardConsole(mainWindow.webContents, 'main')
   // 等「找到 N 个账号」之类的 toast 过期 + 字体/首屏稳定，避免入画
   await sleep(4000)
@@ -3810,6 +4033,24 @@ async function runScreenshotMode() {
       await clickTab('导出数据')
       if (await waitForDom('.format-grid')) {
         await sleep(500)
+        const scopePopupOpened = await mainWindow.webContents
+          .executeJavaScript(
+            `(() => { const trigger = document.querySelector('.export-scope-trigger'); if (!trigger) return false; trigger.click(); return true })()`,
+            true,
+          )
+          .catch(() => false)
+        const scopePopupReady = scopePopupOpened && await waitForDom('.export-session-popover', isRealScreenshotMode ? 120 : 40)
+        if (scopePopupReady) {
+          await dumpRects('export-scope-rects.json', ['.export-scope-trigger', '.export-session-popover'])
+          await mainWindow.webContents
+            .executeJavaScript(
+              `(() => { const close = document.querySelector('[aria-label="关闭导出范围菜单"]'); close?.click(); return !!close })()`,
+              true,
+            )
+            .catch(() => false)
+        } else {
+          log('FAIL [screenshot] 导出范围弹出菜单未打开')
+        }
         await saveStable(mainWindow, 'export.png')
         await dumpRects('export-rects.json', [
           '.format-chip.layout-chip', '.format-grid .format-chip', '.media-check',
@@ -3897,9 +4138,12 @@ async function runScreenshotMode() {
           .then((v) => v === 2)
           .catch(() => false)
       // CI 上该面板首次挂载可能让渲染进程忙很久（软渲染），放宽等待
-      const mounted =
-        (await waitForDom('.ai-shell', 100)) && (await waitForDom('.ai-msg', 100))
-      log(`[screenshot] AI tab mounted=${mounted} rendererProbe=${await probe()}`)
+      const shellMounted = await waitForDom('.ai-shell', 100)
+      const messageMounted = shellMounted && await waitForDom('.ai-msg', 100)
+      // A real profile may have no AI conversation/provider yet. The shell is
+      // still the user's actual WeportAI screen and is a valid README capture.
+      const mounted = shellMounted && (messageMounted || isRealScreenshotMode)
+      log(`[screenshot] AI tab shell=${shellMounted} messages=${messageMounted} mounted=${mounted} rendererProbe=${await probe()}`)
       if (mounted) {
         await sleep(500)
         const ok = await saveStable(mainWindow, 'ai.png', 12, 30)
@@ -3946,7 +4190,7 @@ async function runScreenshotMode() {
 
   // 6) 通知弹窗（persistent：卡片不自动淡出，稳定帧捕获必然拿到完整不透明卡片）
   try {
-    const payload = {
+    let payload = {
       sessionId: 'family@chatroom',
       channel: 'message',
       title: '一家人 · Max Shuang',
@@ -3954,6 +4198,35 @@ async function runScreenshotMode() {
       avatarUrl: process.env.WEPORT_SCREENSHOT_AVATAR_URL || '',
       timestamp: Math.floor(Date.now() / 1000),
       persistent: true,
+    }
+    if (isRealScreenshotMode) {
+      // Use the latest real session/message when the isolated profile can
+      // connect. The privacy mask below protects the rendered values.
+      try {
+        const connected = await chatService.connect()
+        if (connected.success) {
+          const sessionsResult = await chatService.getSessions()
+          const candidate = (sessionsResult.sessions || []).find((session: any) =>
+            String(session?.username || '').trim() && Number(session?.messageCountHint || 0) > 0,
+          ) || (sessionsResult.sessions || []).find((session: any) => String(session?.username || '').trim())
+          if (candidate) {
+            const sessionId = String(candidate.username)
+            const messagesResult = await wcdbService.getMessages(sessionId, 1, 0)
+            const latest = messagesResult.messages?.[0]
+            const content = String(latest?.parsedContent || latest?.content || latest?.rawContent || candidate.summary || '').trim()
+            payload = {
+              ...payload,
+              sessionId,
+              title: String(candidate.displayName || sessionId),
+              content: content.slice(0, 160) || '最新消息',
+              avatarUrl: String(candidate.avatarUrl || ''),
+              timestamp: Number(latest?.createTime || candidate.lastTimestamp || payload.timestamp),
+            }
+          }
+        }
+      } catch (error) {
+        log('[screenshot] real notification data unavailable; using neutral fallback:', error)
+      }
     }
     // 主进程预热真实头像（带微信 UA/Referer），保证渲染进程必命中缓存，头像不会缺失
     if (payload.avatarUrl) {
@@ -3994,6 +4267,7 @@ async function runScreenshotMode() {
         if (mounted) break
         await sleep(300)
       }
+      await installScreenshotPrivacyMask(popup, 'popup')
       // 等卡片入场动画 + 玻璃面板就绪；若指定了真实头像，多等 CDN 加载完成
       await sleep(payload.avatarUrl ? 5000 : 1500)
       // 阈值与其他 11 张截图一致（12）：CI 桌面快照可能为黑底，
@@ -4027,7 +4301,8 @@ async function runScreenshotMode() {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
       if (pre) await pre()
-      const ok = await waitForDom(selectors[0])
+      const ok = await waitForDom(selectors[0], isRealScreenshotMode ? 240 : 40)
+        || (isRealScreenshotMode && selectors[1] ? await waitForDom(selectors[1], 20) : false)
       if (!ok) {
         console.warn(`[screenshot] ${label} did not render`)
         return
@@ -4042,7 +4317,7 @@ async function runScreenshotMode() {
   }
 
   // 7.1) 朋友圈
-  await captureV09('sns', 'sns.png', ['.sns-post-item', '.sns-author'], async () => {
+  await captureV09('sns', 'sns.png', ['.sns-post-item', '.sns-page'], async () => {
     await clickTab('朋友圈')
   })
   // 7.2) 分析入口（两个大卡片并排）
@@ -4055,45 +4330,57 @@ async function runScreenshotMode() {
     ).catch(() => false)
   })
   // 7.3) 全局分析（统计卡片 + 图表）
-  await captureV09('global', 'analytics-global.png', ['.analytics-global .stat-cards'], async () => {
+  await captureV09('global', 'analytics-global.png', ['.analytics-global .analytics-summary-strip'], async () => {
     await mainWindow!.webContents.executeJavaScript(
       `(() => { const c = document.querySelector('.analytics-big-card'); c?.click(); return !!c; })()`,
       true,
     ).catch(() => false)
+    await sleep(500)
   }, 1600)
   // 7.4) 年度报告
-  await captureV09('annual', 'annual-report.png', ['.annual-hero'], async () => {
+  await captureV09('annual', 'annual-report.png', ['.annual-hero', '.annual-report-view'], async () => {
     await mainWindow!.webContents.executeJavaScript(
-      `(() => { const chips = Array.from(document.querySelectorAll('.v09-toolbar .chip, .v09-actions .chip')); const b = chips.find((x) => x.textContent.includes('年度报告')); b?.click(); return !!b; })()`,
+      `(() => { const back = document.querySelector('.analytics-page .v09-actions .chip'); back?.click(); return !!back; })()`,
       true,
     ).catch(() => false)
-    await sleep(600)
+    await waitForDom('.analytics-big-card', isRealScreenshotMode ? 120 : 40)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[2]?.click(); return !!cards[2]; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+    await waitForDom('.annual-report-view', isRealScreenshotMode ? 120 : 40)
+    await waitForDom('.annual-year-row .chip', isRealScreenshotMode ? 120 : 40)
     await mainWindow!.webContents.executeJavaScript(
       `(() => { const c = document.querySelector('.annual-year-row .chip'); c?.click(); return !!c; })()`,
       true,
     ).catch(() => false)
+    await waitForDom('.annual-hero', isRealScreenshotMode ? 240 : 40)
   }, 2000)
   // 7.5) 群聊分析（群列表 + 成员面板）
-  await captureV09('group', 'analytics-group.png', ['.group-member-row'], async () => {
+  await captureV09('group', 'analytics-group.png', ['.group-analytics', '.group-member-row'], async () => {
     await mainWindow!.webContents.executeJavaScript(
-      `(() => { const b = Array.from(document.querySelectorAll('.annual-actions .icon-btn-ghost')); b[0]?.click(); return !!b; })()`,
+      `(() => { const b = document.querySelector('.annual-report-view .annual-actions .icon-btn-ghost'); b?.click(); return !!b; })()`,
       true,
     ).catch(() => false)
-    await sleep(700)
+    await sleep(500)
+    await waitForDom('.analytics-big-card', isRealScreenshotMode ? 120 : 40)
     await mainWindow!.webContents.executeJavaScript(
       `(() => { const back = Array.from(document.querySelectorAll('.v09-actions .chip, .v09-toolbar .chip')).find((x) => x.textContent.includes('返回选择')); back?.click(); return !!back; })()`,
       true,
     ).catch(() => false)
-    await sleep(500)
+    await waitForDom('.analytics-big-card', isRealScreenshotMode ? 120 : 40)
     await mainWindow!.webContents.executeJavaScript(
       `(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[1]?.click(); return !!cards[1]; })()`,
       true,
     ).catch(() => false)
-    await sleep(700)
+    await sleep(500)
+    await waitForDom('.group-analytics', isRealScreenshotMode ? 120 : 40)
     await mainWindow!.webContents.executeJavaScript(
       `(() => { const g = document.querySelector('.group-item'); g?.click(); return !!g; })()`,
       true,
     ).catch(() => false)
+    await sleep(500)
   }, 1600)
   // 7.6) 设置（主题选择 + 启动行为）
   await captureV09('settings', 'settings.png', ['.theme-card'], async () => {
@@ -4729,7 +5016,72 @@ async function runUiDumpMode() {
 // ---------------------------------------------------------------------------
 // 启动 / 退出
 // ---------------------------------------------------------------------------
+function installMainProcessErrorHandlers() {
+  const fatalLog = process.env.WEPORT_FATAL_LOG ||
+    (process.env.WEPORT_AI_SELFTEST_OUT
+      ? join(process.env.WEPORT_AI_SELFTEST_OUT, 'fatal.log')
+      : null)
+  let lastSignature = ''
+  let lastRecordedAt = 0
+  let suppressedCount = 0
+
+  const isBrokenPipe = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'EPIPE'
+  const errorText = (error: unknown) => String((error as Error)?.stack || error)
+  const appendFatal = (kind: string, error: unknown) => {
+    if (isBrokenPipe(error)) return
+    const details = errorText(error)
+    const signature = `${kind}:${details}`
+    const now = Date.now()
+    // A failing event source can reject the same promise repeatedly. Keep the
+    // log useful and avoid turning an error storm into an I/O storm as well.
+    if (signature === lastSignature && now - lastRecordedAt < 1000) {
+      suppressedCount += 1
+      return
+    }
+    const suppressed = suppressedCount
+    suppressedCount = 0
+    lastSignature = signature
+    lastRecordedAt = now
+    const line = `${new Date().toISOString()} ${kind}: ${details}${suppressed ? ` (suppressed ${suppressed} duplicates)` : ''}\n`
+    console.error(`[Weport] ${line.trim()}`)
+    try {
+      const logPath = fatalLog || join(app.getPath('logs'), 'fatal.log')
+      mkdirSync(dirname(logPath), { recursive: true })
+      appendFileSync(logPath, line, 'utf8')
+    } catch {
+      // Logging must never become a second uncaught exception.
+    }
+  }
+
+  process.stdout?.on('error', (error) => {
+    if (!isBrokenPipe(error)) appendFatal('stdout', error)
+  })
+  process.stderr?.on('error', (error) => {
+    if (!isBrokenPipe(error)) appendFatal('stderr', error)
+  })
+  process.on('uncaughtException', (error) => {
+    if (isBrokenPipe(error)) return
+    appendFatal('uncaughtException', error)
+    if (fatalProcessError) return
+    fatalProcessError = true
+    isAppQuitting = true
+    // Registering this handler prevents Electron's default modal
+    // "A JavaScript error occurred in the main process" dialog. A process
+    // which reached uncaughtException is not safe to keep serving requests;
+    // exit once the current callback unwinds instead of showing a dialog for
+    // every follow-up exception.
+    setTimeout(() => {
+      try { app.exit(1) } catch { process.exit(1) }
+    }, 0).unref()
+  })
+  process.on('unhandledRejection', (error) => {
+    appendFatal('unhandledRejection', error)
+  })
+}
+
 function startApp() {
+  installMainProcessErrorHandlers()
+  const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
   if (process.platform !== 'win32' && process.platform !== 'darwin') {
     console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS）')
   }
@@ -4758,43 +5110,6 @@ function startApp() {
       app.disableHardwareAcceleration()
     } catch { /* noop */ }
   }
-
-
-  const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
-  if (aiSelfTest) {
-    // Electron otherwise shows one modal dialog per uncaught main-process
-    // exception. A headless harness must fail once and leave a searchable log,
-    // never spray JavaScript error popups onto the user's desktop.
-    const fatalLog = join(
-      process.env.WEPORT_AI_SELFTEST_OUT || app.getPath('temp'),
-      'fatal.log',
-    )
-    const recordFatal = (kind: string, error: unknown) => {
-      try {
-        mkdirSync(dirname(fatalLog), { recursive: true })
-        appendFileSync(fatalLog, `${new Date().toISOString()} ${kind}: ${String((error as Error)?.stack || error)}\n`, 'utf8')
-      } catch { /* noop */ }
-    }
-    const isBrokenPipe = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'EPIPE'
-    // Packaged Electron detaches from the launching shell on Windows. Any later
-    // console output can then target a closed stdout/stderr pipe; that is a
-    // transport condition, not an application failure and must never produce a
-    // JavaScript modal or terminate a long-running agent test.
-    process.stdout?.on('error', (error) => {
-      if (!isBrokenPipe(error)) recordFatal('stdout', error)
-    })
-    process.stderr?.on('error', (error) => {
-      if (!isBrokenPipe(error)) recordFatal('stderr', error)
-    })
-    process.on('uncaughtException', (error) => {
-      if (isBrokenPipe(error)) return
-      recordFatal('uncaughtException', error)
-      isAppQuitting = true
-      app.exit(1)
-    })
-    process.on('unhandledRejection', (error) => recordFatal('unhandledRejection', error))
-  }
-
   // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）
   if (process.env.WEPORT_SCREENSHOT_POPUP === '1') {
     try {
@@ -4923,13 +5238,13 @@ function startApp() {
       } catch { /* noop */ }
     })
 
-    // 后台预热联系人显示名/头像（不阻塞窗口显示；截图模式跳过：演示数据无真实会话）。
+    // 后台预热联系人显示名/头像（不阻塞窗口显示；仅虚构演示截图跳过）。
     // 仅当需要常驻数据库连接（消息推送开启）或用户主动启动（非静默）时执行；
     // 静默启动时跳过可避免开机即拉起 WCDB 宿主进程与全部微信库连接（约 900MB），
     // 改为窗口打开时由 showMainWindow 按需预热
-    if (!isScreenshotMode && (configService.get('messagePushEnabled') === true || !startHidden)) {
+    if (!isDemoScreenshotMode && (configService.get('messagePushEnabled') === true || !startHidden)) {
       void warmupContactNames()
-    } else if (!isScreenshotMode && startHidden) {
+    } else if (!isDemoScreenshotMode && startHidden) {
       contactWarmupDeferred = true
     }
 
@@ -4951,9 +5266,10 @@ function startApp() {
       messagePushService?.start()
     }
 
-    // 截图模式：跳过更新检查（避免更新横幅入画）。
+    // QA 模式统一跳过更新检查：演示/转储必须离线且不能让 updater 的
+    // 网络错误污染渲染断言或用户的桌面。
     // 静默启动也跳过：无主窗口时横幅无处可送，等首次打开窗口再检查
-    if (!isScreenshotMode && !startHidden) {
+    if (!isAnyQaMode && !startHidden) {
       checkForUpdatesOnStartup()
     }
 

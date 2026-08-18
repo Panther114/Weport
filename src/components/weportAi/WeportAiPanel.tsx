@@ -29,6 +29,7 @@ import {
   MemoryStick,
 } from 'lucide-react'
 import AiMarkdown from './AiMarkdown'
+import './providerProfiles.css'
 
 type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number }
 type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string }
@@ -57,16 +58,42 @@ type SetupInfo = {
   baseUrl: string
   baseUrlError?: string
   model: string
-  maxTokens: number
   reasoningEffort: string
-  maxSteps: number
   customPrompt: string
   workspaceRoot: string
   exportPath: string
   dbReady: boolean
   disabledTools: string[]
-  maxToolChars: number
-  conversationLimit: number
+  activeProfileId: string
+  profiles: ProviderProfileSummary[]
+  catalog: ProviderCatalogEntry[]
+}
+
+type ProviderProtocol = 'openai' | 'openai-compatible' | 'anthropic' | 'google' | 'gemini-compatible'
+type ProviderCatalogEntry = {
+  id: string
+  name: string
+  description: string
+  protocol: ProviderProtocol
+  baseUrl: string
+  defaultModel: string
+  models: string[]
+  allowCustomBaseUrl?: boolean
+  protocolOptions?: ProviderProtocol[]
+  apiKeyOptional?: boolean
+}
+type ProviderProfileSummary = {
+  id: string
+  name: string
+  displayName: string
+  providerId: string
+  protocol: ProviderProtocol
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+  apiKeyHint: string
+  updatedAt: number
+  discovery?: { models: string[]; fetchedAt: number; error?: string }
 }
 
 type AiAction = { id: string; name: string; prompt: string }
@@ -341,7 +368,7 @@ export default function WeportAiPanel() {
   }, [refreshChats, openChat, activeId, api])
 
   useEffect(() => {
-    void api.ai.getSetup().then(setSetup).catch(() => undefined)
+    void api.ai.getSetup().then((value) => setSetup(value as unknown as SetupInfo)).catch(() => undefined)
     void ensureChat()
     void refreshActions()
 
@@ -714,7 +741,7 @@ export default function WeportAiPanel() {
       <main className="ai-main">
         {setup && !setup.hasApiKey && (
           <div className="ai-warn-banner warn">
-            未配置 API 密钥 — 打开左下角「设置」填入你的 DeepSeek API Key 后才能使用。
+            当前服务尚未配置 API key — 打开左下角「设置」完成提供商配置后才能使用。
           </div>
         )}
 
@@ -726,7 +753,7 @@ export default function WeportAiPanel() {
               </div>
               <h2>WeportAI · 聊天历史分析助手</h2>
               <p>
-                基于 DeepSeek V4 Flash 的本地聊天记录分析环境。它能跨会话查看某一天的完整时间线、搜索任意关键词、统计互动，
+                基于所选 AI 提供商的本地聊天记录分析环境。它能跨会话查看某一天的完整时间线、搜索任意关键词、统计互动，
                 并把发现持续写入导出目录下的 <code>WeportAI/memory/</code> 长期记忆。
               </p>
               <div className="ai-empty-tips">
@@ -1154,6 +1181,7 @@ export default function WeportAiPanel() {
         <AiSettingsModal
           setup={setup}
           onClose={() => setSettingsOpen(false)}
+          onChanged={(next) => setSetup(next)}
           onSaved={(next) => {
             setSetup(next)
             setSettingsOpen(false)
@@ -1172,7 +1200,7 @@ function fmtDebugLine(raw: string): string {
     const chat = String(e.chatId || '').slice(0, 8)
     switch (e.kind) {
       case 'request':
-        return `[${time}] 请求 chat=${chat} 模型=${e.model} 消息数=${e.messages} 大小≈${Math.round((e.estChars || 0) / 1024)}KB 上限=${e.maxTokens}`
+        return `[${time}] 请求 chat=${chat} 模型=${e.model} 消息数=${e.messages} 大小≈${Math.round((e.estChars || 0) / 1024)}KB`
       case 'response':
         return `[${time}] 响应 chat=${chat} 内容=${e.contentChars || 0}字 思考=${e.reasoningChars || 0}字 工具调用=${e.toolCalls || 0} 结束=${e.finishReason || '—'} tokens=${e.usage?.totalTokens ?? '—'}（缓存命中 ${e.usage?.promptCacheHitTokens ?? 0}） 耗时=${e.durationMs ?? '—'}ms`
       case 'error':
@@ -1185,103 +1213,269 @@ function fmtDebugLine(raw: string): string {
   }
 }
 
-function AiRangeSlider({
-  label,
-  value,
-  min,
-  max,
-  step,
-  unit,
-  onChange,
-}: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  unit: string
-  onChange: (v: number) => void
-}) {
-  return (
-    <div className="ai-slider-field">
-      <div className="ai-slider-label">
-        <span>{label}</span>
-        <strong>
-          {value.toLocaleString()}
-          {unit}
-        </strong>
-      </div>
-      <input
-        className="ai-slider"
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-      />
-    </div>
-  )
-}
-
 function AiSettingsModal({
   setup,
   onClose,
+  onChanged,
   onSaved,
 }: {
   setup: SetupInfo
   onClose: () => void
+  onChanged?: (next: SetupInfo) => void
   onSaved: (next: SetupInfo) => void
 }) {
   const api = window.electronAPI
-  const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState(setup.baseUrl)
-  const [model, setModel] = useState(setup.model)
-  const [maxTokens, setMaxTokens] = useState(setup.maxTokens)
-  const [effort, setEffort] = useState(setup.reasoningEffort)
-  const [maxSteps, setMaxSteps] = useState(setup.maxSteps)
+  const [profiles, setProfiles] = useState(setup.profiles || [])
+  const [catalog, setCatalog] = useState(setup.catalog || [])
+  const [activeProfileId, setActiveProfileId] = useState(setup.activeProfileId || '')
+  const [editingId, setEditingId] = useState<string | null>(setup.activeProfileId || setup.profiles?.[0]?.id || null)
+  const initial = setup.profiles?.find((p) => p.id === (setup.activeProfileId || setup.profiles?.[0]?.id))
+  const [draft, setDraft] = useState({
+    name: initial?.name || '新 AI 服务',
+    providerId: initial?.providerId || 'deepseek',
+    protocol: initial?.protocol || 'openai-compatible' as ProviderProtocol,
+    baseUrl: initial?.baseUrl || '',
+    model: initial?.model || '',
+    apiKey: '',
+  })
   const [customPrompt, setCustomPrompt] = useState(setup.customPrompt)
   const [workspaceRoot, setWorkspaceRoot] = useState(setup.workspaceRoot)
-  const [maxToolChars, setMaxToolChars] = useState(setup.maxToolChars)
-  const [conversationLimit, setConversationLimit] = useState(setup.conversationLimit)
+  const [effort, setEffort] = useState(setup.reasoningEffort)
   const [disabledTools, setDisabledTools] = useState<Set<string>>(new Set(setup.disabledTools))
   const [actions, setActions] = useState<AiAction[]>([])
   const [saving, setSaving] = useState(false)
   const [clearingMemory, setClearingMemory] = useState(false)
-  const [baseUrlError, setBaseUrlError] = useState(setup.baseUrlError || '')
+  const [error, setError] = useState('')
+  const [discovering, setDiscovering] = useState<string | null>(null)
+  const [fetchingModels, setFetchingModels] = useState(false)
+  const [fetchedModels, setFetchedModels] = useState<string[]>(initial?.discovery?.models || [])
+  const [modelDiscoveryDone, setModelDiscoveryDone] = useState(Boolean(initial?.discovery?.fetchedAt))
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+
+  const selectedCatalog = catalog.find((entry) => entry.id === draft.providerId)
+  const selectedModels = Array.from(new Set([
+    ...fetchedModels,
+    ...(selectedCatalog?.models || []),
+    ...(editingId ? profiles.find((p) => p.id === editingId)?.discovery?.models || [] : []),
+    ...(draft.model ? [draft.model] : []),
+  ]))
 
   useEffect(() => {
     void api.ai.listActions().then((r) => setActions(r.actions || [])).catch(() => undefined)
   }, [api])
 
-  async function save() {
+  function startEdit(profile: ProviderProfileSummary) {
+    setEditingId(profile.id)
+    setDraft({ name: profile.name, providerId: profile.providerId, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, apiKey: '' })
+    setFetchedModels(profile.discovery?.models || [])
+    setModelDiscoveryDone(Boolean(profile.discovery?.fetchedAt))
+    setError('')
+  }
+
+  function startAdd() {
+    const entry = catalog.find((item) => item.id === 'openai-compatible') || catalog[0]
+    setEditingId(null)
+    setDraft({
+      name: entry?.name || '新 AI 服务',
+      providerId: entry?.id || 'custom',
+      protocol: entry?.protocol || 'openai-compatible',
+      baseUrl: entry?.baseUrl || '',
+      model: entry?.defaultModel || '',
+      apiKey: '',
+    })
+    setFetchedModels([])
+    setModelDiscoveryDone(false)
+    setError('')
+  }
+
+  function selectProvider(providerId: string) {
+    const entry = catalog.find((item) => item.id === providerId)
+    if (!entry) return
+    setFetchedModels([])
+    setModelDiscoveryDone(false)
+    setDraft((prev) => ({
+      ...prev,
+      providerId,
+      protocol: entry.protocolOptions?.includes(prev.protocol) ? prev.protocol : entry.protocol,
+      baseUrl: entry.baseUrl || (entry.allowCustomBaseUrl ? '' : prev.baseUrl),
+      model: entry.defaultModel || prev.model,
+      name: prev.name === '新 AI 服务' || prev.name === selectedCatalog?.name ? entry.name : prev.name,
+    }))
+  }
+
+  async function refreshSetup() {
+    const next = (await api.ai.getSetup()) as unknown as SetupInfo
+    setProfiles(next.profiles || [])
+    setCatalog(next.catalog || catalog)
+    setActiveProfileId(next.activeProfileId || '')
+    if (next.baseUrlError) setError(next.baseUrlError)
+    onChanged?.(next)
+    return next
+  }
+
+  async function saveProfile(): Promise<boolean> {
     setSaving(true)
+    setError('')
     try {
+      if (!draft.model.trim()) {
+        setError('请选择模型')
+        return false
+      }
+      if (!editingId && !modelDiscoveryDone) {
+        setError('请先获取模型列表，再保存新的服务配置')
+        return false
+      }
+      if (modelDiscoveryDone && fetchedModels.length > 0 && !fetchedModels.includes(draft.model.trim())) {
+        setError('请选择已获取的模型')
+        return false
+      }
+      const result = await api.ai.saveProfile({
+        id: editingId || undefined,
+        name: draft.name.trim(),
+        providerId: draft.providerId,
+        protocol: draft.protocol,
+        baseUrl: draft.baseUrl.trim(),
+        model: draft.model.trim(),
+        apiKey: draft.apiKey.trim() || undefined,
+      })
+      if (!result.success) {
+        setError(result.error || '保存服务配置失败')
+        return false
+      }
+      const next = await refreshSetup()
+      if (result.profile) {
+        setEditingId(result.profile.id)
+      }
+      if (next.baseUrlError) {
+        setError(next.baseUrlError)
+        return false
+      }
+      return true
+    } catch (e) {
+      setError(String(e))
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function fetchDraftModels() {
+    if (editingId && !draft.apiKey.trim()) {
+      await discover(editingId)
+      return
+    }
+    setFetchingModels(true)
+    setError('')
+    try {
+      const result = await api.ai.fetchModels({
+        providerId: draft.providerId,
+        protocol: draft.protocol,
+        baseUrl: draft.baseUrl.trim() || undefined,
+        apiKey: draft.apiKey.trim() || undefined,
+      })
+      if (!result.success || !result.models?.length) {
+        setFetchedModels([])
+        setModelDiscoveryDone(false)
+        setError(result.error || '未获取到可用模型')
+        return
+      }
+      const models = Array.from(new Set(result.models.map(String).filter(Boolean)))
+      setFetchedModels(models)
+      setModelDiscoveryDone(true)
+      setDraft((prev) => ({ ...prev, model: models.includes(prev.model) ? prev.model : models[0] || '' }))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setFetchingModels(false)
+    }
+  }
+
+  async function activate(id: string) {
+    setError('')
+    try {
+      const result = await api.ai.activateProfile(id)
+      if (!result.success) {
+        setError(result.error || '启用服务失败')
+        return
+      }
+      await refreshSetup()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  async function removeProfile(id: string) {
+    if (confirmDelete !== id) {
+      setConfirmDelete(id)
+      return
+    }
+    setConfirmDelete(null)
+    setError('')
+    try {
+      const result = await api.ai.deleteProfile(id)
+      if (!result.success) {
+        setError(result.error || '删除服务失败')
+        return
+      }
+      const next = await refreshSetup()
+      if (editingId === id) {
+        const replacement = next.profiles?.[0]
+        if (replacement) startEdit(replacement)
+        else startAdd()
+      }
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  async function discover(profileId: string) {
+    setDiscovering(profileId)
+    setError('')
+    try {
+      await api.ai.setSetup({ discoverProfileId: profileId })
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 450))
+        const next = (await api.ai.getSetup()) as unknown as SetupInfo
+        const current = next.profiles?.find((p) => p.id === profileId)
+        setProfiles(next.profiles || [])
+        if (current?.discovery?.fetchedAt && current.discovery.fetchedAt > Date.now() - 20000) {
+          setActiveProfileId(next.activeProfileId || '')
+          setFetchedModels(current.discovery.models || [])
+          setModelDiscoveryDone(Boolean(current.discovery.models?.length))
+          if (current.discovery.error) setError(current.discovery.error)
+          break
+        }
+      }
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setDiscovering(null)
+    }
+  }
+
+  async function saveAll() {
+    setSaving(true)
+    setError('')
+    try {
+      if (!(await saveProfile())) return
       await api.ai.setSetup({
-        apiKey: apiKey.trim() || undefined,
-        baseUrl: baseUrl.trim() || undefined,
-        model: model.trim() || undefined,
-        maxTokens: Number(maxTokens) || 32768,
         reasoningEffort: effort,
-        maxSteps: Number(maxSteps) || 48,
         customPrompt,
         workspaceRoot: workspaceRoot.trim() || undefined,
-        maxToolChars: Number(maxToolChars) || 20000,
-        conversationLimit: Number(conversationLimit) || 60,
         disabledTools: Array.from(disabledTools),
       })
       await api.ai.saveActions(actions)
-      const next = await api.ai.getSetup()
-      setBaseUrlError(next.baseUrlError || '')
-      if (next.baseUrlError) return
+      const next = await refreshSetup()
       onSaved(next)
+    } catch (e) {
+      setError(String(e))
     } finally {
       setSaving(false)
     }
   }
 
   async function pickWorkspace() {
-    const dir = await api.dialog.openDirectory({ title: '选择 WeportAI 工作区根目录（memory/ 与 notes/ 存放于此）' })
+    const dir = await api.dialog.openDirectory({ title: '选择 WeportAI 工作区根目录' })
     if (dir) setWorkspaceRoot(dir)
   }
 
@@ -1298,258 +1492,58 @@ function AiSettingsModal({
     setActions((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)))
   }
 
-  function addAction() {
-    setActions((prev) => [...prev, { id: `action-${Date.now()}`, name: '新动作', prompt: '' }])
-  }
-
-  function removeAction(id: string) {
-    setActions((prev) => prev.filter((a) => a.id !== id))
-  }
-
   return (
     <div className="modal-backdrop" onClick={() => !saving && onClose()}>
-      <div className="modal modal-wide ai-settings" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
-        <h3 id="ai-settings-title">
-          <Sparkles size={15} />
-          WeportAI 设置
-        </h3>
-        <p className="hint">
-          连接 DeepSeek 或其他 OpenAI 兼容接口。密钥只保存在这台电脑上，但发送请求时会以 Bearer 头传给上面配置的 API 地址——请仅使用 https 地址，防止密钥在网络中被窃听。
-        </p>
+      <div className="modal modal-wide ai-settings ai-provider-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
+        <h3 id="ai-settings-title"><Sparkles size={15} /> WeportAI 设置</h3>
+        <p className="hint">服务配置按 profile 管理。API key 只在本机加密保存，列表、摘要和 discovery 结果都不会返回原始密钥。</p>
+        {error && <div className="ai-profile-error">{error}</div>}
 
-        <div className="ai-settings-body">
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <KeyRound size={13} />
-              连接
-            </div>
-            <div className="ai-settings-grid">
-              <div className="field" style={{ gridColumn: '1 / -1' }}>
-                <label htmlFor="aiApiKey">API Key</label>
-                <input
-                  id="aiApiKey"
-                  className="path-input ai-input-wide"
-                  type="password"
-                  value={apiKey}
-                  placeholder={setup.hasApiKey ? '已配置（留空则保持不变）' : 'sk-…'}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p className="hint" style={{ marginTop: 4 }}>
-                  {setup.hasApiKey ? (
-                    <span className="st-ok">✓ 本机已保存密钥</span>
-                  ) : (
-                    <span>尚未配置 — 请从 DeepSeek 平台获取并粘贴（sk- 开头）</span>
-                  )}
-                </p>
-              </div>
-              <div className="field" style={{ gridColumn: '1 / -1' }}>
-                <label htmlFor="aiBaseUrl">
-                  接口地址
-                  <span className="hint">（默认为 DeepSeek 官方地址，如无必要请勿更改）</span>
-                </label>
-                <input
-                  id="aiBaseUrl"
-                  className="path-input ai-input-wide"
-                  value={baseUrl}
-                  onChange={(e) => {
-                    setBaseUrl(e.target.value)
-                    if (baseUrlError) setBaseUrlError('')
-                  }}
-                  spellCheck={false}
-                />
-                {baseUrlError && (
-                  <p className="hint" style={{ marginTop: 4, color: 'var(--danger, #e5484d)' }}>
-                    {baseUrlError}
-                  </p>
-                )}
-              </div>
-              <div className="field" style={{ gridColumn: '1 / -1' }}>
-                <label htmlFor="aiModel">
-                  模型
-                  <span className="hint">（默认 deepseek-v4-flash，如无必要请勿修改）</span>
-                </label>
-                <input
-                  id="aiModel"
-                  className="path-input ai-input-wide"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <Brain size={13} />
-              模型与执行
-            </div>
-            <div className="ai-settings-grid">
-              <div className="field">
-                <label>思考强度</label>
-                <div className="seg" role="radiogroup" aria-label="思考强度">
-                  {([
-                    ['low', 'Low'],
-                    ['high', 'High'],
-                    ['max', 'Max'],
-                  ] as Array<[string, string]>).map(([v, label]) => (
-                    <button key={v} type="button" data-active={effort === v} onClick={() => setEffort(v)}>
-                      {label}
-                    </button>
-                  ))}
+        <div className="ai-profile-layout">
+          <section className="ai-profile-list" aria-label="AI 服务列表">
+            <div className="ai-settings-sec-head"><KeyRound size={13} /> AI 提供商</div>
+            {profiles.map((profile) => (
+              <div key={profile.id} className={`ai-profile-row${profile.id === activeProfileId ? ' active' : ''}`}>
+                <button type="button" className="ai-profile-main" onClick={() => startEdit(profile)}>
+                  <strong>{profile.name}</strong>
+                  <span>{profile.providerId} · {profile.model}</span>
+                  <small>{profile.hasApiKey ? `密钥 ${profile.apiKeyHint}` : '未配置密钥'} · {profile.protocol}</small>
+                  {profile.discovery?.error && <em className="ai-profile-discovery-error">{profile.discovery.error}</em>}
+                </button>
+                <div className="ai-profile-actions">
+                  {profile.id === activeProfileId ? <span className="ai-profile-badge">当前</span> : <button type="button" className="ghost-btn" onClick={() => void activate(profile.id)}>启用</button>}
+                  <button type="button" className="ghost-btn" onClick={() => void discover(profile.id)} disabled={discovering === profile.id}><RefreshCw size={12} /> {discovering === profile.id ? '读取中' : '发现模型'}</button>
+                  <button type="button" className="ghost-btn danger-text" onClick={() => void removeProfile(profile.id)}>{confirmDelete === profile.id ? '再次确认删除' : '删除'}</button>
                 </div>
               </div>
-            </div>
-            <div className="ai-sliders">
-              <AiRangeSlider label="最大输出长度" value={maxTokens} min={1024} max={393216} step={1024} unit=" tokens" onChange={setMaxTokens} />
-              <AiRangeSlider label="最大执行步数" value={maxSteps} min={4} max={128} step={1} unit=" 步" onChange={setMaxSteps} />
-              <AiRangeSlider label="每轮工具结果总上限" value={maxToolChars} min={2000} max={60000} step={1000} unit=" 字" onChange={setMaxToolChars} />
-              <AiRangeSlider label="对话记忆条数（越多越费 token）" value={conversationLimit} min={10} max={200} step={5} unit=" 条" onChange={setConversationLimit} />
-            </div>
-          </div>
-
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <FolderOpen size={13} />
-              工作区
-            </div>
-            <div className="field">
-              <label htmlFor="aiWorkspaceRoot">
-                工作区根目录（AI 的长期记忆 <code>memory/</code> 与对话草稿 <code>notes/</code> 都存放在这里）
-              </label>
-              <div className="path-row">
-                <input
-                  id="aiWorkspaceRoot"
-                  className="path-input"
-                  value={workspaceRoot}
-                  onChange={(e) => setWorkspaceRoot(e.target.value)}
-                  placeholder="默认：导出目录/WeportAI，或用户数据目录/WeportAI"
-                  spellCheck={false}
-                />
-                <button className="ghost-btn" type="button" onClick={() => void pickWorkspace()}>
-                  浏览
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <FilePenLine size={13} />
-              提示词
-            </div>
-            <div className="field">
-              <label htmlFor="aiCustomPrompt">
-                自定义提示词
-                <span className="hint">（追加在系统提示词之后，可约束分析风格、目标与输出格式）</span>
-              </label>
-              <textarea
-                id="aiCustomPrompt"
-                className="ai-prompt-textarea"
-                value={customPrompt}
-                onChange={(e) => setCustomPrompt(e.target.value)}
-                placeholder={'例如：始终用中文回答；先建立整体时间线再深入细节；每次回答前先检查并更新记忆。'}
-                rows={4}
-                spellCheck={false}
-              />
-            </div>
-          </div>
-
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <Zap size={13} />
-              快捷动作（点击后填入输入框，可改后发送）
-            </div>
-            {actions.map((a) => (
-              <div className="ai-action-edit" key={a.id}>
-                <input
-                  className="path-input ai-action-name"
-                  value={a.name}
-                  placeholder="动作名称"
-                  onChange={(e) => updateAction(a.id, { name: e.target.value })}
-                  spellCheck={false}
-                />
-                <textarea
-                  className="ai-prompt-textarea ai-action-prompt"
-                  value={a.prompt}
-                  placeholder="动作要发送给 AI 的提示词…"
-                  rows={2}
-                  onChange={(e) => updateAction(a.id, { prompt: e.target.value })}
-                  spellCheck={false}
-                />
-                <button type="button" className="ghost-btn danger-text" onClick={() => removeAction(a.id)} title="删除动作">
-                  <Trash2 size={12} />
-                </button>
-              </div>
             ))}
-            <button type="button" className="ghost-btn" onClick={addAction}>
-              <Plus size={12} />
-              添加动作
-            </button>
-          </div>
+            <button type="button" className="secondary-btn ai-profile-add" onClick={startAdd}><Plus size={13} /> 添加新提供商</button>
+          </section>
 
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <Settings2 size={13} />
-              工具开关（关闭后该工具不再提供给 AI）
+          <section className="ai-profile-editor">
+            <div className="ai-settings-sec-head"><Settings2 size={13} /> {editingId ? '编辑 profile' : '添加 profile'}</div>
+            <div className="ai-settings-grid ai-provider-fields">
+              <div className="field"><label htmlFor="aiProfileName">配置名称</label><input id="aiProfileName" className="path-input ai-input-wide" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+              <div className="field"><label htmlFor="aiProvider">Provider</label><select id="aiProvider" className="path-input" value={draft.providerId} onChange={(e) => selectProvider(e.target.value)}>{catalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></div>
+              <div className="field"><label htmlFor="aiApiKey">API key</label><input id="aiApiKey" className="path-input ai-input-wide" type="password" value={draft.apiKey} placeholder={editingId ? `已保存 ${profiles.find((p) => p.id === editingId)?.apiKeyHint || '密钥'}；留空保持不变` : (selectedCatalog?.apiKeyOptional ? '本地服务可留空' : '输入 API key')} onChange={(e) => { setDraft({ ...draft, apiKey: e.target.value }); setModelDiscoveryDone(false) }} autoComplete="off" spellCheck={false} /></div>
+              <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></div>
+              {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
+              {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
             </div>
-            <div className="ai-tool-toggles">
-              {TOOL_LABELS.map(([name, label]) => {
-                const off = disabledTools.has(name)
-                return (
-                  <label key={name} className={`ai-tool-toggle${off ? ' off' : ''}`}>
-                    <input type="checkbox" checked={!off} onChange={() => toggleTool(name)} />
-                    <span>{label}</span>
-                    <code>{name}</code>
-                  </label>
-                )
-              })}
+            <div className="ai-profile-discovery">
+              <button type="button" className="ghost-btn" onClick={() => void fetchDraftModels()} disabled={saving || fetchingModels || Boolean(discovering)}><RefreshCw size={12} /> {fetchingModels || discovering ? '正在获取模型…' : '获取模型列表'}</button>
+              <span className="ai-profile-discovery-hint">{modelDiscoveryDone ? `已获取 ${fetchedModels.length} 个模型` : '验证 API key 并读取可用模型'}</span>
+              {editingId && profiles.find((p) => p.id === editingId)?.discovery?.error && <span className="ai-profile-discovery-error">{profiles.find((p) => p.id === editingId)?.discovery?.error}</span>}
             </div>
-          </div>
-
-          <div className="ai-settings-section">
-            <div className="ai-settings-sec-head">
-              <Trash2 size={13} />
-              记忆管理
-            </div>
-            <p className="hint">
-              记忆保存在工作区 <code>memory/</code> 文件夹（跨对话共享）。可在右侧面板逐条查看/删除，也可在此清空全部长期记忆。
-            </p>
-            <div className="btn-row">
-              <button
-                type="button"
-                className={clearingMemory ? 'danger-btn' : 'secondary-btn'}
-                disabled={saving}
-                onClick={() => {
-                  if (!clearingMemory) {
-                    setClearingMemory(true)
-                    window.setTimeout(() => setClearingMemory(false), 2600)
-                    return
-                  }
-                  setClearingMemory(false)
-                  void api.ai.clearMemory().then(() => {
-                    onSaved(setup)
-                  })
-                }}
-              >
-                <Trash2 size={13} />
-                {clearingMemory ? '再次点击确认清空长期记忆' : '清空全部长期记忆'}
-              </button>
-            </div>
-          </div>
+            <div className="btn-row"><button type="button" className="primary-btn" disabled={saving || (!editingId && !modelDiscoveryDone)} onClick={() => void saveProfile()}>{saving ? '保存中…' : '保存 profile'}</button></div>
+          </section>
         </div>
 
-        <div className="modal-actions">
-          <button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>
-            取消
-          </button>
-          <button className="primary-btn" type="button" disabled={saving} onClick={() => void save()}>
-            <KeyRound size={13} />
-            {saving ? '保存中…' : '保存设置'}
-          </button>
-        </div>
+        <div className="ai-settings-section"><div className="ai-settings-sec-head"><FolderOpen size={13} /> 工作区</div><div className="field"><label htmlFor="aiWorkspaceRoot">工作区根目录</label><div className="path-row"><input id="aiWorkspaceRoot" className="path-input" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} /><button className="ghost-btn" type="button" onClick={() => void pickWorkspace()}>浏览</button></div></div></div>
+        <div className="ai-settings-section"><div className="ai-settings-sec-head"><FilePenLine size={13} /> 提示词</div><textarea id="aiCustomPrompt" className="ai-prompt-textarea" value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} rows={4} spellCheck={false} /></div>
+        <div className="ai-settings-section"><div className="ai-settings-sec-head"><Zap size={13} /> 快捷动作</div>{actions.map((a) => <div className="ai-action-edit" key={a.id}><input className="path-input ai-action-name" value={a.name} onChange={(e) => updateAction(a.id, { name: e.target.value })} /><textarea className="ai-prompt-textarea ai-action-prompt" value={a.prompt} onChange={(e) => updateAction(a.id, { prompt: e.target.value })} rows={2} /><button type="button" className="ghost-btn danger-text" onClick={() => setActions((prev) => prev.filter((item) => item.id !== a.id))}><Trash2 size={12} /></button></div>)}<button type="button" className="ghost-btn" onClick={() => setActions((prev) => [...prev, { id: `action-${Date.now()}`, name: '新动作', prompt: '' }])}><Plus size={12} /> 添加动作</button></div>
+        <div className="ai-settings-section"><div className="ai-settings-sec-head"><Settings2 size={13} /> 工具开关</div><div className="ai-tool-toggles">{TOOL_LABELS.map(([name, label]) => <label key={name} className={`ai-tool-toggle${disabledTools.has(name) ? ' off' : ''}`}><input type="checkbox" checked={!disabledTools.has(name)} onChange={() => toggleTool(name)} /><span>{label}</span><code>{name}</code></label>)}</div></div>
+        <div className="modal-actions"><button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button><button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
       </div>
     </div>
   )

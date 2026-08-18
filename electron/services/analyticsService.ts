@@ -1,7 +1,7 @@
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
-import { topWordFrequency, tokenizeText, WordFrequencyItem } from './wordFrequency'
+import { extractAnalyticsText, topWordFrequency, tokenizeText, WordFrequencyItem } from './wordFrequency'
 import { join } from 'path'
 import { readFile, writeFile, rm } from 'fs/promises'
 import { app } from 'electron'
@@ -160,6 +160,14 @@ class AnalyticsService {
     return true
   }
 
+  private isAnalyticsSession(username: string, cleanedWxid: string, includeGroupChats: boolean): boolean {
+    if (!includeGroupChats) return this.isPrivateSession(username, cleanedWxid)
+    const normalized = String(username || '').trim()
+    if (!normalized || normalized.toLowerCase() === cleanedWxid.toLowerCase()) return false
+    if (normalized.toLowerCase().endsWith('@chatroom')) return true
+    return this.isPrivateSession(normalized, cleanedWxid)
+  }
+
   private async ensureConnected(): Promise<{ success: boolean; cleanedWxid?: string; error?: string }> {
     const wxid = this.configService.get('myWxid')
     const dbPath = this.configService.get('dbPath')
@@ -182,7 +190,8 @@ class AnalyticsService {
 
   private async getPrivateSessions(
     cleanedWxid: string,
-    excludedUsernames?: Set<string>
+    excludedUsernames?: Set<string>,
+    includeGroupChats = false,
   ): Promise<{ usernames: string[]; numericIds: string[] }> {
     const sessionResult = await wcdbService.getSessions()
     if (!sessionResult.success || !sessionResult.sessions) {
@@ -211,7 +220,7 @@ class AnalyticsService {
     })
     const usernames = sessions.map((s) => s.username)
     const privateSessions = sessions.filter((s) => {
-      if (!this.isPrivateSession(s.username, cleanedWxid)) return false
+      if (!this.isAnalyticsSession(s.username, cleanedWxid, includeGroupChats)) return false
       if (excluded.size === 0) return true
       return !excluded.has(this.normalizeUsername(s.username))
     })
@@ -468,9 +477,10 @@ class AnalyticsService {
     beginTimestamp = 0,
     endTimestamp = 0,
     window?: any,
-    force = false
+    force = false,
+    cacheScope = '',
   ): Promise<{ success: boolean; data?: any; source?: string; error?: string }> {
-    const cacheKey = this.buildAggregateCacheKey(sessionIds, beginTimestamp, endTimestamp)
+    const cacheKey = `${cacheScope}|${this.buildAggregateCacheKey(sessionIds, beginTimestamp, endTimestamp)}`
 
     if (force) {
       if (this.aggregateCache) this.aggregateCache = null
@@ -599,13 +609,13 @@ class AnalyticsService {
     }
   }
 
-  async getExcludeCandidates(): Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string; wechatId?: string }>; error?: string }> {
+  async getExcludeCandidates(includeGroupChats = false): Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string; wechatId?: string }>; error?: string }> {
     try {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
       const excluded = this.getExcludedUsernamesSet()
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, new Set())
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, new Set(), includeGroupChats)
 
       const usernames = new Set<string>(sessionInfo.usernames)
       for (const name of excluded) usernames.add(name)
@@ -706,18 +716,27 @@ class AnalyticsService {
   async getContactRankings(
     limit: number = 20,
     beginTimestamp: number = 0,
-    endTimestamp: number = 0
+    endTimestamp: number = 0,
+    options?: { includeGroupChats?: boolean },
   ): Promise<{ success: boolean; data?: ContactRanking[]; error?: string }> {
     try {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      const includeGroupChats = options?.includeGroupChats === true
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, undefined, includeGroupChats)
       if (sessionInfo.usernames.length === 0) {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const result = await this.getAggregateWithFallback(sessionInfo.usernames, beginTimestamp, endTimestamp)
+      const result = await this.getAggregateWithFallback(
+        sessionInfo.usernames,
+        beginTimestamp,
+        endTimestamp,
+        undefined,
+        false,
+        includeGroupChats ? 'rankings:with-groups' : 'rankings:private-only',
+      )
       if (!result.success || !result.data) {
         return { success: false, error: result.error || '聚合统计失败' }
       }
@@ -946,9 +965,8 @@ class AnalyticsService {
           if (!textTypes.has(localType)) return
           scannedMessages += 1
 
-          let content = String(row.StrContent || row.message_content || row.content || row.msg_content || '')
+          const content = extractAnalyticsText(row)
           if (!content) return
-          content = content.replace(/^\s*([a-zA-Z0-9_@-]{4,}):(?!\/\/)\s*(?:\r?\n|<br\s*\/?>)/i, '')
           textMessages += 1
           for (const token of tokenizeText(content)) {
             counts.set(token, (counts.get(token) || 0) + 1)

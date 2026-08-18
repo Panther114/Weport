@@ -1,5 +1,5 @@
 /**
- * Prepares the MCP stdio bridge bundle for packaged builds (v0.9.5).
+ * Prepares the MCP stdio bridge bundle for packaged builds (v0.9.7).
  *
  * The bridge runs under the AI host's own Node (Claude Desktop etc.), not
  * Electron, so it must not depend on ESM-only SDK resolution or NODE_PATH.
@@ -9,7 +9,6 @@
  *
  * Run after `vite build`, before `electron-builder`.
  */
-const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -23,28 +22,27 @@ function main() {
     console.warn('[prepare-mcp-bundle] scripts/mcp-stdio-bridge.mjs not found. Skipping.');
     return;
   }
-  const esbuildBin = path.join(projectRoot, 'node_modules', 'esbuild', 'bin', 'esbuild');
-  if (!fs.existsSync(esbuildBin)) {
+  let esbuild;
+  try {
+    // Use the supported JS API so esbuild resolves its platform-specific
+    // native package correctly on both Windows and Apple Silicon macOS.
+    esbuild = require('esbuild');
+  } catch {
     console.warn('[prepare-mcp-bundle] esbuild not installed; run npm install first. Skipping.');
     return;
   }
 
   fs.mkdirSync(outDir, { recursive: true });
-  execFileSync(
-    process.execPath,
-    [
-      esbuildBin,
-      entry,
-      '--bundle',
-      '--platform=node',
-      '--format=cjs',
-      '--target=node18',
-      '--minify',
-      '--legal-comments=none',
-      `--outfile=${outFile}`,
-    ],
-    { stdio: 'inherit' },
-  );
+  esbuild.buildSync({
+    entryPoints: [entry],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node18',
+    minify: true,
+    legalComments: 'none',
+    outfile: outFile,
+  });
   const built = fs.readFileSync(outFile, 'utf8');
   if (!built.startsWith('#!')) {
     fs.writeFileSync(outFile, '#!/usr/bin/env node\n' + built, 'utf8');

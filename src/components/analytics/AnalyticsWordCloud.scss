@@ -1,0 +1,144 @@
+.analytics-word-cloud {
+  width: 100%;
+  color: var(--text);
+}
+
+.analytics-word-cloud__stage {
+  position: relative;
+  width: 100%;
+  height: clamp(240px, 32vw, 360px);
+  min-height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) + 2px);
+  background:
+    radial-gradient(circle at 50% 45%, var(--accent-softer), transparent 64%),
+    var(--panel);
+}
+
+.analytics-word-cloud__word {
+  position: absolute;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  overflow: visible;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-family: var(--font);
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.analytics-word-cloud__word:hover {
+  z-index: 2;
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.analytics-word-cloud__word:focus-visible {
+  z-index: 3;
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 4px var(--accent-softer);
+}
+
+.analytics-word-cloud__word.is-selected {
+  z-index: 2;
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.analytics-word-cloud__tooltip {
+  position: absolute;
+  z-index: 4;
+  max-width: min(260px, calc(100% - 16px));
+  padding: 6px 9px;
+  transform: translate(-50%, -100%);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+  pointer-events: none;
+  box-shadow: var(--shadow-pop);
+  white-space: nowrap;
+}
+
+.analytics-word-cloud__stage-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.analytics-word-cloud__list {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.analytics-word-cloud__list summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-faint);
+}
+
+.analytics-word-cloud__list summary:hover,
+.analytics-word-cloud__list summary:focus-visible {
+  color: var(--text);
+}
+
+.analytics-word-cloud__list ol {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  padding-left: 24px;
+}
+
+.analytics-word-cloud__list li::marker {
+  color: var(--text-faint);
+}
+
+.analytics-word-cloud__list button {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+}
+
+.analytics-word-cloud__list button:hover,
+.analytics-word-cloud__list button:focus-visible,
+.analytics-word-cloud__list button[aria-pressed="true"] {
+  border-color: var(--line-strong);
+  background: var(--accent-softer);
+  color: var(--text);
+}
+
+@media (max-width: 520px) {
+  .analytics-word-cloud__stage {
+    height: 280px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .analytics-word-cloud__word {
+    transition: none;
+  }
+}

@@ -1,10 +1,10 @@
-import { useState } from 'react'
-import { ArrowLeft, ArrowRight, BarChart3, LineChart, Users } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BarChart3, CalendarDays, LineChart, UserRound, Users } from 'lucide-react'
 import { GlobalAnalytics } from './GlobalAnalytics'
 import { GroupAnalytics } from './GroupAnalytics'
 import { AnnualReportView } from './AnnualReportView'
+import { DualReportView } from './DualReportView'
 
-export type AnalyticsSection = 'hub' | 'global' | 'group'
+export type AnalyticsSection = 'hub' | 'global' | 'group' | 'annual' | 'dual'
 
 interface AnalyticsModuleProps {
   section: AnalyticsSection
@@ -12,8 +12,6 @@ interface AnalyticsModuleProps {
 }
 
 export default function AnalyticsModule({ section, onSectionChange }: AnalyticsModuleProps) {
-  const [annualOpen, setAnnualOpen] = useState(false)
-
   if (section === 'hub') {
     return (
       <div className="v09-page analytics-hub">
@@ -30,7 +28,7 @@ export default function AnalyticsModule({ section, onSectionChange }: AnalyticsM
               <BarChart3 size={44} strokeWidth={1.4} />
             </div>
             <div className="analytics-big-title">全局分析</div>
-            <div className="analytics-big-desc">全部聊天 · 总体统计、时段分布、联系排行榜、年度报告</div>
+            <div className="analytics-big-desc">全部聊天 · 总体统计、时段分布与联系人排行榜</div>
             <div className="analytics-big-arrow">
               进入分析
               <ArrowRight size={15} />
@@ -41,15 +39,45 @@ export default function AnalyticsModule({ section, onSectionChange }: AnalyticsM
               <Users size={44} strokeWidth={1.4} />
             </div>
             <div className="analytics-big-title">群聊分析</div>
-            <div className="analytics-big-desc">单个群聊 · 成员排行榜、活跃热力图、媒体构成、成员画像</div>
+            <div className="analytics-big-desc">单个群聊 · 成员排行榜、活跃热力图与媒体构成</div>
             <div className="analytics-big-arrow">
               进入分析
+              <ArrowRight size={15} />
+            </div>
+          </button>
+          <button type="button" className="analytics-big-card" onClick={() => onSectionChange('annual')}>
+            <div className="analytics-big-icon">
+              <CalendarDays size={40} strokeWidth={1.4} />
+            </div>
+            <div className="analytics-big-title">年度报告</div>
+            <div className="analytics-big-desc">按年份回顾消息趋势、核心好友、活跃时段与年度片段</div>
+            <div className="analytics-big-arrow">
+              选择年份
+              <ArrowRight size={15} />
+            </div>
+          </button>
+          <button type="button" className="analytics-big-card" onClick={() => onSectionChange('dual')}>
+            <div className="analytics-big-icon">
+              <UserRound size={40} strokeWidth={1.4} />
+            </div>
+            <div className="analytics-big-title">双人报告</div>
+            <div className="analytics-big-desc">选择一位好友，生成你们的专属聊天趋势与关系回顾</div>
+            <div className="analytics-big-arrow">
+              选择好友
               <ArrowRight size={15} />
             </div>
           </button>
         </div>
       </div>
     )
+  }
+
+  if (section === 'annual') {
+    return <AnnualReportView onClose={() => onSectionChange('hub')} />
+  }
+
+  if (section === 'dual') {
+    return <DualReportView onBack={() => onSectionChange('hub')} defaultYear={0} />
   }
 
   return (
@@ -61,12 +89,6 @@ export default function AnalyticsModule({ section, onSectionChange }: AnalyticsM
           <span className="v09-sub">{section === 'global' ? '全部私聊会话的确定性统计' : '单群成员与活跃度统计'}</span>
         </div>
         <div className="v09-actions">
-          {section === 'global' && (
-            <button type="button" className="chip chip-active" onClick={() => setAnnualOpen((v) => !v)}>
-              <LineChart size={14} />
-              年度报告
-            </button>
-          )}
           <button type="button" className="chip" onClick={() => onSectionChange('hub')}>
             <ArrowLeft size={14} />
             返回选择
@@ -75,11 +97,10 @@ export default function AnalyticsModule({ section, onSectionChange }: AnalyticsM
       </div>
 
       {section === 'global' ? (
-        <GlobalAnalytics annualOpen={annualOpen} onAnnualClose={() => setAnnualOpen(false)} />
+        <GlobalAnalytics />
       ) : (
         <GroupAnalytics />
       )}
-      {annualOpen && <AnnualReportView onClose={() => setAnnualOpen(false)} />}
     </div>
   )
 }
