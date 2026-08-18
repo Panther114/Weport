@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
-import 'echarts-wordcloud'
 import {
   BarChart3,
   CalendarDays,
@@ -15,7 +14,6 @@ import {
   MessageSquare,
   Mic,
   PieChart,
-  Radar as RadarIcon,
   Search,
   Send,
   Smile,
@@ -25,10 +23,12 @@ import {
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { Avatar } from '../../components/Avatar'
+import { AnalyticsWordCloud } from '../../components/analytics/AnalyticsWordCloud'
 import { EmptyState } from '../../components/EmptyState'
 import { useColorMode } from '../../utils/colorMode'
 import { useEscape } from '../../utils/useEscape'
-import { animationCommon, axisCommon, baseChartTheme, blueRamp, blueVerticalGradient, mediaTypeColor, tooltipCommon, BLUE_STACK, MONO_STACK, CHART_TEXT, CHART_GRID } from '../../utils/echartsTheme'
+import { axisCommon, baseChartTheme, blueRamp, mediaTypeColor, tooltipCommon, BLUE_STACK, MONO_STACK, CHART_TEXT } from '../../utils/echartsTheme'
+import { useMeasuredBarWidth } from './chartSizing'
 
 const MEDIA_TYPE_ICONS: Record<number, React.ComponentType<{ size?: number | string }>> = {
   1: MessageSquare,
@@ -106,7 +106,7 @@ interface GroupActivityHeatmap {
   total: number
 }
 
-type GroupTab = 'members' | 'ranking' | 'hours' | 'media' | 'profile'
+type GroupTab = 'members' | 'ranking' | 'hours' | 'media' | 'heatmap'
 
 const formatNum = (n: number) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n))
 
@@ -116,6 +116,7 @@ const MemberAnalyticsDialog: React.FC<{
   onClose: () => void
 }> = ({ chatroomId, member, onClose }) => {
   const colorMode = useColorMode()
+  const hourlyBarSizing = useMeasuredBarWidth(24)
   const [data, setData] = useState<GroupMemberAnalytics | null>(null)
   const [messages, setMessages] = useState<MemberMessage[]>([])
   const [hasMore, setHasMore] = useState(false)
@@ -168,50 +169,9 @@ const hourlyOption = useMemo(() => {
       grid: { left: 36, right: 12, top: 20, bottom: 24 },
       xAxis: { type: 'category' as const, data: hours.map((_, i) => `${i}时`), ...axisCommon },
       yAxis: { type: 'value' as const, ...axisCommon },
-      series: [{ type: 'bar' as const, data: hours, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...hours), colorMode), borderRadius: [3, 3, 0, 0] }, barMaxWidth: 12 }],
+      series: [{ type: 'bar' as const, data: hours, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...hours), colorMode), borderRadius: [3, 3, 0, 0] }, barWidth: hourlyBarSizing.barWidth, barCategoryGap: hourlyBarSizing.barCategoryGap }],
     }
-  }, [data, colorMode])
-
-  const memberWordCloudOption = useMemo(() => {
-    const items = data?.wordCloud || []
-    const max = Math.max(1, ...items.map((w) => w.count))
-    return {
-      ...baseChartTheme(colorMode),
-      tooltip: {
-        ...tooltipCommon,
-        formatter: (params: any) => {
-          const p = params as { name: string; value: number }
-          return `<b>${p.name}</b>：${p.value} 次`
-        },
-      },
-      series: [
-        {
-          type: 'wordCloud' as const,
-          shape: 'circle' as const,
-          gridSize: 7,
-          sizeRange: [11, 34],
-          rotationRange: [0, 0],
-          rotationStep: 0,
-          width: '100%',
-          height: '100%',
-          drawOutOfBound: false,
-          textStyle: {
-            fontFamily: 'inherit',
-            fontWeight: 'bold' as const,
-            color: (word: any) => blueRamp((word.value || 0) / max, colorMode),
-          },
-          emphasis: {
-            textStyle: {
-              color: colorMode === 'mono' ? '#f4f4f5' : '#ffffff',
-              textShadowBlur: 8,
-              textShadowColor: 'rgba(0,0,0,0.5)',
-            },
-          },
-          data: items.map((w) => ({ name: w.word, value: w.count })),
-        },
-      ],
-    }
-  }, [data, colorMode])
+  }, [data, colorMode, hourlyBarSizing.barWidth])
 
   const exportMember = async () => {
     const dir = await window.electronAPI.dialog.openDirectory({ title: '选择导出目录' })
@@ -276,7 +236,9 @@ const hourlyOption = useMemo(() => {
                 <div className="v09-panel-head">
                   <h3>24 小时活跃</h3>
                 </div>
-                <ReactECharts option={hourlyOption} style={{ height: 180 }} notMerge />
+                <div ref={hourlyBarSizing.ref} className="analytics-chart-frame">
+                  <ReactECharts option={hourlyOption} style={{ height: 180 }} notMerge />
+                </div>
               </div>
               <div className="v09-panel">
                 <div className="v09-panel-head">
@@ -317,7 +279,13 @@ const hourlyOption = useMemo(() => {
                 </h3>
               </div>
               {(data.wordCloud || []).length > 0 ? (
-                <ReactECharts option={memberWordCloudOption} style={{ height: 220 }} notMerge />
+                <AnalyticsWordCloud
+                  words={data.wordCloud || []}
+                  maxWords={40}
+                  label={`${member.displayName} 高频词云`}
+                  listLabel="查看成员高频词列表"
+                  formatTooltip={(item) => `${item.word}：${item.count} 次`}
+                />
               ) : (
                 <div className="wp-empty">暂无文本消息</div>
               )}
@@ -357,6 +325,7 @@ const hourlyOption = useMemo(() => {
 
 export const GroupAnalytics: React.FC = () => {
   const colorMode = useColorMode()
+  const hoursBarSizing = useMeasuredBarWidth(24)
   const [groups, setGroups] = useState<GroupChatInfo[]>([])
   const [search, setSearch] = useState('')
   const [groupSort, setGroupSort] = useState<GroupSortKey>('messages')
@@ -366,7 +335,9 @@ export const GroupAnalytics: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [members, setMembers] = useState<GroupMembersPanelEntry[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
-const [ranking, setRanking] = useState<GroupMessageRank[]>([])
+  const [ranking, setRanking] = useState<GroupMessageRank[]>([])
+  const rankingBarSizing = useMeasuredBarWidth(Math.max(1, ranking.length), 10, 6, 24)
+  const [rankingLimit, setRankingLimit] = useState(20)
   const [hours, setHours] = useState<GroupActiveHours | null>(null)
   const [media, setMedia] = useState<GroupMediaStats | null>(null)
   const [heatmap, setHeatmap] = useState<GroupActivityHeatmap | null>(null)
@@ -406,7 +377,7 @@ setMembers([])
       try {
         const [membersRes, rankRes, hoursRes, mediaRes, heatRes] = await Promise.all([
           window.electronAPI.groupAnalytics.getGroupMembersPanelData(group.username, { includeMessageCounts: true }),
-          window.electronAPI.groupAnalytics.getGroupMessageRanking(group.username, 20, 0, 0),
+          window.electronAPI.groupAnalytics.getGroupMessageRanking(group.username, rankingLimit, 0, 0),
           window.electronAPI.groupAnalytics.getGroupActiveHours(group.username, 0, 0),
           window.electronAPI.groupAnalytics.getGroupMediaStats(group.username, 0, 0),
           window.electronAPI.groupAnalytics.getGroupActivityHeatmap(group.username, 0, 0),
@@ -420,8 +391,17 @@ setMembers([])
         setMembersLoading(false)
       }
     },
-    [],
+    [rankingLimit],
   )
+
+  const reloadRanking = useCallback(async (group: GroupChatInfo, limit: number) => {
+    const result = await window.electronAPI.groupAnalytics.getGroupMessageRanking(group.username, limit, 0, 0)
+    if (result.success) setRanking(result.data || [])
+  }, [])
+
+  useEffect(() => {
+    if (selected) void reloadRanking(selected, rankingLimit)
+  }, [rankingLimit, reloadRanking, selected])
 
   const filteredGroups = useMemo(() => {
     const filtered = groups.filter((g) => !search || g.displayName.toLowerCase().includes(search.toLowerCase()))
@@ -431,7 +411,7 @@ setMembers([])
   }, [groups, search, groupSort])
 
   const rankingOption = useMemo(() => {
-    const top = ranking.slice(0, 20)
+    const top = ranking.slice(0, rankingLimit)
     return {
       ...baseChartTheme(colorMode),
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
@@ -446,11 +426,12 @@ setMembers([])
             color: (params: any) => blueRamp(1 - (params.value || 0) / Math.max(1, ...top.map((r) => r.messageCount)), colorMode),
             borderRadius: [0, 3, 3, 0],
           },
-          barMaxWidth: 16,
+          barWidth: rankingBarSizing.barWidth,
+          barCategoryGap: rankingBarSizing.barCategoryGap,
         },
       ],
     }
-  }, [ranking, colorMode])
+  }, [ranking, rankingLimit, colorMode, rankingBarSizing.barWidth])
 
   const hoursOption = useMemo(() => {
     const data = Array.from({ length: 24 }, (_, h) => hours?.hourlyDistribution[h] || 0)
@@ -460,9 +441,9 @@ setMembers([])
       grid: { left: 36, right: 12, top: 20, bottom: 24 },
       xAxis: { type: 'category' as const, data: data.map((_, i) => `${i}时`), ...axisCommon },
       yAxis: { type: 'value' as const, ...axisCommon },
-      series: [{ type: 'bar' as const, data, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...data), colorMode), borderRadius: [3, 3, 0, 0] }, barMaxWidth: 22, barCategoryGap: '8%' }],
+      series: [{ type: 'bar' as const, data, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...data), colorMode), borderRadius: [3, 3, 0, 0] }, barWidth: hoursBarSizing.barWidth, barCategoryGap: hoursBarSizing.barCategoryGap }],
     }
-  }, [hours, colorMode])
+  }, [hours, colorMode, hoursBarSizing.barWidth])
 
   const mediaOption = useMemo(() => {
     const types = media?.typeCounts || []
@@ -486,62 +467,6 @@ setMembers([])
   const maxMemberCount = Math.max(1, ...members.map((m) => m.messageCount))
 
   const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-
-  const profileRadarOption = useMemo(() => {
-    if (!media || !hours) return null
-    const total = Math.max(1, media.total)
-    const byType: Record<number, number> = {}
-    for (const t of media.typeCounts) byType[t.type] = t.count
-    const lateNight = [23, 0, 1, 2, 3, 4, 5].reduce((sum, h) => sum + (hours.hourlyDistribution[h] || 0), 0)
-    const totalByHour = Object.values(hours.hourlyDistribution).reduce((sum, v) => sum + (v || 0), 0)
-    const indicators = [
-      { name: '文字', max: 100 },
-      { name: '图片', max: 100 },
-      { name: '语音', max: 100 },
-      { name: '视频', max: 100 },
-      { name: '表情', max: 100 },
-      { name: '深夜活跃', max: 100 },
-    ]
-    const values = [
-      Math.round(((byType[1] || 0) / total) * 1000) / 10,
-      Math.round(((byType[3] || 0) / total) * 1000) / 10,
-      Math.round(((byType[34] || 0) / total) * 1000) / 10,
-      Math.round(((byType[43] || 0) / total) * 1000) / 10,
-      Math.round(((byType[47] || 0) / total) * 1000) / 10,
-      totalByHour > 0 ? Math.round((lateNight / totalByHour) * 1000) / 10 : 0,
-    ]
-    return {
-      ...baseChartTheme(colorMode),
-      tooltip: {
-        ...tooltipCommon,
-        formatter: (params: any) => {
-          const p = params as { name: string; value: number }
-          return `${p.name}：<b>${p.value}%</b>`
-        },
-      },
-      radar: {
-        indicator: indicators,
-        radius: '64%',
-        center: ['50%', '54%'],
-        splitNumber: 4,
-        axisName: { color: CHART_TEXT, fontSize: 11 },
-        splitLine: { lineStyle: { color: CHART_GRID } },
-        splitArea: { areaStyle: { color: ['rgba(30,63,138,0.04)', 'rgba(30,63,138,0.08)'] } },
-        axisLine: { lineStyle: { color: CHART_GRID } },
-      },
-      series: [
-        {
-          type: 'radar' as const,
-          symbol: 'circle',
-          symbolSize: 4,
-          lineStyle: { color: blueRamp(0.35, colorMode), width: 2 },
-          itemStyle: { color: blueRamp(0.5, colorMode) },
-          areaStyle: { color: blueVerticalGradient(colorMode) },
-          data: [{ name: '群聊构成', value: values }],
-        },
-      ],
-    }
-  }, [media, hours, colorMode])
 
   const heatmapOption = useMemo(() => {
     if (!heatmap) return null
@@ -658,7 +583,7 @@ setMembers([])
                     [
                       { id: 'members', label: '成员', icon: Users },
                       { id: 'ranking', label: '消息排行', icon: BarChart3 },
-                      { id: 'profile', label: '画像', icon: RadarIcon },
+                      { id: 'heatmap', label: '活跃热力图', icon: CalendarDays },
                       { id: 'hours', label: '活跃时段', icon: MessageSquare },
                       { id: 'media', label: '媒体构成', icon: PieChart },
                     ] as Array<{ id: GroupTab; label: string; icon: React.ComponentType<{ size?: number | string }> }>
@@ -705,46 +630,39 @@ setMembers([])
                 </div>
               )}
 
-{tab === 'ranking' && (
+              {tab === 'ranking' && (
                 <div className="v09-panel">
-                  <div className="v09-panel-head">
-                    <h3>消息排行 Top 20</h3>
-                    <span className="v09-sub">按群内消息总量排序</span>
+                  <div className="v09-panel-head ranking-panel-head">
+                    <div>
+                      <h3>消息排行 Top {rankingLimit}</h3>
+                      <span className="v09-sub">按群内消息总量排序</span>
+                    </div>
+                    <div className="ranking-limit-segment" role="group" aria-label="群聊排行榜数量">
+                      {[10, 20, 50, 100].map((limit) => (
+                        <button key={limit} type="button" className={rankingLimit === limit ? 'is-active' : ''} onClick={() => setRankingLimit(limit)}>{limit}</button>
+                      ))}
+                    </div>
                   </div>
-                  <ReactECharts option={rankingOption} style={{ height: Math.max(320, ranking.length * 22) }} notMerge />
+                  <div ref={rankingBarSizing.ref} className="analytics-chart-frame">
+                    <ReactECharts option={rankingOption} style={{ height: Math.max(320, ranking.length * 22) }} notMerge />
+                  </div>
                 </div>
               )}
 
-              {tab === 'profile' && (
-                <div className="chart-grid-2">
-                  <div className="v09-panel">
-                    <div className="v09-panel-head">
-                      <h3>
-                        <RadarIcon size={14} />
-                        交流画像
-                      </h3>
-                      <span className="v09-sub">媒体构成占比 · 深夜为 23:00–05:59</span>
-                    </div>
-                    {profileRadarOption ? (
-                      <ReactECharts option={profileRadarOption} style={{ height: 300 }} notMerge />
-                    ) : (
-                      <div className="wp-loading" style={{ height: 300 }}>暂无数据</div>
-                    )}
+              {tab === 'heatmap' && (
+                <div className="v09-panel">
+                  <div className="v09-panel-head">
+                    <h3>
+                      <CalendarDays size={14} />
+                      活跃热力图
+                    </h3>
+                    <span className="v09-sub">周几 × 小时 · 共 {formatNum(heatmap?.total || 0)} 条消息</span>
                   </div>
-                  <div className="v09-panel">
-                    <div className="v09-panel-head">
-                      <h3>
-                        <CalendarDays size={14} />
-                        活跃热力图
-                      </h3>
-                      <span className="v09-sub">周几 × 小时 · 共 {formatNum(heatmap?.total || 0)} 条消息</span>
-                    </div>
-                    {heatmapOption ? (
-                      <ReactECharts option={heatmapOption} style={{ height: 300 }} notMerge />
-                    ) : (
-                      <div className="wp-loading" style={{ height: 300 }}>暂无数据</div>
-                    )}
-                  </div>
+                  {heatmapOption ? (
+                    <ReactECharts option={heatmapOption} style={{ height: 320 }} notMerge />
+                  ) : (
+                    <div className="wp-loading" style={{ height: 320 }}>暂无数据</div>
+                  )}
                 </div>
               )}
 
@@ -754,7 +672,9 @@ setMembers([])
                     <h3>24 小时活跃度</h3>
                     <span className="v09-sub">该群消息的时间分布</span>
                   </div>
-                  <ReactECharts option={hoursOption} style={{ height: 280 }} notMerge />
+                  <div ref={hoursBarSizing.ref} className="analytics-chart-frame">
+                    <ReactECharts option={hoursOption} style={{ height: 280 }} notMerge />
+                  </div>
                 </div>
               )}
 

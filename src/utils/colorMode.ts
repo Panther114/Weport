@@ -29,15 +29,28 @@ export const subscribeColorMode = (listener: () => void): (() => void) => {
 
 /** 应用启动时从配置恢复主题（App 挂载时调用一次） */
 export const initColorMode = async (): Promise<ColorMode> => {
+  let savedMode: ColorMode | undefined
   try {
     const saved = await window.electronAPI.config.get(CONFIG_KEY)
     if (saved === 'mono' || saved === 'colorful') {
-      currentMode = saved
+      savedMode = saved
     }
   } catch {
     /* noop */
   }
+
+  const changed = savedMode !== undefined && savedMode !== currentMode
+  if (savedMode !== undefined) {
+    currentMode = savedMode
+  }
   applyDom(currentMode)
+  // config.get is asynchronous. Notify subscribers after it resolves so the
+  // first render cannot leave the settings card stuck on the default theme.
+  // Without this, clicking the already-persisted mode is a no-op because the
+  // module state has changed while the React hook still holds "colorful".
+  if (changed) {
+    listeners.forEach((listener) => listener())
+  }
   return currentMode
 }
 

@@ -8,6 +8,7 @@ import { useColorMode } from '../../utils/colorMode'
 import { useEscape } from '../../utils/useEscape'
 import { axisCommon, baseChartTheme, blueRamp, tooltipCommon } from '../../utils/echartsTheme'
 import { DualReportView } from './DualReportView'
+import { useMeasuredBarWidth } from './chartSizing'
 
 interface AnnualReportData {
   year: number
@@ -61,6 +62,8 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
   const [dualOpen, setDualOpen] = useState(false)
   const reportRef = useRef<HTMLDivElement>(null)
   const sectionRefs = useRef<Array<HTMLDivElement | null>>([])
+  const coreFriendCount = Math.max(1, Math.min(8, report?.coreFriends.length || 1))
+  const coreFriendsBarSizing = useMeasuredBarWidth(coreFriendCount, 10, 6, 24)
 
   useEffect(() => {
     let off: (() => void) | undefined
@@ -169,11 +172,12 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
             color: (params: any) => blueRamp(1 - (params.value || 0) / Math.max(1, ...top.map((f) => f.messageCount)), colorMode),
             borderRadius: [0, 3, 3, 0],
           },
-          barMaxWidth: 14,
+          barWidth: coreFriendsBarSizing.barWidth,
+          barCategoryGap: coreFriendsBarSizing.barCategoryGap,
         },
       ],
     }
-  }, [report, colorMode])
+  }, [coreFriendsBarSizing.barWidth, report, colorMode])
 
   const exportImages = async () => {
     if (exporting || !report) return
@@ -351,7 +355,11 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
                 </div>
               ))}
             </div>
-            {report.coreFriends.length > 3 && <ReactECharts option={coreFriendsOption} style={{ height: 240 }} notMerge />}
+            {report.coreFriends.length > 3 && (
+              <div ref={coreFriendsBarSizing.ref} className="analytics-chart-frame">
+                <ReactECharts option={coreFriendsOption} style={{ height: 240 }} notMerge />
+              </div>
+            )}
           </div>
 
           {/* 月度好友 + 活动热力图 */}

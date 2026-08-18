@@ -5,6 +5,7 @@ import { Avatar } from '../../components/Avatar'
 import { CountUp } from '../../components/CountUp'
 import { useColorMode } from '../../utils/colorMode'
 import { axisCommon, baseChartTheme, blueRamp, tooltipCommon } from '../../utils/echartsTheme'
+import { useMeasuredBarWidth } from './chartSizing'
 
 interface ContactRanking {
   username: string
@@ -78,6 +79,7 @@ export const DualReportView: React.FC<{ onBack: () => void; defaultYear: number 
   const [generating, setGenerating] = useState(false)
   const [progress, setProgress] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
+  const monthlyBarSizing = useMeasuredBarWidth(12)
 
   const yearLabel = year === 0 ? '全部时间' : `${year}年`
 
@@ -149,11 +151,12 @@ export const DualReportView: React.FC<{ onBack: () => void; defaultYear: number 
           type: 'bar' as const,
           data,
           itemStyle: { color: (params: any) => blueRamp((params.value || 0) / max, colorMode), borderRadius: [3, 3, 0, 0] },
-          barMaxWidth: 18,
+          barWidth: monthlyBarSizing.barWidth,
+          barCategoryGap: monthlyBarSizing.barCategoryGap,
         },
       ],
     }
-  }, [report, colorMode])
+  }, [monthlyBarSizing.barWidth, report, colorMode])
 
   const heatmapOption = useMemo(() => {
     if (!report?.heatmap) return null
@@ -344,7 +347,9 @@ export const DualReportView: React.FC<{ onBack: () => void; defaultYear: number 
       {monthlyOption && (
         <section className="dual-report-section">
           <h3 className="v09-h3">月度消息分布</h3>
-          <ReactECharts option={monthlyOption} style={{ height: 220 }} />
+          <div ref={monthlyBarSizing.ref} className="analytics-chart-frame">
+            <ReactECharts option={monthlyOption} style={{ height: 220 }} />
+          </div>
         </section>
       )}
 

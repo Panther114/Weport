@@ -1,0 +1,122 @@
+.ai-provider-modal {
+  max-height: min(92vh, 920px);
+  overflow: auto;
+  gap: 6px;
+}
+
+.ai-provider-modal > h3 {
+  margin-bottom: 0;
+}
+
+.ai-provider-modal > .hint {
+  margin: 0 0 4px;
+  line-height: 1.35;
+}
+
+.ai-profile-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.85fr) minmax(360px, 1.15fr);
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.ai-profile-list,
+.ai-profile-editor {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 8px);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+
+.ai-profile-row {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-raised);
+}
+
+.ai-profile-row.active {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--line));
+}
+
+.ai-profile-main {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  padding: 0;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.ai-profile-main span,
+.ai-profile-main small {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ai-profile-main em,
+.ai-profile-discovery-error,
+.ai-profile-error {
+  color: var(--danger, #e5484d);
+  font-size: 11px;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.ai-profile-actions,
+.ai-profile-discovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.ai-profile-actions .ghost-btn {
+  padding: 4px 7px;
+  font-size: 11px;
+}
+
+.ai-profile-badge {
+  padding: 3px 7px;
+  color: var(--ok);
+  font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
+  border-radius: 999px;
+}
+
+.ai-profile-add {
+  width: 100%;
+  margin-top: 7px;
+  justify-content: center;
+}
+
+.ai-profile-editor .ai-settings-grid {
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.ai-profile-editor .ai-settings-section {
+  gap: 7px;
+  margin-top: 9px;
+  padding-top: 8px;
+}
+
+.ai-profile-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+@media (max-width: 760px) {
+  .ai-profile-layout {
+    grid-template-columns: 1fr;
+  }
+}

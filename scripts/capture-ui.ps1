@@ -6,6 +6,7 @@ param(
   [string]$Executable = "",
   [string]$ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path,
   [string]$OutputDir = (Join-Path $env:TEMP "weport-electron-screenshots"),
+  [string]$UserDataDir = (Join-Path $env:TEMP ("weport-electron-screenshot-user-data-" + [guid]::NewGuid().ToString('N'))),
   [switch]$PublishToDocs
 )
 
@@ -24,6 +25,7 @@ if (-not $Executable) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+New-Item -ItemType Directory -Force -Path $UserDataDir | Out-Null
 # 清空历史截图：旧文件会让断言「假通过」（文件存在但本次根本没写成功）
 Get-ChildItem -Path $OutputDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
@@ -64,10 +66,11 @@ $appLog = Join-Path $OutputDir 'app.log'
 $appOut = Join-Path $OutputDir 'app.stdout.log'
 $appErr = Join-Path $OutputDir 'app.stderr.log'
 if ($ProjectRootArg) {
-  $p = Start-Process -FilePath $Executable -ArgumentList $ProjectRootArg -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
+  $processArgs = @($ProjectRootArg, "--user-data-dir=$UserDataDir")
 } else {
-  $p = Start-Process -FilePath $Executable -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
+  $processArgs = @("--user-data-dir=$UserDataDir")
 }
+$p = Start-Process -FilePath $Executable -ArgumentList $processArgs -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
 $waited = $p.WaitForExit(120000)
 if (-not $waited) {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue

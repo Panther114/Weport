@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { ExportRequest } from './services/export/types'
 
 // 事件订阅统一模式：返回"只移除本回调"的退订函数。
 // 用 removeAllListeners 会把同频道的其他订阅者（多组件）一并清掉。
@@ -124,7 +125,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 导出
   export: {
-    exportSessions: (outputRoot: string, options?: any) =>
+    exportSessions: (outputRoot: string, options?: ExportRequest) =>
       ipcRenderer.invoke('export:exportSessions', outputRoot, options),
     cancelTask: (taskId: string) => ipcRenderer.invoke('export:cancelTask', taskId),
     getExportLog: (outputRoot: string) => ipcRenderer.invoke('export:getExportLog', outputRoot),
@@ -167,14 +168,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 全局分析（v0.9）
   analytics: {
     getOverallStatistics: (force?: boolean) => ipcRenderer.invoke('analytics:getOverallStatistics', force),
-    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) =>
-      ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp),
+    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) =>
+      ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp, options),
     getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
     getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
       ipcRenderer.invoke('analytics:getSelfSentDailyDistribution', beginTimestamp, endTimestamp, force),
     getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
     setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
-    getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
+    getExcludeCandidates: (options?: { includeGroupChats?: boolean }) => ipcRenderer.invoke('analytics:getExcludeCandidates', options),
     getDailyActivity: (force?: boolean) => ipcRenderer.invoke('analytics:getDailyActivity', force),
     getWordFrequency: (limit?: number, force?: boolean) => ipcRenderer.invoke('analytics:getWordFrequency', limit, force),
     clearCache: () => ipcRenderer.invoke('cache:clearAnalytics')
@@ -226,6 +227,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // WeportAI（v0.8 聊天历史分析助手）
   ai: {
     getSetup: () => ipcRenderer.invoke('ai:getSetup'),
+    listProviders: () => ipcRenderer.invoke('ai:listProviders'),
+    fetchModels: (input: any) => ipcRenderer.invoke('ai:fetchModels', input),
+    saveProfile: (input: any) => ipcRenderer.invoke('ai:saveProfile', input),
+    activateProfile: (id: string) => ipcRenderer.invoke('ai:activateProfile', id),
+    deleteProfile: (id: string) => ipcRenderer.invoke('ai:deleteProfile', id),
+    testProfile: (input: any) => ipcRenderer.invoke('ai:testProfile', input),
     setSetup: (patch: any) => ipcRenderer.invoke('ai:setSetup', patch),
     listChats: () => ipcRenderer.invoke('ai:listChats'),
     createChat: (title?: string) => ipcRenderer.invoke('ai:createChat', title),

@@ -89,6 +89,15 @@ export interface ExportOptions {
   exportConcurrency?: number
 }
 
+/**
+ * Renderer-facing export request. `sessionIds` is intentionally separate from
+ * formatter options so the IPC integrator can scope a run without changing
+ * the per-session export contract.
+ */
+export interface ExportRequest extends ExportOptions {
+  sessionIds?: string[]
+}
+
 export interface MediaExportItem {
   relativePath: string
   kind: 'image' | 'voice' | 'emoji' | 'video' | 'file'

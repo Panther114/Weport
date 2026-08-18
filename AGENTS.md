@@ -357,3 +357,18 @@ All reference clones live under `reference-projects/` (git-ignored, see
 - `reference-projects/<others>/` — third-party WeChat tools cloned for study
   (chat history exporters, moments/朋友圈 analyzers, bots/auto-repliers, …);
   read-only, never shipped, never imported by the build
+
+## v0.9.6 Reference-Study Policy
+
+Every requirement marked `***` in the v0.9.6 implementation brief MUST be
+implemented only after carefully studying the relevant read-only projects under
+`reference-projects/`. Each implementation handoff must record:
+
+- references studied;
+- patterns adopted;
+- patterns rejected; and
+- Weport-specific deviations and why they are necessary.
+
+Reference code and assets are evidence and design input only. They must never
+be copied or shipped blindly, and must not bypass Weport's WCDB host,
+packaging, security, or platform constraints.

@@ -70,6 +70,8 @@ interface ConfigSchema {
   exportDefaultPathStyle: 'auto' | 'posix' | 'windows'
   exportDefaultDisplayNamePreference: 'group-nickname' | 'remark' | 'nickname'
   analyticsExcludedUsernames: string[]
+  /** Automatically install anti-revoke triggers for groups discovered after activation. */
+  antiRevokeAutoApplyNewGroups: boolean
 
   // 安全相关
   authEnabled: boolean
@@ -159,6 +161,8 @@ interface ConfigSchema {
 
   // WeportAI（v0.8 原生聊天历史分析助手）
   weportAiApiKey: string
+  /** v0.9.6 provider profiles; the complete JSON envelope is safeStorage-encrypted as one value. */
+  weportAiProfilesBlob: string
   weportAiBaseUrl: string
   weportAiBaseUrlError: string
   weportAiModel: string
@@ -185,7 +189,8 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'aiModelApiKey',
   'aiInsightApiKey',
   'aiInsightWeiboCookie',
-  'weportAiApiKey'
+  'weportAiApiKey',
+  'weportAiProfilesBlob'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
 const ENCRYPTED_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
@@ -260,6 +265,7 @@ export class ConfigService {
       exportDefaultPathStyle: 'auto',
       exportDefaultDisplayNamePreference: 'remark',
       analyticsExcludedUsernames: [],
+      antiRevokeAutoApplyNewGroups: false,
       authEnabled: false,
       authPassword: '',
       authUseHello: false,
@@ -329,6 +335,7 @@ export class ConfigService {
       autoDownloadHighRes: false,
       autoDownloadWhitelist: [],
       weportAiApiKey: '',
+      weportAiProfilesBlob: '',
       weportAiBaseUrl: 'https://api.deepseek.com',
       weportAiBaseUrlError: '',
       weportAiModel: 'deepseek-v4-flash',

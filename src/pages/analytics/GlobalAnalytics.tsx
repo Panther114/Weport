@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
-import 'echarts-wordcloud'
-import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays, Radar as RadarIcon, CloudFog } from 'lucide-react'
+import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays, CloudFog } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
 import { CountUp } from '../../components/CountUp'
+import { AnalyticsWordCloud } from '../../components/analytics/AnalyticsWordCloud'
 import { useColorMode } from '../../utils/colorMode'
 import { blueRamp, blueVerticalGradient, BLUE_STACK, MONO_STACK, CHART_TEXT, CHART_TEXT_DIM, CHART_GRID } from '../../utils/echartsTheme'
 import { animationCommon, axisCommon, baseChartTheme, tooltipCommon } from '../../utils/echartsTheme'
+import { useMeasuredBarWidth } from './chartSizing'
 
 interface ChatStatistics {
   totalMessages: number
@@ -78,32 +79,56 @@ const formatDate = (ts: number | null) => {
 
 const formatNumber = (n: number) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n))
 
-export const GlobalAnalytics: React.FC<{ annualOpen: boolean; onAnnualClose: () => void }> = () => {
+export const GlobalAnalytics: React.FC = () => {
   const colorMode = useColorMode()
   const [stats, setStats] = useState<ChatStatistics | null>(null)
   const [timeDist, setTimeDist] = useState<TimeDistribution | null>(null)
   const [selfSent, setSelfSent] = useState<SelfSentDaily | null>(null)
   const [rankings, setRankings] = useState<ContactRanking[]>([])
-const [excluded, setExcluded] = useState<string[]>([])
+  const [excluded, setExcluded] = useState<string[]>([])
   const [excludeCandidates, setExcludeCandidates] = useState<Array<{ username: string; displayName: string; avatarUrl?: string }>>([])
   const [dailyActivity, setDailyActivity] = useState<DailyActivity | null>(null)
   const [wordFreq, setWordFreq] = useState<WordFreqItem[]>([])
   const [wordFreqMeta, setWordFreqMeta] = useState<{ scannedMessages: number; textMessages: number } | null>(null)
   const [excludeSearch, setExcludeSearch] = useState('')
+  const [excludeDialogOpen, setExcludeDialogOpen] = useState(false)
+  const [draftExcluded, setDraftExcluded] = useState<string[]>([])
+  const [rankingLimit, setRankingLimit] = useState(20)
+  const [includeGroups, setIncludeGroups] = useState(false)
+  const [rankingLoading, setRankingLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const hourlyBarSizing = useMeasuredBarWidth(24)
+  const weekdayBarSizing = useMeasuredBarWidth(7)
+  const dailyBarCount = Object.keys(selfSent?.dailyDistribution || {}).length || 1
+  const dailyBarSizing = useMeasuredBarWidth(dailyBarCount)
+
+  const loadRankings = useCallback(async (limit: number, withGroups: boolean) => {
+    setRankingLoading(true)
+    try {
+      const result = await window.electronAPI.analytics.getContactRankings(limit, 0, 0, { includeGroupChats: withGroups })
+      if (!result.success) {
+        setError(result.error || '加载联系人排行失败')
+        return
+      }
+      setRankings((result.data || []) as ContactRanking[])
+      const candidates = await window.electronAPI.analytics.getExcludeCandidates({ includeGroupChats: withGroups })
+      if (candidates.success) setExcludeCandidates(candidates.data || [])
+    } finally {
+      setRankingLoading(false)
+    }
+  }, [])
 
   const loadAll = useCallback(async (force = false) => {
     setLoading(true)
     setError(null)
     try {
-      const [statsRes, timeRes, selfRes, rankRes, exclRes, candRes, dailyRes, wordRes] = await Promise.all([
+      const [statsRes, timeRes, selfRes, exclRes, candRes, dailyRes, wordRes] = await Promise.all([
         window.electronAPI.analytics.getOverallStatistics(force),
         window.electronAPI.analytics.getTimeDistribution(),
         window.electronAPI.analytics.getSelfSentDailyDistribution(undefined, undefined, force),
-        window.electronAPI.analytics.getContactRankings(20, 0, 0),
         window.electronAPI.analytics.getExcludedUsernames(),
-        window.electronAPI.analytics.getExcludeCandidates(),
+        window.electronAPI.analytics.getExcludeCandidates({ includeGroupChats: includeGroups }),
         window.electronAPI.analytics.getDailyActivity(force),
         window.electronAPI.analytics.getWordFrequency(60, force),
       ])
@@ -111,7 +136,6 @@ const [excluded, setExcluded] = useState<string[]>([])
       else if (statsRes.error) setError(statsRes.error)
       if (timeRes.success) setTimeDist(timeRes.data)
       if (selfRes.success) setSelfSent(selfRes.data)
-      if (rankRes.success) setRankings(rankRes.data || [])
       if (exclRes.success) setExcluded(exclRes.data || [])
       if (candRes.success) setExcludeCandidates(candRes.data || [])
       if (dailyRes.success && dailyRes.data) setDailyActivity(dailyRes.data)
@@ -124,11 +148,15 @@ const [excluded, setExcluded] = useState<string[]>([])
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [includeGroups])
 
   useEffect(() => {
     void loadAll()
   }, [loadAll])
+
+  useEffect(() => {
+    if (stats && !loading) void loadRankings(rankingLimit, includeGroups)
+  }, [includeGroups, loading, rankingLimit, loadRankings, stats])
 
   // ---------------------------------------------------------------- 图表配置
   const hourlyOption = useMemo(() => {
@@ -145,11 +173,12 @@ const [excluded, setExcluded] = useState<string[]>([])
           type: 'bar' as const,
           data,
           itemStyle: { color: '#f4f4f5', borderRadius: [3, 3, 0, 0] },
-          barMaxWidth: 14,
+          barWidth: hourlyBarSizing.barWidth,
+          barCategoryGap: hourlyBarSizing.barCategoryGap,
         },
       ],
     }
-  }, [timeDist, colorMode])
+  }, [hourlyBarSizing.barWidth, timeDist, colorMode])
 
   const weekdayOption = useMemo(() => {
     const data = WEEKDAY_LABELS.map((_, i) => timeDist?.weekdayDistribution[i] || 0)
@@ -168,11 +197,12 @@ const [excluded, setExcluded] = useState<string[]>([])
             color: (params: any) => blueRamp(params.value / max, colorMode),
             borderRadius: [3, 3, 0, 0],
           },
-          barMaxWidth: 18,
+          barWidth: weekdayBarSizing.barWidth,
+          barCategoryGap: weekdayBarSizing.barCategoryGap,
         },
       ],
     }
-  }, [timeDist, colorMode])
+  }, [timeDist, weekdayBarSizing.barWidth, colorMode])
 
   const monthlyOption = useMemo(() => {
     const months = Object.keys(timeDist?.monthlyDistribution || {}).sort()
@@ -198,9 +228,10 @@ const [excluded, setExcluded] = useState<string[]>([])
     }
   }, [timeDist, colorMode])
 
-const selfSentOption = useMemo(() => {
+  const selfSentOption = useMemo(() => {
     const days = Object.keys(selfSent?.dailyDistribution || {}).sort()
     const data = days.map((d) => selfSent!.dailyDistribution[d])
+    const max = Math.max(1, ...data)
     return {
       ...baseChartTheme(colorMode),
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
@@ -209,73 +240,17 @@ const selfSentOption = useMemo(() => {
       yAxis: { type: 'value' as const, ...axisCommon },
       series: [
         {
-          type: 'line' as const,
-          data,
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { color: blueRamp(0.45, colorMode), width: 1.5 },
-          areaStyle: { color: blueVerticalGradient(colorMode) },
+          type: 'bar' as const,
+          data: data.map((value) => ({
+            value,
+            itemStyle: { color: blueRamp(value / max, colorMode), borderRadius: [4, 4, 0, 0] },
+          })),
+          barWidth: dailyBarSizing.barWidth,
+          barCategoryGap: dailyBarSizing.barCategoryGap,
         },
       ],
     }
-  }, [selfSent, colorMode])
-
-  // ------------------------------------------------------------ 交流画像（雷达）
-  const radarOption = useMemo(() => {
-    if (!stats || !timeDist) return null
-    const total = Math.max(1, stats.totalMessages)
-    const typeCounts = stats.messageTypeCounts || {}
-    const share = (count: number) => Math.round((count / total) * 1000) / 10
-    const lateNight = [23, 0, 1, 2, 3, 4, 5].reduce((sum, h) => sum + (timeDist.hourlyDistribution[h] || 0), 0)
-    const indicators = [
-      { name: '文字', max: 100 },
-      { name: '图片', max: 100 },
-      { name: '语音', max: 100 },
-      { name: '视频', max: 100 },
-      { name: '表情', max: 100 },
-      { name: '深夜活跃', max: 100 },
-    ]
-    const values = [
-      share(typeCounts[1] || 0),
-      share(typeCounts[3] || 0),
-      share(typeCounts[34] || 0),
-      share(typeCounts[43] || 0),
-      share(typeCounts[47] || 0),
-      Math.round((lateNight / total) * 1000) / 10,
-    ]
-    const fill = blueVerticalGradient(colorMode)
-    return {
-      ...baseChartTheme(colorMode),
-      tooltip: {
-        ...tooltipCommon,
-        formatter: (params: any) => {
-          const p = params as { name: string; value: number }
-          return `${p.name}：<b>${p.value}%</b>`
-        },
-      },
-      radar: {
-        indicator: indicators,
-        radius: '64%',
-        center: ['50%', '54%'],
-        splitNumber: 4,
-        axisName: { color: CHART_TEXT, fontSize: 11 },
-        splitLine: { lineStyle: { color: CHART_GRID } },
-        splitArea: { areaStyle: { color: ['rgba(30,63,138,0.04)', 'rgba(30,63,138,0.08)'] } },
-        axisLine: { lineStyle: { color: CHART_GRID } },
-      },
-      series: [
-        {
-          type: 'radar' as const,
-          symbol: 'circle',
-          symbolSize: 4,
-          lineStyle: { color: blueRamp(0.35, colorMode), width: 2 },
-          itemStyle: { color: blueRamp(0.5, colorMode) },
-          areaStyle: { color: fill },
-          data: [{ name: '消息构成', value: values }],
-        },
-      ],
-    }
-  }, [stats, timeDist, colorMode])
+  }, [dailyBarSizing.barWidth, selfSent, colorMode])
 
   // ------------------------------------------------------------ 全年活跃热力图
   const calendarOption = useMemo(() => {
@@ -336,55 +311,25 @@ const selfSentOption = useMemo(() => {
     }
   }, [dailyActivity, stats, colorMode])
 
-  // ------------------------------------------------------------ 高频词云
-  const wordCloudOption = useMemo(() => {
-    const max = Math.max(1, ...wordFreq.map((w) => w.count))
-    return {
-      ...baseChartTheme(colorMode),
-      tooltip: {
-        ...tooltipCommon,
-        formatter: (params: any) => {
-          const p = params as { name: string; value: number }
-          return `<b>${p.name}</b>：${p.value} 次`
-        },
-      },
-      series: [
-        {
-          type: 'wordCloud' as const,
-          shape: 'circle' as const,
-          gridSize: 8,
-          sizeRange: [12, 42],
-          rotationRange: [0, 0],
-          rotationStep: 0,
-          width: '100%',
-          height: '100%',
-          drawOutOfBound: false,
-          textStyle: {
-            fontFamily: 'inherit',
-            fontWeight: 'bold' as const,
-            color: (word: any) => blueRamp((word.value || 0) / max, colorMode),
-          },
-          emphasis: {
-            textStyle: {
-              color: colorMode === 'mono' ? '#f4f4f5' : '#ffffff',
-              textShadowBlur: 8,
-              textShadowColor: 'rgba(0,0,0,0.5)',
-            },
-          },
-          data: wordFreq.map((w) => ({ name: w.word, value: w.count })),
-        },
-      ],
-    }
-  }, [wordFreq, colorMode])
+  const toggleExclude = (username: string) => {
+    setDraftExcluded((current) => current.includes(username) ? current.filter((u) => u !== username) : [...current, username])
+  }
 
-  const toggleExclude = async (username: string) => {
-    const next = excluded.includes(username) ? excluded.filter((u) => u !== username) : [...excluded, username]
-    setExcluded(next)
-    const r = await window.electronAPI.analytics.setExcludedUsernames(next)
-    if (r.success) {
-      setExcluded(r.data || [])
-      void loadAll(true)
+  const openExcludeDialog = () => {
+    setDraftExcluded(excluded)
+    setExcludeSearch('')
+    setExcludeDialogOpen(true)
+  }
+
+  const applyExclusions = async () => {
+    const result = await window.electronAPI.analytics.setExcludedUsernames(draftExcluded)
+    if (!result.success) {
+      setError(result.error || '更新排除名单失败')
+      return
     }
+    setExcluded(result.data || draftExcluded)
+    setExcludeDialogOpen(false)
+    await loadAll(true)
   }
 
   const filteredCandidates = excludeCandidates.filter(
@@ -417,7 +362,7 @@ const selfSentOption = useMemo(() => {
 
   return (
     <div className="analytics-global">
-      <div className="v09-toolbar-sub">
+      <div className="v09-toolbar-sub analytics-toolbar-sub">
         <button type="button" className="chip" onClick={() => void loadAll(true)}>
           <RefreshCw size={13} />
           刷新统计
@@ -427,8 +372,8 @@ const selfSentOption = useMemo(() => {
         </span>
       </div>
 
-      {/* 统计卡片 */}
-      <div className="stat-cards">
+      {/* KPI 与消息类型：保持一条信息带，避免摘要被拆成两层 */}
+      <div className="analytics-summary-strip">
         <div className="stat-card stat-card-hero">
           <span className="stat-label">
             <MessageSquare size={11} /> 总消息数
@@ -465,15 +410,7 @@ const selfSentOption = useMemo(() => {
           </b>
           <span className="stat-sub">首次 {formatDate(stats.firstMessageTime)}</span>
         </div>
-      </div>
-
-{/* 媒体构成 */}
-      <div className="v09-panel">
-        <div className="v09-panel-head">
-          <h3>消息类型构成</h3>
-          <span className="v09-sub">按消息类型统计</span>
-        </div>
-        <div className="media-type-row">
+        <div className="analytics-summary-types" aria-label="消息类型构成">
           {MEDIA_LABELS.map((m) => {
             const Icon = m.icon
             return (
@@ -483,34 +420,14 @@ const selfSentOption = useMemo(() => {
                   {m.label}
                 </div>
                 <b>{formatNumber(stats[m.key] as number)}</b>
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${stats.totalMessages > 0 ? (Number(stats[m.key]) / stats.totalMessages) * 100 : 0}%` }}
-                  />
-                </div>
               </div>
             )
           })}
         </div>
       </div>
 
-      {/* 交流画像 + 全年活跃热力图 */}
-      <div className="chart-grid-2">
-        <div className="v09-panel">
-          <div className="v09-panel-head">
-            <h3>
-              <RadarIcon size={14} />
-              交流画像
-            </h3>
-            <span className="v09-sub">消息构成占比 · 深夜为 23:00–05:59</span>
-          </div>
-          {radarOption ? (
-            <ReactECharts option={radarOption} style={{ height: 240 }} notMerge />
-          ) : (
-            <div className="wp-loading" style={{ height: 240 }}>暂无数据</div>
-          )}
-        </div>
+      {/* 活跃日历与词云：保留并置 seam，词云数据/组件可独立替换 */}
+      <div className="chart-grid-2 analytics-insight-grid">
         <div className="v09-panel">
           <div className="v09-panel-head">
             <h3>
@@ -525,24 +442,26 @@ const selfSentOption = useMemo(() => {
             <div className="wp-loading" style={{ height: 280 }}>暂无数据</div>
           )}
         </div>
-      </div>
-
-      {/* 高频词云 */}
-      <div className="v09-panel">
-        <div className="v09-panel-head">
-          <h3>
-            <CloudFog size={14} />
-            高频词云
-          </h3>
-          <span className="v09-sub">
-            文本消息热词 · 扫描 {wordFreqMeta ? formatNumber(wordFreqMeta.scannedMessages) : '–'} 条
-          </span>
+        <div className="v09-panel">
+          <div className="v09-panel-head">
+            <h3>
+              <CloudFog size={14} />
+              高频词云
+            </h3>
+            <span className="v09-sub">文本消息热词 · 扫描 {wordFreqMeta ? formatNumber(wordFreqMeta.scannedMessages) : '–'} 条</span>
+          </div>
+          {wordFreq.length > 0 ? (
+            <AnalyticsWordCloud
+              words={wordFreq}
+              maxWords={48}
+              label="高频词云"
+              listLabel="查看高频词列表"
+              formatTooltip={(item) => `${item.word}：${item.count} 次`}
+            />
+          ) : (
+            <div className="wp-loading" style={{ height: 280 }}>暂无文本消息</div>
+          )}
         </div>
-        {wordFreq.length > 0 ? (
-          <ReactECharts option={wordCloudOption} style={{ height: 300 }} notMerge />
-        ) : (
-          <div className="wp-loading" style={{ height: 300 }}>暂无文本消息</div>
-        )}
       </div>
 
       {/* 时段分布 */}
@@ -552,14 +471,18 @@ const selfSentOption = useMemo(() => {
             <h3>24 小时活跃分布</h3>
             <span className="v09-sub">消息量随时间的变化</span>
           </div>
-          <ReactECharts option={hourlyOption} style={{ height: 220 }} notMerge />
+          <div ref={hourlyBarSizing.ref} className="analytics-chart-frame">
+            <ReactECharts option={hourlyOption} style={{ height: 220 }} notMerge />
+          </div>
         </div>
         <div className="v09-panel">
           <div className="v09-panel-head">
             <h3>星期活跃分布</h3>
             <span className="v09-sub">一周内每天的活跃度</span>
           </div>
-          <ReactECharts option={weekdayOption} style={{ height: 220 }} notMerge />
+          <div ref={weekdayBarSizing.ref} className="analytics-chart-frame">
+            <ReactECharts option={weekdayOption} style={{ height: 220 }} notMerge />
+          </div>
         </div>
       </div>
 
@@ -576,22 +499,38 @@ const selfSentOption = useMemo(() => {
             <h3>我的每日消息</h3>
             <span className="v09-sub">我发送的消息 · {selfSent ? formatNumber(selfSent.totalMessages) : '–'} 条</span>
           </div>
-          <ReactECharts option={selfSentOption} style={{ height: 220 }} notMerge />
+          <div ref={dailyBarSizing.ref} className="analytics-chart-frame">
+            <ReactECharts option={selfSentOption} style={{ height: 220 }} notMerge />
+          </div>
         </div>
       </div>
 
       {/* 联系排行榜 */}
       <div className="v09-panel">
-        <div className="v09-panel-head">
-          <h3>
-            <Medal size={14} />
-            联系排行榜 Top {rankings.length}
-          </h3>
-          <span className="v09-sub">按消息总量排序 · 排除列表内联系人</span>
-        </div>
-        <div className="ranking-list">
+          <div className="v09-panel-head ranking-panel-head">
+            <h3>
+              <Medal size={14} />
+              联系排行榜 Top {rankingLimit}
+            </h3>
+            <div className="ranking-controls">
+              <div className="ranking-limit-segment" role="group" aria-label="排行榜数量">
+                {[10, 20, 50, 100].map((limit) => (
+                  <button key={limit} type="button" className={rankingLimit === limit ? 'is-active' : ''} onClick={() => setRankingLimit(limit)}>{limit}</button>
+                ))}
+              </div>
+              <label className="ranking-toggle">
+                <input type="checkbox" checked={includeGroups} onChange={(e) => setIncludeGroups(e.target.checked)} />
+                <span>包含群聊</span>
+              </label>
+              <button type="button" className="chip ranking-exclude-btn" onClick={openExcludeDialog}>
+                <UserMinus size={13} />
+                统计排除名单{excluded.length > 0 ? ` · ${excluded.length}` : ''}
+              </button>
+            </div>
+          </div>
+        <div className={`ranking-list ${rankingLoading ? 'is-loading' : ''}`}>
           {rankings.map((r, i) => (
-            <div key={r.username} className="ranking-row">
+            <div key={r.username} className="ranking-row" style={{ ['--rank-color' as string]: blueRamp(1 - i / Math.max(1, rankings.length - 1), colorMode) }}>
               <span className={`ranking-no ${i < 3 ? 'ranking-top' : ''}`}>{i + 1}</span>
               <Avatar src={r.avatarUrl} name={r.displayName} size={30} shape="rounded" />
               <div className="ranking-info">
@@ -601,7 +540,7 @@ const selfSentOption = useMemo(() => {
                 </span>
               </div>
               <div className="ranking-bar">
-                <div className="progress-fill" style={{ width: `${(r.messageCount / maxRank) * 100}%` }} />
+                <div className="progress-fill" style={{ width: `${(r.messageCount / maxRank) * 100}%`, background: 'var(--rank-color)' }} />
               </div>
               <b className="ranking-count">{formatNumber(r.messageCount)}</b>
             </div>
@@ -609,42 +548,44 @@ const selfSentOption = useMemo(() => {
         </div>
       </div>
 
-      {/* 排除管理 */}
-      <div className="v09-panel">
-        <div className="v09-panel-head">
-          <h3>
-            <UserMinus size={14} />
-            统计排除名单
-          </h3>
-          <span className="v09-sub">排除后统计与排行榜即时重算（公众号 / 广告账号等）</span>
-        </div>
-        <div className="exclude-box">
-          <div className="exclude-search">
-            <Search size={13} />
-            <input value={excludeSearch} placeholder="搜索联系人…" onChange={(e) => setExcludeSearch(e.target.value)} />
+      {excludeDialogOpen && (
+        <div className="wp-overlay" role="presentation" onClick={() => setExcludeDialogOpen(false)}>
+          <div className="wp-dialog exclude-dialog" role="dialog" aria-modal="true" aria-labelledby="exclude-dialog-title" onClick={(e) => e.stopPropagation()}>
+            <div className="wp-dialog-head">
+              <UserMinus size={16} />
+              <h3 id="exclude-dialog-title">统计排除名单</h3>
+              <button type="button" className="icon-btn-ghost" onClick={() => setExcludeDialogOpen(false)} aria-label="关闭">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="exclude-dialog-note">排除公众号、广告号等联系人；应用后统计和排行榜会重新计算。</p>
+            <div className="exclude-search">
+              <Search size={13} />
+              <input value={excludeSearch} placeholder="搜索联系人…" onChange={(e) => setExcludeSearch(e.target.value)} autoFocus />
+            </div>
+            <div className="exclude-list exclude-dialog-list">
+              {filteredCandidates.length === 0 && <div className="wp-empty">没有可排除的联系人</div>}
+              {filteredCandidates.map((c) => {
+                const isExcluded = draftExcluded.includes(c.username)
+                return (
+                  <button key={c.username} type="button" className={`exclude-item ${isExcluded ? 'exclude-item-active' : ''}`} onClick={() => toggleExclude(c.username)}>
+                    <Avatar src={c.avatarUrl} name={c.displayName} size={22} shape="circle" />
+                    <span>{c.displayName}</span>
+                    <span className="exclude-add">{isExcluded ? '已排除' : '排除'}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="exclude-dialog-footer">
+              <span className="v09-sub">已排除 {draftExcluded.length} 人</span>
+              <div className="exclude-dialog-actions">
+                <button type="button" className="chip" onClick={() => setExcludeDialogOpen(false)}>取消</button>
+                <button type="button" className="chip chip-active" onClick={() => void applyExclusions()}>应用</button>
+              </div>
+            </div>
           </div>
-          <div className="exclude-list">
-            {filteredCandidates.length === 0 && <div className="wp-empty">没有可排除的联系人</div>}
-            {filteredCandidates.map((c) => {
-              const isExcluded = excluded.includes(c.username)
-              return (
-                <button key={c.username} type="button" className={`exclude-item ${isExcluded ? 'exclude-item-active' : ''}`} onClick={() => void toggleExclude(c.username)}>
-                  <Avatar src={c.avatarUrl} name={c.displayName} size={22} shape="circle" />
-                  <span>{c.displayName}</span>
-                  {isExcluded ? (
-                    <span className="exclude-badge">
-                      <X size={11} />
-                      已排除
-                    </span>
-                  ) : (
-                    <span className="exclude-add">排除</span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

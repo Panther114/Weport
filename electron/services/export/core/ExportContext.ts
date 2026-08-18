@@ -74,6 +74,12 @@ export class ExportContext {
     private mediaRunMissingImageKeys = new Set<string>();
     private activeChatImagePipelineCount = 0;
     private chatImagePipelineWaiters: Array<() => void> = [];
+    // A single limiter is shared by all session formatters in one export run.
+    // Per-session formatter pools may still queue work, but native/file-heavy
+    // operations never multiply by the number of concurrently exported chats.
+    private sharedMediaConcurrency = 1;
+    private activeSharedMediaCount = 0;
+    private sharedMediaWaiters: Array<() => void> = [];
     private mediaFileCacheCleanupPending: Promise<void> | null = null;
     private mediaFileCacheLastCleanupAt = 0;
     private readonly mediaFileCacheCleanupIntervalMs = 30 * 60 * 1000;
@@ -434,12 +440,33 @@ export class ExportContext {
         this.mediaExportTelemetry = this.createEmptyMediaTelemetry()
         this.mediaRunSourceDedupMap.clear()
         this.mediaRunMissingImageKeys.clear()
+        this.activeSharedMediaCount = 0
+        this.sharedMediaWaiters = []
     }
 
     public clearMediaRuntimeState(): void {
         this.mediaExportTelemetry = null
         this.mediaRunSourceDedupMap.clear()
         this.mediaRunMissingImageKeys.clear()
+        this.activeSharedMediaCount = 0
+        this.sharedMediaWaiters = []
+    }
+
+    public configureSharedMediaConcurrency(value: number): void {
+        this.sharedMediaConcurrency = Math.max(1, Math.min(6, Math.floor(Number(value) || 1)))
+    }
+
+    private async withSharedMediaLimit<T>(fn: () => Promise<T>): Promise<T> {
+        while (this.activeSharedMediaCount >= this.sharedMediaConcurrency) {
+            await new Promise<void>((resolve) => this.sharedMediaWaiters.push(resolve))
+        }
+        this.activeSharedMediaCount += 1
+        try {
+            return await fn()
+        } finally {
+            this.activeSharedMediaCount = Math.max(0, this.activeSharedMediaCount - 1)
+            this.sharedMediaWaiters.shift()?.()
+        }
     }
 
     private async runWithChatImagePipelineLimit<T>(fn: () => Promise<T>): Promise<T> {
@@ -2832,6 +2859,23 @@ export class ExportContext {
     }
 
     public async exportMediaForMessage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, options: {
+          exportImages?: boolean
+          exportVoices?: boolean
+          exportVideos?: boolean
+          exportEmojis?: boolean
+          exportFiles?: boolean
+          maxFileSizeMb?: number
+          exportVoiceAsText?: boolean
+          exportConflictStrategy?: ExportOptions['exportConflictStrategy']
+          includeVideoPoster?: boolean
+          includeVoiceWithTranscript?: boolean
+          dirCache?: Set<string>
+          control?: ExportTaskControl
+        }): Promise<MediaExportItem | null> {
+        return this.withSharedMediaLimit(() => this.exportMediaForMessageUnbounded(msg, sessionId, mediaRootDir, mediaRelativePrefix, options))
+    }
+
+    private async exportMediaForMessageUnbounded(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, options: {
           exportImages?: boolean
           exportVoices?: boolean
           exportVideos?: boolean

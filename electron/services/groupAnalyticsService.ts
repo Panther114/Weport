@@ -5,7 +5,7 @@ import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import { avatarCacheService, protocolUrlToPath } from './avatarCacheService'
-import { tokenizeText, topWordFrequency } from './wordFrequency'
+import { extractAnalyticsText, tokenizeText, topWordFrequency } from './wordFrequency'
 import type { Message } from './chatService'
 import type { ChatStatistics } from './analyticsService'
 
@@ -1832,10 +1832,7 @@ class GroupAnalyticsService {
             const msgType = parseInt(row.Type || row.type || row.local_type || row.msg_type || '0', 10)
             const createTime = parseInt(row.CreateTime || row.create_time || row.createTime || row.msg_time || '0', 10)
             
-            let content = String(row.StrContent || row.message_content || row.content || row.msg_content || '')
-            if (content) {
-              content = content.replace(/^\s*([a-zA-Z0-9_@-]{4,}):(?!\/\/)\s*(?:\r?\n|<br\s*\/?>)/i, '')
-            }
+            const content = extractAnalyticsText(row)
 
             stats.totalMessages++
             if (textTypes.includes(msgType)) {
