@@ -849,7 +849,13 @@ function createWindow(autoShow: boolean): BrowserWindow {
 
   win.once('ready-to-show', () => {
     mainWindowReady = true
-    if (autoShow) win.show()
+    if (autoShow) {
+      win.show()
+      // 必须在 show 之后再 maximize，Windows 上 show 前的 maximize 会被忽略导致启动时不是全屏
+      if (!isAnyQaMode && !win.isMaximized()) {
+        try { win.maximize() } catch { /* noop */ }
+      }
+    }
   })
 
   // 导航守卫：渲染层只能停留在应用页面；外链一律交给系统浏览器。
@@ -2375,7 +2381,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
         worker.removeAllListeners()
       }
 
-      worker.on('message', (msg: any) => {
+      worker.on('message', async (msg: any) => {
         if (msg && msg.type === 'dualReport:progress') {
           for (const win of BrowserWindow.getAllWindows()) {
             if (!win.isDestroyed()) {
@@ -2387,7 +2393,39 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
         if (msg && (msg.type === 'dualReport:result' || msg.type === 'done')) {
           cleanup()
           void worker.terminate()
-          resolve(msg.data ?? msg.result)
+          const payload = msg.data ?? msg.result
+          // Enrich hero avatars via local head_image pipeline (weport-media://) so
+          // header shows instantly instead of slow/expired CDN http fetch.
+          if (payload?.success && payload?.data) {
+            try {
+              const d: any = payload.data
+              const candidates = [payload.data.friendUsername, wxid, configService?.getMyWxidCleaned?.() || wxid].filter(Boolean) as string[]
+              const enriched: any = await chatService.enrichSessionsContactInfo(candidates as string[], { skipDisplayName: true }).catch(() => null)
+              const pick = (u: string): string | undefined => {
+                const hit = enriched?.contacts?.[u]?.avatarUrl as string | undefined
+                return hit
+              }
+              const tryLocalize = (url?: string): string | undefined => {
+                if (!url) return undefined
+                if (url.startsWith('weport-media://')) return url
+                try { return (avatarCacheService as any).localUrlOrOriginal?.(url) || url } catch { return url }
+              }
+              const selfPick = pick(wxid) || pick(String(configService?.getMyWxidCleaned?.() || '')) || d.selfAvatarUrl
+              const friendPick = pick(payload.data.friendUsername) || d.friendAvatarUrl
+              payload.data.selfAvatarUrl = (selfPick && selfPick.startsWith('http') ? tryLocalize(selfPick) : selfPick) || d.selfAvatarUrl
+              payload.data.friendAvatarUrl = (friendPick && friendPick.startsWith('http') ? tryLocalize(friendPick) : friendPick) || d.friendAvatarUrl
+              const ensureResolvable = (url?: string) => {
+                if (!url || !url.startsWith('weport-media://')) return url
+                try { const p = protocolUrlToPath(url); if (p && !existsSync(p)) return undefined } catch {}
+                return url
+              }
+              const selfRes = ensureResolvable(payload.data.selfAvatarUrl)
+              const friendRes = ensureResolvable(payload.data.friendAvatarUrl)
+              if (selfRes !== payload.data.selfAvatarUrl) payload.data.selfAvatarUrl = selfRes
+              if (friendRes !== payload.data.friendAvatarUrl) payload.data.friendAvatarUrl = friendRes
+            } catch { /* avatar enrichment failure must not fail report */ }
+          }
+          resolve(payload)
           return
         }
         if (msg && (msg.type === 'dualReport:error' || msg.type === 'error')) {

@@ -27,7 +27,7 @@ import { AnalyticsWordCloud } from '../../components/analytics/AnalyticsWordClou
 import { EmptyState } from '../../components/EmptyState'
 import { useColorMode } from '../../utils/colorMode'
 import { useEscape } from '../../utils/useEscape'
-import { axisCommon, baseChartTheme, blueRamp, mediaTypeColor, tooltipCommon, BLUE_STACK, MONO_STACK, CHART_TEXT } from '../../utils/echartsTheme'
+import { animationCommon, axisCommon, baseChartTheme, blueRamp, mediaTypeColor, tooltipCommon, BLUE_STACK, MONO_STACK, CHART_TEXT } from '../../utils/echartsTheme'
 import { useMeasuredBarWidth } from './chartSizing'
 
 const MEDIA_TYPE_ICONS: Record<number, React.ComponentType<{ size?: number | string }>> = {
@@ -116,7 +116,7 @@ const MemberAnalyticsDialog: React.FC<{
   onClose: () => void
 }> = ({ chatroomId, member, onClose }) => {
   const colorMode = useColorMode()
-  const hourlyBarSizing = useMeasuredBarWidth(24)
+  const hourlyBarSizing = useMeasuredBarWidth(24, 1, 16, 42)
   const [data, setData] = useState<GroupMemberAnalytics | null>(null)
   const [messages, setMessages] = useState<MemberMessage[]>([])
   const [hasMore, setHasMore] = useState(false)
@@ -165,11 +165,12 @@ const hourlyOption = useMemo(() => {
     const hours = Array.from({ length: 24 }, (_, h) => data?.timeDistribution[h] || 0)
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 36, right: 12, top: 20, bottom: 24 },
       xAxis: { type: 'category' as const, data: hours.map((_, i) => `${i}时`), ...axisCommon },
       yAxis: { type: 'value' as const, ...axisCommon },
-      series: [{ type: 'bar' as const, data: hours, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...hours), colorMode), borderRadius: [3, 3, 0, 0] }, barWidth: hourlyBarSizing.barWidth, barCategoryGap: hourlyBarSizing.barCategoryGap }],
+      series: [{ type: 'bar' as const, data: hours, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...hours), colorMode), borderRadius: [3, 3, 0, 0] }, barWidth: hourlyBarSizing.barWidth, barCategoryGap: hourlyBarSizing.barCategoryGap, animationDelay: (idx: number) => idx * 24 }],
     }
   }, [data, colorMode, hourlyBarSizing.barWidth])
 
@@ -325,7 +326,7 @@ const hourlyOption = useMemo(() => {
 
 export const GroupAnalytics: React.FC = () => {
   const colorMode = useColorMode()
-  const hoursBarSizing = useMeasuredBarWidth(24)
+  const hoursBarSizing = useMeasuredBarWidth(24, 1, 16, 42)
   const [groups, setGroups] = useState<GroupChatInfo[]>([])
   const [search, setSearch] = useState('')
   const [groupSort, setGroupSort] = useState<GroupSortKey>('messages')
@@ -336,7 +337,7 @@ export const GroupAnalytics: React.FC = () => {
   const [members, setMembers] = useState<GroupMembersPanelEntry[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
   const [ranking, setRanking] = useState<GroupMessageRank[]>([])
-  const rankingBarSizing = useMeasuredBarWidth(Math.max(1, ranking.length), 10, 6, 24)
+  const rankingBarSizing = useMeasuredBarWidth(Math.max(1, ranking.length), 3, 14, 42)
   const [rankingLimit, setRankingLimit] = useState(20)
   const [hours, setHours] = useState<GroupActiveHours | null>(null)
   const [media, setMedia] = useState<GroupMediaStats | null>(null)
@@ -414,6 +415,7 @@ setMembers([])
     const top = ranking.slice(0, rankingLimit)
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 90, right: 30, top: 16, bottom: 20 },
       xAxis: { type: 'value' as const, ...axisCommon, splitLine: { lineStyle: { color: '#1c1c21', type: 'dashed' as const } } },
@@ -428,6 +430,7 @@ setMembers([])
           },
           barWidth: rankingBarSizing.barWidth,
           barCategoryGap: rankingBarSizing.barCategoryGap,
+          animationDelay: (idx: number) => idx * 24,
         },
       ],
     }
@@ -437,11 +440,12 @@ setMembers([])
     const data = Array.from({ length: 24 }, (_, h) => hours?.hourlyDistribution[h] || 0)
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 36, right: 12, top: 20, bottom: 24 },
       xAxis: { type: 'category' as const, data: data.map((_, i) => `${i}时`), ...axisCommon },
       yAxis: { type: 'value' as const, ...axisCommon },
-      series: [{ type: 'bar' as const, data, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...data), colorMode), borderRadius: [3, 3, 0, 0] }, barWidth: hoursBarSizing.barWidth, barCategoryGap: hoursBarSizing.barCategoryGap }],
+      series: [{ type: 'bar' as const, data, itemStyle: { color: (params: any) => blueRamp((params.value || 0) / Math.max(1, ...data), colorMode), borderRadius: [3, 3, 0, 0] }, barWidth: hoursBarSizing.barWidth, barCategoryGap: hoursBarSizing.barCategoryGap, animationDelay: (idx: number) => idx * 30 }],
     }
   }, [hours, colorMode, hoursBarSizing.barWidth])
 
@@ -449,6 +453,7 @@ setMembers([])
     const types = media?.typeCounts || []
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'item' as const },
       legend: { bottom: 0, textStyle: { color: '#b0b0b8', fontSize: 11 }, itemWidth: 10, itemHeight: 10 },
       series: [
@@ -459,6 +464,7 @@ setMembers([])
           itemStyle: { borderRadius: 4, borderColor: '#000', borderWidth: 2 },
           label: { color: '#b0b0b8', fontSize: 11 },
           data: types.map((t) => ({ name: t.name, value: t.count, itemStyle: { color: mediaTypeColor(t.type, colorMode) } })),
+          animationDelay: (idx: number) => idx * 70,
         },
       ],
     }
@@ -481,6 +487,7 @@ setMembers([])
     const heatColors = colorMode === 'mono' ? MONO_STACK : BLUE_STACK
     return {
       ...baseChartTheme(colorMode),
+      animation: false,
       tooltip: {
         ...tooltipCommon,
         formatter: (params: any) => {
@@ -488,19 +495,10 @@ setMembers([])
           return `${WEEKDAY_LABELS[p.value[1]]} ${p.value[0]}：<b>${p.value[2]}</b> 条`
         },
       },
-      grid: { left: 40, right: 12, top: 12, bottom: 60 },
+      grid: { left: 40, right: 12, top: 12, bottom: 20 },
       xAxis: { type: 'category' as const, data: Array.from({ length: 24 }, (_, i) => `${i}时`), ...axisCommon, splitArea: { show: false } },
       yAxis: { type: 'category' as const, data: WEEKDAY_LABELS, ...axisCommon },
-      visualMap: {
-        min: 0,
-        max,
-        calculable: false,
-        orient: 'horizontal',
-        left: 'center',
-        bottom: 0,
-        textStyle: { color: CHART_TEXT, fontSize: 10 },
-        inRange: { color: heatColors },
-      },
+      visualMap: { show: false, min: 0, max, inRange: { color: heatColors } },
       series: [
         {
           type: 'heatmap' as const,

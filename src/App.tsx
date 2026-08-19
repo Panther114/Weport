@@ -583,9 +583,8 @@ export default function App() {
       }),
       api.export.onProgress((payload) => {
         setProgress(payload)
-        const label = payload.phaseLabel || payload.phase || '导出中'
-        const session = payload.currentSession || ''
-        setBusyLabel(session ? `${label} · ${session}` : label)
+        // 顶部品牌区不再显示导出进度（避免 `收集消息149,020条·群名` 把页签挤压导致布局跳动），
+        // 导出状态仅在导出面板的进度条上方以固定高度展示当前会话名。
         if (payload.taskId) setExportTaskId(payload.taskId)
       }),
       api.app.onUpdateAvailable((info) => {
@@ -1137,9 +1136,9 @@ export default function App() {
           </div>
           <div className="brand-text">
             <h1>Weport</h1>
-            <p>
+            <p title={busy && tab === 'export' ? `v${version}` : `微信工具箱 · v${version}${busyLabel ? ` · ${busyLabel}` : ''}`}>
               微信工具箱 · v{version}
-              {busyLabel ? ` · ${busyLabel}` : ''}
+              {busy && tab === 'export' ? '' : busyLabel ? ` · ${busyLabel}` : ''}
             </p>
           </div>
         </div>
@@ -1760,11 +1759,11 @@ export default function App() {
                   />
                 </div>
                 <div className="progress-meta">
-                  <strong>{progress.currentSession || progress.phaseLabel || '…'}</strong>
-                  <span>
+                  <strong className="progress-session" title={progress.currentSession || ''}>{progress.currentSession || '准备中…'}</strong>
+                  <span className="progress-count">
                     {progress.total > 0
                       ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}`
-                      : progress.phaseLabel || ''}
+                      : ''}
                   </span>
                 </div>
               </div>

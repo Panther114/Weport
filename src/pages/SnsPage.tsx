@@ -220,10 +220,14 @@ export default function SnsPage() {
     } catch {
       /* cached author data is optional */
     }
-    setAuthorsLoading(!hydrated)
+    // 若已从缓存恢复出正确排序的作者列表，保持显示直到真实计数返回，避免首屏闪现未排序的“奇怪联系人”
+    if (hydrated) {
+      setAuthorsLoading(false)
+    } else {
+      setAuthorsLoading(true)
+    }
     try {
-      // Author names/avatars are useful immediately; a cold full-timeline
-      // count scan must not block the profile sidebar from rendering.
+      // 先并发拉取：用户名与计数（计数 preferCache 命中时很快，未命中则需扫描，绝不能先以空计数渲染未排序列表）
       const countsPromise = window.electronAPI.sns.getUserPostCounts({ preferCache: true })
       const usersRes = await window.electronAPI.sns.getSnsUsernames()
       const usernames = usersRes.success ? usersRes.usernames || [] : []
@@ -233,7 +237,7 @@ export default function SnsPage() {
         if (enr.success && enr.contacts) Object.assign(enriched, enr.contacts)
       }
       let authorCacheWrite: Promise<void> = Promise.resolve()
-      const applyAuthors = (counts: Record<string, number>) => {
+      const applyAuthors = (counts: Record<string, number>, hasCounts: boolean) => {
         const list: SnsAuthor[] = usernames
           .filter((u) => enriched[u]?.displayName)
           .map((u) => ({
@@ -242,24 +246,44 @@ export default function SnsPage() {
             avatarUrl: enriched[u]?.avatarUrl,
             postCount: typeof counts[u] === 'number' ? counts[u] : undefined,
           }))
-          .sort((a, b) => (b.postCount ?? 0) - (a.postCount ?? 0))
-        setAuthors(list)
-        authorCacheWrite = authorCacheWrite.catch(() => undefined).then(async () => {
-          try {
-            const scope = await ensureCacheScope()
-            const existing = await window.electronAPI.config.get('snsAuthorCacheMap')
-            const map = existing && typeof existing === 'object' ? { ...(existing as Record<string, unknown>) } : {}
-            map[scope] = { updatedAt: Date.now(), authors: list }
-            await window.electronAPI.config.set('snsAuthorCacheMap', map)
-          } catch {
-            /* cache failure does not affect the live sidebar */
-          }
-        })
+          .sort((a, b) => {
+            // 有真实计数时严格按发帖数降序；无计数时保持用户名稳定顺序，避免与计数排序结果混淆
+            if (hasCounts) return (b.postCount ?? 0) - (a.postCount ?? 0)
+            return a.displayName.localeCompare(b.displayName, 'zh-Hans-CN')
+          })
+        // 仅当拿到真实计数或无缓存兜底时才覆盖首屏；已 hydration 的缓存列表不会被空计数阶段的未排序结果闪掉
+        if (hasCounts || !hydrated) {
+          setAuthors(list)
+        } else if (!hasCounts && !hydrated) {
+          // 理论不可达：兜底
+          setAuthors(list)
+        }
+        if (hasCounts) {
+          authorCacheWrite = authorCacheWrite.catch(() => undefined).then(async () => {
+            try {
+              const scope = await ensureCacheScope()
+              const existing = await window.electronAPI.config.get('snsAuthorCacheMap')
+              const map = existing && typeof existing === 'object' ? { ...(existing as Record<string, unknown>) } : {}
+              map[scope] = { updatedAt: Date.now(), authors: list }
+              await window.electronAPI.config.set('snsAuthorCacheMap', map)
+            } catch {
+              /* cache failure does not affect the live sidebar */
+            }
+          })
+        }
       }
-      applyAuthors({})
-      void countsPromise.then((countsRes) => {
-        if (countsRes.success) applyAuthors(countsRes.counts || {})
-      }).catch(() => {})
+      // 等计数就绪后再首次渲染作者列表，保证发布者始终按发帖数正确排序
+      try {
+        const countsRes = await countsPromise
+        if (countsRes.success) {
+          applyAuthors(countsRes.counts || {}, true)
+        } else {
+          // 计数失败时仍按展示名稳定排序，避免空计数导致的“奇怪顺序”
+          applyAuthors({}, false)
+        }
+      } catch {
+        applyAuthors({}, false)
+      }
     } catch {
       /* noop */
     } finally {

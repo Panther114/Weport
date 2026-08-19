@@ -3,8 +3,8 @@ import { useLayoutEffect, useRef, useState } from 'react'
 export const fixedGapBarWidth = (
   containerWidth: number,
   itemCount: number,
-  gap = 10,
-  minWidth = 6,
+  gap = 6,
+  minWidth = 8,
   maxWidth = 96,
 ) => {
   const count = Math.max(1, itemCount)
@@ -12,7 +12,7 @@ export const fixedGapBarWidth = (
   return Math.max(minWidth, Math.min(maxWidth, Math.floor(usableWidth / count)))
 }
 
-export const useMeasuredBarWidth = (itemCount: number, gap = 10, minWidth = 6, maxWidth = 96) => {
+export const useMeasuredBarWidth = (itemCount: number, gap = 6, minWidth = 8, maxWidth = 96) => {
   const ref = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
 

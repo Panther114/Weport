@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
 import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays, CloudFog } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
@@ -98,37 +98,61 @@ export const GlobalAnalytics: React.FC = () => {
   const [rankingLoading, setRankingLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const hourlyBarSizing = useMeasuredBarWidth(24)
-  const weekdayBarSizing = useMeasuredBarWidth(7)
-  const dailyBarCount = Object.keys(selfSent?.dailyDistribution || {}).length || 1
-  const dailyBarSizing = useMeasuredBarWidth(dailyBarCount)
+  const hourlyBarSizing = useMeasuredBarWidth(24, 1, 16, 42)
+  const weekdayBarSizing = useMeasuredBarWidth(7, 2, 24, 72)
 
-  const loadRankings = useCallback(async (limit: number, withGroups: boolean) => {
+  // 排行榜缓存：key = withGroups ? 'with-groups' : 'private' → 100 条全量
+  const rankingCacheRef = useRef<Map<string, ContactRanking[]>>(new Map())
+  const rankingRequestRef = useRef(0)
+  const loadRankings = useCallback(async (limit: number, withGroups: boolean, opts?: { force?: boolean }) => {
+    const cacheKey = withGroups ? 'with-groups' : 'private'
+    const cached = rankingCacheRef.current.get(cacheKey)
+    const needFetch = opts?.force || !cached || cached.length < limit
+    // 已有足量缓存则直接切片，零闪烁、零等待
+    if (cached && cached.length >= limit && !opts?.force) {
+      setRankings(cached.slice(0, limit))
+      return
+    }
+    // 乐观：先展示已有缓存的切片，再后台拉取全量 100
+    if (cached && cached.length > 0 && !opts?.force) {
+      setRankings(cached.slice(0, Math.min(limit, cached.length)))
+    }
+    const reqId = ++rankingRequestRef.current
     setRankingLoading(true)
     try {
-      const result = await window.electronAPI.analytics.getContactRankings(limit, 0, 0, { includeGroupChats: withGroups })
+      // 始终拉取 100 条缓存于本地，切 Top 10/20/50 均本地切片，无需二次请求
+      const fetchLimit = 100
+      const result = await window.electronAPI.analytics.getContactRankings(fetchLimit, 0, 0, { includeGroupChats: withGroups })
+      if (reqId !== rankingRequestRef.current) return
       if (!result.success) {
         setError(result.error || '加载联系人排行失败')
         return
       }
-      setRankings((result.data || []) as ContactRanking[])
-      const candidates = await window.electronAPI.analytics.getExcludeCandidates({ includeGroupChats: withGroups })
-      if (candidates.success) setExcludeCandidates(candidates.data || [])
+      const full = (result.data || []) as ContactRanking[]
+      rankingCacheRef.current.set(cacheKey, full)
+      setRankings(full.slice(0, limit))
     } finally {
-      setRankingLoading(false)
+      if (reqId === rankingRequestRef.current) setRankingLoading(false)
     }
+  }, [])
+
+  const loadExcludeCandidates = useCallback(async (withGroups: boolean, force = false) => {
+    try {
+      const candRes = await window.electronAPI.analytics.getExcludeCandidates({ includeGroupChats: withGroups })
+      if (candRes.success) setExcludeCandidates(candRes.data || [])
+    } catch { /* 候选列表失败不阻断主流程 */ }
+    void force
   }, [])
 
   const loadAll = useCallback(async (force = false) => {
     setLoading(true)
     setError(null)
     try {
-      const [statsRes, timeRes, selfRes, exclRes, candRes, dailyRes, wordRes] = await Promise.all([
+      const [statsRes, timeRes, selfRes, exclRes, dailyRes, wordRes] = await Promise.all([
         window.electronAPI.analytics.getOverallStatistics(force),
         window.electronAPI.analytics.getTimeDistribution(),
         window.electronAPI.analytics.getSelfSentDailyDistribution(undefined, undefined, force),
         window.electronAPI.analytics.getExcludedUsernames(),
-        window.electronAPI.analytics.getExcludeCandidates({ includeGroupChats: includeGroups }),
         window.electronAPI.analytics.getDailyActivity(force),
         window.electronAPI.analytics.getWordFrequency(60, force),
       ])
@@ -137,18 +161,19 @@ export const GlobalAnalytics: React.FC = () => {
       if (timeRes.success) setTimeDist(timeRes.data)
       if (selfRes.success) setSelfSent(selfRes.data)
       if (exclRes.success) setExcluded(exclRes.data || [])
-      if (candRes.success) setExcludeCandidates(candRes.data || [])
       if (dailyRes.success && dailyRes.data) setDailyActivity(dailyRes.data)
       if (wordRes.success && wordRes.data) {
         setWordFreq(wordRes.data.items || [])
         setWordFreqMeta({ scannedMessages: wordRes.data.scannedMessages, textMessages: wordRes.data.textMessages })
       }
+      // 候选列表与主统计解耦，单独懒加载（打开排除对话框时必已就绪）
+      void loadExcludeCandidates(includeGroups, force)
     } catch (e) {
       setError(String(e))
     } finally {
       setLoading(false)
     }
-  }, [includeGroups])
+  }, [includeGroups, loadExcludeCandidates])
 
   useEffect(() => {
     void loadAll()
@@ -158,12 +183,17 @@ export const GlobalAnalytics: React.FC = () => {
     if (stats && !loading) void loadRankings(rankingLimit, includeGroups)
   }, [includeGroups, loading, rankingLimit, loadRankings, stats])
 
+  // 排除候选单独跟随 includeGroups 变化（不与排行榜强耦合、失败不置全局 error）
+  useEffect(() => {
+    if (!loading) void loadExcludeCandidates(includeGroups)
+  }, [includeGroups, loading, loadExcludeCandidates])
+
   // ---------------------------------------------------------------- 图表配置
   const hourlyOption = useMemo(() => {
     const data = Array.from({ length: 24 }, (_, h) => timeDist?.hourlyDistribution[h] || 0)
     return {
       ...baseChartTheme(colorMode),
-      animation: animationCommon.animationDuration > 0,
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 36, right: 12, top: 24, bottom: 24 },
       xAxis: { type: 'category' as const, data: data.map((_, i) => `${i}时`), ...axisCommon },
@@ -172,6 +202,8 @@ export const GlobalAnalytics: React.FC = () => {
         {
           type: 'bar' as const,
           data,
+          animationDelay: (idx: number) => idx * 24,
+          animationDelayUpdate: (idx: number) => idx * 12,
           itemStyle: { color: '#f4f4f5', borderRadius: [3, 3, 0, 0] },
           barWidth: hourlyBarSizing.barWidth,
           barCategoryGap: hourlyBarSizing.barCategoryGap,
@@ -185,6 +217,7 @@ export const GlobalAnalytics: React.FC = () => {
     const max = Math.max(1, ...data)
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 36, right: 12, top: 24, bottom: 24 },
       xAxis: { type: 'category' as const, data: WEEKDAY_LABELS, ...axisCommon },
@@ -193,6 +226,8 @@ export const GlobalAnalytics: React.FC = () => {
         {
           type: 'bar' as const,
           data,
+          animationDelay: (idx: number) => idx * 24,
+          animationDelayUpdate: (idx: number) => idx * 12,
           itemStyle: {
             color: (params: any) => blueRamp(params.value / max, colorMode),
             borderRadius: [3, 3, 0, 0],
@@ -209,6 +244,7 @@ export const GlobalAnalytics: React.FC = () => {
     const data = months.map((m) => timeDist!.monthlyDistribution[m])
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 40, right: 12, top: 24, bottom: 24 },
       xAxis: { type: 'category' as const, data: months, ...axisCommon },
@@ -223,7 +259,9 @@ export const GlobalAnalytics: React.FC = () => {
           lineStyle: { color: blueRamp(0.35, colorMode), width: 2 },
           itemStyle: { color: blueRamp(0.5, colorMode) },
           areaStyle: { color: blueVerticalGradient(colorMode) },
-        },
+          animationDelay: (idx: number) => idx * 24,
+          animationDelayUpdate: (idx: number) => idx * 12,
+        } as any,
       ],
     }
   }, [timeDist, colorMode])
@@ -231,28 +269,30 @@ export const GlobalAnalytics: React.FC = () => {
   const selfSentOption = useMemo(() => {
     const days = Object.keys(selfSent?.dailyDistribution || {}).sort()
     const data = days.map((d) => selfSent!.dailyDistribution[d])
-    const max = Math.max(1, ...data)
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 40, right: 12, top: 24, bottom: 24 },
       xAxis: { type: 'category' as const, data: days, ...axisCommon },
       yAxis: { type: 'value' as const, ...axisCommon },
       series: [
         {
-          type: 'bar' as const,
-          data: data.map((value) => ({
-            value,
-            itemStyle: { color: blueRamp(value / max, colorMode), borderRadius: [4, 4, 0, 0] },
-          })),
-          barWidth: dailyBarSizing.barWidth,
-          barCategoryGap: dailyBarSizing.barCategoryGap,
-        },
+          type: 'line' as const,
+          data,
+          smooth: true,
+          symbol: 'circle',
+          symbolSize: 4,
+          lineStyle: { color: blueRamp(0.4, colorMode), width: 2 },
+          itemStyle: { color: blueRamp(0.55, colorMode) },
+          areaStyle: { color: blueVerticalGradient(colorMode) },
+          animationDelay: (idx: number) => idx * 12,
+        } as any,
       ],
     }
-  }, [dailyBarSizing.barWidth, selfSent, colorMode])
+  }, [selfSent, colorMode])
 
-  // ------------------------------------------------------------ 全年活跃热力图
+  // ------------------------------------------------------------ 全年活跃热力图（重制：紧凑图例 + 零重叠布局）
   const calendarOption = useMemo(() => {
     if (!dailyActivity || !stats) return null
     const days = Object.keys(dailyActivity.daily).sort()
@@ -267,10 +307,16 @@ export const GlobalAnalytics: React.FC = () => {
     start.setDate(1)
     const first = new Date(days[0])
     const rangeStart = first < start ? first : start
+    const pad2 = (n: number) => String(n).padStart(2, '0')
+    const range = [
+      `${rangeStart.getFullYear()}-${pad2(rangeStart.getMonth() + 1)}`,
+      `${end.getFullYear()}-${pad2(end.getMonth() + 1)}`,
+    ]
 
     const heatColors = colorMode === 'mono' ? MONO_STACK : BLUE_STACK
     return {
       ...baseChartTheme(colorMode),
+      animation: false,
       tooltip: {
         ...tooltipCommon,
         formatter: (params: any) => {
@@ -279,25 +325,22 @@ export const GlobalAnalytics: React.FC = () => {
         },
       },
       calendar: {
-        range: [rangeStart.getFullYear() + '-' + (rangeStart.getMonth() + 1), end.getFullYear() + '-' + (end.getMonth() + 1)],
-        top: 28,
-        left: 48,
-        right: 16,
-        cellSize: ['auto', 13],
+        range,
+        top: 36,
+        left: 32,
+        right: 12,
+        bottom: 12,
+        cellSize: [12, 12],
         itemStyle: { color: 'rgba(30,63,138,0.06)', borderColor: CHART_GRID, borderWidth: 1 },
         splitLine: { lineStyle: { color: CHART_GRID } },
-        dayLabel: { color: CHART_TEXT_DIM, fontSize: 10 },
-        monthLabel: { color: CHART_TEXT, fontSize: 11 },
-        yearLabel: { color: CHART_TEXT, fontSize: 11 },
+        dayLabel: { firstDay: 1, color: CHART_TEXT_DIM, fontSize: 9, margin: 6, nameMap: 'cn' as const },
+        monthLabel: { color: CHART_TEXT, fontSize: 10, margin: 8, nameMap: 'cn' as const },
+        yearLabel: { show: false },
       },
       visualMap: {
+        show: false,
         min: 0,
         max,
-        calculable: false,
-        orient: 'horizontal',
-        left: 'center',
-        bottom: 0,
-        textStyle: { color: CHART_TEXT_DIM, fontSize: 10 },
         inRange: { color: heatColors },
       },
       series: [
@@ -329,7 +372,11 @@ export const GlobalAnalytics: React.FC = () => {
     }
     setExcluded(result.data || draftExcluded)
     setExcludeDialogOpen(false)
+    // 排除名单变更使排行榜缓存失效
+    rankingCacheRef.current.clear()
     await loadAll(true)
+    // 强制刷新排行榜（排除后必须重算）
+    void loadRankings(rankingLimit, includeGroups, { force: true })
   }
 
   const filteredCandidates = excludeCandidates.filter(
@@ -499,7 +546,7 @@ export const GlobalAnalytics: React.FC = () => {
             <h3>我的每日消息</h3>
             <span className="v09-sub">我发送的消息 · {selfSent ? formatNumber(selfSent.totalMessages) : '–'} 条</span>
           </div>
-          <div ref={dailyBarSizing.ref} className="analytics-chart-frame">
+          <div className="analytics-chart-frame">
             <ReactECharts option={selfSentOption} style={{ height: 220 }} notMerge />
           </div>
         </div>

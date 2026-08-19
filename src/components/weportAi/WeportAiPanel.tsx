@@ -27,6 +27,7 @@ import {
   CheckCircle2,
   XCircle,
   MemoryStick,
+  Loader2,
 } from 'lucide-react'
 import AiMarkdown from './AiMarkdown'
 import './providerProfiles.css'
@@ -724,10 +725,10 @@ export default function WeportAiPanel() {
                 setDebugOpen(true)
                 void api.ai.getDebugLog(400).then((r) => setDebugLines(r.lines || [])).catch(() => undefined)
               }}
-              title="调试日志（查看最近一次任务与 API 请求记录）"
+              title="日志（查看最近一次任务与 API 请求记录）"
             >
               <Bug size={14} />
-              调试日志
+              日志
             </button>
             <button type="button" className="ai-settings-btn" onClick={() => setSettingsOpen(true)} title="WeportAI 设置">
               <Settings2 size={14} />
@@ -1142,7 +1143,7 @@ export default function WeportAiPanel() {
           <div className="modal modal-wide ai-debug" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-debug-title">
             <h3 id="ai-debug-title">
               <Bug size={15} />
-              WeportAI 调试日志
+              WeportAI 日志
               <span className="hint">（最近一次任务与 API 请求/响应记录，用于排查问题）</span>
             </h3>
             <div className="ai-debug-toolbar">
@@ -1251,6 +1252,23 @@ function AiSettingsModal({
   const [fetchedModels, setFetchedModels] = useState<string[]>(initial?.discovery?.models || [])
   const [modelDiscoveryDone, setModelDiscoveryDone] = useState(Boolean(initial?.discovery?.fetchedAt))
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [addDraft, setAddDraft] = useState(() => {
+    const entry = (setup.catalog || []).find((item) => item.id === 'deepseek') || (setup.catalog || [])[0]
+    return {
+      name: entry?.name || '新 AI 服务',
+      providerId: entry?.id || 'deepseek',
+      protocol: (entry?.protocol || 'openai-compatible') as ProviderProtocol,
+      baseUrl: entry?.baseUrl || '',
+      model: entry?.defaultModel || '',
+      apiKey: '',
+    }
+  })
+  const [addFetchedModels, setAddFetchedModels] = useState<string[]>([])
+  const [addFetching, setAddFetching] = useState(false)
+  const [addDiscoveryDone, setAddDiscoveryDone] = useState(false)
+  const [addError, setAddError] = useState('')
+  const [addSaving, setAddSaving] = useState(false)
 
   const selectedCatalog = catalog.find((entry) => entry.id === draft.providerId)
   const selectedModels = Array.from(new Set([
@@ -1272,20 +1290,24 @@ function AiSettingsModal({
     setError('')
   }
 
-  function startAdd() {
-    const entry = catalog.find((item) => item.id === 'openai-compatible') || catalog[0]
-    setEditingId(null)
-    setDraft({
-      name: entry?.name || '新 AI 服务',
-      providerId: entry?.id || 'custom',
-      protocol: entry?.protocol || 'openai-compatible',
+  function openAddDialog() {
+    const entry = catalog.find((item) => item.id === 'deepseek') || catalog[0]
+    setAddDraft({
+      name: entry?.name ? `${entry.name} · 新配置` : '新 AI 服务',
+      providerId: entry?.id || 'deepseek',
+      protocol: (entry?.protocol || 'openai-compatible') as ProviderProtocol,
       baseUrl: entry?.baseUrl || '',
       model: entry?.defaultModel || '',
       apiKey: '',
     })
-    setFetchedModels([])
-    setModelDiscoveryDone(false)
-    setError('')
+    setAddFetchedModels([])
+    setAddDiscoveryDone(false)
+    setAddError('')
+    setAddOpen(true)
+  }
+
+  function startAdd() {
+    openAddDialog()
   }
 
   function selectProvider(providerId: string) {
@@ -1301,6 +1323,114 @@ function AiSettingsModal({
       model: entry.defaultModel || prev.model,
       name: prev.name === '新 AI 服务' || prev.name === selectedCatalog?.name ? entry.name : prev.name,
     }))
+  }
+
+  function selectAddProvider(providerId: string) {
+    const entry = catalog.find((item) => item.id === providerId)
+    if (!entry) return
+    setAddFetchedModels([])
+    setAddDiscoveryDone(false)
+    setAddError('')
+    setAddDraft((prev) => ({
+      ...prev,
+      providerId,
+      protocol: entry.protocolOptions?.includes(prev.protocol) ? prev.protocol : entry.protocol,
+      baseUrl: entry.baseUrl || (entry.allowCustomBaseUrl ? '' : prev.baseUrl),
+      model: entry.defaultModel || prev.model,
+      name: prev.name === '新 AI 服务' || prev.name.startsWith(catalog.find((c) => c.id === prev.providerId)?.name || '') ? (entry.name ? `${entry.name} · 新配置` : prev.name) : prev.name,
+    }))
+  }
+
+  async function fetchAddModels() {
+    setAddFetching(true)
+    setAddError('')
+    try {
+      const result = await api.ai.fetchModels({
+        providerId: addDraft.providerId,
+        protocol: addDraft.protocol,
+        baseUrl: addDraft.baseUrl.trim() || undefined,
+        apiKey: addDraft.apiKey.trim() || undefined,
+      })
+      if (!result.success || !result.models?.length) {
+        setAddFetchedModels([])
+        setAddDiscoveryDone(false)
+        setAddError(result.error || '未获取到可用模型')
+        return
+      }
+      const models = Array.from(new Set(result.models.map(String).filter(Boolean)))
+      setAddFetchedModels(models)
+      setAddDiscoveryDone(true)
+      setAddDraft((prev) => ({ ...prev, model: models.includes(prev.model) ? prev.model : models[0] || '' }))
+    } catch (e) {
+      setAddError(String(e))
+    } finally {
+      setAddFetching(false)
+    }
+  }
+
+  async function saveAddProfile() {
+    setAddSaving(true)
+    setAddError('')
+    try {
+      if (!addDraft.name.trim()) {
+        setAddError('请填写配置名称')
+        return
+      }
+      const catalogEntry = catalog.find((c) => c.id === addDraft.providerId)
+      const needsKey = catalogEntry ? catalogEntry.apiKeyOptional !== true : true
+      if (needsKey && !addDraft.apiKey.trim()) {
+        setAddError('请填写 API key（本地服务除外）')
+        return
+      }
+      if (!addDraft.model.trim()) {
+        setAddError('请选择模型（先获取模型列表）')
+        return
+      }
+      if (!addDiscoveryDone) {
+        setAddError('请先验证并获取模型列表')
+        return
+      }
+      if (addDiscoveryDone && addFetchedModels.length > 0 && !addFetchedModels.includes(addDraft.model.trim())) {
+        setAddError('请选择已获取的模型')
+        return
+      }
+      const result = await api.ai.saveProfile({
+        name: addDraft.name.trim(),
+        providerId: addDraft.providerId,
+        protocol: addDraft.protocol,
+        baseUrl: addDraft.baseUrl.trim(),
+        model: addDraft.model.trim(),
+        apiKey: addDraft.apiKey.trim() || undefined,
+      })
+      if (!result.success) {
+        setAddError(result.error || '添加提供商失败')
+        return
+      }
+      const next = await refreshSetup()
+      if (result.profile) {
+        setEditingId(result.profile.id)
+        setDraft({
+          name: result.profile.name,
+          providerId: result.profile.providerId,
+          protocol: result.profile.protocol,
+          baseUrl: result.profile.baseUrl,
+          model: result.profile.model,
+          apiKey: '',
+        })
+        setFetchedModels(result.profile.discovery?.models || [])
+        setModelDiscoveryDone(Boolean(result.profile.discovery?.fetchedAt))
+      }
+      // 使新配置立即成为当前生效项
+      if (result.profile?.id) {
+        try { await api.ai.activateProfile(result.profile.id); await refreshSetup() } catch { /* noop */ }
+      }
+      setAddOpen(false)
+      if (next.baseUrlError) setError(next.baseUrlError)
+    } catch (e) {
+      setAddError(String(e))
+    } finally {
+      setAddSaving(false)
+    }
   }
 
   async function refreshSetup() {
@@ -1421,7 +1551,12 @@ function AiSettingsModal({
       if (editingId === id) {
         const replacement = next.profiles?.[0]
         if (replacement) startEdit(replacement)
-        else startAdd()
+        else {
+          setEditingId(null)
+          setDraft({ name: '新 AI 服务', providerId: 'deepseek', protocol: 'openai-compatible' as ProviderProtocol, baseUrl: 'https://api.deepseek.com', model: '', apiKey: '' })
+          setFetchedModels([])
+          setModelDiscoveryDone(false)
+        }
       }
     } catch (e) {
       setError(String(e))
@@ -1457,7 +1592,10 @@ function AiSettingsModal({
     setSaving(true)
     setError('')
     try {
-      if (!(await saveProfile())) return
+      // 若当前无可编辑的 profile（首次使用且尚未添加），跳过 profile 保存，仅保存其他设置
+      if (editingId || profiles.length > 0) {
+        if (!(await saveProfile())) return
+      }
       await api.ai.setSetup({
         reasoningEffort: effort,
         customPrompt,
@@ -1521,21 +1659,35 @@ function AiSettingsModal({
           </section>
 
           <section className="ai-profile-editor">
-            <div className="ai-settings-sec-head"><Settings2 size={13} /> {editingId ? '编辑 profile' : '添加 profile'}</div>
-            <div className="ai-settings-grid ai-provider-fields">
-              <div className="field"><label htmlFor="aiProfileName">配置名称</label><input id="aiProfileName" className="path-input ai-input-wide" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
-              <div className="field"><label htmlFor="aiProvider">Provider</label><select id="aiProvider" className="path-input" value={draft.providerId} onChange={(e) => selectProvider(e.target.value)}>{catalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></div>
-              <div className="field"><label htmlFor="aiApiKey">API key</label><input id="aiApiKey" className="path-input ai-input-wide" type="password" value={draft.apiKey} placeholder={editingId ? `已保存 ${profiles.find((p) => p.id === editingId)?.apiKeyHint || '密钥'}；留空保持不变` : (selectedCatalog?.apiKeyOptional ? '本地服务可留空' : '输入 API key')} onChange={(e) => { setDraft({ ...draft, apiKey: e.target.value }); setModelDiscoveryDone(false) }} autoComplete="off" spellCheck={false} /></div>
-              <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></div>
-              {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
-              {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
-            </div>
-            <div className="ai-profile-discovery">
-              <button type="button" className="ghost-btn" onClick={() => void fetchDraftModels()} disabled={saving || fetchingModels || Boolean(discovering)}><RefreshCw size={12} /> {fetchingModels || discovering ? '正在获取模型…' : '获取模型列表'}</button>
-              <span className="ai-profile-discovery-hint">{modelDiscoveryDone ? `已获取 ${fetchedModels.length} 个模型` : '验证 API key 并读取可用模型'}</span>
-              {editingId && profiles.find((p) => p.id === editingId)?.discovery?.error && <span className="ai-profile-discovery-error">{profiles.find((p) => p.id === editingId)?.discovery?.error}</span>}
-            </div>
-            <div className="btn-row"><button type="button" className="primary-btn" disabled={saving || (!editingId && !modelDiscoveryDone)} onClick={() => void saveProfile()}>{saving ? '保存中…' : '保存 profile'}</button></div>
+            <div className="ai-settings-sec-head"><Settings2 size={13} /> {editingId ? '编辑服务' : profiles.length === 0 ? '暂无服务' : '选择服务'}</div>
+            {profiles.length === 0 && !editingId ? (
+              <div className="ai-editor-empty">
+                <p>还没有配置任何 AI 提供商。</p>
+                <button type="button" className="primary-btn" onClick={openAddDialog}><Plus size={13} /> 添加第一个提供商</button>
+              </div>
+            ) : !editingId && profiles.length > 0 ? (
+              <div className="ai-editor-empty">
+                <p>从左侧选择一个服务进行编辑，或添加新的提供商。</p>
+                <button type="button" className="secondary-btn" onClick={() => profiles[0] && startEdit(profiles[0])}>编辑 “{profiles[0].name}”</button>
+              </div>
+            ) : (
+              <>
+                <div className="ai-settings-grid ai-provider-fields">
+                  <div className="field"><label htmlFor="aiProfileName">配置名称</label><input id="aiProfileName" className="path-input ai-input-wide" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
+                  <div className="field"><label htmlFor="aiProvider">Provider</label><select id="aiProvider" className="path-input" value={draft.providerId} onChange={(e) => selectProvider(e.target.value)}>{catalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></div>
+                  <div className="field"><label htmlFor="aiApiKey">API key</label><input id="aiApiKey" className="path-input ai-input-wide" type="password" value={draft.apiKey} placeholder={editingId ? `已保存 ${profiles.find((p) => p.id === editingId)?.apiKeyHint || '密钥'}；留空保持不变` : (selectedCatalog?.apiKeyOptional ? '本地服务可留空' : '输入 API key')} onChange={(e) => { setDraft({ ...draft, apiKey: e.target.value }); setModelDiscoveryDone(false) }} autoComplete="off" spellCheck={false} /></div>
+                  <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></div>
+                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
+                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
+                </div>
+                <div className="ai-profile-discovery">
+                  <button type="button" className="ghost-btn" onClick={() => void fetchDraftModels()} disabled={saving || fetchingModels || Boolean(discovering)}><RefreshCw size={12} /> {fetchingModels || discovering ? '正在获取模型…' : '获取模型列表'}</button>
+                  <span className="ai-profile-discovery-hint">{modelDiscoveryDone ? `已获取 ${fetchedModels.length} 个模型` : '验证 API key 并读取可用模型'}</span>
+                  {editingId && profiles.find((p) => p.id === editingId)?.discovery?.error && <span className="ai-profile-discovery-error">{profiles.find((p) => p.id === editingId)?.discovery?.error}</span>}
+                </div>
+                <div className="btn-row"><button type="button" className="primary-btn" disabled={saving || (!editingId && !modelDiscoveryDone)} onClick={() => void saveProfile()}>{saving ? '保存中…' : '保存 profile'}</button></div>
+              </>
+            )}
           </section>
         </div>
 
@@ -1545,6 +1697,88 @@ function AiSettingsModal({
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Settings2 size={13} /> 工具开关</div><div className="ai-tool-toggles">{TOOL_LABELS.map(([name, label]) => <label key={name} className={`ai-tool-toggle${disabledTools.has(name) ? ' off' : ''}`}><input type="checkbox" checked={!disabledTools.has(name)} onChange={() => toggleTool(name)} /><span>{label}</span><code>{name}</code></label>)}</div></div>
         <div className="modal-actions"><button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button><button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
       </div>
+      {addOpen && (
+        <div className="ai-add-overlay" onClick={() => !addSaving && setAddOpen(false)}>
+          <div className="ai-add-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-add-title">
+            <div className="ai-add-head">
+              <div className="ai-add-title">
+                <div className="ai-add-icon"><Sparkles size={16} /></div>
+                <div>
+                  <h3 id="ai-add-title">添加 AI 提供商</h3>
+                  <p>从目录挑选提供商，验证密钥后选择模型，创建即可启用</p>
+                </div>
+              </div>
+              <button type="button" className="icon-btn-ghost" aria-label="关闭" onClick={() => !addSaving && setAddOpen(false)}><XCircle size={16} /></button>
+            </div>
+
+            {addError && <div className="ai-profile-error" style={{ marginBottom: 12 }}>{addError}</div>}
+
+            <div className="ai-add-catalog">
+              <div className="ai-add-section-label"><span>① 选择提供商</span><small>{catalog.length} 个可用</small></div>
+              <div className="ai-add-grid">
+                {catalog.map((entry) => {
+                  const isSelected = addDraft.providerId === entry.id
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className={`ai-add-card${isSelected ? ' selected' : ''}`}
+                      onClick={() => selectAddProvider(entry.id)}
+                    >
+                      <div className="ai-add-card-head">
+                        <strong>{entry.name}</strong>
+                        {isSelected && <span className="ai-add-check"><CheckCircle2 size={13} /></span>}
+                      </div>
+                      <span className="ai-add-card-desc">{entry.description}</span>
+                      <span className="ai-add-card-meta">
+                        <code>{entry.protocol}</code>
+                        <span title={entry.baseUrl}>{entry.baseUrl ? entry.baseUrl.replace(/^https?:\/\//, '').slice(0, 28) || '自定义地址' : '自定义地址'}</span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="ai-add-form">
+              <div className="ai-add-section-label"><span>② 配置详情</span><small>带 * 为必填</small></div>
+              <div className="ai-settings-grid ai-provider-fields">
+                <div className="field"><label htmlFor="aiAddName">配置名称 *</label><input id="aiAddName" className="path-input ai-input-wide" value={addDraft.name} onChange={(e) => setAddDraft({ ...addDraft, name: e.target.value })} placeholder="例如：我的 DeepSeek" /></div>
+                <div className="field"><label htmlFor="aiAddKey">API Key {catalog.find((c) => c.id === addDraft.providerId)?.apiKeyOptional ? '(可选)' : '*'}</label>
+                  <input id="aiAddKey" className="path-input ai-input-wide" type="password" value={addDraft.apiKey} onChange={(e) => { setAddDraft({ ...addDraft, apiKey: e.target.value }); setAddDiscoveryDone(false) }} placeholder={catalog.find((c) => c.id === addDraft.providerId)?.apiKeyOptional ? '本地服务可留空' : '粘贴 API key'} autoComplete="off" spellCheck={false} />
+                </div>
+                {(catalog.find((c) => c.id === addDraft.providerId)?.allowCustomBaseUrl || addDraft.providerId === 'custom') && (
+                  <div className="field ai-provider-custom-url"><label htmlFor="aiAddBaseUrl">自定义接口地址 {catalog.find((c) => c.id === addDraft.providerId)?.id === 'azure-openai' ? '*' : ''}</label><input id="aiAddBaseUrl" className="path-input ai-input-wide" value={addDraft.baseUrl} onChange={(e) => setAddDraft({ ...addDraft, baseUrl: e.target.value })} placeholder="https://..." spellCheck={false} /></div>
+                )}
+                {(catalog.find((c) => c.id === addDraft.providerId)?.allowCustomBaseUrl || addDraft.providerId === 'custom') && (
+                  <div className="field"><label htmlFor="aiAddProtocol">协议</label><select id="aiAddProtocol" className="path-input" value={addDraft.protocol} onChange={(e) => setAddDraft({ ...addDraft, protocol: e.target.value as ProviderProtocol })}>{(catalog.find((c) => c.id === addDraft.providerId)?.protocolOptions || [catalog.find((c) => c.id === addDraft.providerId)?.protocol || addDraft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>
+                )}
+                <div className="field"><label htmlFor="aiAddModel">模型 *</label>
+                  <div className="ai-add-model-row">
+                    <select id="aiAddModel" className="path-input" value={addDraft.model} onChange={(e) => setAddDraft({ ...addDraft, model: e.target.value })} disabled={addFetchedModels.length === 0 && !(catalog.find((c) => c.id === addDraft.providerId)?.models?.length)}>
+                      <option value="">{addFetchedModels.length || catalog.find((c) => c.id === addDraft.providerId)?.models?.length ? '选择模型' : '先获取模型列表'}</option>
+                      {Array.from(new Set([...addFetchedModels, ...(catalog.find((c) => c.id === addDraft.providerId)?.models || []), ...(addDraft.model ? [addDraft.model] : [])].filter(Boolean))).map((m) => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                    <button type="button" className="ghost-btn ai-add-fetch" onClick={() => void fetchAddModels()} disabled={addFetching}>
+                      {addFetching ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+                      {addFetching ? '获取中…' : '获取模型'}
+                    </button>
+                  </div>
+                  <span className="ai-profile-discovery-hint">{addDiscoveryDone ? `✓ 已验证 · ${addFetchedModels.length} 个模型可用` : addFetching ? '正在验证密钥并拉取模型…' : '验证 API key 后自动刷新模型列表'}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="ai-add-actions">
+              <button type="button" className="secondary-btn" disabled={addSaving} onClick={() => setAddOpen(false)}>取消</button>
+              <button type="button" className="primary-btn" disabled={addSaving || !addDiscoveryDone || !addDraft.name.trim() || !addDraft.model.trim()} onClick={() => void saveAddProfile()}>
+                {addSaving ? '创建中…' : '确认添加并启用'}
+              </button>
+            </div>
+            <p className="hint" style={{ marginTop: 8, textAlign: 'center', fontSize: 11 }}>添加后将自动设为当前提供商，可在左侧列表随时切换</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -6,7 +6,7 @@ import { Avatar } from '../../components/Avatar'
 import { CountUp } from '../../components/CountUp'
 import { useColorMode } from '../../utils/colorMode'
 import { useEscape } from '../../utils/useEscape'
-import { axisCommon, baseChartTheme, blueRamp, tooltipCommon } from '../../utils/echartsTheme'
+import { animationCommon, axisCommon, baseChartTheme, blueRamp, tooltipCommon } from '../../utils/echartsTheme'
 import { DualReportView } from './DualReportView'
 import { useMeasuredBarWidth } from './chartSizing'
 
@@ -125,6 +125,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
     const max = Math.max(1, ...values.map((v) => v[2]))
     return {
       ...baseChartTheme(colorMode),
+      animation: false,
       tooltip: {
         ...tooltipCommon,
         formatter: (params: any) => {
@@ -160,6 +161,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
     const top = report.coreFriends.slice(0, 8)
     return {
       ...baseChartTheme(colorMode),
+      ...animationCommon,
       tooltip: { ...tooltipCommon, trigger: 'axis' as const },
       grid: { left: 80, right: 24, top: 16, bottom: 24 },
       xAxis: { type: 'value' as const, ...axisCommon },
@@ -168,6 +170,8 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
         {
           type: 'bar' as const,
           data: [...top].reverse().map((f) => f.messageCount),
+          animationDelay: (idx: number) => idx * 40,
+          animationDelayUpdate: (idx: number) => idx * 12,
           itemStyle: {
             color: (params: any) => blueRamp(1 - (params.value || 0) / Math.max(1, ...top.map((f) => f.messageCount)), colorMode),
             borderRadius: [0, 3, 3, 0],

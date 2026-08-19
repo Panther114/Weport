@@ -5,15 +5,15 @@
 }
 
 :root {
-  --bg: #000000;
-  --bg-raised: #101014;
-  --panel: #15151a;
-  --elevated: #1b1b21;
-  --line: #24242c;
-  --line-strong: #383842;
-  --text: #f4f4f5;
-  --text-dim: #b0b0b8;
-  --text-faint: #6b6b74;
+  --bg: #060608;
+  --bg-raised: #111116;
+  --panel: #17171d;
+  --elevated: #1e1e26;
+  --line: #282835;
+  --line-strong: #3a3a4a;
+  --text: #f2f2f5;
+  --text-dim: #b6b6c0;
+  --text-faint: #6e6e7a;
   --ok: #9fe8a8;
   --warn: #ffd27e;
   --danger: #e5484d;
@@ -21,23 +21,23 @@
   --radius-sm: 8px;
   --font: "Weport", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --font-mono: Consolas, "Cascadia Mono", "JetBrains Mono", monospace;
-  --shadow-pop: 0 6px 24px rgba(0, 0, 0, 0.5);
-  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
 
-  /* 彩色主题（默认）：单一浅蓝 accent 家族，现代克制；只作用于
-     图标 / 图表 / 描边 / 渐变，数字与正文保持黑白 */
-  --accent: #6ea8ff;
-  --accent-2: #7fb4ff;
-  --accent-3: #93c2ff;
-  --accent-4: #5b93ff;
-  --accent-5: #84b7ff;
+  /* 彩色主题（默认）：提升饱和度与对比度的浅蓝家族，克制但更通透 */
+  --accent: #5b8eff;
+  --accent-2: #6ea8ff;
+  --accent-3: #8ab4ff;
+  --accent-4: #3d5bff;
+  --accent-5: #7ec0ff;
   --accent-6: #a6cfff;
-  --accent-strong: #6ea8ff;
-  --accent-deep: #4a7dff;
-  --accent-soft: rgba(110, 168, 255, 0.13);
-  --accent-softer: rgba(110, 168, 255, 0.07);
-  --accent-grad: linear-gradient(160deg, rgba(110, 168, 255, 0.22), rgba(110, 168, 255, 0.04));
-  --accent-grad-strong: linear-gradient(160deg, rgba(110, 168, 255, 0.32), rgba(74, 125, 255, 0.1));
+  --accent-strong: #5b8eff;
+  --accent-deep: #3658ff;
+  --accent-soft: rgba(91, 142, 255, 0.16);
+  --accent-softer: rgba(91, 142, 255, 0.09);
+  --accent-glow: rgba(91, 142, 255, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(91, 142, 255, 0.24), rgba(91, 142, 255, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(91, 142, 255, 0.36), rgba(54, 88, 255, 0.12));
 }
 
 /* 黑白主题：全部 accent 退化为中性灰阶（背景保持不变） */
@@ -82,15 +82,19 @@ button {
 }
 
 :focus-visible {
-  outline: 2px solid rgba(255, 255, 255, 0.7);
+  outline: 2px solid var(--accent, rgba(91, 142, 255, 0.9));
   outline-offset: 2px;
   border-radius: 6px;
+  box-shadow: 0 0 0 4px var(--accent-soft, rgba(91, 142, 255, 0.15));
 }
 
 .shell {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: radial-gradient(900px 520px at 18% -10%, rgba(91, 142, 255, 0.07), transparent 58%),
+              radial-gradient(700px 460px at 86% 0%, rgba(91, 142, 255, 0.045), transparent 62%),
+              var(--bg);
 }
 
 /* ---------- 顶栏 ---------- */
@@ -108,7 +112,9 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 210px;
+  min-width: 200px;
+  max-width: 240px;
+  flex-shrink: 0;
   cursor: pointer;
   border-radius: 10px;
   padding: 4px 10px;
@@ -153,10 +159,11 @@ button {
 .brand-text p {
   font-size: 11.5px;
   color: var(--text-faint);
-  max-width: 420px;
+  max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: opacity 0.2s ease;
 }
 
 .tabs {
@@ -209,17 +216,17 @@ button {
 .tab:hover {
   background: var(--elevated);
   color: var(--text);
-  transform: translateY(-2px) scale(1.07) rotate(-1deg);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
 
 .tab:hover svg {
-  transform: scale(1.25) rotate(-6deg);
-  filter: drop-shadow(0 2px 6px var(--accent-soft, rgba(255, 255, 255, 0.2)));
+  transform: scale(1.12);
+  filter: drop-shadow(0 2px 6px var(--accent-glow, rgba(91, 142, 255, 0.22)));
 }
 
 .tab:active {
-  transform: scale(0.94) rotate(1deg);
+  transform: translateY(0) scale(0.98);
 }
 
 .tab[data-active="true"] {
@@ -356,8 +363,9 @@ button {
 .workspace {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 22px 20px;
   scrollbar-gutter: stable;
+  overflow-anchor: none;
 }
 
 /* 标签页切换：内容淡入 + 轻微上移 + 柔和缩放 */
@@ -384,6 +392,17 @@ button {
   align-items: start;
   max-width: 1060px;
   margin: 0 auto;
+}
+@media (max-width: 720px) {
+  .two-col {
+    grid-template-columns: 1fr;
+  }
+  .connect-loc,
+  .connect-acc,
+  .connect-key {
+    grid-column: 1;
+    grid-row: auto;
+  }
 }
 
 .panel-wide {
@@ -419,12 +438,14 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 18px;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025) inset, 0 2px 16px rgba(0, 0, 0, 0.22);
+  transition: border-color 0.2s ease, box-shadow 0.22s ease, transform 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
 .panel:hover {
-  border-color: var(--line-strong);
+  border-color: color-mix(in srgb, var(--accent) 14%, var(--line-strong));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 28px rgba(0, 0, 0, 0.32), 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
+  transform: translateY(-1px);
 }
 
 .panel-fill {
@@ -564,7 +585,7 @@ button {
   font-weight: 600;
   padding: 9px 18px;
   cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease;
+  transition: opacity 0.15s ease, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.15s ease;
   user-select: none;
 }
 
@@ -759,7 +780,7 @@ button:disabled {
   cursor: pointer;
   text-align: left;
   font-size: 13px;
-  transition: border-color 0.15s ease, background 0.15s ease, transform 0.08s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease;
 }
 
 .account-item:hover:not(.static):not([data-active="true"]) {
@@ -957,12 +978,12 @@ button:disabled {
 .chip:hover:not(:disabled) {
   border-color: var(--accent, var(--line-strong));
   color: var(--text);
-  transform: translateY(-2px) scale(1.05) rotate(-0.6deg);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
 }
 
 .chip:active:not(:disabled) {
-  transform: scale(0.92);
+  transform: scale(0.97);
 }
 
 .chip[data-active="true"] {
@@ -1026,7 +1047,7 @@ button:disabled {
   transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.2s ease;
 }
 .format-chip:hover .fmt-head svg {
-  transform: scale(1.3) rotate(-8deg);
+  transform: scale(1.15);
 }
 /* å¯¼å‡ºæ ¼å¼å›¾æ ‡ï¼šç”±æ·±åˆ°æµ…è“è‰²é˜¶ */
 .format-grid .format-chip:nth-child(1) .fmt-head svg { color: var(--accent-deep, var(--text-dim)); }
@@ -1327,6 +1348,7 @@ button:disabled {
   color: var(--text);
   cursor: pointer;
   text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
 
 .export-session-row:hover {
@@ -1469,8 +1491,13 @@ button:disabled {
 /* 目录结构三选一：占满面板整行 */
 .layout-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+@media (max-width: 620px) {
+  .layout-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .layout-chip {
@@ -1541,6 +1568,7 @@ button:disabled {
   color: var(--text-dim);
   cursor: pointer;
   user-select: none;
+  transition: color 0.15s ease;
 }
 
 .media-check:hover {
@@ -1629,7 +1657,7 @@ button:disabled {
   padding: 7px 14px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .seg button:last-child {
@@ -1699,7 +1727,7 @@ button:disabled {
   padding: 6px 8px;
   border-radius: 6px;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background 0.15s ease;
 }
 
 .notify-row:hover {
@@ -1772,22 +1800,38 @@ button:disabled {
 
 .progress {
   margin-top: 14px;
+  height: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+  contain: layout;
+  overflow-anchor: none;
+  animation: progress-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes progress-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
 }
 
 .progress-track {
   height: 6px;
+  min-height: 6px;
   border-radius: 999px;
   background: var(--bg);
   border: 1px solid var(--line);
   overflow: hidden;
   position: relative;
+  flex-shrink: 0;
 }
 
 .progress-fill {
   height: 100%;
-  background: #fff;
-  transition: width 0.25s ease;
+  background: linear-gradient(90deg, #fff 0%, #dbe6ff 100%);
+  transition: width 0.36s cubic-bezier(0.2, 0.8, 0.3, 1);
   border-radius: 999px;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.18);
 }
 
 .progress-fill.indeterminate {
@@ -1807,22 +1851,52 @@ button:disabled {
 .progress-meta {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 12px;
   font-size: 12px;
-  margin-top: 6px;
   color: var(--text-dim);
+  height: 18px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .progress-meta strong {
   font-weight: 500;
-  max-width: 70%;
+  max-width: 68%;
+  min-width: 0;
+  flex: 1 1 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: block;
+  line-height: 18px;
+  transition: opacity 0.18s ease;
 }
 
-.progress-meta span {
+.progress-session {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  min-width: 0;
+}
+
+.progress-count {
   font-family: var(--font-mono);
   font-size: 11.5px;
+  flex-shrink: 0;
+  min-width: 92px;
+  max-width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  line-height: 18px;
 }
 
 .export-actions {
@@ -1862,7 +1936,7 @@ button:disabled {
   font-size: 12.5px;
   color: var(--text-dim);
   padding: 3px 0;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .check-row:hover {
@@ -1925,7 +1999,7 @@ button:disabled {
   gap: 16px;
   padding: 12px 4px;
   border-bottom: 1px solid var(--line);
-  transition: background 0.12s ease;
+  transition: background 0.15s ease;
   border-radius: 6px;
 }
 
@@ -2173,7 +2247,7 @@ button:disabled {
   line-height: 1;
   padding: 2px 4px;
   border-radius: 4px;
-  transition: color 0.12s ease, background 0.12s ease;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 
 .toast-close:hover {
@@ -2265,6 +2339,7 @@ button:disabled {
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: content-box;
+  transition: background 0.15s ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -2358,6 +2433,7 @@ button:disabled {
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
   cursor: grab;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .ai-chat-item:active {
@@ -2407,7 +2483,7 @@ button:disabled {
   flex: none;
   width: 22px;
   height: 22px;
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
   background: none;
@@ -2415,11 +2491,16 @@ button:disabled {
   border-radius: 6px;
   color: var(--text-faint);
   cursor: pointer;
-  transition: color 0.12s ease, background 0.12s ease;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: color 0.12s ease, background 0.12s ease, opacity 0.15s ease;
 }
 
 .ai-chat-item:hover .ai-chat-del {
-  display: flex;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .ai-chat-del:hover {
@@ -2764,7 +2845,7 @@ button:disabled {
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background 0.15s ease;
 }
 
 .ai-tool-row:hover {
@@ -3251,6 +3332,7 @@ button:disabled {
 .ai-md a {
   color: var(--ok);
   text-decoration: none;
+  transition: color 0.15s ease;
 }
 
 .ai-md a:hover {
@@ -3439,7 +3521,7 @@ button:disabled {
   border: 2px solid var(--bg);
   box-shadow: 0 0 0 1px var(--line-strong);
   cursor: grab;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 .ai-slider::-webkit-slider-thumb:hover {
@@ -3486,7 +3568,7 @@ button:disabled {
   font-size: 12px;
   color: var(--text-dim);
   cursor: pointer;
-  transition: border-color 0.12s ease;
+  transition: border-color 0.15s ease;
 }
 
 .ai-tool-toggle:hover {
@@ -3594,6 +3676,7 @@ button:disabled {
   color: var(--text-dim);
   text-align: left;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .ai-action-item:hover {
@@ -3705,6 +3788,7 @@ button:disabled {
   border: 1px solid var(--line);
   background: var(--panel);
   overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .ai-ws-note:hover {
@@ -3757,7 +3841,7 @@ button:disabled {
   width: 22px;
   height: 22px;
   margin-right: 4px;
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
   background: none;
@@ -3765,10 +3849,16 @@ button:disabled {
   border-radius: 6px;
   color: var(--text-faint);
   cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
 }
 
 .ai-ws-note:hover .ai-ws-note-del {
-  display: flex;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .ai-ws-note-del:hover {

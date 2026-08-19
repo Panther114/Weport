@@ -929,20 +929,21 @@ class AnalyticsService {
   }
 
   /**
-   * 全局高频词云。游标扫描文本消息，抽样上限 15 万条（达上限即停，
-   * scannedMessages 标记实际扫描量）。结果缓存 10 分钟。
+   * 全局高频词云。游标扫描**用户本人发送**的文本消息，覆盖私聊+群聊，**不应用排除名单过滤**，
+   * 抽样上限 15 万条（达上限即停，scannedMessages 标记实际扫描量）。结果缓存 10 分钟。
    */
   async getWordFrequency(limit = 60, force = false): Promise<{ success: boolean; data?: WordFrequencyResult; error?: string }> {
     try {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      // 覆盖私聊+群聊，且不应用统计排除名单（no filtering），满足产品需求：统计用户输入的所有文本
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, new Set(), true)
       if (sessionInfo.usernames.length === 0) {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const cacheKey = `word-freq-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0)}-${limit}`
+      const cacheKey = `word-freq-all-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0)}-${limit}`
       if (force) this.wordFrequencyCache = null
 
       if (!force && this.wordFrequencyCache && this.wordFrequencyCache.key === cacheKey) {
@@ -961,6 +962,8 @@ class AnalyticsService {
         if (scannedMessages >= MAX_SCANNED) break
         await this.iterateSessionMessages(sessionId, (row) => {
           if (scannedMessages >= MAX_SCANNED) return
+          // 仅统计用户本人发送的文本（“用户输入的所有消息”）
+          if (!this.isRowSentByMe(row, conn.cleanedWxid!)) return
           const localType = parseInt(row.local_type || row.type || '0', 10)
           if (!textTypes.has(localType)) return
           scannedMessages += 1
