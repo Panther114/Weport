@@ -1,36 +1,4 @@
-<p align="center">
-  <img src="assets/icons/icon.png" width="120" alt="Weport" />
-</p>
-
-<h1 align="center">Weport</h1>
-
-<p align="center">
-  <b>轻量、本地化的微信聊天记录导出与分析工具（Windows · macOS）</b><br />
-  一键导出所有聊天记录 · 朋友圈快速查询 · 消息防撤回 · 朋友圈防撤回 · 微信数据分析 · 新消息置顶弹窗 · WeportAI 聊天历史分析助手
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/github/v/release/Panther114/Weport" alt="Latest release" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20(arm64)-blue" alt="Windows | macOS (arm64)" />
-  <img src="https://img.shields.io/badge/WeChat-4.x-brightgreen" alt="WeChat 4.x" />
-</p>
-
----
-
-## ✨ 这是什么？
-
-Weport 可以把微信 4.x 的本地聊天数据导出成你自己可以掌控的形式：一键导出全部私聊和群聊、离线浏览历史朋友圈、统计这一年聊了谁最多 —— 所有处理都在本机完成。想直接问问题？WeportAI 可以对聊天记录提问、总结、复盘。
-
-- 🔒 **本地优先** — 你的微信数据不会被上传！
-- 📦 **一键导出** — 可以一键导出全部私聊 + 群聊，也可选择导出单个聊天
-- 🎨 **10种格式** — TXT / JSON / HTML / XLSX / Markdown / ChatLab / SQL 等等
-- 🖼️ **朋友圈归档（v0.9）** — 浏览历史朋友圈、按人/关键词/日期筛选、图片视频解密预览、导出（JSON/HTML/ARKME/Markdown）、以及防朋友圈删除
-- 📊 **数据分析（v0.9）** — 一键生成全局统计（时段分布、联系排行榜、排除名单）、群聊分析（成员排行、活跃热力图、媒体构成、成员画像）、年度报告
-- 🤖 **WeportAI** — 独立研发的Agent Harness, 支持所有主流AI提供商，聊天历史分析助手，带 17 个检索/分析工具，以及对你的长期记忆
-- 🔔 **消息提醒** — 独立置顶弹窗，新消息与撤回即时通知（可按会话过滤）
-- 🛡️ **防撤回** — 会话级 WCDB 触发器，撤回的消息在微信本地仍然可见
-- 🚀 **托盘常驻** — 开机自启、静默启动、关闭最小化到托盘
+![](docs/media/weport-feature-poster.png)
 
 ## 📸 截图
 
