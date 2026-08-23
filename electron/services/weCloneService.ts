@@ -1085,6 +1085,24 @@ export class WeCloneService {
   // 上传 / 服务端交互
   // -------------------------------------------------------------------------
 
+  private normalizeBaseUrl(url: string): string {
+    return String(url || '').trim().replace(/\/+$/, '')
+  }
+
+  private isHtmlBody(text: string): boolean {
+    const t = String(text || '').trim().toLowerCase()
+    return t.startsWith('<!doctype') || t.startsWith('<html')
+  }
+
+  private buildHtmlError(baseUrl: string): string {
+    const u = this.normalizeBaseUrl(baseUrl)
+    return `服务器返回 HTML 而非 JSON — Railway 可能部署的是 Weport 主应用而非 weclone 服务，请检查根 Dockerfile 是否为 weclone-server 构建 (当前访问 ${u} 返回 HTML)`
+  }
+
+  private buildNotFoundHtmlError(): string {
+    return '服务未找到 (404) — 请确认 Railway 服务已部署且健康检查 /health 通过'
+  }
+
   private async fetchWithTimeout(url: string, init: Parameters<typeof fetch>[1], timeoutMs: number, externalSignal?: AbortSignal): Promise<Response> {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), timeoutMs)
@@ -1162,7 +1180,8 @@ export class WeCloneService {
     }
 
     const body = gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
-    const url = `${serverCfg.baseUrl}/api/weclone/upload`
+    const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
+    const url = `${normalizedBaseUrl}/api/weclone/upload`
     const resp = await this.fetchWithTimeout(
       url,
       {
@@ -1178,11 +1197,28 @@ export class WeCloneService {
       signal
     )
     const text = await resp.text().catch(() => '')
+    const contentType = resp.headers.get('content-type') || ''
+    const isHtmlCt = contentType.toLowerCase().includes('text/html')
+    const bodyIsHtml = this.isHtmlBody(text)
     if (!resp.ok) {
+      if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
+        throw new Error(this.buildNotFoundHtmlError())
+      }
+      if (isHtmlCt || bodyIsHtml) {
+        throw new Error(this.buildHtmlError(normalizedBaseUrl))
+      }
       throw new Error(`上传失败 HTTP ${resp.status}${text ? `：${text.slice(0, 200)}` : ''}`)
     }
+    if (isHtmlCt || bodyIsHtml) {
+      throw new Error(this.buildHtmlError(normalizedBaseUrl))
+    }
     let parsed: { success?: boolean; id?: string; error?: string } = {}
-    try { parsed = JSON.parse(text) as { success?: boolean; id?: string; error?: string } } catch { /* noop */ }
+    try {
+      parsed = JSON.parse(text) as { success?: boolean; id?: string; error?: string }
+    } catch (e) {
+      if (bodyIsHtml) throw new Error(this.buildHtmlError(normalizedBaseUrl))
+      throw new Error(`上传响应解析失败：${String((e as Error)?.message || e)}`)
+    }
     if (parsed.success === false) throw new Error(parsed.error || '服务端拒绝上传')
     const serverId = String(parsed.id || '').trim()
     if (!serverId) throw new Error('服务端未返回 clone id')
@@ -1207,12 +1243,20 @@ export class WeCloneService {
     const serverCfg = this.getServerConfig()
     if (remote && serverCfg.configured && meta.serverId) {
       try {
+        const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
         const resp = await this.fetchWithTimeout(
-          `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(meta.serverId)}`,
+          `${normalizedBaseUrl}/api/weclone/${encodeURIComponent(meta.serverId)}`,
           { method: 'DELETE', headers: this.authHeaders(serverCfg.token) },
           30_000
         )
         if (!resp.ok && resp.status !== 404) {
+          const text = await resp.text().catch(() => '')
+          const ct = resp.headers.get('content-type') || ''
+          const isHtml = ct.toLowerCase().includes('text/html') || this.isHtmlBody(text)
+          if (isHtml) {
+            const msg = resp.status === 404 ? this.buildNotFoundHtmlError() : this.buildHtmlError(normalizedBaseUrl)
+            return { success: false, error: `服务端删除失败：${msg}` }
+          }
           return { success: false, error: `服务端删除失败 HTTP ${resp.status}` }
         }
       } catch (e) {
@@ -1241,8 +1285,9 @@ export class WeCloneService {
       const remoteId = meta.serverId
       if (serverCfg.configured && remoteId) {
         try {
+          const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
           const resp = await this.fetchWithTimeout(
-            `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(remoteId)}/visibility`,
+            `${normalizedBaseUrl}/api/weclone/${encodeURIComponent(remoteId)}/visibility`,
             {
               method: 'PATCH',
               headers: { ...this.authHeaders(serverCfg.token), 'Content-Type': 'application/json' },
@@ -1251,11 +1296,28 @@ export class WeCloneService {
             30_000
           )
           const text = await resp.text().catch(() => '')
-          if (!resp.ok) return { success: false, error: `服务端更新失败 HTTP ${resp.status}` }
+          const ct = resp.headers.get('content-type') || ''
+          const isHtmlCt = ct.toLowerCase().includes('text/html')
+          const bodyIsHtml = this.isHtmlBody(text)
+          if (!resp.ok) {
+            if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
+              return { success: false, error: `服务端更新失败：${this.buildNotFoundHtmlError()}` }
+            }
+            if (isHtmlCt || bodyIsHtml) {
+              return { success: false, error: `服务端更新失败：${this.buildHtmlError(normalizedBaseUrl)}` }
+            }
+            return { success: false, error: `服务端更新失败 HTTP ${resp.status}` }
+          }
+          if (isHtmlCt || bodyIsHtml) {
+            return { success: false, error: `服务端更新失败：${this.buildHtmlError(normalizedBaseUrl)}` }
+          }
           try {
             const parsed = JSON.parse(text) as { shareUrl?: string }
             if (parsed.shareUrl) return { success: true, shareUrl: parsed.shareUrl }
-          } catch { /* noop */ }
+          } catch (e) {
+            if (bodyIsHtml) return { success: false, error: `服务端更新失败：${this.buildHtmlError(normalizedBaseUrl)}` }
+            // JSON parse failure on success is non-fatal; treat as success without shareUrl
+          }
         } catch (e) {
           return { success: false, error: `服务端更新失败：${String((e as Error)?.message || e)}` }
         }
@@ -1265,7 +1327,7 @@ export class WeCloneService {
     return { success: false, error: '找不到该克隆' }
   }
 
-  /** 合并本地 + 远端克隆列表 */
+  /** 合并本地 + 远端克隆列表 — 远端失败仅记 remoteError，仍回退到本地档案 */
   async getClones(): Promise<{ success: boolean; clones: WeCloneListItem[]; error?: string }> {
     const local = this.listLocalClones().map<WeCloneListItem>((m) => ({ ...m, source: 'local' }))
     const serverCfg = this.getServerConfig()
@@ -1274,21 +1336,56 @@ export class WeCloneService {
     type RemoteRow = { id?: string; displayName?: string; cutoff?: string; visibility?: string; createdAt?: number }
     let remoteRows: RemoteRow[] = []
     let remoteError: string | undefined
+    const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
     try {
       const resp = await this.fetchWithTimeout(
-        `${serverCfg.baseUrl}/api/weclone/list`,
+        `${normalizedBaseUrl}/api/weclone/list`,
         { method: 'GET', headers: this.authHeaders(serverCfg.token) },
         15_000
       )
       const text = await resp.text().catch(() => '')
-      if (resp.ok) {
-        const parsed = JSON.parse(text) as { clones?: RemoteRow[] }
-        remoteRows = Array.isArray(parsed.clones) ? parsed.clones : []
-      } else {
-        remoteError = `HTTP ${resp.status}`
+      const contentType = resp.headers.get('content-type') || ''
+      const isHtmlCt = contentType.toLowerCase().includes('text/html')
+      const bodyIsHtml = this.isHtmlBody(text)
+
+      if (!resp.ok) {
+        if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
+          throw new Error(this.buildNotFoundHtmlError())
+        }
+        if (isHtmlCt || bodyIsHtml) {
+          throw new Error(this.buildHtmlError(normalizedBaseUrl))
+        }
+        throw new Error(`HTTP ${resp.status}${text ? `：${text.slice(0, 200)}` : ''}`)
       }
+
+      // resp.ok — still verify not HTML before parsing
+      if (isHtmlCt) {
+        throw new Error(this.buildHtmlError(normalizedBaseUrl))
+      }
+      if (bodyIsHtml) {
+        throw new Error(this.buildHtmlError(normalizedBaseUrl))
+      }
+
+      let parsed: { clones?: RemoteRow[] }
+      try {
+        parsed = JSON.parse(text) as { clones?: RemoteRow[] }
+      } catch (e) {
+        if (bodyIsHtml || isHtmlCt) {
+          throw new Error(this.buildHtmlError(normalizedBaseUrl))
+        }
+        // Re-check raw body prefix even if content-type missing
+        const trimmed = String(text || '').trim().toLowerCase()
+        if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
+          throw new Error(this.buildHtmlError(normalizedBaseUrl))
+        }
+        throw new Error(`响应解析失败：${String((e as Error)?.message || e)}`)
+      }
+      remoteRows = Array.isArray(parsed.clones) ? parsed.clones : []
     } catch (e) {
-      remoteError = String((e as Error)?.message || e)
+      const msg = String((e as Error)?.message || e)
+      remoteError = msg
+      // Ensure confusing JSON parse error never surfaces as raw "Unexpected token '<'"
+      console.warn(`[WeClone] 远端列表获取失败 (baseUrl=${normalizedBaseUrl})：`, msg, e)
     }
 
     const byServerId = new Map(local.filter((m) => m.serverId).map((m) => [m.serverId as string, m]))
@@ -1326,26 +1423,64 @@ export class WeCloneService {
 
   async getServerStatus(): Promise<WeCloneServerStatus> {
     const cfg = this.getServerConfig()
+    const normalizedBaseUrl = this.normalizeBaseUrl(cfg.baseUrl)
     const base: WeCloneServerStatus = {
       configured: cfg.configured,
       enabled: cfg.enabled,
-      baseUrl: cfg.baseUrl,
+      baseUrl: normalizedBaseUrl,
       hasToken: Boolean(cfg.token),
     }
     if (!cfg.configured) return base
     try {
-      const resp = await this.fetchWithTimeout(`${cfg.baseUrl}/health`, { method: 'GET' }, 8_000)
+      const resp = await this.fetchWithTimeout(`${normalizedBaseUrl}/health`, { method: 'GET' }, 8_000)
       const text = await resp.text().catch(() => '')
-      if (!resp.ok) return { ...base, online: false, error: `HTTP ${resp.status}` }
+      const ct = resp.headers.get('content-type') || ''
+      const isHtmlCt = ct.toLowerCase().includes('text/html')
+      const bodyIsHtml = this.isHtmlBody(text)
+      if (!resp.ok) {
+        if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
+          return { ...base, online: false, error: this.buildNotFoundHtmlError() }
+        }
+        if (isHtmlCt || bodyIsHtml) {
+          return { ...base, online: false, error: this.buildHtmlError(normalizedBaseUrl) }
+        }
+        return { ...base, online: false, error: `HTTP ${resp.status}` }
+      }
+      if (isHtmlCt || bodyIsHtml) {
+        return { ...base, online: false, error: this.buildHtmlError(normalizedBaseUrl) }
+      }
       try {
         const parsed = JSON.parse(text) as { ok?: boolean; version?: string }
         return { ...base, online: parsed.ok !== false, version: parsed.version }
       } catch {
+        if (bodyIsHtml) return { ...base, online: false, error: this.buildHtmlError(normalizedBaseUrl) }
         return { ...base, online: resp.ok }
       }
     } catch (e) {
       return { ...base, online: false, error: String((e as Error)?.message || e) }
     }
+  }
+
+  // 兼容别名：供旧调用方或测试使用的远端拉取入口
+  async getRemoteClones(): Promise<{ success: boolean; clones: WeCloneListItem[]; error?: string }> {
+    return this.getClones()
+  }
+
+  async fetchRemote(path: string, init?: RequestInit, timeoutMs = 15_000): Promise<Response> {
+    const cfg = this.getServerConfig()
+    const normalizedBaseUrl = this.normalizeBaseUrl(cfg.baseUrl)
+    const normalizedPath = String(path || '').startsWith('/') ? String(path) : `/${String(path || '')}`
+    const url = `${normalizedBaseUrl}${normalizedPath}`
+    const resp = await this.fetchWithTimeout(url, init as Parameters<typeof fetch>[1], timeoutMs)
+    const ct = resp.headers.get('content-type') || ''
+    // 预检 HTML 以便调用方获得更清晰的错误（仍返回 Response 供上层决定）
+    if (ct.toLowerCase().includes('text/html')) {
+      const text = await resp.clone().text().catch(() => '')
+      if (this.isHtmlBody(text)) {
+        console.warn(`[WeClone] fetchRemote 收到 HTML 响应 (${url}) — ${this.buildHtmlError(normalizedBaseUrl)}`)
+      }
+    }
+    return resp
   }
 }
 

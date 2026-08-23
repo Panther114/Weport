@@ -60,11 +60,28 @@ npm run build     # 写入 ../public（清空重建，替换占位 index.html）
 > `https://railway.app/template/<template-code>` 即可。部署时按提示设置
 > `WECLONE_*` 环境变量（必填只有 `WECLONE_LLM_API_KEY`，其余均有默认值）。
 
+### 构建入口：仓库根 `Dockerfile`（Railway 默认，重要）
+
+Railway 服务以 **GitHub 仓库根目录** 为构建上下文时（本仓库的线上部署，
+域名 `weport.up.railway.app`），实际生效的是 **根目录的 `Dockerfile` +
+`railway.json`**，不是本目录的这两个文件：
+
+- 根 `railway.json` 强制 `builder: DOCKERFILE`、`dockerfilePath: Dockerfile`。
+  没有它，Railway 会回落到 nixpacks 并执行根 `package.json` 的 Electron
+  构建 —— 部署出来的服务会在**所有**路由（包括 `/health` 与
+  `/api/weclone/*`）返回 Weport HTML，客户端拿到 `<!doctype` 而不是 JSON。
+- 根 `Dockerfile` 与本目录 `Dockerfile` 逐阶段一致（server build → web
+  build → runtime），仅把 COPY 路径加上 `weclone-server/` 前缀（上下文为
+  仓库根）；根 `.dockerignore` 用白名单方式只放行 `weclone-server/`，
+  Electron 应用不进入构建上下文。两者产物相同。
+- 本目录的 `Dockerfile` / `railway.json` 仅在把服务的 Root Directory 显式
+  设为 `weclone-server/` 时使用；改这两个文件时必须同步根目录版本。
+
 ### 简单流程（三步）
 
-1. **Deploy to Railway（一键）** → 点上方按钮创建服务，构建由本目录
-   `railway.json`（builder = DOCKERFILE）+ `Dockerfile` 完成，Healthcheck 走
-   `/health`。从模板创建服务时，在 Settings → Networking 里把公网域名设为
+1. **Deploy to Railway（一键）** → 点上方按钮创建服务，构建由**仓库根**
+   `railway.json`（builder = DOCKERFILE）+ 根 `Dockerfile` 完成（见上节；
+   只构建本目录，不碰 Electron 应用），Healthcheck 走 `/health`。从模板创建服务时，在 Settings → Networking 里把公网域名设为
    **`weport.up.railway.app`**（Railway 生成服务时会分配 `<name>.up.railway.app`
    子域，手动改成 weport 即可），得到服务地址 `https://weport.up.railway.app`。
    建议挂一个 Volume 到 `/data`（或设 `WECLONE_DATA_DIR` 指向卷路径），重启不丢数据。

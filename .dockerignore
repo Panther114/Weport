@@ -1,0 +1,23 @@
+# Root Dockerfile builds ONLY weclone-server (see ./Dockerfile).
+#
+# Whitelist strategy: exclude the whole repo, re-include the weclone-server
+# subtree, then strip its local junk. This keeps the Electron application
+# (root node_modules/, dist/, dist-electron/, release/, videos/, resources/,
+# reference-projects/, …) out of the build context entirely — faster uploads,
+# and no chance of Electron artifacts leaking into the server image.
+#
+# NEVER re-include anything outside weclone-server/ here.
+
+*
+
+!weclone-server/
+
+# Local junk inside the server subtree (rebuilt in-image or machine-local):
+weclone-server/node_modules
+weclone-server/dist
+weclone-server/data
+weclone-server/data-test
+weclone-server/.env
+weclone-server/*.log
+weclone-server/.server-pid.txt
+weclone-server/.server-test-pid.txt
