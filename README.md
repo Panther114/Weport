@@ -111,6 +111,14 @@ WeportAI 把你自定义的模型与 17 个本地检索工具组合成一个**�
 
 所有统计基于本地数据实时计算，支持缓存清理与强制刷新，不依赖任何外部服务。
 
+## 👤 人格克隆（v0.9.10）
+
+从聊天记录提炼你的 AI 分身：本地生成人格知识库，身份证、手机号、住址等隐私自动脱敏后才上传；生成后可设为私密、公开或链接分享，浏览器打开链接即可与分身对话。
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/github/Weport/weport)
+
+一键部署私有服务器（默认地址 `https://weport.up.railway.app`），然后在 App「人格克隆 → 私有服务器」填入 URL 与 OpenCode Go API Key（模型 `muse-spark-1.2-contributor`）保存即可。完整三步流程见 [`weclone-server/README.md`](weclone-server/README.md)。
+
 ## 📦 导出格式
 
 | 格式 | 说明 |

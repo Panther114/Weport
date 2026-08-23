@@ -98,6 +98,20 @@ export default function NotificationWindow() {
         window.electronAPI.notification?.close()
     }
 
+    const handleNotificationClick = () => {
+        const current = notificationRef.current
+        if (!current) return
+        const payload: Record<string, unknown> = {}
+        if (current.sessionId) payload.sessionId = current.sessionId
+        if (current.channel) payload.channel = current.channel
+        if (current.targetRoute) payload.targetRoute = current.targetRoute
+        if ((current as any).insightRecordId) payload.insightRecordId = (current as any).insightRecordId
+        // 先触发隐藏动画（原生玻璃同步淡出），再通知主进程显示窗口
+        if (nativeBackdrop) window.electronAPI?.notification?.glassHide?.()
+        window.electronAPI?.notification?.click?.(payload)
+        handleClose()
+    }
+
     useEffect(() => {
         if (!notification && !prevNotification) return
 
@@ -243,6 +257,7 @@ export default function NotificationWindow() {
                             key={notification.id} // Ensure remount for animation
                             data={notification}
                             onClose={handleClose}
+                            onClick={handleNotificationClick}
                             initialVisible={true}
                             backdropImage={backdrop}
                             nativeBackdrop={nativeBackdrop}

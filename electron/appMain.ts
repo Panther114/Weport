@@ -47,6 +47,7 @@ import { KeyService } from './services/keyService'
 import { KeyServiceMac } from './services/keyServiceMac'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
+import { weCloneService } from './services/weCloneService'
 import { getProviderCatalog } from './services/ai/providerCatalog'
 import {
   registerNotificationHandlers,
@@ -671,13 +672,78 @@ function setupNotificationPipeline() {
     ensureWeChatRequestHeaderInterceptor()
     void showNotification(buildPopupData(payload))
   })
-  setNotificationNavigateHandler(() => {
-    // 静默启动不建主窗口：通知点击时按需创建/显示
-    showMainWindow()
+  setNotificationNavigateHandler((payload: unknown) => {
+    handleNotificationClickNavigation(payload)
   })
   chatService.addDbMonitorListener((type, json) => {
     messagePushService?.handleDbMonitorChange(type, json)
   })
+}
+
+// 弹窗点击 → 主窗口导航（复用 WeFlow 逻辑，适配 WePort）
+// 支持 targetRoute / ai-insight / sessionId 三种载荷，且兼容隐藏窗口的 about:blank 回收态
+function focusMainWindowAndNavigate(sessionId: string): void {
+  if (!sessionId) {
+    showMainWindow()
+    return
+  }
+  showMainWindow()
+  const target = mainWindow
+  if (!target || target.isDestroyed()) return
+  const send = () => {
+    try {
+      target.webContents.send('notification:navigate', { sessionId })
+      // 兼容旧监听（WeFlow 风格）
+      target.webContents.send('navigate-to-session', sessionId)
+    } catch { /* noop */ }
+  }
+  try {
+    if (target.webContents.isLoading()) target.webContents.once('did-finish-load', send)
+    else send()
+  } catch { send() }
+}
+
+function focusMainWindowAndNavigateRoute(route: string): void {
+  if (!route) { showMainWindow(); return }
+  showMainWindow()
+  const target = mainWindow
+  if (!target || target.isDestroyed()) return
+  const send = () => {
+    try {
+      target.webContents.send('notification:navigate', { targetRoute: route })
+      target.webContents.send('navigate-to-route', route)
+    } catch { /* noop */ }
+  }
+  try {
+    if (target.webContents.isLoading()) target.webContents.once('did-finish-load', send)
+    else send()
+  } catch { send() }
+}
+
+function handleNotificationClickNavigation(payload: unknown): void {
+  if (payload && typeof payload === 'object') {
+    const data = payload as { sessionId?: string; channel?: string; insightRecordId?: string; targetRoute?: string }
+    const targetRoute = String((data as any).targetRoute || '').trim()
+    if (targetRoute.startsWith('/')) {
+      focusMainWindowAndNavigateRoute(targetRoute)
+      return
+    }
+    if (data.channel === 'ai-insight' && (data as any).insightRecordId) {
+      focusMainWindowAndNavigateRoute(`/insight-inbox?recordId=${encodeURIComponent(String((data as any).insightRecordId))}`)
+      return
+    }
+    const sid = String((data as any).sessionId || '').trim()
+    if (sid) {
+      focusMainWindowAndNavigate(sid)
+      return
+    }
+    // 载荷无可导航字段：仅显示主窗口
+    showMainWindow()
+    return
+  }
+  const sid = String(payload || '').trim()
+  if (sid) focusMainWindowAndNavigate(sid)
+  else showMainWindow()
 }
 
 // ---------------------------------------------------------------------------
@@ -1767,8 +1833,8 @@ async function runRealDataDump() {
 function registerIpcHandlers() {
   void registerNotificationHandlers()
 
-  ipcMain.on('notification-clicked', (_event, _payload) => {
-    showMainWindow()
+  ipcMain.on('notification-clicked', (_event, payload) => {
+    handleNotificationClickNavigation(payload)
   })
 
   // 配置
@@ -2600,6 +2666,58 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('ai:abort', (_e, chatId: string) => {
     weportAiService.abort(String(chatId || ''))
     return { success: true }
+  })
+
+  // -------------------------------------------------------------------------
+  // WeClone（v0.9.10 人格克隆）
+  // -------------------------------------------------------------------------
+  const wecloneControllers = new Map<string, AbortController>()
+  ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
+    const taskId = 'generate'
+    if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
+    const ctrl = new AbortController()
+    wecloneControllers.set(taskId, ctrl)
+    try {
+      return await weCloneService.generateClone(
+        (progress) => mainWindow?.webContents.send('weclone:progress', progress),
+        ctrl.signal,
+        opts && typeof opts === 'object' ? opts : {}
+      )
+    } finally {
+      wecloneControllers.delete(taskId)
+    }
+  })
+  ipcMain.handle('weclone:list', () => weCloneService.getClones())
+  ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
+  ipcMain.handle('weclone:delete', (_e, id: string, remote?: boolean) =>
+    weCloneService.deleteClone(String(id || ''), remote !== false))
+  ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
+    weCloneService.setVisibility(String(id || ''), String(visibility || '')))
+  ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
+  ipcMain.handle('weclone:cancel', () => {
+    wecloneControllers.get('generate')?.abort()
+    weCloneService.cancel()
+    return { success: true }
+  })
+  // 强制 provider（opencode-go / muse-spark-1.2-contributor）
+  ipcMain.handle('weclone:getForcedProviderStatus', () => weCloneService.getForcedProviderStatus())
+  ipcMain.handle('weclone:ensureProvider', async (_e, payload?: { apiKey?: string }) => {
+    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
+    try {
+      await weCloneService.ensureForcedProvider(apiKey || undefined)
+      return { success: true, status: weCloneService.getForcedProviderStatus() }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
+    }
+  })
+  ipcMain.handle('weclone:setForcedApiKey', async (_e, payload?: { apiKey?: string }) => {
+    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
+    try {
+      await weCloneService.ensureForcedProvider(apiKey || undefined)
+      return { success: true, status: weCloneService.getForcedProviderStatus() }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
+    }
   })
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
@@ -5512,6 +5630,7 @@ try { tray?.destroy() } catch { /* noop */ }
     for (const chatId of weportAiService.listChats().map((c) => c.id)) {
       weportAiService.abort(chatId)
     }
+    weCloneService.cancel()
     const forceExitTimer = setTimeout(() => {
       console.warn('[Weport] Force exit after timeout')
       // app.exit 会等待 IPC 子进程（WCDB 宿主）回收；先强杀宿主再退出

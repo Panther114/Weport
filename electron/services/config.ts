@@ -177,6 +177,15 @@ interface ConfigSchema {
   weportAiActions: Array<{ id: string; name: string; prompt: string }>
   weportAiMaxToolChars: number
   weportAiContextWindow: number
+
+  // WeClone（v0.9.10 人格克隆）
+  /** Railway 私有服务地址，空 = 仅本地生成 */
+  weCloneServerUrl: string
+  /** ownerToken（safeStorage 加密，复用 mcpToken 模式） */
+  weCloneServerToken: string
+  weCloneEnabled: boolean
+  /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
+  weCloneLastCutoff: string
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -190,7 +199,8 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'aiInsightApiKey',
   'aiInsightWeiboCookie',
   'weportAiApiKey',
-  'weportAiProfilesBlob'
+  'weportAiProfilesBlob',
+  'weCloneServerToken'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
 const ENCRYPTED_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
@@ -367,6 +377,10 @@ export class ConfigService {
       weportAiMaxToolChars: 12000,
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
+      weCloneServerUrl: '',
+      weCloneServerToken: '',
+      weCloneEnabled: true,
+      weCloneLastCutoff: '',
     }
 
     const storeOptions: any = {
@@ -1213,5 +1227,88 @@ export class ConfigService {
     this.unlockedKeys.clear()
     this.unlockPassword = null
   }
+}
+
+// === WeClone 强制 provider（与 WeportAI 同款加密配置存储 weportAiProfilesBlob）===
+
+export const WECLONE_FORCED_PROVIDER_ID = 'opencode-go'
+export const WECLONE_FORCED_BASE_URL = 'https://opencode.ai/zen/go/v1'
+export const WECLONE_FORCED_MODEL = 'muse-spark-1.2-contributor'
+
+export interface WeCloneForcedProviderInfo {
+  providerId: string
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+  /** 当前激活 profile 是否已满足强制配置（provider+baseUrl+model+apiKey 全匹配） */
+  isForced: boolean
+}
+
+/**
+ * 轻量读取强制 provider 状态：直接解析 weportAiProfilesBlob（get 时已由
+ * safeStorage 解密），不引入 ProviderProfileService 依赖（避免 config ↔ ai 循环导入）。
+ */
+export function getWeCloneForcedProviderStatus(): WeCloneForcedProviderInfo {
+  const fallback: WeCloneForcedProviderInfo = {
+    providerId: WECLONE_FORCED_PROVIDER_ID,
+    baseUrl: WECLONE_FORCED_BASE_URL,
+    model: WECLONE_FORCED_MODEL,
+    hasApiKey: false,
+    isForced: false,
+  }
+  try {
+    const raw = String(ConfigService.getInstance().get('weportAiProfilesBlob') || '').trim()
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as {
+      activeProfileId?: string
+      profiles?: Array<{ id?: string; providerId?: unknown; baseUrl?: unknown; model?: unknown; apiKey?: unknown }>
+    }
+    const profiles = Array.isArray(parsed?.profiles) ? parsed.profiles : []
+    const active = profiles.find((p) => p.id && p.id === parsed.activeProfileId) || profiles[0]
+    if (!active) return fallback
+    return {
+      providerId: WECLONE_FORCED_PROVIDER_ID,
+      baseUrl: WECLONE_FORCED_BASE_URL,
+      model: WECLONE_FORCED_MODEL,
+      hasApiKey: Boolean(String(active.apiKey || '').trim()),
+      isForced:
+        String(active.providerId || '') === WECLONE_FORCED_PROVIDER_ID &&
+        String(active.baseUrl || '').replace(/\/+$/, '') === WECLONE_FORCED_BASE_URL &&
+        String(active.model || '') === WECLONE_FORCED_MODEL &&
+        Boolean(String(active.apiKey || '').trim()),
+    }
+  } catch {
+    return fallback
+  }
+}
+
+// === WeClone 服务配置（v0.9.10）===
+
+export interface WeCloneServerConfig {
+  enabled: boolean
+  /** 规范化后的服务地址（无尾斜杠），空字符串表示未配置 */
+  baseUrl: string
+  /** ownerToken 明文（get 时已由 safeStorage 解密） */
+  token: string
+  /** enabled 且配置了 baseUrl 才视为已配置 */
+  configured: boolean
+}
+
+/** 读取 WeClone 私有服务配置（token 自动解密；键缺失时优雅兜底） */
+export function getWeCloneServerConfig(): WeCloneServerConfig {
+  const svc = ConfigService.getInstance()
+  let enabled = true
+  let baseUrl = ''
+  let token = ''
+  try {
+    enabled = svc.get('weCloneEnabled') !== false
+  } catch { /* 键缺失时保持默认 */ }
+  try {
+    baseUrl = String(svc.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
+  } catch { /* noop */ }
+  try {
+    token = String(svc.get('weCloneServerToken') || '').trim()
+  } catch { /* noop */ }
+  return { enabled, baseUrl, token, configured: enabled && baseUrl.length > 0 }
 }
 
