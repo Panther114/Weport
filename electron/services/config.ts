@@ -179,7 +179,7 @@ interface ConfigSchema {
   weportAiContextWindow: number
 
   // WeClone（v0.9.10 人格克隆）
-  /** Railway 私有服务地址，空 = 仅本地生成 */
+  /** WeClone 服务地址（固定为 https://weport.up.railway.app，清空则回退默认值） */
   weCloneServerUrl: string
   /** ownerToken（safeStorage 加密，复用 mcpToken 模式） */
   weCloneServerToken: string
@@ -377,7 +377,7 @@ export class ConfigService {
       weportAiMaxToolChars: 12000,
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
-      weCloneServerUrl: '',
+      weCloneServerUrl: 'https://weport.up.railway.app',
       weCloneServerToken: '',
       weCloneEnabled: true,
       weCloneLastCutoff: '',
@@ -1284,17 +1284,19 @@ export function getWeCloneForcedProviderStatus(): WeCloneForcedProviderInfo {
 
 // === WeClone 服务配置（v0.9.10）===
 
+export const WECLONE_DEFAULT_SERVER_URL = 'https://weport.up.railway.app'
+
 export interface WeCloneServerConfig {
   enabled: boolean
-  /** 规范化后的服务地址（无尾斜杠），空字符串表示未配置 */
+  /** 规范化后的服务地址（无尾斜杠），固定为 WECLONE_DEFAULT_SERVER_URL */
   baseUrl: string
   /** ownerToken 明文（get 时已由 safeStorage 解密） */
   token: string
-  /** enabled 且配置了 baseUrl 才视为已配置 */
+  /** enabled 且配置了 baseUrl 才视为已配置（固定服务始终为 true） */
   configured: boolean
 }
 
-/** 读取 WeClone 私有服务配置（token 自动解密；键缺失时优雅兜底） */
+/** 读取 WeClone 服务配置（token 自动解密；空地址回退固定服务地址） */
 export function getWeCloneServerConfig(): WeCloneServerConfig {
   const svc = ConfigService.getInstance()
   let enabled = true
@@ -1306,6 +1308,7 @@ export function getWeCloneServerConfig(): WeCloneServerConfig {
   try {
     baseUrl = String(svc.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
   } catch { /* noop */ }
+  if (!baseUrl) baseUrl = WECLONE_DEFAULT_SERVER_URL
   try {
     token = String(svc.get('weCloneServerToken') || '').trim()
   } catch { /* noop */ }

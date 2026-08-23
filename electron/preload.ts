@@ -268,6 +268,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id: string, remote?: boolean) => ipcRenderer.invoke('weclone:delete', id, remote),
     setVisibility: (id: string, visibility: string) => ipcRenderer.invoke('weclone:setVisibility', id, visibility),
     getServerStatus: () => ipcRenderer.invoke('weclone:getServerStatus'),
+    getProgress: () => ipcRenderer.invoke('weclone:getProgress'),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),
     getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
     ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),

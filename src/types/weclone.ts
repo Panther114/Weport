@@ -5,13 +5,15 @@
 
 export type WeCloneVisibility = 'private' | 'public' | 'link'
 
-export type WeCloneStage = 'scan' | 'generate' | 'filter' | 'upload' | 'done'
+export type WeCloneStage = 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'error' | 'cancelled'
 
 export interface WeCloneProgressInfo {
   stage: WeCloneStage
   /** 总进度 0-100 */
   progress: number
   message: string
+  status?: 'running' | 'done' | 'error' | 'cancelled'
+  ts?: number
 }
 
 /** WeCloneMetaInfo 来自 vite-env.d.ts（全局接口） */

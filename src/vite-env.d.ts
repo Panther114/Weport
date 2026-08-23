@@ -245,6 +245,11 @@ interface ElectronApi {
       version?: string
       error?: string
     }>
+    getProgress: () => Promise<{
+      lastProgress: { stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'error' | 'cancelled'; progress: number; message: string; status?: 'running' | 'done' | 'error' | 'cancelled'; ts?: number } | null
+      history: Array<{ stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'error' | 'cancelled'; progress: number; message: string; status?: string; ts?: number }>
+      isGenerating: boolean
+    }>
     cancel: () => Promise<{ success: boolean }>
     getForcedProviderStatus: () => Promise<{
       providerId: string

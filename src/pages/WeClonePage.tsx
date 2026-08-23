@@ -54,6 +54,7 @@ export default function WeClonePage() {
   const [generating, setGenerating] = useState(false)
   const [progress, setProgress] = useState<WeCloneProgressInfo | null>(null)
   const [logs, setLogs] = useState<string[]>([])
+  const [history, setHistory] = useState<WeCloneProgressInfo[]>([])
   const [panelOpen, setPanelOpen] = useState(false)
   /** 渲染侧取消句柄：中止本地 UI 状态跟踪（真正的取消走 weclone.cancel IPC） */
   const abortRef = useRef<AbortController | null>(null)
@@ -120,20 +121,99 @@ export default function WeClonePage() {
     }
   }, [api])
 
-  // 进度订阅 + 首次加载（仅挂载一次）
+  // 进度订阅 + 首次加载（仅挂载一次）— 含 tab 切换回显
   useEffect(() => {
     void refreshList()
     void refreshServerStatus()
-    const unsub = api.weclone.onProgress((payload) => {
+
+    // 初始回放：从主进程快照恢复进度（切换标签/窗口重建后不丢失）
+    void window.electronAPI.weclone
+      .getProgress()
+      .then((snapshot: any) => {
+        if (snapshot?.lastProgress) {
+          const lp = snapshot.lastProgress as WeCloneProgressInfo
+          setProgress(lp)
+          setHistory(snapshot.history || [])
+          // 用 history 重建可见日志，保持与服务端的时序一致
+          if (Array.isArray(snapshot.history) && snapshot.history.length > 0) {
+            const rebuilt = snapshot.history
+              .filter((h: any) => h?.message)
+              .map((h: any) => {
+                const ts = h.ts ? new Date(h.ts).toLocaleTimeString('zh-Hans-CN', { hour12: false }) : ''
+                return ts ? `[${ts}] ${String(h.message)}` : String(h.message)
+              })
+            setLogs(rebuilt.slice(-200))
+          } else if (lp.message) {
+            const time = new Date().toLocaleTimeString('zh-Hans-CN', { hour12: false })
+            setLogs([`[${time}] ${lp.message}`])
+          }
+          if (lp.status === 'running' || snapshot.isGenerating) {
+            setGenerating(true)
+            setSection('create')
+            setPanelOpen(true)
+          } else if (lp.status === 'done') {
+            setGenerating(false)
+            setPanelOpen(true)
+          } else if (lp.status === 'error' || lp.status === 'cancelled') {
+            setGenerating(false)
+            setPanelOpen(true)
+          } else if (snapshot.isGenerating) {
+            setGenerating(true)
+            setSection('create')
+            setPanelOpen(true)
+          }
+        } else if (snapshot?.isGenerating) {
+          // 无 lastProgress 但服务仍在跑（极早阶段）
+          setGenerating(true)
+          setSection('create')
+          setPanelOpen(true)
+          if (Array.isArray(snapshot.history) && snapshot.history.length > 0) {
+            const last = snapshot.history[snapshot.history.length - 1] as WeCloneProgressInfo
+            setProgress(last)
+            setHistory(snapshot.history as WeCloneProgressInfo[])
+            const rebuilt = (snapshot.history as any[])
+              .filter((h: any) => h?.message)
+              .map((h: any) => {
+                const ts = h.ts ? new Date(h.ts).toLocaleTimeString('zh-Hans-CN', { hour12: false }) : ''
+                return ts ? `[${ts}] ${String(h.message)}` : String(h.message)
+              })
+            setLogs(rebuilt.slice(-200))
+          }
+        } else if (Array.isArray(snapshot?.history) && snapshot.history.length > 0) {
+          // 仅历史（已完成但 retained）— 展示最后一条 done 状态便于用户看到结果
+          const last = snapshot.history[snapshot.history.length - 1] as WeCloneProgressInfo
+          if (last?.stage === 'done' || last?.status === 'done') {
+            setProgress(last)
+            setHistory(snapshot.history as WeCloneProgressInfo[])
+            setGenerating(false)
+            setPanelOpen(true)
+          }
+        }
+      })
+      .catch(() => undefined)
+
+    const unsub = api.weclone.onProgress((payload: any) => {
       const p: WeCloneProgressInfo = {
-        stage: payload?.stage ?? 'scan',
+        stage: (payload?.stage ?? 'scan') as WeCloneProgressInfo['stage'],
         progress: Number(payload?.progress) || 0,
         message: String(payload?.message || ''),
-      }
+        status: payload?.status as WeCloneProgressInfo['status'],
+        ts: payload?.ts,
+      } as WeCloneProgressInfo
       setProgress(p)
+      setHistory((prev) => [...prev.slice(-49), p])
       if (p.message) {
         const time = new Date().toLocaleTimeString('zh-Hans-CN', { hour12: false })
         setLogs((prev) => [...prev.slice(-199), `[${time}] ${p.message}`])
+      }
+      // 依据服务端 status 同步 generating 旗标（tab 切回后也能正确反映运行态）
+      const st = String(payload?.status || '')
+      if (st === 'running') setGenerating(true)
+      else if (st === 'done' || st === 'error' || st === 'cancelled') setGenerating(false)
+      else if (payload?.stage === 'done' || payload?.stage === 'error' || payload?.stage === 'cancelled') {
+        // 兼容未带 status 的旧载荷
+        if (payload?.stage === 'done') setGenerating(false)
+        else if (payload?.stage === 'error' || payload?.stage === 'cancelled') setGenerating(false)
       }
     })
     return unsub
@@ -200,12 +280,14 @@ export default function WeClonePage() {
           'ok',
           '克隆生成完成',
           result.status === 'uploaded'
-            ? '人格档案已上传到私有服务器'
-            : '人格档案已保存在本地（未上传）',
+            ? '人格档案已上传到 https://weport.up.railway.app'
+            : '人格档案已保存在本地',
           7000
         )
         setProgress((prev) => (prev ? { ...prev, stage: 'done', progress: 100, message: '生成完成' } : prev))
         void refreshList()
+        void refreshServerStatus()
+        setSection('manage')
       } else if (result.aborted) {
         pushToast('info', '已取消生成', '已扫描的部分不会保留')
       } else {
@@ -332,9 +414,9 @@ export default function WeClonePage() {
       </div>
       <div className="v09-actions">
         {section === 'manage' && (
-          <span className={`weclone-server-chip${serverOnline ? ' online' : serverConfigured ? ' offline' : ''}`}>
+          <span className={`weclone-server-chip${serverOnline ? ' online' : ' offline'}`}>
             <span className="weclone-server-dot" />
-            {serverConfigured ? (serverOnline ? '服务器在线' : '服务器离线') : '未配置服务器'}
+            {serverOnline ? 'weport.up.railway.app · 在线' : 'weport.up.railway.app · 离线'}
           </span>
         )}
         <button type="button" className="chip" onClick={() => setSection('hub')}>
@@ -474,7 +556,7 @@ export default function WeClonePage() {
             <Server size={15} />
             生成服务配置
           </h3>
-          <span className="v09-sub">API Key 与私有服务器（均可选）</span>
+          <span className="v09-sub">API Key（生成所需）· 服务地址已固定为 weport.up.railway.app</span>
         </div>
 
         <WeCloneForcedKey notify={pushToast} />

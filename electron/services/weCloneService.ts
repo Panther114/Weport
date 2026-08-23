@@ -30,6 +30,7 @@ import { gzipSync } from 'zlib'
 import {
   ConfigService,
   getWeCloneServerConfig,
+  WECLONE_DEFAULT_SERVER_URL,
   WECLONE_FORCED_PROVIDER_ID,
   WECLONE_FORCED_BASE_URL,
   WECLONE_FORCED_MODEL,
@@ -94,7 +95,10 @@ export interface WeCloneListItem extends WeCloneMeta {
   shareUrl?: string
 }
 
-export type WeCloneProgressStage = 'scan' | 'generate' | 'filter' | 'upload' | 'done'
+export type WeCloneProgressStage = 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'error' | 'cancelled'
+
+/** 任务状态：running 生成中 / done 成功 / error 失败 / cancelled 已取消 */
+export type WeCloneProgressStatus = 'running' | 'done' | 'error' | 'cancelled'
 
 export interface WeCloneProgress {
   stage: WeCloneProgressStage
@@ -102,7 +106,14 @@ export interface WeCloneProgress {
   progress: number
   message: string
   detail?: Record<string, unknown>
+  /** 任务状态（内存回放用；推送载荷同样携带） */
+  status?: WeCloneProgressStatus
+  /** 该条进度的时间戳（ms） */
+  ts?: number
 }
+
+/** 兼容别名：WeCloneProgressInfo 与 WeCloneProgress 等价 */
+export type WeCloneProgressInfo = WeCloneProgress
 
 export interface WeCloneGenerateOptions {
   /** 跳过上传，仅本地生成 */
@@ -184,6 +195,9 @@ export class WeCloneService {
   private configService: ConfigService
   private providerProfiles: ProviderProfileService
   private runningController: AbortController | null = null
+  private lastProgress: WeCloneProgressInfo | null = null
+  private progressHistory: WeCloneProgressInfo[] = []
+  private progressRetentionTimer: NodeJS.Timeout | null = null
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -205,10 +219,13 @@ export class WeCloneService {
   private getServerConfig(): { enabled: boolean; baseUrl: string; token: string; configured: boolean } {
     try {
       const cfg = getWeCloneServerConfig()
+      // 硬编码兜底：历史空配置直接回退固定地址，避免 local_only
+      if (!cfg.baseUrl) return { ...cfg, baseUrl: WECLONE_DEFAULT_SERVER_URL, configured: cfg.enabled }
       return cfg
     } catch {
       const enabled = this.cfgGet('weCloneEnabled') !== false
-      const baseUrl = String(this.cfgGet('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
+      let baseUrl = String(this.cfgGet('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
+      if (!baseUrl) baseUrl = WECLONE_DEFAULT_SERVER_URL
       const token = String(this.cfgGet('weCloneServerToken') || '').trim()
       return { enabled, baseUrl, token, configured: enabled && !!baseUrl }
     }
@@ -686,7 +703,8 @@ export class WeCloneService {
     profile: ProviderProfile,
     systemContent: string,
     userContent: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onText?: (chunk: string) => void
   ): Promise<string> {
     const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
     const result = await getProviderAdapter(profile).stream({
@@ -699,7 +717,11 @@ export class WeCloneService {
       reasoningEffort,
       signal: signal ?? AbortSignal.timeout(300_000),
       onReasoning: () => undefined,
-      onText: () => undefined,
+      onText: onText
+        ? (chunk: string) => {
+            try { onText(String(chunk)) } catch { /* noop */ }
+          }
+        : () => undefined,
     })
     return String(result.content || '')
   }
@@ -821,6 +843,38 @@ export class WeCloneService {
     return this.runningController !== null
   }
 
+  getLastProgress(): WeCloneProgressInfo | null {
+    return this.lastProgress
+  }
+
+  getProgressHistory(): WeCloneProgressInfo[] {
+    return [...this.progressHistory]
+  }
+
+  getProgressSnapshot(): { lastProgress: WeCloneProgressInfo | null; history: WeCloneProgressInfo[]; isGenerating: boolean } {
+    return { lastProgress: this.lastProgress, history: [...this.progressHistory], isGenerating: this.isGenerating() }
+  }
+
+  private recordProgress(p: WeCloneProgressInfo): void {
+    p.ts = Date.now()
+    this.lastProgress = p
+    this.progressHistory.push(p)
+    if (this.progressHistory.length > 50) this.progressHistory.shift()
+  }
+
+  private scheduleProgressRetention(): void {
+    if (this.progressRetentionTimer) {
+      clearTimeout(this.progressRetentionTimer)
+      this.progressRetentionTimer = null
+    }
+    this.progressRetentionTimer = setTimeout(() => {
+      this.lastProgress = null
+      this.progressRetentionTimer = null
+    }, 5 * 60 * 1000)
+    const maybeUnref = this.progressRetentionTimer as unknown as { unref?: () => void }
+    if (typeof maybeUnref.unref === 'function') maybeUnref.unref()
+  }
+
   async generateClone(
     progressCb: ((progress: WeCloneProgress) => void) | undefined,
     externalSignal: AbortSignal | undefined,
@@ -837,11 +891,33 @@ export class WeCloneService {
       else externalSignal.addEventListener('abort', forward, { once: true })
     }
     const signal = ctrl.signal
-    const report = (stage: WeCloneProgressStage, progress: number, message: string, detail?: Record<string, unknown>) => {
+    if (this.progressRetentionTimer) {
+      clearTimeout(this.progressRetentionTimer)
+      this.progressRetentionTimer = null
+    }
+    this.progressHistory = []
+    this.lastProgress = null
+    const report = (
+      stage: WeCloneProgressStage,
+      progress: number,
+      message: string,
+      detail?: Record<string, unknown>,
+      status: WeCloneProgressStatus = 'running'
+    ) => {
+      const p: WeCloneProgressInfo = {
+        stage,
+        progress: Math.max(0, Math.min(100, Math.round(progress))),
+        message,
+        detail,
+        status,
+        ts: Date.now(),
+      }
+      this.recordProgress(p)
       try {
-        progressCb?.({ stage, progress: Math.max(0, Math.min(100, Math.round(progress))), message, detail })
+        progressCb?.(p)
       } catch { /* noop */ }
     }
+    report('scan', 0, '开始生成', undefined, 'running')
 
     const wxid = this.getMyWxid()
     const dir = this.getStagingDir(wxid)
@@ -868,14 +944,14 @@ export class WeCloneService {
       try { rmSync(jsonlPart, { force: true }) } catch { /* noop */ }
       report('scan', 4, `开始扫描 ${ids.length} 个会话…`, { sessions: ids.length })
       const stats = await this.scanAllSessions(ids, jsonlPart, signal, (completed, total, messages) => {
-        report('scan', 4 + (completed / Math.max(1, total)) * 46, `扫描会话 ${completed}/${total}（${messages.toLocaleString()} 条消息）`, { completed, total, messages })
+        report('scan', (completed / Math.max(1, total)) * 30, `扫描会话 ${completed}/${total}（${messages.toLocaleString()} 条消息）`, { completed, total, messages })
       })
       this.ensureNotAborted(signal)
       renameSync(jsonlPart, jsonlFinal) // 原子收尾
       if (stats.messageCount === 0) throw new Error('没有扫到可用的文本消息')
 
       // ---- 3. 采样 + 逐份生成 MD -------------------------------------------
-      report('generate', 52, '正在采样语料…')
+      report('generate', 30, '正在采样语料…')
       const { sampled } = await this.sampleChunksFromJsonl(jsonlFinal, SAMPLE_RANDOM_CHUNKS, SAMPLE_RECENT_CHUNKS)
       const contextBase = this.buildGenerationContext(sampled, names)
       const mdKeys = Object.keys(WECLONE_MD_PROMPTS) as Array<keyof WeCloneMds>
@@ -883,13 +959,26 @@ export class WeCloneService {
       for (let i = 0; i < mdKeys.length; i += 1) {
         const key = mdKeys[i]
         this.ensureNotAborted(signal)
-        report('generate', 54 + (i / mdKeys.length) * 28, `正在生成 ${key}.md…`)
+        const baseProgress = 30 + (i / mdKeys.length) * 40
+        report('generate', baseProgress, `正在生成 ${key}.md…`)
         const prompt = WECLONE_MD_PROMPTS[key].replace('{context}', contextBase)
-        const content = await this.callLlm(profile, WECLONE_SYSTEM_PROMPT, prompt, signal)
+        let streamedChars = 0
+        let lastSubEmit = 0
+        const onText = (chunk: string) => {
+          streamedChars += chunk.length
+          const now = Date.now()
+          if (now - lastSubEmit < 100) return
+          lastSubEmit = now
+          const sub = Math.min(7.5, (streamedChars / MD_CHAR_LIMIT) * 8)
+          report('generate', baseProgress + sub, `正在生成 ${key}.md…`)
+        }
+        const content = await this.callLlm(profile, WECLONE_SYSTEM_PROMPT, prompt, signal, onText)
         const cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
         if (!cleaned) throw new Error(`${key}.md 生成结果为空`)
         mds[key] = cleaned
         this.atomicWriteFile(join(dir, `${key}.md`), cleaned)
+        // ensure stage end snaps to next boundary
+        report('generate', 30 + ((i + 1) / mdKeys.length) * 40, `已生成 ${key}.md`)
       }
       const fullMds: WeCloneMds = {
         profile: mds.profile || '',
@@ -900,9 +989,13 @@ export class WeCloneService {
       }
 
       // ---- 4. 第二阶段 PII 审查 --------------------------------------------
-      report('filter', 84, '正在进行二次隐私审查…')
+      report('filter', 70, '正在进行二次隐私审查…')
+      let filterSteps = 0
       const filterResult = await this.runSecondPassFilter(profile, fullMds, jsonlFinal, signal, (message) => {
-        report('filter', 85, message)
+        filterSteps += 1
+        // 70 -> 85 across ~6 steps (5 MD + sampling headroom)
+        const pct = 70 + Math.min(15, (filterSteps / 6) * 15)
+        report('filter', pct, message)
       })
       for (const { key, path } of this.mdFilePaths(dir)) {
         this.atomicWriteFile(path, filterResult.mds[key])
@@ -935,7 +1028,7 @@ export class WeCloneService {
       let status: 'local_only' | 'uploaded' | 'failed' = 'local_only'
       const serverCfg = this.getServerConfig()
       if (options.localOnly !== true && serverCfg.configured) {
-        report('upload', 90, '正在上传到私有服务…')
+        report('upload', 85, '正在上传到私有服务…')
         try {
           const serverId = await this.uploadToServer(serverCfg, meta, filterResult.mds, jsonlFinal, filterResult.chunkPatches, signal)
           meta.serverId = serverId
@@ -943,23 +1036,46 @@ export class WeCloneService {
           meta.uploadStatus = 'uploaded'
           status = 'uploaded'
           this.writeMeta(dir, meta)
+          report('upload', 98, '上传完成')
         } catch (e) {
           if ((e as Error)?.name === 'WeCloneAbortedError') throw e
           meta.uploadStatus = 'failed'
           this.writeMeta(dir, meta)
           console.warn('[WeClone] 上传失败（克隆已保存在本地）:', e)
+          report('upload', 98, '上传失败，已保存在本地')
         }
       }
 
-      report('done', 100, status === 'uploaded' ? '克隆生成并上传完成' : '克隆已在本地生成', { status })
+      report('done', 100, status === 'uploaded' ? '克隆生成并上传完成' : '克隆已在本地生成', { status }, 'done')
       return { success: true, clone: meta, status }
     } catch (e) {
       const aborted = (e as Error)?.name === 'WeCloneAbortedError' || signal.aborted
       const message = aborted ? '已取消' : String((e as Error)?.message || e)
       console.warn('[WeClone] 生成失败:', e)
-      if (!aborted) report('done', 100, `生成失败：${message}`)
+      if (aborted) {
+        const p: WeCloneProgressInfo = {
+          stage: 'cancelled',
+          progress: (this.lastProgress as WeCloneProgressInfo | null)?.progress ?? 99,
+          message,
+          status: 'cancelled',
+          ts: Date.now(),
+        }
+        this.recordProgress(p)
+        try { progressCb?.(p) } catch { /* noop */ }
+      } else {
+        const p: WeCloneProgressInfo = {
+          stage: 'error',
+          progress: (this.lastProgress as WeCloneProgressInfo | null)?.progress ?? 99,
+          message: `生成失败：${message}`,
+          status: 'error',
+          ts: Date.now(),
+        }
+        this.recordProgress(p)
+        try { progressCb?.(p) } catch { /* noop */ }
+      }
       return { success: false, aborted, error: message }
     } finally {
+      this.scheduleProgressRetention()
       this.runningController = null
       try { rmSync(jsonlPart, { force: true }) } catch { /* noop */ }
     }

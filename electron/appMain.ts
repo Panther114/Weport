@@ -48,6 +48,7 @@ import { KeyServiceMac } from './services/keyServiceMac'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 import { weCloneService } from './services/weCloneService'
+import type { WeCloneProgressInfo } from './services/weCloneService'
 import { getProviderCatalog } from './services/ai/providerCatalog'
 import {
   registerNotificationHandlers,
@@ -1027,7 +1028,11 @@ function scheduleMainWindowDiscard(): void {
     mainWindowDiscardTimer = null
   }
   if (isAppQuitting || isAnyQaMode) return
-  if (exportTaskControlService.hasActiveTasks()) {
+  if (
+    exportTaskControlService.hasActiveTasks() ||
+    weCloneService.isGenerating?.() ||
+    weCloneService.getLastProgress?.()?.status === 'running'
+  ) {
     // 导出中不卸载渲染层（进度事件目标需存活），导出结束后再试
     mainWindowDiscardTimer = setTimeout(() => {
       mainWindowDiscardTimer = null
@@ -1041,7 +1046,11 @@ function scheduleMainWindowDiscard(): void {
     discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode}`)
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
     if (isAppQuitting || isAnyQaMode) return
-    if (exportTaskControlService.hasActiveTasks()) {
+    if (
+      exportTaskControlService.hasActiveTasks() ||
+      weCloneService.isGenerating?.() ||
+      weCloneService.getLastProgress?.()?.status === 'running'
+    ) {
       scheduleMainWindowDiscard()
       return
     }
@@ -2671,7 +2680,40 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // -------------------------------------------------------------------------
   // WeClone（v0.9.10 人格克隆）
   // -------------------------------------------------------------------------
+  // WeClone progress notification throttling (avoid flooding notification window)
+  let weCloneProgressLastShow = 0
+  let weCloneProgressLastValue = -1
+  function showWeCloneProgressNotification(p: WeCloneProgressInfo) {
+    const now = Date.now()
+    const isTerminal =
+      p.stage === 'done' || p.stage === 'error' || p.stage === 'cancelled' || p.status === 'done' || p.status === 'error' || p.status === 'cancelled'
+    const progressDiff = Math.abs((p.progress ?? 0) - weCloneProgressLastValue)
+    const timeDiff = now - weCloneProgressLastShow
+    const isGenerateLike = p.stage === 'generate' || p.stage === 'filter'
+    const threshold = isGenerateLike ? 1 : 1
+    if (!isTerminal && weCloneProgressLastValue !== -1 && timeDiff > 3000) {
+      // heartbeat: force notification even if progress unchanged for >3s
+    } else if (!isTerminal && weCloneProgressLastValue !== -1 && progressDiff < threshold && timeDiff < 1000) return
+    weCloneProgressLastShow = now
+    weCloneProgressLastValue = p.progress ?? 0
+    void showNotification(
+      {
+        id: 'weclone-progress',
+        sessionId: 'weport-weclone',
+        title: '人格克隆',
+        content: `${p.stage} ${p.message} ${p.progress}%`,
+        body: `${p.stage} ${p.message} ${p.progress}%`,
+        position: 'top-left',
+        persistent: p.status === 'running',
+        progress: p.progress,
+        channel: 'weclone',
+      },
+      { force: true }
+    )
+  }
+
   const wecloneControllers = new Map<string, AbortController>()
+  ipcMain.handle('weclone:getProgress', () => weCloneService.getProgressSnapshot())
   ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
     const taskId = 'generate'
     if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
@@ -2679,7 +2721,10 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     wecloneControllers.set(taskId, ctrl)
     try {
       return await weCloneService.generateClone(
-        (progress) => mainWindow?.webContents.send('weclone:progress', progress),
+        (progress) => {
+          mainWindow?.webContents.send('weclone:progress', progress)
+          showWeCloneProgressNotification(progress as WeCloneProgressInfo)
+        },
         ctrl.signal,
         opts && typeof opts === 'object' ? opts : {}
       )

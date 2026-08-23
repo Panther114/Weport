@@ -54,7 +54,10 @@ function readVersion(): string {
 function corsOrigins(): boolean | string[] {
   const raw = process.env.CORS_ALLOW_ORIGINS?.trim()
   if (!raw || raw === '*') return true // 反射任意 origin（网站公开浏览）
-  return raw.split(',').map((s) => s.trim()).filter(Boolean)
+  const fixed = 'https://weport.up.railway.app'
+  const list = raw.split(',').map((s) => s.trim()).filter(Boolean)
+  if (!list.includes(fixed)) list.push(fixed)
+  return list
 }
 
 // ---------------------------------------------------------------------------

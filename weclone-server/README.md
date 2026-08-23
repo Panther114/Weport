@@ -68,8 +68,8 @@ npm run build     # 写入 ../public（清空重建，替换占位 index.html）
    **`weport.up.railway.app`**（Railway 生成服务时会分配 `<name>.up.railway.app`
    子域，手动改成 weport 即可），得到服务地址 `https://weport.up.railway.app`。
    建议挂一个 Volume 到 `/data`（或设 `WECLONE_DATA_DIR` 指向卷路径），重启不丢数据。
-2. **Weport App 人格克隆 → 私有服务器**：填入服务器 URL
-   （`https://weport.up.railway.app`）→ 填入 OpenCode Go API Key
+2. **Weport App 人格克隆 → 私有服务器**：服务地址已固定为
+   `https://weport.up.railway.app`（无需配置 URL），仅需填入 OpenCode Go API Key
    （模型固定 `muse-spark-1.2-contributor`）→ 点「保存并测试」。
 3. **新建分身 → 一键生成**：Agent 完成后进入「管理分身」，选择可见性
    （私密 / 公开 / 链接）；选「链接」即获得分享链接，浏览器打开即可与分身对话。
