@@ -337,7 +337,13 @@ fluff, no boilerplate. Create the release with `gh release create` BEFORE the
 CI publish step finishes: release.yml passes `body_path: RELEASE_NOTES.md` with
 default `update_release_body: false`, so a pre-created release keeps its body
 and CI only attaches installers. Tag name must match `package.json` version
-(`v0.9.5` ↔ `0.9.5`) — the workflow fails otherwise.
+(`v0.9.9` ↔ `0.9.9`) — the workflow fails otherwise.
+
+- Release title MUST be `Weport vX.X.X` (e.g. `Weport v0.9.9`), never bare `vX.X.X` with `gh release create vX.X.X --title "Weport vX.X.X"`.
+- Release body MUST contain ONLY that version's section from `RELEASE_NOTES.md`
+  (from `# Weport vX.X.X` until the next `# Weport` heading), never the entire
+  changelog file. Example: extract with `sed -n '/^# Weport v0.9.9$/,/^# Weport /p' RELEASE_NOTES.md | sed '$d'`
+  or pass only the 5–6 bullets for that version to `gh release create --notes` / `gh release edit --notes`. Pushing the full file is a release-notes regression.
 
 ## Reference Repos (on-disk only, never shipped)
 
