@@ -1,8 +1,8 @@
-import { join, dirname, basename } from 'path'
+import { join, dirname, basename, resolve } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, symlinkSync, rmdirSync, realpathSync } from 'fs'
 import { appendFile } from 'fs/promises'
 import { createHash } from 'crypto'
-import { tmpdir } from 'os'
+import { tmpdir, userInfo } from 'os'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
 
@@ -178,6 +178,7 @@ export class WcdbCore {
   private logFlushTimer: ReturnType<typeof setTimeout> | null = null
   private pendingLogLines: string[] = []
   private lastLogTail: string | null = null
+  private lastLogTailPos = 0
   private lastResolvedLogPath: string | null = null
   private lastCursorForceReopenAt = 0
   private readonly maxPendingLogLines = 1200
@@ -415,6 +416,7 @@ export class WcdbCore {
       this.logFlushTimer = null
       void this.flushPendingLogs()
     }, this.logFlushDelayMs)
+    this.logFlushTimer.unref?.()
   }
 
   private getLogFileCandidates(): string[] {
@@ -444,11 +446,21 @@ export class WcdbCore {
     }
 
     console.error('[wcdbCore] flushPendingLogs failed for all candidates:', candidates.join(' | '))
+    // 全部候选路径都写入失败：把未落盘内容放回队首，避免整批日志永久丢失
+    //（下方重试定时器只在本数组仍有内容时才会安排，而新日志到达前 splice 已清空）
+    if (lines.length > 0) {
+      const restored = lines.split('\n').filter(Boolean).map((l) => l + '\n')
+      this.pendingLogLines.unshift(...restored.slice(-this.maxPendingLogLines))
+      while (this.pendingLogLines.length > this.maxPendingLogLines) {
+        this.pendingLogLines.shift()
+      }
+    }
     if (this.pendingLogLines.length > 0 && this.logFlushTimer === null) {
       this.logFlushTimer = setTimeout(() => {
         this.logFlushTimer = null
         void this.flushPendingLogs()
       }, this.logFlushDelayMs)
+      this.logFlushTimer.unref?.()
     }
   }
 
@@ -1071,7 +1083,8 @@ export class WcdbCore {
       this.wcdbCloseMessageCursor = this.lib.func('int32 wcdb_close_message_cursor(int64 handle, int64 cursor)')
 
       // wcdb_status wcdb_get_logs(char** out_json)
-      this.wcdbGetLogs = this.lib.func('int32 wcdb_get_logs(_Out_ void** outJson)')
+      // （仅在上方 try/catch 中绑定一次：此处重复无条件绑定会让旧版 DLL 上
+      // 本应"缺失则降级"的导出变成初始化直接抛错）
 
       // wcdb_status wcdb_exec_query(wcdb_handle handle, const char* db_kind, const char* db_path, const char* sql, char** out_json)
       this.wcdbExecQuery = this.lib.func('int32 wcdb_exec_query(int64 handle, const char* kind, const char* path, const char* sql, _Out_ void** outJson)')
@@ -1422,8 +1435,15 @@ export class WcdbCore {
         return { success: false, error: this.formatInitProtectionError(-3003) }
       }
 
-      // 测试成功：使用 shutdown 清理资源（包括测试句柄）
+      // 测试成功：使用 shutdown 清理资源（包括测试句柄）。
+      // 按与 close() 相同的顺序先停监控/云控/定时器，避免 native 回调在 shutdown 后
+      // 访问已释放资源；同时让后续 open() 能干净地重建。
       // 注意：shutdown 会断开当前活动连接，因此需要在测试后尝试恢复之前的连接
+      const hadMonitor = !!this.monitorCallback
+      try { this.stopMonitor() } catch {}
+      try { this.cloudStop() } catch {}
+      this.stopPeriodicPurge()
+      this.stopLogPolling()
       try {
         this.wcdbShutdown()
         this.handle = null
@@ -1431,6 +1451,11 @@ export class WcdbCore {
         this.currentKey = null
         this.currentWxid = null
         this.initialized = false
+        this.clearHardlinkCaches()
+        this.clearDisplayNameCache()
+        this.clearAvatarUrlCache()
+        this.clearMediaStreamSessionCache()
+        this.clearMediaStreamPageCache()
       } catch (closeErr) {
         console.error('关闭测试数据库时出错:', closeErr)
       }
@@ -1438,10 +1463,15 @@ export class WcdbCore {
       // 恢复测试前的连接（如果之前有活动连接）
       if (hadActiveConnection && prevPath && prevKey) {
         try {
-          await this.open(prevPath, prevKey)
-        } catch {
-          // 恢复失败则保持断开，由调用方处理
+          const ok = await this.open(prevPath, prevKey)
+          if (!ok) this.writeLog(`testConnection restore open failed for ${prevPath}`, true)
+        } catch (e) {
+          this.writeLog(`testConnection restore exception: ${String(e)}`, true)
         }
+      } else if (hadMonitor) {
+        // 无活动连接但之前监控处于活动状态（极少见）：尝试重建监控
+        // 此时无 handle，监控会在下次 open 时由 chatService 重建，此处仅记录
+        this.writeLog('testConnection hadMonitor without active connection — monitor will be re-established on next open', true)
       }
 
       return { success: true, sessionCount: 0 }
@@ -1480,6 +1510,7 @@ export class WcdbCore {
     this.logTimer = setInterval(() => {
       void this.pollLogs()
     }, 2000)
+    this.logTimer.unref?.()
   }
 
   private stopLogPolling(): void {
@@ -1487,7 +1518,12 @@ export class WcdbCore {
       clearInterval(this.logTimer)
       this.logTimer = null
     }
+    if (this.logFlushTimer) {
+      clearTimeout(this.logFlushTimer)
+      this.logFlushTimer = null
+    }
     this.lastLogTail = null
+    this.lastLogTailPos = 0
   }
 
   private async pollLogs(): Promise<void> {
@@ -1504,15 +1540,24 @@ export class WcdbCore {
       }
       const logs = JSON.parse(jsonStr) as string[]
       if (!Array.isArray(logs) || logs.length === 0) return
+      // 断点续传：优先从上一轮尾行出现的位置向后查找，避免 DLL 环形日志缓冲
+      // 中重复行导致旧日志重放；找不到时退回全局查找/全量同步（与旧行为一致）
       let startIdx = 0
       if (this.lastLogTail) {
-        const idx = logs.lastIndexOf(this.lastLogTail)
+        let idx = -1
+        if (this.lastLogTailPos > 0 && this.lastLogTailPos < logs.length) {
+          idx = logs.indexOf(this.lastLogTail, this.lastLogTailPos)
+        }
+        if (idx === -1) {
+          idx = logs.lastIndexOf(this.lastLogTail)
+        }
         if (idx >= 0) startIdx = idx + 1
       }
       for (let i = startIdx; i < logs.length; i += 1) {
         this.writeLog(`wcdb: ${logs[i]}`)
       }
       this.lastLogTail = logs[logs.length - 1]
+      this.lastLogTailPos = logs.length - 1
     } catch (e) {
       // ignore polling errors
     }
@@ -1638,6 +1683,26 @@ export class WcdbCore {
 
   private clearDisplayNameCache(): void {
     this.displayNameCache.clear()
+  }
+
+  private clearAvatarUrlCache(): void {
+    this.avatarUrlCache.clear()
+  }
+
+  private pruneAvatarUrlCache(now = Date.now()): void {
+    const expiresBefore = now - this.avatarCacheTtlMs
+    for (const [key, entry] of this.avatarUrlCache) {
+      if (entry.updatedAt < expiresBefore) this.avatarUrlCache.delete(key)
+    }
+    while (this.avatarUrlCache.size > this.displayNameCacheMaxEntries) {
+      let oldestKey: string | undefined
+      let oldestAt = Number.POSITIVE_INFINITY
+      for (const [key, entry] of this.avatarUrlCache) {
+        if (entry.updatedAt < oldestAt) { oldestAt = entry.updatedAt; oldestKey = key }
+      }
+      if (!oldestKey) break
+      this.avatarUrlCache.delete(oldestKey)
+    }
   }
 
   private writeDisplayNameCache(username: string, displayName: string, now = Date.now()): void {
@@ -1822,40 +1887,86 @@ export class WcdbCore {
    * （如中文 OneDrive 目录），导致 message_db_cache 为 0、openMessageCursor
    * 返回 -3，进而导出/弹窗/防撤回全部失效。此处用 NTFS junction（无需管理员
    * 权限）把账号目录映射到纯 ASCII 路径，仅对 DLL 使用该映射路径。
+   *
+   * 根目录必须自身是纯 ASCII：旧实现放在 userDataPath / tmpdir 下，中文
+   * Windows 用户名的机器上这两个目录本身含非 ASCII（C:\Users\<中文名>\…），
+   * junction 建出来 DLL 依然扫不到（issue #8）。现在优先 ProgramData，
+   * 并按 OS 用户名做命名空间隔离，避免多用户共享机器时互相删除对方的 junction。
    */
+  private asciiJunctionRootCandidates(): string[] {
+    const candidates: string[] = []
+    const push = (value: string | null | undefined) => {
+      if (!value) return
+      try {
+        const resolved = resolve(value)
+        if (!candidates.includes(resolved)) candidates.push(resolved)
+      } catch { /* ignore */ }
+    }
+    if (process.platform === 'win32') {
+      const programData = process.env.ProgramData || process.env.ALLUSERSPROFILE || ''
+      if (programData) {
+        push(join(programData, 'Weport'))
+        push('C:\\ProgramData\\Weport')
+      }
+    }
+    // 兼容回退：旧位置（可能非 ASCII，但聊胜于无）
+    push(this.userDataPath)
+    push(join(tmpdir(), 'wepor-junctions'))
+    return candidates
+  }
+
+  private junctionUserNamespace(): string {
+    try {
+      const name = userInfo().username
+      return `u_${createHash('sha1').update(name).digest('hex').slice(0, 10)}`
+    } catch {
+      return 'u_shared'
+    }
+  }
+
   private asciiPathForDll(accountDir: string): string {
     if (!this.hasNonAscii(accountDir)) return accountDir
     const cached = this.asciiJunctionCache.get(accountDir)
     if (cached) return cached
-    try {
-      const root = this.userDataPath || join(tmpdir(), 'wepor-junctions')
-      const junctionDir = join(root, 'wcdb-junctions')
-      mkdirSync(junctionDir, { recursive: true })
-      const name = `acct_${createHash('sha1').update(accountDir).digest('hex').slice(0, 16)}`
-      const junction = join(junctionDir, name)
-      if (existsSync(junction)) {
-        try {
-          const target = realpathSync(junction)
-          const expect = realpathSync(accountDir)
-          if (target.toLowerCase() === expect.toLowerCase()) {
-            this.asciiJunctionCache.set(accountDir, junction)
-            this.writeLog(`[ascii-junction] reuse ${junction} -> ${accountDir}`, true)
-            return junction
-          }
-          // 目标已移动（如 OneDrive 重定位），删除失效 junction 后重建
-          try { rmdirSync(junction) } catch { /* ignore */ }
-        } catch {
-          // 损坏的 junction，走重建路径
+
+    const failures: string[] = []
+    for (const root of this.asciiJunctionRootCandidates()) {
+      try {
+        const junctionDir = join(root, 'wcdb-junctions', this.junctionUserNamespace())
+        if (this.hasNonAscii(junctionDir)) {
+          failures.push(`${junctionDir} (root non-ascii)`)
+          continue
         }
+        mkdirSync(junctionDir, { recursive: true })
+        const name = `acct_${createHash('sha1').update(accountDir).digest('hex').slice(0, 16)}`
+        const junction = join(junctionDir, name)
+        if (existsSync(junction)) {
+          try {
+            const target = realpathSync(junction)
+            const expect = realpathSync(accountDir)
+            if (target.toLowerCase() === expect.toLowerCase()) {
+              this.asciiJunctionCache.set(accountDir, junction)
+              this.writeLog(`[ascii-junction] reuse ${junction} -> ${accountDir}`, true)
+              return junction
+            }
+            // 目标已移动（如 OneDrive 重定位），删除失效 junction 后重建
+            try { rmdirSync(junction) } catch { /* ignore */ }
+          } catch {
+            // 损坏的 junction，走重建路径
+            try { rmdirSync(junction) } catch { /* ignore */ }
+          }
+        }
+        symlinkSync(accountDir, junction, 'junction')
+        this.asciiJunctionCache.set(accountDir, junction)
+        this.writeLog(`[ascii-junction] created ${junction} -> ${accountDir} (root=${root})`, true)
+        return junction
+      } catch (e) {
+        failures.push(String(e))
       }
-      symlinkSync(accountDir, junction, 'junction')
-      this.asciiJunctionCache.set(accountDir, junction)
-      this.writeLog(`[ascii-junction] created ${junction} -> ${accountDir}`, true)
-      return junction
-    } catch (e) {
-      this.writeLog(`[ascii-junction] failed, falling back to original path: ${String(e)}`, true)
-      return accountDir
     }
+    // 不再静默失败：DLL 在非 ASCII 路径下消息库扫描为空，必须让日志可见
+    this.writeLog(`[ascii-junction] all roots failed (${failures.join(' | ')}), falling back to original path — 消息库扫描预计为空`, true)
+    return accountDir
   }
 
   async open(accountDir: string, hexKey: string): Promise<boolean> {
@@ -1930,6 +2041,7 @@ export class WcdbCore {
       this.currentDbStoragePath = dbStoragePath
       this.initialized = true
       this.clearDisplayNameCache()
+      this.clearAvatarUrlCache()
       this.clearMediaStreamPageCache()
       lastDllInitError = null
       if (this.wcdbSetMyWxid && wxid) {
@@ -1945,6 +2057,19 @@ export class WcdbCore {
       this.startPeriodicPurge()
       this.writeLog(`open ok handle=${handle}`, true)
       await this.dumpDbStatus('open')
+      // 诊断（issue #8）：db_status 的 total_dbs 是搜索索引状态，与消息库无关。
+      // 这里直接列出 DLL 发现的消息库数量，为 0 时给出最常见原因提示。
+      try {
+        const discovered = await this.listMessageDbs()
+        const count = discovered.success ? (discovered.data?.length ?? -1) : -1
+        if (!discovered.success || count === 0) {
+          this.writeLog(`[diag:open] message_dbs discovered=${count}${discovered.error ? ` error=${discovered.error}` : ''} —— 消息库为空：常见原因是账号目录路径含非 ASCII 且 ASCII junction 创建失败（见 [ascii-junction] 日志），或该账号在 db_storage/message 下确无消息库`, true)
+        } else {
+          this.writeLog(`[diag:open] message_dbs discovered=${count}`, true)
+        }
+      } catch (e) {
+        this.writeLog(`[diag:open] listMessageDbs exception: ${String(e)}`, true)
+      }
       await this.runPostOpenDiagnostics(accountDir, dbStoragePath, sessionDbPath, wxid)
       return true
     } catch (e) {
@@ -2003,6 +2128,7 @@ export class WcdbCore {
       this.initialized = false
       this.clearHardlinkCaches()
       this.clearDisplayNameCache()
+      this.clearAvatarUrlCache()
       this.clearMediaStreamSessionCache()
       this.clearMediaStreamPageCache()
       this.stopLogPolling()
@@ -3170,6 +3296,7 @@ export class WcdbCore {
           if (url) {
             resultMap[username] = url
             this.avatarUrlCache.set(username, { url, updatedAt: now })
+            this.pruneAvatarUrlCache(now)
           }
         }
         return { success: true, map: resultMap }
@@ -3210,6 +3337,7 @@ export class WcdbCore {
           resultMap[username] = url
           // 只缓存有效的URL
           this.avatarUrlCache.set(username, { url, updatedAt: now })
+          this.pruneAvatarUrlCache(now)
         }
         // 不缓存空URL,下次可以重新尝试
       }
@@ -3929,14 +4057,20 @@ export class WcdbCore {
   /**
    * 强制重新打开账号连接（绕过路径缓存），用于微信重装后消息数据库刷新失败时的自动恢复。
    * 返回重新打开是否成功。
+   * 与 close() 保持相同的清理顺序：先停监控/云控/定时器，再 shutdown，避免 native 回调
+   * 在 shutdown 后访问已释放资源。重开成功后若之前监控处于活动状态则重新拉起。
    */
   private async forceReopen(): Promise<boolean> {
     if (!this.currentPath || !this.currentKey || !this.currentWxid) return false
     const path = this.currentPath
     const key = this.currentKey
-    const wxid = this.currentWxid
+    const hadMonitor = !!this.monitorCallback
+    const monitorCb = this.monitorCallback
     this.writeLog('forceReopen: clearing cached handle and reopening...', true)
-    // 清空缓存状态，让 open() 真正重新打开
+    try { this.stopMonitor() } catch {}
+    try { this.cloudStop() } catch {}
+    this.stopPeriodicPurge()
+    this.stopLogPolling()
     try { this.wcdbShutdown() } catch { }
     this.handle = null
     this.currentPath = null
@@ -3944,7 +4078,16 @@ export class WcdbCore {
     this.currentWxid = null
     this.currentDbStoragePath = null
     this.initialized = false
-    return this.open(path, key)
+    this.clearHardlinkCaches()
+    this.clearDisplayNameCache()
+    this.clearAvatarUrlCache()
+    this.clearMediaStreamSessionCache()
+    this.clearMediaStreamPageCache()
+    const ok = await this.open(path, key)
+    if (ok && hadMonitor && monitorCb) {
+      try { this.startMonitor(monitorCb) } catch {}
+    }
+    return ok
   }
 
   private shouldRetryCursorAfterNoDb(): boolean {
@@ -3961,14 +4104,16 @@ export class WcdbCore {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      const normalizedBegin = this.normalizeTimestamp(beginTimestamp)
+      const normalizedEnd = this.normalizeTimestamp(endTimestamp)
       const outCursor = [0]
       let result = this.wcdbOpenMessageCursor(
         this.handle,
         sessionId,
         batchSize,
         ascending ? 1 : 0,
-        beginTimestamp,
-        endTimestamp,
+        normalizedBegin,
+        normalizedEnd,
         outCursor
       )
       // result=-3 表示 WCDB_STATUS_NO_MESSAGE_DB：消息数据库缓存为空（常见于微信重装后）

@@ -366,6 +366,7 @@ class ChatService {
   private connected = false
   private readonly dbMonitorListeners = new Set<(type: string, json: string) => void>()
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
+  private messageCursorHostGeneration: number | null = null
   private messageCursorMutex: boolean = false
   private readonly messageBatchDefault = 50
   private readonly messageCursorSessionLimit = 8
@@ -760,6 +761,19 @@ class ChatService {
       if (sessionId === activeSessionId) continue
       await this.closeMessageCursorBySession(sessionId)
     }
+  }
+
+  private ensureCursorsValid(): void {
+    try {
+      const gen = (wcdbService as any).getHostGeneration?.() ?? 0
+      if (this.messageCursorHostGeneration !== gen) {
+        for (const state of this.messageCursors.values()) {
+          wcdbService.closeMessageCursor(state.cursor).catch(() => {})
+        }
+        this.messageCursors.clear()
+        this.messageCursorHostGeneration = gen
+      }
+    } catch {}
   }
 
   close(): void {
@@ -2353,6 +2367,7 @@ class ChatService {
       if (!connectResult.success) {
         return { success: false, error: connectResult.error || '数据库未连接' }
       }
+      this.ensureCursorsValid()
 
       const requestLimit = Math.max(1, Math.floor(limit || this.messageBatchDefault))
 

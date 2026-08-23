@@ -197,6 +197,9 @@ export default function App() {
   const [showKey, setShowKey] = useState(false)
   const [keyStatus, setKeyStatus] = useState('')
   const [keyHookReady, setKeyHookReady] = useState(false)
+  const [imageKeyStatus, setImageKeyStatus] = useState('')
+  const [imageKeysOk, setImageKeysOk] = useState(false)
+  const loadKeySeqRef = useRef(0)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
   const [progress, setProgress] = useState<any | null>(null)
@@ -400,6 +403,54 @@ export default function App() {
     }
   }, [api, pushToast])
 
+  const loadAccountKey = useCallback(async (wxid: string) => {
+    const seq = ++loadKeySeqRef.current
+    if (!wxid) {
+      setDecryptKey('')
+      setImageKeysOk(false)
+      return
+    }
+    try {
+      const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
+      if (seq !== loadKeySeqRef.current) return
+      const cfg = wxidConfigs[wxid]
+      const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      if (seq !== loadKeySeqRef.current) return
+      setDecryptKey(key)
+      // 图片密钥状态（issue #9a）：aesKey 非空视为已配置（xorKey 可合法为 0）。
+      // 与主进程 getImageKeysForCurrentWxid 一致：账号级缺省时回退全局配置。
+      let imageOk = Boolean(cfg?.imageAesKey)
+      if (!imageOk) {
+        try {
+          const globalAes = await api.config.get('imageAesKey')
+          if (seq !== loadKeySeqRef.current) return
+          imageOk = Boolean(globalAes)
+        } catch { /* noop */ }
+      }
+      if (seq !== loadKeySeqRef.current) return
+      setImageKeysOk(imageOk)
+      // 全局 decryptKey 必须与当前账号一致，导出/后端连接都读全局配置；
+      // 只改 React 状态会让「界面显示 A 账号密钥、实际用 B 账号密钥」的错位状态出现。
+      // 注意：仅当与全局配置确实不同才写回——启动加载时两者通常已一致，
+      // 无脑写会触发主进程 config:set → close → reconnect 循环（连接抖动）。
+      if (key) {
+        try {
+          const globalKey = await api.config.get('decryptKey')
+          if (globalKey !== key) void persist({ decryptKey: key })
+        } catch { /* noop */ }
+      }
+    } catch {
+      setDecryptKey('')
+    }
+  }, [api, persist])
+
+  const saveAccountKey = useCallback(async (wxid: string, key: string) => {
+    if (!wxid || !key) return
+    try {
+      await api.config.updateWxidEntry(wxid, { decryptKey: key, updatedAt: Date.now() })
+    } catch { /* noop */ }
+  }, [api])
+
   const refreshAccounts = useCallback(async (path: string) => {
     if (!path.trim()) {
       setAccounts([])
@@ -410,7 +461,11 @@ export default function App() {
       const list = await api.dbPath.scanWxids(path.trim())
       setAccounts(list || [])
       if (list?.length) {
-        setSelectedWxid((prev) => (list.some((a) => a.wxid === prev) ? prev : list[0].wxid))
+        // 自动切换选中账号时必须同步加载该账号的密钥状态，否则 decryptKey /
+        // imageKeysOk 仍停留在旧账号上（导出拦截、密钥展示全部错位）。
+        const chosen = list.some((a) => a.wxid === selectedWxid) ? selectedWxid : list[0].wxid
+        setSelectedWxid(chosen)
+        if (chosen !== selectedWxid) void loadAccountKey(chosen)
         pushToast('ok', `找到 ${list.length} 个账号`, path.trim(), 3200)
       } else {
         setSelectedWxid('')
@@ -421,7 +476,7 @@ export default function App() {
       setSelectedWxid('')
       pushToast('err', '扫描账号失败', String(e))
     }
-  }, [api, pushToast])
+  }, [api, pushToast, selectedWxid, loadAccountKey])
 
   const detectDb = useCallback(async () => {
     setBusy(true)
@@ -444,39 +499,51 @@ export default function App() {
     }
   }, [api, pushToast, refreshAccounts, persist])
 
-  const loadAccountKey = useCallback(async (wxid: string) => {
-    if (!wxid) {
-      setDecryptKey('')
+  // issue #9a：图片密钥提取（kvcomm 缓存 → 内存扫描兜底），成功后按账号持久化
+  const extractImageKey = useCallback(async () => {
+    if (busy) return
+    if (!selectedWxid) {
+      pushToast('err', '请先选择要导出的账号')
       return
     }
-    try {
-      const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
-      const cfg = wxidConfigs[wxid]
-      const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
-      setDecryptKey(key)
-      // 全局 decryptKey 必须与当前账号一致，导出/后端连接都读全局配置；
-      // 只改 React 状态会让「界面显示 A 账号密钥、实际用 B 账号密钥」的错位状态出现。
-      // 注意：仅当与全局配置确实不同才写回——启动加载时两者通常已一致，
-      // 无脑写会触发主进程 config:set → close → reconnect 循环（连接抖动）。
-      if (key) {
-        try {
-          const globalKey = await api.config.get('decryptKey')
-          if (globalKey !== key) void persist({ decryptKey: key })
-        } catch { /* noop */ }
-      }
-    } catch {
-      setDecryptKey('')
+    if (!dbPath.trim()) {
+      // 无 dbPath 时 kvcomm 路径无法校验密钥归属（keyService 会退化为
+      // candidates[0] 猜测），内存扫描也找不到 *_t.dat 模板——直接拦截。
+      pushToast('err', '请先选择微信数据目录', '获取图片密钥需要数据目录来校验密钥归属')
+      return
     }
-  }, [api, persist])
-
-  const saveAccountKey = useCallback(async (wxid: string, key: string) => {
-    if (!wxid || !key) return
+    setBusy(true)
+    setBusyLabel('正在获取图片密钥…')
+    setImageKeyStatus('正在从微信缓存读取图片密钥…')
     try {
-      const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
-      wxidConfigs[wxid] = { decryptKey: key, updatedAt: Date.now() }
-      void api.config.set('wxidConfigs', wxidConfigs)
-    } catch { /* noop */ }
-  }, [api])
+      let result = await api.key.autoGetImageKey(dbPath || undefined, selectedWxid)
+      if (!result.success) {
+        setImageKeyStatus('缓存读取失败，尝试内存扫描（请在微信中打开几张图片大图）…')
+        result = await api.key.scanImageKeyFromMemory(dbPath || '')
+      }
+      if (result.success && typeof result.xorKey === 'number' && result.aesKey) {
+        await api.config.updateWxidEntry(selectedWxid, { imageXorKey: result.xorKey, imageAesKey: result.aesKey, updatedAt: Date.now() })
+        setImageKeysOk(true)
+        if (result.verified === false) {
+          // keyService 未能用 *_t.dat 模板校验密钥归属（如目录里还没有图片缓存），
+          // 密钥可能属于别的账号——明确提示而不是静默当作成功。
+          pushToast('info', '图片密钥已保存（未校验）', '未能确认密钥属于当前账号；若导出图片仍失败，请先在微信中查看几张图片后重新获取', 12000)
+        } else {
+          pushToast('ok', '图片密钥获取成功', '现在可以导出图片了')
+        }
+      } else if (result.success) {
+        pushToast('err', '图片密钥不完整', '未取得完整的 XOR/AES 密钥，请重试或使用内存扫描')
+      } else {
+        pushToast('err', '图片密钥获取失败', result.error || '请先在微信中查看几张图片后重试', 10000)
+      }
+    } catch (e) {
+      pushToast('err', '图片密钥获取失败', String(e), 10000)
+    } finally {
+      setBusy(false)
+      setBusyLabel('')
+      setImageKeyStatus('')
+    }
+  }, [api, busy, selectedWxid, dbPath, pushToast])
 
   const selectAccount = useCallback((wxid: string) => {
     setSelectedWxid(wxid)
@@ -580,6 +647,9 @@ export default function App() {
         if (payload.message.includes('密钥获取成功')) {
           setKeyHookReady(false)
         }
+      }),
+      api.key.onImageKeyStatus((payload) => {
+        setImageKeyStatus(payload.message)
       }),
       api.export.onProgress((payload) => {
         setProgress(payload)
@@ -733,6 +803,12 @@ export default function App() {
     }
     if (exportSelectionMode === 'selected' && selectedExportSessionIds.size === 0) {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
+      return
+    }
+    // issue #9a：Windows 上图片 .dat 需要图片密钥，缺失时导出只会得到 [图片] 占位符。
+    // 提前拦截并指引导出密钥（macOS 图片为明文，无需密钥）。
+    if (exportMedia.images && api.process.platform === 'win32' && !imageKeysOk) {
+      pushToast('err', '尚未配置图片密钥', '请先点击「获取图片密钥」，否则导出的图片将全部失败', 10000)
       return
     }
 
@@ -1608,6 +1684,23 @@ export default function App() {
                   </label>
                 )}
               </div>
+              {exportMedia.images && api.process.platform === 'win32' && (
+                <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => void extractImageKey()}
+                    disabled={busy}
+                  >
+                    {imageKeysOk ? '重新获取图片密钥' : '获取图片密钥'}
+                  </button>
+                  <span className="hint" style={{ margin: 0 }}>
+                    {imageKeyStatus || (imageKeysOk
+                      ? '图片密钥已配置（按账号保存）'
+                      : '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）')}
+                  </span>
+                </div>
+              )}
               <p className="hint" style={{ marginTop: 6 }}>
                 不勾选则仅导出文字消息（默认）。导出媒体时会同时导出对应文字消息。
               </p>

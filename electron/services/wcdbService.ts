@@ -23,17 +23,33 @@ export class WcdbService {
   private userDataPath: string | null = null
   private logEnabled = false
   private monitorListener: ((type: string, json: string) => void) | null = null
+  private hostGeneration = 0
+  private lastSpawnAt = 0
+  private consecutiveFastFailures = 0
 
   constructor() {}
 
   /**
    * 初始化 WCDB 宿主进程
    */
+  getHostGeneration(): number {
+    return this.hostGeneration
+  }
+
   private initWorker() {
     if (this.worker) return
 
+    // 背压：连续快死快拉（<10s 内）超过 3 次则指数退避，避免缺失运行库时的无限拉起循环
+    const now = Date.now()
+    if (this.consecutiveFastFailures >= 3) {
+      const backoffMs = Math.min(30000, 1000 * Math.pow(2, this.consecutiveFastFailures - 3))
+      if (now - this.lastSpawnAt < backoffMs) return
+    }
+    this.lastSpawnAt = now
+
     try {
       this.worker = new WcdbHostClient()
+      this.hostGeneration++
 
       const child = this.worker
       child.on('message', (msg: any) => {
@@ -56,7 +72,9 @@ export class WcdbService {
       })
 
       child.on('error', (err) => {
-        // 宿主进程发生错误，需要 reject 所有 pending promises
+        // 宿主进程发生错误，需要 reject 所有 pending promises。
+        // 构建阶段失败（如硬链接创建被拦截）：worker 指向已死实例，
+        // 置 null 允许下次调用重建（否则永久“不可用”）。
         console.error('WCDB 宿主进程错误:', err)
         const errorMsg = err instanceof Error ? err.message : String(err)
         for (const [id, p] of this.pending) {
@@ -64,14 +82,20 @@ export class WcdbService {
           p.reject(new Error(`WCDB 宿主进程错误: ${errorMsg}`))
         }
         this.pending.clear()
+        if (this.worker === child) this.worker = null
       })
 
       child.on('exit', (code) => {
         // 宿主进程退出，无论退出码都 reject 在途请求：
         // 退出码 0 也可能在请求尚未完成时发生（如被外部杀进程），
         // 挂着的请求若只靠 180s 超时兜底会长时间假死。
+        const lifetimeMs = Date.now() - this.lastSpawnAt
+        if (lifetimeMs < 10000) this.consecutiveFastFailures++
+        else this.consecutiveFastFailures = 0
         if (code !== 0) {
           console.error('WCDB 宿主进程异常退出，退出码:', code)
+        } else if (this.pending.size > 0) {
+          this.consecutiveFastFailures = 0
         }
         const errorMsg = code !== 0
           ? `WCDB 宿主进程异常退出 (退出码: ${code})。可能是数据服务加载失败，请检查是否安装了 Visual C++ Redistributable。`
@@ -102,13 +126,13 @@ export class WcdbService {
   /**
    * 发送消息到 WCDB 宿主进程并等待响应
    */
-  private callWorker<T>(type: string, payload: any = {}): Promise<T> {
+  private callWorker<T>(type: string, payload: any = {}, opts?: { timeoutMs?: number }): Promise<T> {
     if (!this.worker) this.initWorker()
     if (!this.worker) return Promise.reject(new Error('WCDB 宿主进程不可用'))
 
     return new Promise((resolve, reject) => {
       const id = ++this.messageId
-      const timeoutMs = Number(process.env.WEPORT_WCDB_TIMEOUT_MS || 180_000)
+      const timeoutMs = opts?.timeoutMs ?? Number(process.env.WEPORT_WCDB_TIMEOUT_MS || 180_000)
       const timer = setTimeout(() => {
         const p = this.pending.get(id)
         if (p) {
@@ -119,7 +143,15 @@ export class WcdbService {
         }
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
-      this.worker!.postMessage({ id, type, payload })
+      const sent = this.worker!.postMessage({ id, type, payload })
+      if (sent === false) {
+        const p = this.pending.get(id)
+        if (p) {
+          this.pending.delete(id)
+          if (p.timer) clearTimeout(p.timer)
+          p.reject(new Error(`WCDB 通道已关闭 (${type})`))
+        }
+      }
     })
   }
 
@@ -433,15 +465,15 @@ export class WcdbService {
   }
 
   async exportTableSnapshot(kind: string, dbPath: string, tableName: string, outputPath: string): Promise<{ success: boolean; rows?: number; columns?: number; error?: string }> {
-    return this.callWorker('exportTableSnapshot', { kind, dbPath, tableName, outputPath })
+    return this.callWorker('exportTableSnapshot', { kind, dbPath, tableName, outputPath }, { timeoutMs: 600_000 })
   }
 
   async importTableSnapshot(kind: string, dbPath: string, tableName: string, inputPath: string): Promise<{ success: boolean; rows?: number; inserted?: number; ignored?: number; malformed?: number; columns?: number; error?: string }> {
-    return this.callWorker('importTableSnapshot', { kind, dbPath, tableName, inputPath })
+    return this.callWorker('importTableSnapshot', { kind, dbPath, tableName, inputPath }, { timeoutMs: 600_000 })
   }
 
   async importTableSnapshotWithSchema(kind: string, dbPath: string, tableName: string, inputPath: string, createTableSql: string): Promise<{ success: boolean; rows?: number; inserted?: number; ignored?: number; malformed?: number; columns?: number; error?: string }> {
-    return this.callWorker('importTableSnapshotWithSchema', { kind, dbPath, tableName, inputPath, createTableSql })
+    return this.callWorker('importTableSnapshotWithSchema', { kind, dbPath, tableName, inputPath, createTableSql }, { timeoutMs: 600_000 })
   }
 
   async getMessageTableTimeRange(dbPath: string, tableName: string): Promise<{ success: boolean; data?: any; error?: string }> {

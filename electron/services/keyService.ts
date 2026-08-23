@@ -528,23 +528,32 @@ export class KeyService {
     if (!this.ensureUser32()) return false
     let requested = false
 
+    // 注意：koffi.register 的回调从原生代码（EnumWindows 等）调用，JS 异常无法
+    // 穿越 FFI 边界，未捕获会直接终止进程（表现为闪退）。回调体内一律 try/catch。
     const enumWindowsCallback = this.koffi.register((hWnd: any, lParam: any) => {
-      if (!this.IsWindowVisible(hWnd)) return true
-      const title = this.getWindowTitle(hWnd)
-      const className = this.getClassName(hWnd)
-      const classLower = (className || '').toLowerCase()
-      const isWeChatWindow = this.isWeChatWindowTitle(title) || classLower.includes('wechat') || classLower.includes('weixin')
-      if (!isWeChatWindow) return true
-
-      requested = true
       try {
-        this.PostMessageW?.(hWnd, this.WM_CLOSE, 0, 0)
-      } catch { }
-      return true
+        if (!this.IsWindowVisible(hWnd)) return true
+        const title = this.getWindowTitle(hWnd)
+        const className = this.getClassName(hWnd)
+        const classLower = (className || '').toLowerCase()
+        const isWeChatWindow = this.isWeChatWindowTitle(title) || classLower.includes('wechat') || classLower.includes('weixin')
+        if (!isWeChatWindow) return true
+
+        requested = true
+        try {
+          this.PostMessageW?.(hWnd, this.WM_CLOSE, 0, 0)
+        } catch { }
+        return true
+      } catch {
+        return true
+      }
     }, this.WNDENUMPROC_PTR)
 
-    this.EnumWindows(enumWindowsCallback, 0)
-    this.koffi.unregister(enumWindowsCallback)
+    try {
+      this.EnumWindows(enumWindowsCallback, 0)
+    } finally {
+      this.koffi.unregister(enumWindowsCallback)
+    }
 
     return requested
   }
@@ -594,22 +603,29 @@ export class KeyService {
       let foundPid: number | null = null
 
       const enumWindowsCallback = this.koffi.register((hWnd: any, lParam: any) => {
-        if (!this.IsWindowVisible(hWnd)) return true
-        const title = this.getWindowTitle(hWnd)
-        if (!this.isWeChatWindowTitle(title)) return true
+        try {
+          if (!this.IsWindowVisible(hWnd)) return true
+          const title = this.getWindowTitle(hWnd)
+          if (!this.isWeChatWindowTitle(title)) return true
 
-        const pidBuf = Buffer.alloc(4)
-        this.GetWindowThreadProcessId(hWnd, pidBuf)
-        const pid = pidBuf.readUInt32LE(0)
-        if (pid) {
-          foundPid = pid
-          return false
+          const pidBuf = Buffer.alloc(4)
+          this.GetWindowThreadProcessId(hWnd, pidBuf)
+          const pid = pidBuf.readUInt32LE(0)
+          if (pid) {
+            foundPid = pid
+            return false
+          }
+          return true
+        } catch {
+          return true
         }
-        return true
       }, this.WNDENUMPROC_PTR)
 
-      this.EnumWindows(enumWindowsCallback, 0)
-      this.koffi.unregister(enumWindowsCallback)
+      try {
+        this.EnumWindows(enumWindowsCallback, 0)
+      } finally {
+        this.koffi.unregister(enumWindowsCallback)
+      }
 
       if (foundPid) return foundPid
       await new Promise(r => setTimeout(r, 500))
@@ -620,13 +636,20 @@ export class KeyService {
   private collectChildWindowInfos(parent: any): Array<{ title: string; className: string }> {
     const children: Array<{ title: string; className: string }> = []
     const enumChildCallback = this.koffi.register((hChild: any, lp: any) => {
-      const title = this.getWindowTitle(hChild).trim()
-      const className = this.getClassName(hChild).trim()
-      children.push({ title, className })
-      return true
+      try {
+        const title = this.getWindowTitle(hChild).trim()
+        const className = this.getClassName(hChild).trim()
+        children.push({ title, className })
+        return true
+      } catch {
+        return true
+      }
     }, this.WNDENUMPROC_PTR)
-    this.EnumChildWindows(parent, enumChildCallback, 0)
-    this.koffi.unregister(enumChildCallback)
+    try {
+      this.EnumChildWindows(parent, enumChildCallback, 0)
+    } finally {
+      this.koffi.unregister(enumChildCallback)
+    }
     return children
   }
 
@@ -685,32 +708,39 @@ export class KeyService {
     let loginRequired = false
 
     const enumWindowsCallback = this.koffi.register((hWnd: any, _lParam: any) => {
-      if (!this.IsWindowVisible(hWnd)) return true
-      const title = this.getWindowTitle(hWnd)
-      if (!this.isWeChatWindowTitle(title)) return true
+      try {
+        if (!this.IsWindowVisible(hWnd)) return true
+        const title = this.getWindowTitle(hWnd)
+        if (!this.isWeChatWindowTitle(title)) return true
 
-      const pidBuf = Buffer.alloc(4)
-      this.GetWindowThreadProcessId(hWnd, pidBuf)
-      const windowPid = pidBuf.readUInt32LE(0)
-      if (windowPid !== pid) return true
+        const pidBuf = Buffer.alloc(4)
+        this.GetWindowThreadProcessId(hWnd, pidBuf)
+        const windowPid = pidBuf.readUInt32LE(0)
+        if (windowPid !== pid) return true
 
-      if (this.isLoginRelatedText(title)) {
-        loginRequired = true
-        return false
-      }
-
-      const children = this.collectChildWindowInfos(hWnd)
-      for (const child of children) {
-        if (this.isLoginRelatedText(child.title) || this.isLoginRelatedText(child.className)) {
+        if (this.isLoginRelatedText(title)) {
           loginRequired = true
           return false
         }
+
+        const children = this.collectChildWindowInfos(hWnd)
+        for (const child of children) {
+          if (this.isLoginRelatedText(child.title) || this.isLoginRelatedText(child.className)) {
+            loginRequired = true
+            return false
+          }
+        }
+        return true
+      } catch {
+        return true
       }
-      return true
     }, this.WNDENUMPROC_PTR)
 
-    this.EnumWindows(enumWindowsCallback, 0)
-    this.koffi.unregister(enumWindowsCallback)
+    try {
+      this.EnumWindows(enumWindowsCallback, 0)
+    } finally {
+      this.koffi.unregister(enumWindowsCallback)
+    }
 
     return loginRequired
   }
@@ -721,25 +751,32 @@ export class KeyService {
     while (Date.now() - startTime < timeoutMs) {
       let ready = false
       const enumWindowsCallback = this.koffi.register((hWnd: any, lParam: any) => {
-        if (!this.IsWindowVisible(hWnd)) return true
-        const title = this.getWindowTitle(hWnd)
-        if (!this.isWeChatWindowTitle(title)) return true
+        try {
+          if (!this.IsWindowVisible(hWnd)) return true
+          const title = this.getWindowTitle(hWnd)
+          if (!this.isWeChatWindowTitle(title)) return true
 
-        const pidBuf = Buffer.alloc(4)
-        this.GetWindowThreadProcessId(hWnd, pidBuf)
-        const windowPid = pidBuf.readUInt32LE(0)
-        if (windowPid !== pid) return true
+          const pidBuf = Buffer.alloc(4)
+          this.GetWindowThreadProcessId(hWnd, pidBuf)
+          const windowPid = pidBuf.readUInt32LE(0)
+          if (windowPid !== pid) return true
 
-        const children = this.collectChildWindowInfos(hWnd)
-        if (this.hasReadyComponents(children)) {
-          ready = true
-          return false
+          const children = this.collectChildWindowInfos(hWnd)
+          if (this.hasReadyComponents(children)) {
+            ready = true
+            return false
+          }
+          return true
+        } catch {
+          return true
         }
-        return true
       }, this.WNDENUMPROC_PTR)
 
-      this.EnumWindows(enumWindowsCallback, 0)
-      this.koffi.unregister(enumWindowsCallback)
+      try {
+        this.EnumWindows(enumWindowsCallback, 0)
+      } finally {
+        this.koffi.unregister(enumWindowsCallback)
+      }
 
       if (ready) return true
       await new Promise(r => setTimeout(r, 500))
@@ -778,7 +815,15 @@ export class KeyService {
         continue
       }
 
-      const ok = this.initHook(pid)
+      // initHook 调用原生 wx_key.dll：koffi 层的 JS 级异常也要走结构化错误返回，
+      // 否则 renderer 只会看到泛化的 handler 错误文本，丢失日志与友好提示。
+      let ok = false
+      try {
+        ok = this.initHook(pid)
+      } catch (e) {
+        try { this.cleanupDbKeyHook() } catch { /* ignore */ }
+        return { success: false, error: `初始化 Hook 异常: ${e instanceof Error ? e.message : String(e)}`, logs }
+      }
       if (!ok) {
         if (!await this.isWeChatPidActive(pid)) {
           this.cleanupDbKeyHook()
@@ -861,7 +906,8 @@ export class KeyService {
       candidates.push(v)
     }
 
-    if (wxidParam && wxidParam.startsWith('wxid_')) pushUnique(wxidParam)
+    // 接受任意非空 wxidParam（wxid_ 前缀或自定义微信号），避免自定义账号被静默丢弃
+    if (wxidParam) pushUnique(wxidParam)
 
     if (manualDir) {
       const normalized = manualDir.replace(/[\\/]+$/, '')
@@ -915,16 +961,22 @@ export class KeyService {
       return { success: false, error: '解析密钥数据失败' }
     }
 
-    // 从任意账号提取 code 列表（code 来自 kvcomm，与 wxid 无关，所有账号都一样）
+    // 从任意账号提取 code 列表（code 来自 kvcomm，与 wxid 无关，所有账号都一样）。
+    // 优先使用与调用方选定账号匹配的 DLL 条目，避免多账号机器上取错账号的 codes。
     const accounts: any[] = parsed.accounts ?? []
     if (!accounts.length || !accounts[0]?.keys?.length) {
       return { success: false, error: '未找到有效的密钥码（kvcomm 缓存为空）' }
     }
 
-    const codes: number[] = accounts[0].keys.map((k: any) => k.code)
+    const wxidCandidatesPre = await this.collectWxidCandidates(manualDir, wxidParam)
+    let codes: number[] = accounts[0].keys.map((k: any) => k.code)
+    for (const cand of wxidCandidatesPre) {
+      const hit = accounts.find((a: any) => String(a.wxid || '').toLowerCase() === String(cand || '').toLowerCase())
+      if (hit?.keys?.length) { codes = hit.keys.map((k: any) => k.code); break }
+    }
     console.log('[ImageKey] codes:', codes, 'DLL wxids:', accounts.map((a: any) => a.wxid))
 
-    const wxidCandidates = await this.collectWxidCandidates(manualDir, wxidParam)
+    const wxidCandidates = wxidCandidatesPre
     let verifyCiphertext: Buffer | null = null
     if (manualDir && existsSync(manualDir)) {
       const template = await this._findTemplateData(manualDir, 32)
@@ -982,8 +1034,8 @@ export class KeyService {
 
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
-      // 2. 找微信 PID
-      const pid = await this.findWeChatPid()
+      // 2. 找微信 PID（每轮重查，避免 60s 窗口内进程重启导致持续失败）
+      let pid = await this.findWeChatPid()
       if (!pid) return { success: false, error: '微信进程未运行，请先启动微信' }
 
       onProgress?.(`已找到微信进程 PID=${pid}，正在扫描内存...`)
@@ -994,6 +1046,9 @@ export class KeyService {
       while (Date.now() < deadline) {
         scanCount++
         onProgress?.(`第 ${scanCount} 次扫描内存，请在微信中打开图片大图...`)
+        // 每轮重查 PID，兼容微信崩溃/重启场景
+        const currentPid = await this.findWeChatPid()
+        if (currentPid) pid = currentPid
         const aesKey = await this._scanMemoryForAesKey(pid, ciphertext, onProgress)
         if (aesKey) {
           onProgress?.('密钥获取成功')
@@ -1017,21 +1072,36 @@ export class KeyService {
     const { join } = await import('path')
     const V2_MAGIC = Buffer.from([0x07, 0x08, 0x56, 0x32, 0x08, 0x07])
 
-    // 递归收集 *_t.dat 文件
-    const collect = (dir: string, results: string[], maxFiles: number) => {
+    const trimmedDir = String(userDir || '').trim()
+    if (!trimmedDir) return { ciphertext: null, xorKey: null }
+    // 拒绝 UNC/网络路径与超长路径（避免主进程同步遍历挂起或触发 SMB 凭据面）
+    if (trimmedDir.startsWith('\\\\')) return { ciphertext: null, xorKey: null }
+    try {
+      const s = statSync(trimmedDir)
+      if (!s.isDirectory()) return { ciphertext: null, xorKey: null }
+    } catch { return { ciphertext: null, xorKey: null } }
+
+    // 递归收集 *_t.dat 文件（带深度与条目上限，避免整盘遍历导致假死）
+    let visitedDirs = 0
+    const MAX_DIRS = 8000
+    const MAX_DEPTH = 8
+    const collect = (dir: string, results: string[], maxFiles: number, depth = 0) => {
       if (results.length >= maxFiles) return
+      if (depth > MAX_DEPTH) return
+      if (visitedDirs++ > MAX_DIRS) return
       try {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
           if (results.length >= maxFiles) break
+          if (visitedDirs > MAX_DIRS) break
           const full = join(dir, entry.name)
-          if (entry.isDirectory()) collect(full, results, maxFiles)
+          if (entry.isDirectory()) collect(full, results, maxFiles, depth + 1)
           else if (entry.isFile() && entry.name.endsWith('_t.dat')) results.push(full)
         }
       } catch { /* 忽略无权限目录 */ }
     }
 
     const files: string[] = []
-    collect(userDir, files, limit)
+    collect(trimmedDir, files, limit)
 
     // 按修改时间降序
     files.sort((a, b) => {
@@ -1043,6 +1113,11 @@ export class KeyService {
 
     for (const f of files.slice(0, 32)) {
       try {
+        // 超大文件跳过（>10MB 可能是误命名或异常文件，避免 OOM）
+        try {
+          const st = statSync(f)
+          if (st.size > 10 * 1024 * 1024) continue
+        } catch { continue }
         const data = readFileSync(f)
         if (data.length < 8) continue
 
@@ -1093,6 +1168,7 @@ export class KeyService {
     try {
       // 枚举 RW 内存区域
       const regions: Array<[number, number]> = []
+      let skippedLarge = 0
       let addr = 0
       const mbi = Buffer.alloc(MBI_SIZE)
 
@@ -1115,9 +1191,12 @@ export class KeyService {
         if (state === MEM_COMMIT &&
             protect !== PAGE_NOACCESS &&
             (protect & PAGE_GUARD) === 0 &&
-            (protect & RW_FLAGS) !== 0 &&
-            size <= 50 * 1024 * 1024) {
-          regions.push([base, size])
+            (protect & RW_FLAGS) !== 0) {
+          if (size <= 50 * 1024 * 1024) {
+            regions.push([base, size])
+          } else {
+            skippedLarge++
+          }
         }
         const next = base + size
         if (next <= addr) break
@@ -1125,7 +1204,11 @@ export class KeyService {
       }
 
       const totalMB = regions.reduce((s, [, sz]) => s + sz, 0) / 1024 / 1024
-      onProgress?.(`扫描 ${regions.length} 个 RW 区域 (${totalMB.toFixed(0)} MB)...`)
+      if (skippedLarge > 0) {
+        onProgress?.(`扫描 ${regions.length} 个 RW 区域 (${totalMB.toFixed(0)} MB)，已跳过 ${skippedLarge} 个 >50MB 超大区域`)
+      } else {
+        onProgress?.(`扫描 ${regions.length} 个 RW 区域 (${totalMB.toFixed(0)} MB)...`)
+      }
 
       const CHUNK = 4 * 1024 * 1024
       const OVERLAP = 65
@@ -1139,6 +1222,7 @@ export class KeyService {
 
         let offset = 0
         let trailing: Buffer | null = null
+        let chunkIdx = 0
 
         while (offset < size) {
           const chunkSize = Math.min(CHUNK, size - offset)
@@ -1151,14 +1235,19 @@ export class KeyService {
 
           // 搜索 ASCII 32字节密钥
           const key = this._searchAsciiKey(data, ciphertext)
-          if (key) { this.CloseHandle(hProcess); return key }
+          if (key) { return key }
 
-          // 搜索 UTF-16LE 32字节密钥
+          // 搜索 UTF-16LE 32字节密钥（每 4 块让出一次事件循环，避免主进程长时间冻结）
+          // 注：UTF-16 密钥罕见，优先 ASCII 可稍快；此处合并报告一次
           const key16 = this._searchUtf16Key(data, ciphertext)
-          if (key16) { this.CloseHandle(hProcess); return key16 }
+          if (key16) { return key16 }
 
           trailing = data.subarray(Math.max(0, data.length - OVERLAP))
           offset += chunkSize
+          chunkIdx++
+          if (chunkIdx % 4 === 0) {
+            await new Promise(r => setTimeout(r, 0))
+          }
         }
       }
 

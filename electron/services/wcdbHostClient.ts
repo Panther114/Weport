@@ -106,7 +106,9 @@ export class WcdbHostClient extends EventEmitter {
       WEFLOW_WORKER: '1',
       WEFLOW_USER_DATA_PATH: process.env.WEPORT_USER_DATA_PATH || '',
       WEFLOW_CONFIG_CWD: process.env.WEPORT_USER_DATA_PATH || '',
-      PATH: [...extraPathParts, process.env.PATH || ''].filter(Boolean).join(delimiter)
+      PATH: [...extraPathParts, process.env.PATH || ''].filter(Boolean).join(delimiter),
+      // 兼容 wcdbCore.getDllPath() 探测 WCDB_RESOURCES_PATH（历史仅 annualReportWorker 设置）
+      WCDB_RESOURCES_PATH: process.env.WEPORT_RESOURCES_PATH || resourcesPath || ''
     }
     // 打包版：koffi 不在脚本的 node_modules 走查链上（resources/host/libs，
     // 见 scripts/prepare-host-bundle.cjs），用 NODE_PATH 补解析；dev 走项目
@@ -140,12 +142,17 @@ export class WcdbHostClient extends EventEmitter {
     })
   }
 
-  postMessage(msg: any): void {
+  postMessage(msg: any): boolean {
     if (!this.child || this.child.killed) {
       this.emit('error', new Error('WCDB 宿主进程不可用'))
-      return
+      return false
     }
-    this.child.send(msg)
+    try {
+      return this.child.send(msg)
+    } catch (e) {
+      this.emit('error', e instanceof Error ? e : new Error(String(e)))
+      return false
+    }
   }
 
   /** 同步强杀宿主进程（退出兜底路径使用：app.exit 会等待 IPC 子进程回收） */

@@ -33,6 +33,7 @@ interface ElectronApi {
     get: (key: string) => Promise<any>
     set: (key: string, value: any) => Promise<{ success: boolean }>
     clear: () => Promise<{ success: boolean }>
+    updateWxidEntry: (wxid: string, patch: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>
   }
   notification: {
     show: (data: any) => Promise<void>
@@ -86,6 +87,9 @@ interface ElectronApi {
   key: {
     autoGetDbKey: () => Promise<{ success: boolean; key?: string; error?: string; logs?: string[] }>
     onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => () => void
+    autoGetImageKey: (manualDir?: string, wxid?: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }>
+    scanImageKeyFromMemory: (userDir: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; error?: string }>
+    onImageKeyStatus: (callback: (payload: { message: string }) => void) => () => void
   }
   wcdb: {
     testConnection: (dbPath: string, hexKey: string, wxid: string) => Promise<{ success: boolean; error?: string; sessionCount?: number }>

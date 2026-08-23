@@ -441,7 +441,10 @@ export class ExportContext {
         this.mediaRunSourceDedupMap.clear()
         this.mediaRunMissingImageKeys.clear()
         this.activeSharedMediaCount = 0
+        for (const w of this.sharedMediaWaiters) try { w() } catch {}
         this.sharedMediaWaiters = []
+        for (const w of this.chatImagePipelineWaiters) try { w() } catch {}
+        this.chatImagePipelineWaiters = []
     }
 
     public clearMediaRuntimeState(): void {
@@ -449,7 +452,10 @@ export class ExportContext {
         this.mediaRunSourceDedupMap.clear()
         this.mediaRunMissingImageKeys.clear()
         this.activeSharedMediaCount = 0
+        for (const w of this.sharedMediaWaiters) try { w() } catch {}
         this.sharedMediaWaiters = []
+        for (const w of this.chatImagePipelineWaiters) try { w() } catch {}
+        this.chatImagePipelineWaiters = []
     }
 
     public configureSharedMediaConcurrency(value: number): void {
@@ -1131,13 +1137,17 @@ export class ExportContext {
         return `${localType}_${this.getStableMessageKey(msg)}`
     }
 
-    private getImageMissingRunCacheKey(sessionId: string, imageMd5?: unknown, imageDatName?: unknown): string | null {
+    private getImageMissingRunCacheKey(sessionId: string, imageMd5?: unknown, imageDatName?: unknown, localId?: unknown): string | null {
         const normalizedSessionId = String(sessionId || '').trim();
         const normalizedImageMd5 = String(imageMd5 || '').trim().toLowerCase();
         const normalizedImageDatName = String(imageDatName || '').trim().toLowerCase();
         if (!normalizedSessionId) return null
-        if (!normalizedImageMd5 && !normalizedImageDatName) return null
-        const primaryToken = normalizedImageMd5 || normalizedImageDatName;
+        let primaryToken = normalizedImageMd5 || normalizedImageDatName;
+        if (!primaryToken) {
+          const lid = String(localId ?? '').trim()
+          if (!lid || lid === '0') return null
+          primaryToken = `lid:${lid}`
+        }
         const secondaryToken = normalizedImageMd5 && normalizedImageDatName && normalizedImageDatName !== normalizedImageMd5
                   ? normalizedImageDatName
                   : '';
@@ -3137,7 +3147,7 @@ export class ExportContext {
           // 使用消息对象中已提取的字段，先尝试快速导出。
           let imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
           let imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
-          const initialMissingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName)
+          const initialMissingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName, (msg as any)?.localId)
           if (initialMissingRunCacheKey && this.mediaRunMissingImageKeys.has(initialMissingRunCacheKey)) {
             return null
           }
@@ -3155,7 +3165,7 @@ export class ExportContext {
           }
 
           if (!sourcePath) {
-            const missingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName)
+            const missingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName, (msg as any)?.localId)
             console.log(`[Export] 缩略图也获取失败，所有方式均失败 → 将显示 [图片] 占位符`)
             if (missingRunCacheKey) {
               this.mediaRunMissingImageKeys.add(missingRunCacheKey)
@@ -5306,10 +5316,13 @@ export class ExportContext {
             const filename = `${sanitizedUsername}${ext}`
             const avatarPath = path.join(avatarsDir, filename)
 
-            // 跳过已存在文件
+            // 已存在且非空则复用；0 字节视为损坏需重写，避免“不同账号头像串台”
+            let shouldWrite = true
             try {
-              await fs.promises.access(avatarPath)
-            } catch {
+              const stat = await fs.promises.stat(avatarPath)
+              if (stat.size > 0) shouldWrite = false
+            } catch {}
+            if (shouldWrite) {
               await this.recordCreatedFileBeforeWrite(avatarPath, control)
               await fs.promises.writeFile(avatarPath, data)
             }
@@ -5747,6 +5760,10 @@ export class ExportContext {
           this.batchSize = 100;
           this.rendered = 0;
           this.loading = false;
+          // 数据集代数：搜索过滤 setData 换数据时 +1，用于让进行中的跳转失效，
+          // 防止按旧下标滚动到错误消息；seekSeq 让后发起的跳转作废先前的跳转。
+          this.dataGeneration = 0;
+          this.seekSeq = 0;
 
           this.list = document.createElement('div');
           this.list.className = 'message-list';
@@ -5782,6 +5799,7 @@ export class ExportContext {
         }
 
         setData(newData) {
+          this.dataGeneration += 1;
           this.data = newData;
           this.rendered = 0;
           this.list.innerHTML = '';
@@ -5793,29 +5811,67 @@ export class ExportContext {
           this.renderBatch();
         }
 
-        scrollToTime(timestamp) {
-          const idx = this.data.findIndex(item => item.t >= timestamp);
-          if (idx === -1) return;
-          // Ensure all messages up to target are rendered
-          while (this.rendered <= idx) {
-            this.renderBatch();
+        findFirstIndexAtOrAfter(timestamp) {
+          // 数据已按时间升序注入（见 HtmlFormatter），二分查找第一个 t >= timestamp 的下标
+          let lo = 0;
+          let hi = this.data.length - 1;
+          let ans = -1;
+          while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            const t = Number(this.data[mid].t || 0);
+            if (t >= timestamp) { ans = mid; hi = mid - 1; } else { lo = mid + 1; }
           }
+          return ans;
+        }
+
+        ensureRenderedUpTo(idx, onProgress, generation) {
+          // 分帧渲染到目标下标，避免大会话一次性同步渲染造成长时间冻结
+          return new Promise((resolve) => {
+            if (idx < this.rendered || this.rendered >= this.data.length ||
+                (generation !== undefined && generation !== this.dataGeneration)) { resolve(); return; }
+            const BATCHES_PER_FRAME = 20;
+            const total = idx + 1;
+            const tick = () => {
+              if (this.rendered >= this.data.length || idx < this.rendered ||
+                  (generation !== undefined && generation !== this.dataGeneration)) { resolve(); return; }
+              for (let i = 0; i < BATCHES_PER_FRAME && this.rendered <= idx && this.rendered < this.data.length; i++) {
+                this.renderBatch();
+              }
+              if (onProgress) onProgress(Math.min(this.rendered, total), total);
+              if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
+              else setTimeout(tick, 0);
+            };
+            tick();
+          });
+        }
+
+        async scrollToTime(timestamp, onProgress) {
+          const idx = this.findFirstIndexAtOrAfter(timestamp);
+          if (idx === -1) return false;
+          const generation = this.dataGeneration;
+          const seekId = ++this.seekSeq;
+          await this.ensureRenderedUpTo(idx, onProgress, generation);
+          if (generation !== this.dataGeneration || seekId !== this.seekSeq) return false;
           const el = this.list.children[idx];
           if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'center' });
             el.classList.add('highlight');
             setTimeout(() => el.classList.remove('highlight'), 2500);
           }
+          return true;
         }
 
-        scrollToIndex(index) {
-          while (this.rendered <= index) {
-            this.renderBatch();
-          }
+        async scrollToIndex(index) {
+          if (index < 0 || index >= this.data.length) return false;
+          const generation = this.dataGeneration;
+          const seekId = ++this.seekSeq;
+          await this.ensureRenderedUpTo(index, undefined, generation);
+          if (generation !== this.dataGeneration || seekId !== this.seekSeq) return false;
           const el = this.list.children[index];
           if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
+          return true;
         }
       }
     `;

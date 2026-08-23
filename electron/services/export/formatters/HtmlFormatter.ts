@@ -100,7 +100,11 @@ export class HtmlFormatter {
         this.exportService.throwIfStopRequested(control)
         await this.exportService.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
       }
-      const sortedMessages = collected.rows
+      // issue #9b: 显式保证注入 window.WEFLOW_DATA 的数据按时间升序排列——
+      // 页面内 scrollToTime 依赖升序做二分查找。collectMessages 当前已排序，
+      // 这里是防御性稳定排序（同秒内保持库内原序），防止上游行为变化悄悄破坏契约。
+      const sortedMessages = [...collected.rows].sort((a: any, b: any) =>
+        Number(a?.createTime || 0) - Number(b?.createTime || 0))
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.exportService.getMediaLayout(outputPath, options)
       const mediaMessages = this.exportService.collectMediaMessagesForExport(sortedMessages, options)
@@ -534,11 +538,25 @@ export class HtmlFormatter {
       })
 
       // Jump Logic
-      jumpBtn.addEventListener('click', () => {
+      jumpBtn.addEventListener('click', async () => {
         const value = timeInput.value
         if (!value) return
-        const target = Math.floor(new Date(value).getTime() / 1000)
-        renderer.scrollToTime(target);
+        const parsed = new Date(value)
+        if (isNaN(parsed.getTime())) return
+        const target = Math.floor(parsed.getTime() / 1000)
+        jumpBtn.disabled = true
+        try {
+          const found = await renderer.scrollToTime(target, (done, total) => {
+            jumpBtn.textContent = total > 0 ? \`跳转中 \${Math.floor((done / total) * 100)}%\` : '跳转中...'
+          })
+          if (!found) {
+            resultCount.textContent = '该时间之后没有消息'
+            setTimeout(updateCount, 2500)
+          }
+        } finally {
+          jumpBtn.disabled = false
+          jumpBtn.textContent = '跳转'
+        }
       })
 
       // Image Preview (Delegation)

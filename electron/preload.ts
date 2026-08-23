@@ -23,7 +23,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   config: {
     get: (key: string) => ipcRenderer.invoke('config:get', key),
     set: (key: string, value: any) => ipcRenderer.invoke('config:set', key, value),
-    clear: () => ipcRenderer.invoke('config:clear')
+    clear: () => ipcRenderer.invoke('config:clear'),
+    updateWxidEntry: (wxid: string, patch: Record<string, unknown>) => ipcRenderer.invoke('config:updateWxidEntry', wxid, patch)
   },
 
   // 通知
@@ -95,7 +96,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 密钥
   key: {
     autoGetDbKey: () => ipcRenderer.invoke('key:autoGetDbKey'),
-    onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => subscribe('key:dbKeyStatus', callback)
+    onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => subscribe('key:dbKeyStatus', callback),
+    autoGetImageKey: (manualDir?: string, wxid?: string) => ipcRenderer.invoke('key:autoGetImageKey', manualDir, wxid),
+    scanImageKeyFromMemory: (userDir: string) => ipcRenderer.invoke('key:scanImageKeyFromMemory', userDir),
+    onImageKeyStatus: (callback: (payload: { message: string }) => void) => subscribe('key:imageKeyStatus', callback)
   },
 
   // WCDB

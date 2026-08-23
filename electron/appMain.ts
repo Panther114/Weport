@@ -1799,13 +1799,30 @@ function registerIpcHandlers() {
     messagePushService?.handleConfigCleared()
     return { success: true }
   })
+  ipcMain.handle('config:updateWxidEntry', async (_e, wxid: string, patch: Record<string, unknown>) => {
+    const id = String(wxid || '').trim()
+    if (!id) return { success: false, error: 'wxid 为空' }
+    const p = (patch && typeof patch === 'object' ? patch : {}) as Record<string, unknown>
+    // 仅允许合并已定义的 wxidConfigs 字段，避免污染
+    const allowed = new Set(['decryptKey', 'imageXorKey', 'imageAesKey', 'updatedAt'])
+    const filtered: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(p)) if (allowed.has(k)) filtered[k] = v
+    if (!filtered.updatedAt) filtered.updatedAt = Date.now()
+    const cur = ((configService as any)?.get('wxidConfigs') || {}) as Record<string, any>
+    cur[id] = { ...(cur[id] || {}), ...filtered }
+    ;(configService as any)?.set('wxidConfigs', cur)
+    return { success: true }
+  })
 
   // 对话框 / 外壳
-  ipcMain.handle('dialog:openDirectory', (_e, options?: any) =>
-    dialog.showOpenDialog(mainWindow!, {
+  ipcMain.handle('dialog:openDirectory', (_e, options?: any) => {
+    const win = mainWindow ?? BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ?? null
+    if (!win) return Promise.resolve(null)
+    return dialog.showOpenDialog(win, {
       properties: ['openDirectory'],
       ...(options || {}),
-    }).then((r) => (r.canceled ? null : r.filePaths[0])))
+    }).then((r) => (r.canceled ? null : r.filePaths[0]))
+  })
   ipcMain.handle('dialog:openFile', (_e, options?: any) =>
     dialog.showOpenDialog(mainWindow!, {
       properties: ['openFile'],
@@ -1875,6 +1892,38 @@ function registerIpcHandlers() {
       mainWindow?.webContents.send('key:dbKeyStatus', { message, level })
     })
     return result
+  })
+
+  // 图片密钥（issue #9a：kvcomm 缓存读取 + 内存扫描兜底，WeFlow 同名通道）
+  const sendImageKeyStatus = (event: Electron.IpcMainInvokeEvent, message: string) => {
+    try {
+      if (!event.sender.isDestroyed()) event.sender.send('key:imageKeyStatus', { message: String(message || '') })
+    } catch { /* noop */ }
+  }
+  ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {
+    if (process.platform !== 'win32') {
+      return { success: false, error: '图片密钥提取仅支持 Windows（macOS 图片为明文存储，无需密钥）' }
+    }
+    const dir = manualDir ? String(manualDir).trim() : ''
+    if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
+    const keyService = new KeyService()
+    return keyService.autoGetImageKey(
+      dir || undefined,
+      (message) => sendImageKeyStatus(event, message),
+      wxid ? String(wxid) : undefined
+    )
+  })
+  ipcMain.handle('key:scanImageKeyFromMemory', async (event, userDir: string) => {
+    if (process.platform !== 'win32') {
+      return { success: false, error: '内存扫描仅支持 Windows' }
+    }
+    const dir = String(userDir || '').trim()
+    if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
+    const keyService = new KeyService()
+    return keyService.autoGetImageKeyByMemoryScan(
+      dir,
+      (message) => sendImageKeyStatus(event, message)
+    )
   })
 
   // WCDB
@@ -5108,6 +5157,23 @@ function installMainProcessErrorHandlers() {
     // which reached uncaughtException is not safe to keep serving requests;
     // exit once the current callback unwinds instead of showing a dialog for
     // every follow-up exception.
+    //
+    // issue #7: 静默 app.exit 会把可诊断的错误呈现成"点击即闪退"。退出前弹一次
+    // 错误框（含 fatal.log 路径），让用户/反馈有迹可循。QA/无人值守模式跳过弹窗。
+    const inQaMode = process.env.WEPORT_SCREENSHOT_POPUP === '1' ||
+      process.env.WEPORT_V09_DUMP === '1' ||
+      process.env.WEPORT_AI_SELFTEST === '1'
+    if (!inQaMode && app.isReady()) {
+      try {
+        const logPath = fatalLog || join(app.getPath('logs'), 'fatal.log')
+        dialog.showErrorBox(
+          'Weport 遇到内部错误',
+          `主进程出现未捕获异常，应用即将退出。\n\n${errorText(error).slice(0, 1200)}\n\n详细日志：${logPath}`
+        )
+      } catch {
+        // 弹窗失败也要保证退出路径执行
+      }
+    }
     setTimeout(() => {
       try { app.exit(1) } catch { process.exit(1) }
     }, 0).unref()
