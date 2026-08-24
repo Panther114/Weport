@@ -15,6 +15,7 @@ import {
 import type { WeCloneListItem, WeCloneMdsPreview, WeCloneVisibility } from '../../types/weclone'
 import { copyTextToClipboard } from '../../utils/clipboard'
 import WeCloneVisibilityToggle from './WeCloneVisibilityToggle'
+import WeCloneLocalChat from './WeCloneLocalChat'
 
 const VISIBILITY_LABEL: Record<WeCloneVisibility, string> = {
   private: 'PRIVATE',
@@ -60,6 +61,7 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
   const [mdLoading, setMdLoading] = useState(false)
   const [mds, setMds] = useState<WeCloneMdsPreview | null>(null)
   const [mdError, setMdError] = useState('')
+  const [localChatOpen, setLocalChatOpen] = useState(false)
 
   const remoteOnly = clone.source === 'remote'
   const busy = visBusy
@@ -105,7 +107,8 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
   }
 
   return (
-    <article className="v09-panel weclone-card">
+    <>
+      <article className="v09-panel weclone-card">
       <div className="weclone-card-head">
         <div className="weclone-card-title">
           <strong className="weclone-card-name" title={clone.displayName}>{clone.displayName || clone.wxid || clone.id}</strong>
@@ -160,6 +163,16 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
         <>
           <div className="chip-group">
             <WeCloneVisibilityToggle value={clone.visibility} disabled={busy} onChange={(v) => void handleVisibility(v)} />
+            <button
+              className="primary-btn compact"
+              type="button"
+              disabled={busy || remoteOnly}
+              title={remoteOnly ? '仅本地档案可本地对话' : '在本地直接与分身对话，无需 Railway'}
+              onClick={() => setLocalChatOpen(true)}
+            >
+              <MessageSquareText size={13} />
+              本地对话
+            </button>
             <button className="ghost-btn compact" type="button" disabled={busy} onClick={() => void toggleMds()}>
               {mdLoading ? <Loader2 size={13} className="spin" /> : <FileText size={13} />}
               {mdOpen ? '收起档案' : '查看档案'}
@@ -229,6 +242,8 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
           )}
         </>
       )}
-    </article>
+      </article>
+      <WeCloneLocalChat cloneId={clone.id} displayName={clone.displayName || clone.wxid} open={localChatOpen} onClose={() => setLocalChatOpen(false)} />
+    </>
   )
 }

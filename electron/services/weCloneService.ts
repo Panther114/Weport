@@ -48,6 +48,7 @@ import {
   WECLONE_SYSTEM_PROMPT,
   WECLONE_MD_PROMPTS,
   WECLONE_FILTER_PROMPT,
+  buildWeCloneChatSystemPrompt,
 } from './weClonePrompts'
 
 // ---------------------------------------------------------------------------
@@ -1458,6 +1459,162 @@ export class WeCloneService {
       }
     } catch (e) {
       return { ...base, online: false, error: String((e as Error)?.message || e) }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 本地对话（不走 Railway，复用强制 provider 直接在本地跑 agent）
+  // -------------------------------------------------------------------------
+
+  private tokenizeForLocalSearch(text: string): string[] {
+    const s = String(text || '').toLowerCase().trim()
+    if (!s) return []
+    const tokens: string[] = []
+    // 空白分词
+    for (const part of s.split(/\s+/)) {
+      if (!part) continue
+      if (/[\u4e00-\u9fff]/.test(part)) {
+        // CJK 按字 + 二元组
+        for (let i = 0; i < part.length; i += 1) tokens.push(part[i])
+        for (let i = 0; i < part.length - 1; i += 1) tokens.push(part.slice(i, i + 2))
+      } else {
+        tokens.push(part)
+      }
+    }
+    return tokens
+  }
+
+  private scoreChunkLocal(queryTokens: string[], chunkText: string): number {
+    const chunkLower = chunkText.toLowerCase()
+    let score = 0
+    for (const tok of queryTokens) {
+      if (!tok) continue
+      if (chunkLower.includes(tok)) score += tok.length > 1 ? 2 : 1
+    }
+    // 长度惩罚：超长 chunk 轻微惩罚
+    const len = chunkText.length
+    if (len > 1000) score *= 0.9
+    return score
+  }
+
+  async chatLocal(
+    id: string,
+    message: string,
+    history: Array<{ role: string; content: string }> = [],
+    onDelta?: (delta: string) => void,
+    externalSignal?: AbortSignal
+  ): Promise<{ success: boolean; reply?: string; error?: string }> {
+    const msg = String(message || '').trim()
+    if (!msg) return { success: false, error: '消息为空' }
+    // 定位克隆目录
+    const root = this.getStagingRoot()
+    let targetDir: string | null = null
+    let meta: WeCloneMeta | null = null
+    for (const entry of readdirSyncSafe(root)) {
+      const dir = join(root, entry)
+      const m = this.readMeta(dir)
+      if (m && m.id === id) {
+        targetDir = dir
+        meta = m
+        break
+      }
+    }
+    if (!targetDir || !meta) return { success: false, error: '找不到该克隆' }
+
+    // 读取 MD
+    const mds: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>> = {}
+    for (const { key, path } of this.mdFilePaths(targetDir)) {
+      try {
+        if (existsSync(path)) mds[key as 'profile'] = readFileSync(path, 'utf8')
+      } catch { /* noop */ }
+    }
+    // 读取 chunks 并检索 top 8
+    const jsonlPath = join(targetDir, 'chunks.jsonl')
+    const allChunks: WeCloneChunk[] = []
+    if (existsSync(jsonlPath)) {
+      try {
+        const rl = createInterface({ input: createReadStream(jsonlPath, { encoding: 'utf8' }), crlfDelay: Infinity })
+        for await (const line of rl) {
+          const t = line.trim()
+          if (!t) continue
+          try {
+            const c = JSON.parse(t) as WeCloneChunk
+            if (c && typeof c.text === 'string') allChunks.push(c)
+          } catch { /* noop */ }
+          if (allChunks.length > 5000) break
+        }
+        rl.close()
+      } catch { /* noop */ }
+    }
+    const queryTokens = this.tokenizeForLocalSearch(msg)
+    const scored = allChunks
+      .map((c) => ({ c, score: this.scoreChunkLocal(queryTokens, c.text) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8)
+      .map((x) => x.c.text.slice(0, 800))
+
+    // 若无匹配，取最近 3 条作兜底
+    const retrieved = scored.length > 0 ? scored : allChunks.slice(-3).map((c) => c.text.slice(0, 800))
+
+    const systemPrompt = buildWeCloneChatSystemPrompt({
+      displayName: meta.displayName || meta.wxid || '我',
+      knowledgeCutoff: meta.knowledgeCutoff,
+      mds: mds as Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>,
+      retrievedChunks: retrieved,
+    })
+
+    // 强制 provider
+    let profile: ProviderProfile | null = null
+    try {
+      profile = await this.ensureForcedProvider()
+      this.assertProfileReady(profile)
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message || e) }
+    }
+
+    const historyMessages = (Array.isArray(history) ? history : [])
+      .filter((h) => h && typeof h.role === 'string' && typeof h.content === 'string')
+      .slice(-20)
+      .map((h) => ({ role: h.role as 'user' | 'assistant', content: String(h.content).slice(0, 4000) }))
+
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: this.sanitizeForApi(systemPrompt) },
+      ...historyMessages.map((h) => ({ role: h.role as 'user' | 'assistant', content: this.sanitizeForApi(h.content) })),
+      { role: 'user', content: this.sanitizeForApi(msg) },
+    ]
+
+    const abortCtrl = new AbortController()
+    const onExternalAbort = () => abortCtrl.abort()
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
+    const timeout = setTimeout(() => abortCtrl.abort(), 120_000)
+    try {
+      let full = ''
+      const result = await getProviderAdapter(profile as ProviderProfile).stream({
+        profile: profile as ProviderProfile,
+        messages: messages as never,
+        tools: [],
+        reasoningEffort: String(this.cfgGet('weportAiReasoningEffort') || 'high'),
+        signal: abortCtrl.signal as unknown as AbortSignal,
+        onText: (chunk: string) => {
+          const d = String(chunk || '')
+          if (!d) return
+          full += d
+          try { onDelta?.(d) } catch { /* noop */ }
+        },
+        onReasoning: () => undefined,
+      })
+      const reply = String((result as { content?: string })?.content || full || '').trim()
+      if (!reply) return { success: false, error: '模型未返回内容' }
+      return { success: true, reply }
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError' || abortCtrl.signal.aborted || externalSignal?.aborted) {
+        return { success: false, error: '已取消' }
+      }
+      return { success: false, error: String((e as Error)?.message || e) }
+    } finally {
+      clearTimeout(timeout)
+      externalSignal?.removeEventListener('abort', onExternalAbort)
     }
   }
 

@@ -273,6 +273,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
     ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),
     setForcedApiKey: (payload: { apiKey: string }) => ipcRenderer.invoke('weclone:setForcedApiKey', payload),
+    chatLocal: (payload: { id: string; message: string; history?: Array<{ role: string; content: string }> }) =>
+      ipcRenderer.invoke('weclone:chatLocal', payload),
     onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
   },
 

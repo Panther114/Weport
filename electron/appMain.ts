@@ -2764,6 +2764,12 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
       return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
     }
   })
+  ipcMain.handle('weclone:chatLocal', async (_e, payload: { id?: string; message?: string; history?: Array<{ role: string; content: string }> }) => {
+    const id = String(payload?.id || '').trim()
+    const message = String(payload?.message || '').trim()
+    const history = Array.isArray(payload?.history) ? payload?.history : []
+    return await weCloneService.chatLocal(id, message, history)
+  })
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
   // 真实 README 截图模式读取隔离副本，不安装这些 IPC 覆盖。

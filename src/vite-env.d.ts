@@ -307,6 +307,11 @@ interface ElectronApi {
       }
       error?: string
     }>
+    chatLocal: (payload: { id: string; message: string; history?: Array<{ role: string; content: string }> }) => Promise<{
+      success: boolean
+      reply?: string
+      error?: string
+    }>
     onProgress: (callback: (payload: { stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done'; progress: number; message: string; detail?: any }) => void) => () => void
   }
   sns: {
