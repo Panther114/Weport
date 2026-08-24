@@ -2765,10 +2765,18 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     }
   })
   ipcMain.handle('weclone:chatLocal', async (_e, payload: { id?: string; message?: string; history?: Array<{ role: string; content: string }> }) => {
-    const id = String(payload?.id || '').trim()
-    const message = String(payload?.message || '').trim()
-    const history = Array.isArray(payload?.history) ? payload?.history : []
-    return await weCloneService.chatLocal(id, message, history)
+    try {
+      const id = String(payload?.id || '').trim()
+      const message = String(payload?.message || '').trim()
+      const history = Array.isArray(payload?.history) ? payload?.history : []
+      console.log(`[WeClone] chatLocal IPC id=${id} history=${history.length} msgLen=${message.length}`)
+      const result = await weCloneService.chatLocal(id, message, history)
+      console.log(`[WeClone] chatLocal result success=${result.success} hasReply=${Boolean(result.reply)} error=${result.error || ''}`)
+      return result
+    } catch (e) {
+      console.error('[WeClone] chatLocal IPC unhandled error:', e)
+      return { success: false, error: `本地对话服务异常：${String((e as Error)?.message || e)}` }
+    }
   })
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。

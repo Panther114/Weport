@@ -1525,8 +1525,10 @@ export class WeCloneService {
     const mds: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>> = {}
     for (const { key, path } of this.mdFilePaths(targetDir)) {
       try {
-        if (existsSync(path)) mds[key as 'profile'] = readFileSync(path, 'utf8')
-      } catch { /* noop */ }
+        if (existsSync(path)) (mds as Record<string, string>)[key] = readFileSync(path, 'utf8')
+      } catch (e) {
+        console.warn(`[WeClone] 读取 ${key}.md 失败:`, e)
+      }
     }
     // 读取 chunks 并检索 top 8
     const jsonlPath = join(targetDir, 'chunks.jsonl')
@@ -1556,6 +1558,7 @@ export class WeCloneService {
 
     // 若无匹配，取最近 3 条作兜底
     const retrieved = scored.length > 0 ? scored : allChunks.slice(-3).map((c) => c.text.slice(0, 800))
+    console.log(`[WeClone] chatLocal id=${id} mdsKeys=${Object.keys(mds).join(',')} allChunks=${allChunks.length} queryTokens=${queryTokens.length} retrieved=${retrieved.length}`)
 
     const systemPrompt = buildWeCloneChatSystemPrompt({
       displayName: meta.displayName || meta.wxid || '我',
@@ -1608,10 +1611,19 @@ export class WeCloneService {
       if (!reply) return { success: false, error: '模型未返回内容' }
       return { success: true, reply }
     } catch (e) {
+      console.error('[WeClone] chatLocal LLM error:', e)
       if ((e as Error)?.name === 'AbortError' || abortCtrl.signal.aborted || externalSignal?.aborted) {
         return { success: false, error: '已取消' }
       }
-      return { success: false, error: String((e as Error)?.message || e) }
+      const msg = String((e as Error)?.message || e)
+      // 常见：API Key 未配置、网络、模型不存在
+      if (msg.includes('401') || msg.toLowerCase().includes('unauthorized')) {
+        return { success: false, error: 'API Key 无效或未配置，请在 人格克隆 → OpenCode Go API Key 中设置 muse-spark-1.2-contributor 的 Key' }
+      }
+      if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
+        return { success: false, error: `模型或服务未找到：${msg}（已固定为 opencode-go/muse-spark-1.2-contributor，请检查服务是否可用）` }
+      }
+      return { success: false, error: msg }
     } finally {
       clearTimeout(timeout)
       externalSignal?.removeEventListener('abort', onExternalAbort)
