@@ -66,7 +66,6 @@ COPY --from=build /app/dist ./dist
 COPY --from=web-build /app/public ./public
 
 RUN mkdir -p /data
-VOLUME ["/data"]
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
