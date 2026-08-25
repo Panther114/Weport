@@ -8,6 +8,11 @@
  *   （https://opencode.ai/zen/go/v1）+ muse-spark-1.2-contributor。
  *   WECLONE_LLM_BASE_URL / WECLONE_LLM_MODEL 环境变量仍可覆盖（自建网关用），
  *   但缺省即锁定 opencode-go，不再回落 deepseek-chat。
+ * - 模型降级链（v0.9.10 修复 "Internal server error"）：首选模型返回
+ *   HTTP ≥500 / 404（例如 muse-spark-1.2-contributor 网关侧整体 500）时，
+ *   依次尝试 WECLONE_LLM_FALLBACK_MODELS（默认 glm-5,minimax-m2.5,
+ *   deepseek-v4-flash，同一网关）。仅在默认网关（或显式设置
+ *   WECLONE_LLM_FALLBACK_MODELS）时启用 —— 自建网关的备选模型无意义。
  * - baseUrl 以 /v1 结尾时直接拼 /chat/completions；否则补 /v1 前缀
  *   （兼容 WECLONE_LLM_BASE_URL=https://api.deepseek.com 这类裸域名覆盖）。
  * - 未配置 API key 时进入 mock 模式：回显最后一条 user 消息，
@@ -36,9 +41,24 @@ let warnedNoKey = false
 /** 默认强制：OpenCode Go 订阅网关 + muse-spark-1.2-contributor（与 WeportAI 一致） */
 export const DEFAULT_LLM_BASE_URL = 'https://opencode.ai/zen/go/v1'
 export const DEFAULT_LLM_MODEL = 'muse-spark-1.2-contributor'
+/** 首选模型网关侧故障（500/404）时的降级候选（同网关实测可用模型） */
+export const DEFAULT_LLM_FALLBACK_MODELS = 'glm-5,minimax-m2.5,deepseek-v4-flash'
+
+/** 进程内 sticky：最近一次成功的模型，后续请求直接从它开始 */
+let lastGoodModel = ''
 
 export function isLlmConfigured(): boolean {
   return Boolean(process.env.WECLONE_LLM_API_KEY)
+}
+
+/** /health 用的 LLM 配置摘要（不含 key） */
+export function describeLlm(): { configured: boolean; baseUrl: string; primaryModel: string; candidates: string[] } {
+  return {
+    configured: isLlmConfigured(),
+    baseUrl: llmBaseUrl(),
+    primaryModel: llmModel(),
+    candidates: llmModelCandidates(),
+  }
 }
 
 function llmBaseUrl(): string {
@@ -47,6 +67,21 @@ function llmBaseUrl(): string {
 
 function llmModel(): string {
   return process.env.WECLONE_LLM_MODEL || DEFAULT_LLM_MODEL
+}
+
+/** 本轮请求依次尝试的模型候选（去重、保序、sticky 优先） */
+function llmModelCandidates(): string[] {
+  const primary = llmModel()
+  const csvRaw = process.env.WECLONE_LLM_FALLBACK_MODELS
+  const csv =
+    csvRaw !== undefined ? csvRaw : llmBaseUrl() === DEFAULT_LLM_BASE_URL ? DEFAULT_LLM_FALLBACK_MODELS : ''
+  const list = [lastGoodModel || primary, primary, ...csv.split(',').map((s) => s.trim()).filter(Boolean)]
+  return list.filter((m, i, arr) => m && arr.indexOf(m) === i)
+}
+
+/** 该上游错误是否值得换下一个候选模型（5xx / 404 = 网关或模型侧问题） */
+function isFallbackEligible(status: number): boolean {
+  return status >= 500 || status === 404
 }
 
 /** baseUrl 已含版本段（…/v1）则直接拼路径，否则补 /v1 */
@@ -69,6 +104,35 @@ export async function* streamChatWithLLM(opts: StreamChatOptions): AsyncGenerato
     return
   }
 
+  let lastError: Error | null = null
+  for (const model of llmModelCandidates()) {
+    let emittedChars = 0
+    try {
+      for await (const delta of streamSingleModel(model, apiKey, opts)) {
+        emittedChars += delta.length
+        yield delta
+      }
+      if (model !== lastGoodModel) console.log(`[llm/proxy] model ok: ${model}`)
+      lastGoodModel = model
+      return
+    } catch (err) {
+      lastError = err as Error
+      if (opts.signal?.aborted || emittedChars > 0) throw err // 已产出内容，不能换模型重放
+      const status = Number((err as { status?: number } | null)?.status) || 0
+      console.warn(`[llm/proxy] model ${model} failed (HTTP ${status || '?'}): ${(err as Error).message}`)
+      if (!isFallbackEligible(status)) throw err
+      // 否则尝试下一个候选模型
+    }
+  }
+  throw lastError ?? new Error('all candidate models failed')
+}
+
+/** 单个模型的完整流式转发（解析 SSE → delta）。失败抛出带 status 的错误。 */
+async function* streamSingleModel(
+  model: string,
+  apiKey: string,
+  opts: StreamChatOptions
+): AsyncGenerator<string, void, undefined> {
   const controller = new AbortController()
   const onClientAbort = () => controller.abort()
   if (opts.signal) {
@@ -86,7 +150,7 @@ export async function* streamChatWithLLM(opts: StreamChatOptions): AsyncGenerato
         Accept: 'text/event-stream',
       },
       body: JSON.stringify({
-        model: llmModel(),
+        model,
         messages: opts.messages,
         stream: true,
         temperature: opts.temperature ?? 0.9,
@@ -97,7 +161,9 @@ export async function* streamChatWithLLM(opts: StreamChatOptions): AsyncGenerato
 
     if (!res.ok || !res.body) {
       const detail = await res.text().catch(() => '')
-      throw new Error(`LLM upstream ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`)
+      const err = new Error(`LLM upstream ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`) as Error & { status?: number }
+      err.status = res.status
+      throw err
     }
 
     // Node 18 fetch body 是 web ReadableStream —— 按 SSE 帧解析

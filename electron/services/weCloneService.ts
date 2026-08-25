@@ -14,6 +14,7 @@
  */
 import { app } from 'electron'
 import { join, dirname } from 'path'
+import { randomUUID } from 'crypto'
 import {
   existsSync,
   mkdirSync,
@@ -187,6 +188,15 @@ const SAMPLE_RANDOM_CHUNKS = 200
 const SAMPLE_RECENT_CHUNKS = 50
 /** 生成上下文总字符上限 */
 const GENERATION_CONTEXT_CHAR_LIMIT = 120_000
+/**
+ * 克隆 LLM 候选模型链（v0.9.10 本地对话修复）：
+ * 首选模型（config weCloneModel，缺省 muse-spark-1.2-contributor）失败
+ * （HTTP 5xx / 404 / 400，例如 muse-spark-1.2-contributor 曾整段返回
+ * "Internal server error" 500）时，依次降级到同一 opencode-go 网关的备选模型，
+ * 保证本地对话/生成不至于被单一模型故障卡死。sticky 命中记录在
+ * config weCloneEffectiveModel，下次直接从可用模型开始。
+ */
+const WECLONE_FALLBACK_MODELS = ['glm-5', 'minimax-m2.5', 'deepseek-v4-flash']
 
 // ---------------------------------------------------------------------------
 // 服务
@@ -700,6 +710,80 @@ export class WeCloneService {
       .replace(/(?<![\uD800-\uDFFF])[\uDC00-\uDFFF]/g, '\uFFFD')
   }
 
+  /** 上游错误是否值得换下一个候选模型重试（5xx / 404 / 400 = 模型或网关侧问题） */
+  private isModelFallbackEligible(e: unknown): boolean {
+    const status = Number((e as { status?: number } | null)?.status)
+    if (Number.isFinite(status) && status !== 0) {
+      if (status === 401 || status === 403 || status === 429) return false // key/配额问题，换模型无用
+      return status >= 400
+    }
+    const msg = String((e as Error)?.message || e).toLowerCase()
+    return msg.includes('not found') || msg.includes('internal server error')
+  }
+
+  private buildModelCandidates(profile: ProviderProfile): string[] {
+    const preferred =
+      String(this.cfgGet('weCloneEffectiveModel') || '').trim() ||
+      String(this.cfgGet('weCloneModel') || '').trim() ||
+      profile.model ||
+      WECLONE_FORCED_MODEL
+    return [preferred, ...WECLONE_FALLBACK_MODELS].filter(
+      (m, i, arr) => m && arr.indexOf(m) === i
+    )
+  }
+
+  /**
+   * 带模型降级链的流式调用：逐个候选尝试，直到某个模型产出回复。
+   * 返回实际生效的模型名（供日志/UI 提示）。全部失败时抛出最后一个错误。
+   */
+  private async streamLlmWithFallback(input: {
+    profile: ProviderProfile
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+    reasoningEffort: string
+    signal?: AbortSignal
+    onText?: (chunk: string) => void
+    onAttemptStart?: (model: string) => void
+  }): Promise<{ content: string; model: string }> {
+    const candidates = this.buildModelCandidates(input.profile)
+    let lastError: unknown = null
+    for (const model of candidates) {
+      if (input.signal?.aborted) throw new WeCloneAbortedError()
+      input.onAttemptStart?.(model)
+      let attemptChars = 0
+      try {
+        const result = await getProviderAdapter({ ...input.profile, model }).stream({
+          profile: { ...input.profile, model },
+          messages: input.messages as never,
+          tools: [],
+          reasoningEffort: input.reasoningEffort,
+          signal: input.signal ?? AbortSignal.timeout(300_000),
+          onText: (chunk: string) => {
+            attemptChars += String(chunk || '').length
+            try { input.onText?.(chunk) } catch { /* noop */ }
+          },
+          onReasoning: () => undefined,
+        })
+        const content = String(result?.content || '').trim()
+        if (!content && attemptChars === 0) {
+          // 上游空响应也视为该模型故障，继续降级
+          lastError = new Error(`模型 ${model} 返回空内容`)
+          console.warn(`[WeClone] 模型 ${model} 返回空内容，尝试下一个候选…`)
+          continue
+        }
+        try { this.configService.set('weCloneEffectiveModel', model) } catch { /* noop */ }
+        console.log(`[WeClone] LLM 调用成功 model=${model} chars=${content.length}`)
+        return { content, model }
+      } catch (e) {
+        lastError = e
+        if ((e as Error)?.name === 'WeCloneAbortedError' || input.signal?.aborted || (e as Error)?.name === 'AbortError') throw e
+        const status = Number((e as { status?: number } | null)?.status) || 0
+        console.warn(`[WeClone] 模型 ${model} 调用失败（HTTP ${status || '?'}）：${String((e as Error)?.message || e)}`)
+        if (!this.isModelFallbackEligible(e)) throw e
+      }
+    }
+    throw lastError ?? new Error('所有候选模型均不可用')
+  }
+
   private async callLlm(
     profile: ProviderProfile,
     systemContent: string,
@@ -708,23 +792,21 @@ export class WeCloneService {
     onText?: (chunk: string) => void
   ): Promise<string> {
     const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
-    const result = await getProviderAdapter(profile).stream({
+    const { content } = await this.streamLlmWithFallback({
       profile,
       messages: [
         { role: 'system', content: this.sanitizeForApi(systemContent) },
         { role: 'user', content: this.sanitizeForApi(userContent) },
       ],
-      tools: [],
       reasoningEffort,
-      signal: signal ?? AbortSignal.timeout(300_000),
-      onReasoning: () => undefined,
+      signal,
       onText: onText
         ? (chunk: string) => {
             try { onText(String(chunk)) } catch { /* noop */ }
           }
-        : () => undefined,
+        : undefined,
     })
-    return String(result.content || '')
+    return content
   }
 
   // -------------------------------------------------------------------------
@@ -1027,7 +1109,7 @@ export class WeCloneService {
 
       // ---- 6. 上传 ----------------------------------------------------------
       let status: 'local_only' | 'uploaded' | 'failed' = 'local_only'
-      const serverCfg = this.getServerConfig()
+      const serverCfg = this.resolveUploadServerConfig()
       if (options.localOnly !== true && serverCfg.configured) {
         report('upload', 85, '正在上传到私有服务…')
         try {
@@ -1224,6 +1306,100 @@ export class WeCloneService {
     const serverId = String(parsed.id || '').trim()
     if (!serverId) throw new Error('服务端未返回 clone id')
     return serverId
+  }
+
+  /**
+   * 上传前确保存在 ownerToken：服务端 /upload 要求 Bearer（owner 身份即 token）。
+   * 历史版本允许留空，这里首次上传时自动生成并持久化（safeStorage 加密），
+   * 之后所有上传/删除/可见性操作都用同一身份。
+   */
+  private resolveUploadServerConfig(): { configured: boolean; baseUrl: string; token: string } {
+    const cfg = this.getServerConfig()
+    let token = cfg.token
+    if (!token) {
+      token = `wc_${randomUUID()}`
+      try {
+        this.configService.set('weCloneServerToken', token)
+        console.log('[WeClone] 已自动生成 ownerToken 并写入配置（safeStorage 加密）')
+      } catch (e) {
+        console.warn('[WeClone] ownerToken 持久化失败（本次上传仍会使用内存值）:', e)
+      }
+    }
+    return { configured: cfg.configured, baseUrl: this.normalizeBaseUrl(cfg.baseUrl), token }
+  }
+
+  /**
+   * 上传一个已存在的本地克隆（v0.9.10 补充能力）：
+   * 直接复用 staging 目录里的 mds/*.md + chunks.jsonl（无二审补丁可应用），
+   * 让「Railway 已部署但克隆是 local_only」的老档案无需重新生成即可分享。
+   */
+  async uploadExistingClone(id: string): Promise<{ success: boolean; serverId?: string; error?: string }> {
+    const root = this.getStagingRoot()
+    let targetDir: string | null = null
+    let meta: WeCloneMeta | null = null
+    for (const entry of readdirSyncSafe(root)) {
+      const dir = join(root, entry)
+      const m = this.readMeta(dir)
+      if (m && m.id === id) {
+        targetDir = dir
+        meta = m
+        break
+      }
+    }
+    if (!targetDir || !meta) return { success: false, error: '找不到该克隆' }
+
+    const serverCfg = this.resolveUploadServerConfig()
+    if (!serverCfg.configured || !serverCfg.baseUrl) {
+      return { success: false, error: '未配置克隆服务器（weport.up.railway.app 不可达或被禁用）' }
+    }
+
+    // 读取本地 MD
+    const mds: Partial<WeCloneMds> = {}
+    for (const { key, path } of this.mdFilePaths(targetDir)) {
+      try {
+        if (existsSync(path)) (mds as Record<string, string>)[key] = readFileSync(path, 'utf8')
+      } catch { /* 单份缺失不阻断 */ }
+    }
+    if (!mds.profile && !mds.relationships && !mds.knowledge) {
+      return { success: false, error: '本地档案缺少知识文件（profile/relationships/knowledge 至少需要一份）' }
+    }
+    const jsonlPath = join(targetDir, 'chunks.jsonl')
+    if (!existsSync(jsonlPath)) {
+      return { success: false, error: '本地档案缺少语料文件 chunks.jsonl，无法上传' }
+    }
+
+    const fullMds: WeCloneMds = {
+      profile: mds.profile || '',
+      relationships: mds.relationships || '',
+      knowledge: mds.knowledge || '',
+      timeline: mds.timeline || '',
+      language: mds.language || '',
+    }
+
+    try {
+      const serverId = await this.uploadToServer(
+        { baseUrl: serverCfg.baseUrl, token: serverCfg.token },
+        meta,
+        fullMds,
+        jsonlPath,
+        new Map<string, string>(),
+        undefined
+      )
+      meta.serverId = serverId
+      meta.uploaded = true
+      meta.uploadStatus = 'uploaded'
+      this.writeMeta(targetDir, meta)
+      console.log(`[WeClone] 本地克隆 ${id} 已上传为 serverId=${serverId}`)
+      return { success: true, serverId }
+    } catch (e) {
+      const message = String((e as Error)?.message || e)
+      console.warn(`[WeClone] 本地克隆 ${id} 上传失败:`, e)
+      try {
+        meta.uploadStatus = 'failed'
+        this.writeMeta(targetDir, meta)
+      } catch { /* noop */ }
+      return { success: false, error: message }
+    }
   }
 
   async deleteClone(id: string, remote: boolean): Promise<{ success: boolean; error?: string }> {
@@ -1591,12 +1767,11 @@ export class WeCloneService {
     const onExternalAbort = () => abortCtrl.abort()
     externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
     const timeout = setTimeout(() => abortCtrl.abort(), 120_000)
+    let full = ''
     try {
-      let full = ''
-      const result = await getProviderAdapter(profile as ProviderProfile).stream({
+      const { content, model } = await this.streamLlmWithFallback({
         profile: profile as ProviderProfile,
-        messages: messages as never,
-        tools: [],
+        messages,
         reasoningEffort: String(this.cfgGet('weportAiReasoningEffort') || 'high'),
         signal: abortCtrl.signal as unknown as AbortSignal,
         onText: (chunk: string) => {
@@ -1605,14 +1780,14 @@ export class WeCloneService {
           full += d
           try { onDelta?.(d) } catch { /* noop */ }
         },
-        onReasoning: () => undefined,
       })
-      const reply = String((result as { content?: string })?.content || full || '').trim()
+      void model
+      const reply = String(content || full || '').trim()
       if (!reply) return { success: false, error: '模型未返回内容' }
       return { success: true, reply }
     } catch (e) {
       console.error('[WeClone] chatLocal LLM error:', e)
-      if ((e as Error)?.name === 'AbortError' || abortCtrl.signal.aborted || externalSignal?.aborted) {
+      if ((e as Error)?.name === 'AbortError' || (e as Error)?.name === 'WeCloneAbortedError' || abortCtrl.signal.aborted || externalSignal?.aborted) {
         return { success: false, error: '已取消' }
       }
       const msg = String((e as Error)?.message || e)
@@ -1622,6 +1797,12 @@ export class WeCloneService {
       }
       if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
         return { success: false, error: `模型或服务未找到：${msg}（已固定为 opencode-go/muse-spark-1.2-contributor，请检查服务是否可用）` }
+      }
+      if (/internal server error|HTTP 5\d{2}|500/i.test(msg)) {
+        return {
+          success: false,
+          error: `上游模型服务暂时不可用（${msg}）。已自动尝试备选模型仍未成功 — 请稍后重试，或在「新建分身 → 模型」里更换其他 OpenCode Go 模型`,
+        }
       }
       return { success: false, error: msg }
     } finally {

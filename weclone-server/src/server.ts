@@ -21,6 +21,7 @@ import fastifyStatic from '@fastify/static'
 import { MetaStore } from './store/metaStore'
 import { BlobStore } from './store/blobStore'
 import { RetrievalManager } from './retrieval/bm25'
+import { describeLlm } from './llm/proxy'
 import { readLimitsFromEnv, type WecloneContext } from './context'
 import { registerUploadRoute } from './routes/upload'
 import { registerCloneRoutes } from './routes/clones'
@@ -98,7 +99,8 @@ async function main(): Promise<void> {
     version: VERSION,
     uptime: Math.round(process.uptime()),
     store: metaStore.kind,
-    llm: process.env.WECLONE_LLM_API_KEY ? 'configured' : 'mock',
+    llm: describeLlm().configured ? 'configured' : 'mock',
+    llmModels: describeLlm().candidates,
   }))
 
   registerUploadRoute(app)

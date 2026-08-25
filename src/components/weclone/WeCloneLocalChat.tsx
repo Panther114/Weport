@@ -112,7 +112,9 @@ export default function WeCloneLocalChat({ cloneId, displayName, open, onClose }
         >
           {messages.length === 0 && (
             <p className="hint" style={{ textAlign: 'center', margin: '24px 0' }}>
-              本地模式：使用已配置的 OpenCode Go API Key (muse-spark-1.2-contributor) 直接在本地与分身对话，无需上传到 Railway。
+              本地模式：使用已配置的 OpenCode Go API Key 直接在本地与分身对话，无需上传到 Railway。
+              <br />
+              首选 muse-spark-1.2-contributor，模型故障时自动降级到 glm-5 等备选模型。
               <br />
               试试：你好，你是谁？
             </p>
