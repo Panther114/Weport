@@ -45,6 +45,7 @@ import { windowsHelloService } from './services/windowsHelloService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
 import { KeyServiceMac } from './services/keyServiceMac'
+import { KeyServiceLinux } from './services/keyServiceLinux'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 import { weCloneService } from './services/weCloneService'
@@ -202,7 +203,7 @@ const getLaunchAtStartupUnsupportedReason = (): string | null => {
 }
 
 const getSystemLaunchAtStartup = (): boolean => {
-  if (isMacHost) {
+  if (isMacHost || process.platform === 'linux') {
     try {
       return app.getLoginItemSettings({ path: process.execPath }).openAtLogin
     } catch {
@@ -233,7 +234,8 @@ const getMacLoginItemArgs = (): string[] => {
 }
 
 const setSystemLaunchAtStartup = (enabled: boolean): { success: boolean; enabled: boolean; error?: string } => {
-  if (isMacHost) {
+  if (isMacHost || process.platform === 'linux') {
+    // Linux：Electron 写 XDG autostart（~/.config/autostart），桌面环境支持时生效
     const silent = configService?.get('silentStartup') === true
     try {
       app.setLoginItemSettings({
@@ -1960,9 +1962,14 @@ function registerIpcHandlers() {
   ipcMain.handle('dbpath:scanWxids', (_e, rootPath: string) => dbPathService.scanWxids(String(rootPath || '')))
   ipcMain.handle('dbpath:getDefault', () => dbPathService.getDefaultPath())
 
-  // 密钥
+  // 密钥（Linux：keyServiceLinux 自 v0.7.5 起随仓库携带，v0.9.10 接线）
   ipcMain.handle('key:autoGetDbKey', async () => {
-    const keyService = process.platform === 'darwin' ? new KeyServiceMac() : new KeyService()
+    const keyService =
+      process.platform === 'darwin'
+        ? new KeyServiceMac()
+        : process.platform === 'linux'
+          ? new KeyServiceLinux()
+          : new KeyService()
     const result = await keyService.autoGetDbKey(180_000, (message, level) => {
       mainWindow?.webContents.send('key:dbKeyStatus', { message, level })
     })
@@ -1975,14 +1982,28 @@ function registerIpcHandlers() {
       if (!event.sender.isDestroyed()) event.sender.send('key:imageKeyStatus', { message: String(message || '') })
     } catch { /* noop */ }
   }
+  const createImageKeyService = (): KeyService | KeyServiceMac | KeyServiceLinux =>
+    process.platform === 'darwin'
+      ? new KeyServiceMac()
+      : process.platform === 'linux'
+        ? new KeyServiceLinux()
+        : new KeyService()
   ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {
-    if (process.platform !== 'win32') {
-      return { success: false, error: '图片密钥提取仅支持 Windows（macOS 图片为明文存储，无需密钥）' }
+    if (process.platform === 'win32') {
+      const dir = manualDir ? String(manualDir).trim() : ''
+      if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
+      return new KeyService().autoGetImageKey(
+        dir || undefined,
+        (message) => sendImageKeyStatus(event, message),
+        wxid ? String(wxid) : undefined
+      )
+    }
+    if (process.platform !== 'linux' && process.platform !== 'darwin') {
+      return { success: false, error: '图片密钥提取不支持当前平台' }
     }
     const dir = manualDir ? String(manualDir).trim() : ''
     if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
-    const keyService = new KeyService()
-    return keyService.autoGetImageKey(
+    return createImageKeyService().autoGetImageKey(
       dir || undefined,
       (message) => sendImageKeyStatus(event, message),
       wxid ? String(wxid) : undefined
@@ -1994,8 +2015,7 @@ function registerIpcHandlers() {
     }
     const dir = String(userDir || '').trim()
     if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
-    const keyService = new KeyService()
-    return keyService.autoGetImageKeyByMemoryScan(
+    return new KeyService().autoGetImageKeyByMemoryScan(
       dir,
       (message) => sendImageKeyStatus(event, message)
     )

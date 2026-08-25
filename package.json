@@ -21,6 +21,7 @@
     "build": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
     "build:dir": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --dir --publish never",
     "build:mac": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
+    "build:linux": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
     "package": "node scripts/clean-dist-electron.cjs && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never"
   },
   "dependencies": {
@@ -184,6 +185,44 @@
         }
       ]
     },
+    "linux": {
+      "target": [
+        "appimage",
+        "tar.gz"
+      ],
+      "category": "Utility",
+      "artifactName": "Weport-${version}-${arch}.${ext}",
+      "icon": "assets/icons/icon.png",
+      "extraResources": [
+        {
+          "from": "resources/wcdb/linux/${arch}",
+          "to": "resources/wcdb/linux/${arch}"
+        },
+        {
+          "from": "resources/key/linux",
+          "to": "resources/key/linux",
+          "filter": [
+            "${arch}/**/*"
+          ]
+        },
+        {
+          "from": "resources/wedecrypt/linux/${arch}",
+          "to": "resources/wedecrypt/linux/${arch}"
+        },
+        {
+          "from": "electron/assets/wasm/",
+          "to": "assets/wasm/"
+        },
+        {
+          "from": "resources/host",
+          "to": "host"
+        },
+        {
+          "from": "resources/mcp",
+          "to": "mcp"
+        }
+      ]
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
@@ -203,6 +242,7 @@
     "asarUnpack": [
       "node_modules/@hicccc77/electron-liquid-glass/**/*",
       "node_modules/koffi/**/*",
+      "node_modules/@koromix/**/*",
       "node_modules/silk-wasm/**/*",
       "resources/wedecrypt/**/*.node"
     ],
