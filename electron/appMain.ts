@@ -2738,6 +2738,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weCloneService.deleteClone(String(id || ''), remote !== false))
   ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
     weCloneService.setVisibility(String(id || ''), String(visibility || '')))
+  ipcMain.handle('weclone:upload', (_e, id: string) => weCloneService.uploadExistingClone(String(id || '')))
   ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
   ipcMain.handle('weclone:cancel', () => {
     wecloneControllers.get('generate')?.abort()

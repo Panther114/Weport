@@ -240,6 +240,16 @@ export default function WeClonePage() {
     void refreshServerStatus()
   }, [refreshList, refreshServerStatus])
 
+  /** 本地-only 克隆「上传到服务器」成功后的回调：刷新列表 + 状态 + toast */
+  const handleUploaded = useCallback(
+    (clone: WeCloneListItem) => {
+      pushToast('ok', '克隆已上传到服务器', '可在克隆卡片生成分享链接（设为公开/链接可见）')
+      setListLoading(true)
+      void refreshList()
+    },
+    [pushToast, refreshList]
+  )
+
   // ---------------------------------------------------------------- 一键生成
   const handleGenerate = useCallback(async () => {
     if (generating) return
@@ -479,6 +489,7 @@ export default function WeClonePage() {
                   serverBaseUrl={serverStatus?.baseUrl || ''}
                   onVisibilityChange={handleVisibilityChange}
                   onDeleteRequest={(c) => setConfirmDelete(c)}
+                  onUploaded={() => handleUploaded(clone)}
                 />
               ))}
             </div>

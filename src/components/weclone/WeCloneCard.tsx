@@ -10,6 +10,7 @@ import {
   Loader2,
   MessageSquareText,
   Trash2,
+  UploadCloud,
   Users2,
 } from 'lucide-react'
 import type { WeCloneListItem, WeCloneMdsPreview, WeCloneVisibility } from '../../types/weclone'
@@ -51,20 +52,43 @@ interface WeCloneCardProps {
   /** 切换可见性；返回服务端下发的分享链接（若有） */
   onVisibilityChange: (clone: WeCloneListItem, v: WeCloneVisibility) => Promise<string | undefined>
   onDeleteRequest: (clone: WeCloneListItem) => void
+  /** 本地-only 克隆上传成功后回调（页面据此刷新列表与服务器状态） */
+  onUploaded?: () => void
 }
 
-export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, onDeleteRequest }: WeCloneCardProps) {
+export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, onDeleteRequest, onUploaded }: WeCloneCardProps) {
   const [visBusy, setVisBusy] = useState(false)
   const [shareUrl, setShareUrl] = useState(clone.shareUrl || '')
   const [copied, setCopied] = useState(false)
   const [mdOpen, setMdOpen] = useState(false)
   const [mdLoading, setMdLoading] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
   const [mds, setMds] = useState<WeCloneMdsPreview | null>(null)
   const [mdError, setMdError] = useState('')
   const [localChatOpen, setLocalChatOpen] = useState(false)
 
   const remoteOnly = clone.source === 'remote'
-  const busy = visBusy
+  const needsUpload = !remoteOnly && !clone.serverId
+  const busy = visBusy || uploading
+
+  async function handleUpload() {
+    if (uploading || !needsUpload) return
+    setUploading(true)
+    setUploadError('')
+    try {
+      const r = await window.electronAPI.weclone.upload(clone.id)
+      if (r.success && r.serverId) {
+        onUploaded?.()
+      } else {
+        setUploadError(r.error || '上传失败')
+      }
+    } catch (e) {
+      setUploadError(String(e))
+    } finally {
+      setUploading(false)
+    }
+  }
 
   const resolvedShareUrl =
     shareUrl || (clone.serverId && serverBaseUrl ? `${serverBaseUrl}/share/${clone.serverId}` : '')
@@ -173,6 +197,18 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
               <MessageSquareText size={13} />
               本地对话
             </button>
+            {needsUpload && (
+              <button
+                className="primary-btn compact"
+                type="button"
+                disabled={busy}
+                title="把本地人格档案上传到 weport.up.railway.app 以获得分享链接"
+                onClick={() => void handleUpload()}
+              >
+                {uploading ? <Loader2 size={13} className="spin" /> : <UploadCloud size={13} />}
+                {uploading ? '上传中…' : '上传到服务器'}
+              </button>
+            )}
             <button className="ghost-btn compact" type="button" disabled={busy} onClick={() => void toggleMds()}>
               {mdLoading ? <Loader2 size={13} className="spin" /> : <FileText size={13} />}
               {mdOpen ? '收起档案' : '查看档案'}
@@ -189,6 +225,12 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
               删除
             </button>
           </div>
+
+          {uploadError && (
+            <p className="weclone-error-line" style={{ margin: '8px 0 0' }}>
+              <AlertTriangle size={12} /> 上传失败：{uploadError}
+            </p>
+          )}
 
           {clone.visibility === 'link' && (
             <div className="weclone-share-row">

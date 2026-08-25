@@ -52,7 +52,10 @@ npm run build     # 写入 ../public（清空重建，替换占位 index.html）
 > 注意：本目录刻意不提交 `package-lock.json`（依赖极少且全为纯 JS，安装秒级完成）。
 > 如需锁定版本，本地 `npm install --package-lock-only` 后提交即可。
 
-## Railway 一键部署（Dockerfile，推荐）
+## Railway 部署
+
+> **完整的分步指南（Dashboard 每一步点哪里、变量、域名绑定、Volume、
+> 故障排查）见 [`docs/DEPLOY-RAILWAY.md`](../docs/DEPLOY-RAILWAY.md)。**
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/github/Weport/weport)
 
@@ -79,17 +82,19 @@ Railway 服务以 **GitHub 仓库根目录** 为构建上下文时（本仓库�
 
 ### 简单流程（三步）
 
-1. **Deploy to Railway（一键）** → 点上方按钮创建服务，构建由**仓库根**
-   `railway.json`（builder = DOCKERFILE）+ 根 `Dockerfile` 完成（见上节；
-   只构建本目录，不碰 Electron 应用），Healthcheck 走 `/health`。从模板创建服务时，在 Settings → Networking 里把公网域名设为
-   **`weport.up.railway.app`**（Railway 生成服务时会分配 `<name>.up.railway.app`
-   子域，手动改成 weport 即可），得到服务地址 `https://weport.up.railway.app`。
-   建议挂一个 Volume 到 `/data`（或设 `WECLONE_DATA_DIR` 指向卷路径），重启不丢数据。
-2. **Weport App 人格克隆 → 私有服务器**：服务地址已固定为
-   `https://weport.up.railway.app`（无需配置 URL），仅需填入 OpenCode Go API Key
-   （模型固定 `muse-spark-1.2-contributor`）→ 点「保存并测试」。
-3. **新建分身 → 一键生成**：Agent 完成后进入「管理分身」，选择可见性
-   （私密 / 公开 / 链接）；选「链接」即获得分享链接，浏览器打开即可与分身对话。
+1. **部署到 Railway**：New Project → Deploy from GitHub repo → 选本仓库；
+   构建由**仓库根** `railway.json`（builder = DOCKERFILE）+ 根 `Dockerfile`
+   完成（见上节；只构建本目录，不碰 Electron 应用），Healthcheck 走 `/health`。
+   在 Settings → Networking 里把公网域名设为 **`weport.up.railway.app`**
+   （客户端硬编码此地址），并挂一个 Volume 到 `/data`（重启不丢数据）。
+   变量里设置 `WECLONE_LLM_API_KEY`（OpenCode Go key）—— 不设则为 mock 模式。
+   逐图逐步见 [`docs/DEPLOY-RAILWAY.md`](../docs/DEPLOY-RAILWAY.md)。
+2. **Weport App 人格克隆 → 新建分身**：填入 OpenCode Go API Key → 点「保存并测试」
+   （顶部小灯变绿 = 服务在线）。克隆对话首选 `muse-spark-1.2-contributor`，
+   该模型网关侧故障时自动降级到 glm-5 等备选模型（客户端与服务端同款降级链）。
+3. **管理分身 → 上传到服务器 → 选可见性**：本地已生成的老档案不用重新生成，
+   直接点卡片上的「上传到服务器」（ownerToken 自动生成）；切「公开 / 链接」即得
+   分享链接，浏览器打开即可与分身对话。
 
 ### 部署细节
 
@@ -109,7 +114,8 @@ Railway 服务以 **GitHub 仓库根目录** 为构建上下文时（本仓库�
 | `WECLONE_DATA_DIR` | `./data` | 元数据 + blobs 持久化目录（Railway 上指向 Volume） |
 | `WECLONE_LLM_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenAI 兼容上游（OpenCode Go 订阅网关，自建网关才覆盖） |
 | `WECLONE_LLM_API_KEY` | — | 服务端 LLM key（客户端永不传 key；空 = mock 模式） |
-| `WECLONE_LLM_MODEL` | `muse-spark-1.2-contributor` | |
+| `WECLONE_LLM_MODEL` | `muse-spark-1.2-contributor` | 首选模型（5xx/404 时自动降级） |
+| `WECLONE_LLM_FALLBACK_MODELS` | `glm-5,minimax-m2.5,deepseek-v4-flash` | 降级候选（仅默认网关生效；显式设置则任何网关都生效；空串关闭） |
 | `WECLONE_LLM_MAX_TOKENS` | `1024` | 单次回复上限 |
 | `WECLONE_MAX_UPLOAD_MB` | `25` | 上传请求体上限 |
 | `WECLONE_MAX_BLOB_MB` | `20` | 单 clone 序列化 chunks 上限 |
