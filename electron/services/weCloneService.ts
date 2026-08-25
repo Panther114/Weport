@@ -51,6 +51,7 @@ import {
   WECLONE_FILTER_PROMPT,
   buildWeCloneChatSystemPrompt,
 } from './weClonePrompts'
+import { computeVoiceDna, renderVoiceSheet } from './weCloneVoice'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -183,21 +184,11 @@ const CHUNK_CHAR_LIMIT = 800
 const MAX_CHUNKS_UPLOAD_BYTES = 20 * 1024 * 1024
 /** 单份 MD 字符上限 */
 const MD_CHAR_LIMIT = 12_000
-/** 生成上下文采样：随机 + 最近 */
-const SAMPLE_RANDOM_CHUNKS = 200
-const SAMPLE_RECENT_CHUNKS = 50
+/** 生成上下文采样：随机 + 最近（gen3：扩大覆盖，配合模型降级链兜底长上下文） */
+const SAMPLE_RANDOM_CHUNKS = 400
+const SAMPLE_RECENT_CHUNKS = 120
 /** 生成上下文总字符上限 */
-const GENERATION_CONTEXT_CHAR_LIMIT = 120_000
-/**
- * 克隆 LLM 候选模型链（v0.9.10 本地对话修复）：
- * 首选模型（config weCloneModel，缺省 muse-spark-1.2-contributor）失败
- * （HTTP 5xx / 404 / 400，例如 muse-spark-1.2-contributor 曾整段返回
- * "Internal server error" 500）时，依次降级到同一 opencode-go 网关的备选模型，
- * 保证本地对话/生成不至于被单一模型故障卡死。sticky 命中记录在
- * config weCloneEffectiveModel，下次直接从可用模型开始。
- */
-const WECLONE_FALLBACK_MODELS = ['glm-5', 'minimax-m2.5', 'deepseek-v4-flash']
-
+const GENERATION_CONTEXT_CHAR_LIMIT = 180_000
 // ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
@@ -415,7 +406,13 @@ export class WeCloneService {
 
   private formatChunkLine(isSend: boolean, sender: string, myWxid: string, text: string): string {
     const who = isSend ? '我' : sender && sender !== myWxid ? sender : '对方'
-    return `${who}: ${text.replace(/\r?\n/g, ' ')}`
+    // 群聊 message_content 自带 "发送者: " 前缀，与我们的行前缀重复 → 去重
+    let body = text.replace(/\r?\n/g, ' ')
+    if (sender) {
+      const prefix = `${sender}: `
+      if (body.startsWith(prefix)) body = body.slice(prefix.length).trimStart()
+    }
+    return `${who}: ${body}`
   }
 
   /**
@@ -710,78 +707,43 @@ export class WeCloneService {
       .replace(/(?<![\uD800-\uDFFF])[\uDC00-\uDFFF]/g, '\uFFFD')
   }
 
-  /** 上游错误是否值得换下一个候选模型重试（5xx / 404 / 400 = 模型或网关侧问题） */
-  private isModelFallbackEligible(e: unknown): boolean {
-    const status = Number((e as { status?: number } | null)?.status)
-    if (Number.isFinite(status) && status !== 0) {
-      if (status === 401 || status === 403 || status === 429) return false // key/配额问题，换模型无用
-      return status >= 400
-    }
-    const msg = String((e as Error)?.message || e).toLowerCase()
-    return msg.includes('not found') || msg.includes('internal server error')
-  }
-
-  private buildModelCandidates(profile: ProviderProfile): string[] {
-    const preferred =
-      String(this.cfgGet('weCloneEffectiveModel') || '').trim() ||
+  /** 克隆固定使用强制 provider 的模型（muse-spark-1.2-contributor）。
+   * gen3 起不做跨模型降级：不同模型语气差异会污染人格一致性（用户明确要求）。 */
+  private resolveCloneModel(profile: ProviderProfile): string {
+    return (
       String(this.cfgGet('weCloneModel') || '').trim() ||
       profile.model ||
       WECLONE_FORCED_MODEL
-    return [preferred, ...WECLONE_FALLBACK_MODELS].filter(
-      (m, i, arr) => m && arr.indexOf(m) === i
     )
   }
 
   /**
-   * 带模型降级链的流式调用：逐个候选尝试，直到某个模型产出回复。
-   * 返回实际生效的模型名（供日志/UI 提示）。全部失败时抛出最后一个错误。
+   * 固定模型的流式调用（单模型，不降级）。
+   * 返回实际使用的模型名。失败时原样抛出上游错误。
    */
-  private async streamLlmWithFallback(input: {
+  private async streamLlm(input: {
     profile: ProviderProfile
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
     reasoningEffort: string
     signal?: AbortSignal
     onText?: (chunk: string) => void
-    onAttemptStart?: (model: string) => void
   }): Promise<{ content: string; model: string }> {
-    const candidates = this.buildModelCandidates(input.profile)
-    let lastError: unknown = null
-    for (const model of candidates) {
-      if (input.signal?.aborted) throw new WeCloneAbortedError()
-      input.onAttemptStart?.(model)
-      let attemptChars = 0
-      try {
-        const result = await getProviderAdapter({ ...input.profile, model }).stream({
-          profile: { ...input.profile, model },
-          messages: input.messages as never,
-          tools: [],
-          reasoningEffort: input.reasoningEffort,
-          signal: input.signal ?? AbortSignal.timeout(300_000),
-          onText: (chunk: string) => {
-            attemptChars += String(chunk || '').length
-            try { input.onText?.(chunk) } catch { /* noop */ }
-          },
-          onReasoning: () => undefined,
-        })
-        const content = String(result?.content || '').trim()
-        if (!content && attemptChars === 0) {
-          // 上游空响应也视为该模型故障，继续降级
-          lastError = new Error(`模型 ${model} 返回空内容`)
-          console.warn(`[WeClone] 模型 ${model} 返回空内容，尝试下一个候选…`)
-          continue
-        }
-        try { this.configService.set('weCloneEffectiveModel', model) } catch { /* noop */ }
-        console.log(`[WeClone] LLM 调用成功 model=${model} chars=${content.length}`)
-        return { content, model }
-      } catch (e) {
-        lastError = e
-        if ((e as Error)?.name === 'WeCloneAbortedError' || input.signal?.aborted || (e as Error)?.name === 'AbortError') throw e
-        const status = Number((e as { status?: number } | null)?.status) || 0
-        console.warn(`[WeClone] 模型 ${model} 调用失败（HTTP ${status || '?'}）：${String((e as Error)?.message || e)}`)
-        if (!this.isModelFallbackEligible(e)) throw e
-      }
-    }
-    throw lastError ?? new Error('所有候选模型均不可用')
+    const model = this.resolveCloneModel(input.profile)
+    if (input.signal?.aborted) throw new WeCloneAbortedError()
+    const result = await getProviderAdapter({ ...input.profile, model }).stream({
+      profile: { ...input.profile, model },
+      messages: input.messages as never,
+      tools: [],
+      reasoningEffort: input.reasoningEffort,
+      signal: input.signal ?? AbortSignal.timeout(300_000),
+      onText: (chunk: string) => {
+        try { input.onText?.(chunk) } catch { /* noop */ }
+      },
+      onReasoning: () => undefined,
+    })
+    const content = String(result?.content || '').trim()
+    console.log(`[WeClone] LLM 调用成功 model=${model} chars=${content.length}`)
+    return { content, model }
   }
 
   private async callLlm(
@@ -792,7 +754,7 @@ export class WeCloneService {
     onText?: (chunk: string) => void
   ): Promise<string> {
     const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
-    const { content } = await this.streamLlmWithFallback({
+    const { content } = await this.streamLlm({
       profile,
       messages: [
         { role: 'system', content: this.sanitizeForApi(systemContent) },
@@ -1033,10 +995,18 @@ export class WeCloneService {
       renameSync(jsonlPart, jsonlFinal) // 原子收尾
       if (stats.messageCount === 0) throw new Error('没有扫到可用的文本消息')
 
-      // ---- 3. 采样 + 逐份生成 MD -------------------------------------------
+      // ---- 3. Voice DNA + 采样 + 逐份生成 MD --------------------------------
+      report('generate', 30, '正在计算语音硬指标（Voice DNA）…')
+      const voiceDna = await computeVoiceDna(jsonlFinal)
+      this.ensureNotAborted(signal)
+      const voiceSheet = renderVoiceSheet(voiceDna)
+      try {
+        this.atomicWriteFile(join(dir, 'voice.json'), JSON.stringify(voiceDna, null, 2))
+      } catch { /* 诊断文件，失败不阻塞 */ }
+      console.log(`[WeClone] Voice DNA 样本 ${voiceDna.sampleCount} 条，中位长度 ${voiceDna.length.p50} 字符`)
       report('generate', 30, '正在采样语料…')
       const { sampled } = await this.sampleChunksFromJsonl(jsonlFinal, SAMPLE_RANDOM_CHUNKS, SAMPLE_RECENT_CHUNKS)
-      const contextBase = this.buildGenerationContext(sampled, names)
+      const contextBase = `${voiceSheet}\n\n${this.buildGenerationContext(sampled, names)}`
       const mdKeys = Object.keys(WECLONE_MD_PROMPTS) as Array<keyof WeCloneMds>
       const mds: Partial<WeCloneMds> = {}
       for (let i = 0; i < mdKeys.length; i += 1) {
@@ -1056,8 +1026,13 @@ export class WeCloneService {
           report('generate', baseProgress + sub, `正在生成 ${key}.md…`)
         }
         const content = await this.callLlm(profile, WECLONE_SYSTEM_PROMPT, prompt, signal, onText)
-        const cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
+        let cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
         if (!cleaned) throw new Error(`${key}.md 生成结果为空`)
+        // gen3：language.md 机器前置 Voice DNA 硬指标段（聊天端语气锚点，
+        // 不依赖 LLM 是否复写数字；随上传原样带到服务端）
+        if (key === 'language' && !cleaned.includes('## Voice DNA 硬指标')) {
+          cleaned = `${voiceSheet}\n\n${cleaned}`.slice(0, MD_CHAR_LIMIT + 2_600)
+        }
         mds[key] = cleaned
         this.atomicWriteFile(join(dir, `${key}.md`), cleaned)
         // ensure stage end snaps to next boundary
@@ -1769,7 +1744,7 @@ export class WeCloneService {
     const timeout = setTimeout(() => abortCtrl.abort(), 120_000)
     let full = ''
     try {
-      const { content, model } = await this.streamLlmWithFallback({
+      const { content, model } = await this.streamLlm({
         profile: profile as ProviderProfile,
         messages,
         reasoningEffort: String(this.cfgGet('weportAiReasoningEffort') || 'high'),
@@ -1801,7 +1776,7 @@ export class WeCloneService {
       if (/internal server error|HTTP 5\d{2}|500/i.test(msg)) {
         return {
           success: false,
-          error: `上游模型服务暂时不可用（${msg}）。已自动尝试备选模型仍未成功 — 请稍后重试，或在「新建分身 → 模型」里更换其他 OpenCode Go 模型`,
+          error: `上游模型 muse-spark-1.2-contributor 暂时不可用（${msg}）。这是 OpenCode Go 网关侧的故障，与本地配置无关 — 请稍后重试`,
         }
       }
       return { success: false, error: msg }

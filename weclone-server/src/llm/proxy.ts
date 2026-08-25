@@ -8,11 +8,10 @@
  *   （https://opencode.ai/zen/go/v1）+ muse-spark-1.2-contributor。
  *   WECLONE_LLM_BASE_URL / WECLONE_LLM_MODEL 环境变量仍可覆盖（自建网关用），
  *   但缺省即锁定 opencode-go，不再回落 deepseek-chat。
- * - 模型降级链（v0.9.10 修复 "Internal server error"）：首选模型返回
- *   HTTP ≥500 / 404（例如 muse-spark-1.2-contributor 网关侧整体 500）时，
- *   依次尝试 WECLONE_LLM_FALLBACK_MODELS（默认 glm-5,minimax-m2.5,
- *   deepseek-v4-flash，同一网关）。仅在默认网关（或显式设置
- *   WECLONE_LLM_FALLBACK_MODELS）时启用 —— 自建网关的备选模型无意义。
+ * - 模型固定（gen3）：WeClone 全链路只使用 muse-spark-1.2-contributor，
+ *   默认【不做】跨模型降级 —— 不同模型的语气差异会污染克隆人格一致性。
+ *   确有需要时可显式设置 WECLONE_LLM_FALLBACK_MODELS（逗号分隔，同网关模型），
+ *   首选模型返回 HTTP ≥500 / 404 时依次尝试。
  * - baseUrl 以 /v1 结尾时直接拼 /chat/completions；否则补 /v1 前缀
  *   （兼容 WECLONE_LLM_BASE_URL=https://api.deepseek.com 这类裸域名覆盖）。
  * - 未配置 API key 时进入 mock 模式：回显最后一条 user 消息，
@@ -41,8 +40,8 @@ let warnedNoKey = false
 /** 默认强制：OpenCode Go 订阅网关 + muse-spark-1.2-contributor（与 WeportAI 一致） */
 export const DEFAULT_LLM_BASE_URL = 'https://opencode.ai/zen/go/v1'
 export const DEFAULT_LLM_MODEL = 'muse-spark-1.2-contributor'
-/** 首选模型网关侧故障（500/404）时的降级候选（同网关实测可用模型） */
-export const DEFAULT_LLM_FALLBACK_MODELS = 'glm-5,minimax-m2.5,deepseek-v4-flash'
+/** 可选降级候选：默认空 = 不降级（人格一致性优先）；显式设置才启用 */
+export const DEFAULT_LLM_FALLBACK_MODELS = ''
 
 /** 进程内 sticky：最近一次成功的模型，后续请求直接从它开始 */
 let lastGoodModel = ''
@@ -69,12 +68,11 @@ function llmModel(): string {
   return process.env.WECLONE_LLM_MODEL || DEFAULT_LLM_MODEL
 }
 
-/** 本轮请求依次尝试的模型候选（去重、保序、sticky 优先） */
+/** 本轮请求依次尝试的模型候选（去重、保序、sticky 优先）。
+ * 默认只有主模型（不降级）；仅当显式设置 WECLONE_LLM_FALLBACK_MODELS 时追加候选。 */
 function llmModelCandidates(): string[] {
   const primary = llmModel()
-  const csvRaw = process.env.WECLONE_LLM_FALLBACK_MODELS
-  const csv =
-    csvRaw !== undefined ? csvRaw : llmBaseUrl() === DEFAULT_LLM_BASE_URL ? DEFAULT_LLM_FALLBACK_MODELS : ''
+  const csv = process.env.WECLONE_LLM_FALLBACK_MODELS ?? DEFAULT_LLM_FALLBACK_MODELS
   const list = [lastGoodModel || primary, primary, ...csv.split(',').map((s) => s.trim()).filter(Boolean)]
   return list.filter((m, i, arr) => m && arr.indexOf(m) === i)
 }
