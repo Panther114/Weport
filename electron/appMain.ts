@@ -1955,7 +1955,13 @@ function registerIpcHandlers() {
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
   ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
-  ipcMain.handle('auth:verifyHello', (_e, message: string) => windowsHelloService.verify(String(message || '请验证您的身份')))
+  ipcMain.handle('auth:verifyHello', (_e, message: string) => {
+    // Windows Hello（mac 为 Touch ID 路径）：Linux 无对应生物认证后端，直接给出明确错误
+    if (process.platform !== 'win32' && process.platform !== 'darwin') {
+      return Promise.resolve({ success: false, error: '生物识别解锁仅支持 Windows / macOS' })
+    }
+    return windowsHelloService.verify(String(message || '请验证您的身份'))
+  })
 
   // 数据库路径
   ipcMain.handle('dbpath:autoDetect', () => dbPathService.autoDetect())
@@ -5387,8 +5393,8 @@ function installMainProcessErrorHandlers() {
 function startApp() {
   installMainProcessErrorHandlers()
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
-  if (process.platform !== 'win32' && process.platform !== 'darwin') {
-    console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS）')
+  if (process.platform !== 'win32' && process.platform !== 'darwin' && process.platform !== 'linux') {
+    console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS / Linux）')
   }
 
   // ---------------------------------------------------------------------------
