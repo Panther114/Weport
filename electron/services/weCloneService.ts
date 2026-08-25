@@ -692,6 +692,39 @@ export class WeCloneService {
     }
   }
 
+  /**
+   * 克隆可用模型目录（gen3 模型选择）：用强制 provider 的 key 拉 OpenCode Go
+   * /models 列表，供设置 UI 下拉选择；key 不出主进程。
+   */
+  async listAvailableModels(): Promise<{ success: boolean; models?: string[]; error?: string }> {
+    try {
+      const profile = await this.ensureForcedProvider()
+      const adapter = getProviderAdapter(profile)
+      const models = await adapter.listModels(profile, AbortSignal.timeout(15_000))
+      const ids = Array.from(new Set((models || []).map((m) => String(m).trim()).filter(Boolean))).sort()
+      if (ids.length === 0) return { success: false, error: '网关未返回任何模型' }
+      return { success: true, models: ids }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message || e) }
+    }
+  }
+
+  /** 当前克隆模型覆盖（空 = 默认 muse-spark-1.2-contributor） */
+  getModelOverride(): string {
+    return String(this.cfgGet('weCloneModel') || '').trim()
+  }
+
+  setModelOverride(model: string): { success: boolean; model: string } {
+    const cleaned = String(model || '').trim().slice(0, 120)
+    try {
+      this.configService.set('weCloneModel', cleaned)
+    } catch (e) {
+      return { success: false, model: this.getModelOverride() }
+    }
+    console.log(`[WeClone] 克隆模型覆盖已设置: ${cleaned || '(默认)'}`)
+    return { success: true, model: cleaned }
+  }
+
   private assertProfileReady(profile: ProviderProfile | null): void {
     if (!profile) throw new Error('未配置 AI 服务，请先在 WeportAI 设置中添加服务配置')
     if (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional) {
