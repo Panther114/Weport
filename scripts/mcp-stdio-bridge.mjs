@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Weport MCP stdio 桥接（v0.9.7）
+ * Weport MCP stdio 桥接（v0.9.10）
  *
  * 供仅支持 stdio 的 AI 宿主（Claude Desktop 等）接入 Weport 的本地
  * MCP 服务（Streamable HTTP）。桥接进程是独立 Node 进程：
@@ -41,7 +41,7 @@ async function main() {
   const headers = {}
   if (args.token) headers.Authorization = `Bearer ${args.token}`
 
-  const client = new Client({ name: 'weport-mcp-bridge', version: '0.9.7' }, { capabilities: {} })
+  const client = new Client({ name: 'weport-mcp-bridge', version: '0.9.10' }, { capabilities: {} })
   try {
     await client.connect(
       new StreamableHTTPClientTransport(new URL(mcpUrl), { requestInit: { headers } }),
@@ -52,7 +52,7 @@ async function main() {
   }
 
   const server = new Server(
-    { name: 'weport-mcp-bridge', version: '0.9.7' },
+    { name: 'weport-mcp-bridge', version: '0.9.10' },
     { capabilities: { tools: {} } },
   )
 

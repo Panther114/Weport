@@ -3,6 +3,7 @@
 .notification-toast-container {
     position: relative;
     width: 100%;
+    box-sizing: border-box;
     // 四周留白：容纳卡片投影，并透出窗口底层的仿桌面背景
     padding: 8px;
     opacity: 0;
@@ -15,9 +16,16 @@
         transform: none;
         pointer-events: auto;
 
-        // 唯一交互：悬停平滑放大（无点击、无辉光）
-        &:hover {
-            transform: scale(1.02);
+        // 保持卡片边缘稳定，避免在透明窗口边界处因悬停放大被裁掉
+    }
+
+    &.motion-disabled {
+        transform: none;
+        transition: none;
+
+        &.visible {
+            opacity: 1;
+            transform: none;
         }
     }
 

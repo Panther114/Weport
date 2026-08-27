@@ -52,6 +52,10 @@ body {
     &.anim-center {
         animation: noti-enter-center 0.5s cubic-bezier(0.16, 1, 0.3, 1);
     }
+
+    &.motion-disabled {
+        animation: none;
+    }
 }
 
 #notification-prev {
@@ -61,4 +65,8 @@ body {
 
     // Ensure it stays behind
     z-index: 0 !important;
+
+    &.motion-disabled {
+        animation: none;
+    }
 }

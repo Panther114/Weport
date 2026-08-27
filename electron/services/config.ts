@@ -87,6 +87,8 @@ interface ConfigSchema {
   notificationEnabled: boolean
   aiInsightNotificationEnabled: boolean
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
+  notificationDuration: number
+  notificationAnimationEnabled: boolean
   notificationFilterMode: 'all' | 'whitelist' | 'blacklist'
   notificationFilterList: string[]
   messagePushEnabled: boolean
@@ -275,6 +277,8 @@ export class ConfigService {
       notificationEnabled: true,
       aiInsightNotificationEnabled: true,
       notificationPosition: 'top-right',
+      notificationDuration: 5000,
+      notificationAnimationEnabled: true,
       notificationFilterMode: 'all',
       notificationFilterList: [],
       httpApiToken: '',

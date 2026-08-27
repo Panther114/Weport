@@ -42,6 +42,8 @@ import {
   LineChart,
   Palette,
   Contrast,
+  MapPin,
+  Timer,
   Settings2 as SettingsIcon,
 } from 'lucide-react'
 
@@ -58,6 +60,7 @@ type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
 type DisplayNamePref = 'group-nickname' | 'remark' | 'nickname'
 type WriteLayout = 'A' | 'B' | 'C'
+type NotificationPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
 type FilterMode = 'all' | 'whitelist' | 'blacklist'
 type SessionType = 'all' | 'private' | 'group' | 'official' | 'other'
 type ToastKind = 'ok' | 'err' | 'info'
@@ -154,6 +157,23 @@ const NAME_PREF_OPTIONS: Array<{ value: DisplayNamePref; label: string }> = [
 
 const CONCURRENCY_OPTIONS = [1, 3, 5, 10]
 
+const NOTIFICATION_DURATION_OPTIONS = [
+  { value: 3000, label: '3 秒' },
+  { value: 5000, label: '5 秒' },
+  { value: 8000, label: '8 秒' },
+  { value: 15000, label: '15 秒' },
+]
+
+const NOTIFICATION_POSITION_OPTIONS: Array<{ value: NotificationPosition; label: string }> = [
+  { value: 'top-right', label: '右上角' },
+  { value: 'top-left', label: '左上角' },
+  { value: 'bottom-right', label: '右下角' },
+  { value: 'bottom-left', label: '左下角' },
+  { value: 'top-center', label: '顶部居中' },
+]
+
+const isValidDecryptKey = (value: string): boolean => /^[0-9a-f]{64}$/i.test(value.trim())
+
 const EXPORT_DEFAULTS = {
   format: 'txt' as Format,
   writeLayout: 'A' as WriteLayout,
@@ -206,6 +226,9 @@ export default function App() {
   const [exportTaskId, setExportTaskId] = useState<string | null>(null)
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(false)
+  const [notificationPosition, setNotificationPosition] = useState<NotificationPosition>('top-right')
+  const [notificationDuration, setNotificationDuration] = useState(5000)
+  const [notificationAnimationEnabled, setNotificationAnimationEnabled] = useState(true)
   const [launchAtStartup, setLaunchAtStartup] = useState(false)
   const [startupSupported, setStartupSupported] = useState(true)
   const [startupReason, setStartupReason] = useState<string | undefined>()
@@ -444,12 +467,53 @@ export default function App() {
     }
   }, [api, persist])
 
-  const saveAccountKey = useCallback(async (wxid: string, key: string) => {
-    if (!wxid || !key) return
+  const saveAccountKey = useCallback(async (wxid: string, key: string): Promise<boolean> => {
+    if (!wxid || !key) return false
     try {
-      await api.config.updateWxidEntry(wxid, { decryptKey: key, updatedAt: Date.now() })
-    } catch { /* noop */ }
+      const result = await api.config.updateWxidEntry(wxid, { decryptKey: key, updatedAt: Date.now() })
+      return result?.success !== false
+    } catch {
+      return false
+    }
   }, [api])
+
+  // 密钥输入与自动捕获共用同一条确认路径，确保主进程拿到最新的账号/目录/密钥，
+  // 并在 UI 解锁前实际打开 WCDB、读取一次会话列表。此前这里只是 fire-and-forget
+  // 写配置，用户看到密钥已填入但数据库仍未连接，容易误以为需要再次登录微信。
+  const persistAndConnectKey = useCallback(async (rawKey: string): Promise<{ success: boolean; error?: string }> => {
+    const key = rawKey.trim()
+    const path = dbPath.trim()
+    const wxid = selectedWxid.trim()
+    if (!isValidDecryptKey(key)) return { success: false, error: '请输入完整的 64 位十六进制密钥' }
+    if (!path) return { success: false, error: '请先选择微信数据目录' }
+    if (!wxid) return { success: false, error: '请先选择微信账号' }
+
+    const ensureConfig = async (configKey: string, value: string) => {
+      const current = await api.config.get(configKey)
+      if (current === value) return
+      const result = await api.config.set(configKey, value)
+      if (result?.success === false) throw new Error(`保存${configKey}失败`)
+    }
+
+    try {
+      await ensureConfig('dbPath', path)
+      await ensureConfig('myWxid', wxid)
+      await ensureConfig('decryptKey', key)
+      if (!await saveAccountKey(wxid, key)) return { success: false, error: '账号密钥保存失败' }
+
+      const connection = await api.chat.connect()
+      if (!connection?.success) {
+        return { success: false, error: connection?.error || '数据库连接失败' }
+      }
+      const sessions = await api.chat.getSessions()
+      if (!sessions?.success) {
+        return { success: false, error: sessions?.error || '数据库已打开，但会话读取失败' }
+      }
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }, [api, dbPath, saveAccountKey, selectedWxid])
 
   const refreshAccounts = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -577,6 +641,16 @@ export default function App() {
         if (typeof fmt === 'string' && FORMATS.some((f) => f.value === fmt)) setFormat(fmt as Format)
         const notif = await api.config.get('notificationEnabled')
         setNotificationsEnabled(notif === true)
+        const notifPosition = await api.config.get('notificationPosition')
+        if (NOTIFICATION_POSITION_OPTIONS.some((option) => option.value === notifPosition)) {
+          setNotificationPosition(notifPosition as NotificationPosition)
+        }
+        const notifDuration = await api.config.get('notificationDuration')
+        if (NOTIFICATION_DURATION_OPTIONS.some((option) => option.value === notifDuration)) {
+          setNotificationDuration(notifDuration as number)
+        }
+        const notifAnimation = await api.config.get('notificationAnimationEnabled')
+        if (typeof notifAnimation === 'boolean') setNotificationAnimationEnabled(notifAnimation)
         try {
           const httpOn = await api.config.get('httpApiEnabled')
           setHttpApiEnabled(httpOn === true)
@@ -756,8 +830,13 @@ export default function App() {
   }
 
   async function extractKey() {
+    if (busy) return
     if (!dbPath.trim()) {
       pushToast('err', '请先选择微信数据目录')
+      return
+    }
+    if (!selectedWxid) {
+      pushToast('err', '请先选择微信账号', '获取密钥后需要绑定当前账号并验证数据库连接')
       return
     }
     setBusy(true)
@@ -767,11 +846,15 @@ export default function App() {
     try {
       const result = await api.key.autoGetDbKey()
       if (result.success && result.key) {
-        setDecryptKey(result.key)
+        const key = result.key.trim()
+        setDecryptKey(key)
         setKeyHookReady(false)
-        void persist({ decryptKey: result.key })
-        void saveAccountKey(selectedWxid, result.key)
-        pushToast('ok', '密钥提取成功', '可以开始导出全部聊天记录')
+        const connection = await persistAndConnectKey(key)
+        if (connection.success) {
+          pushToast('ok', '密钥提取并连接成功', '已读取会话，可以开始导出全部聊天记录')
+        } else {
+          pushToast('err', '密钥已获取，但数据库连接失败', connection.error, 10000)
+        }
       } else {
         pushToast('err', '密钥提取失败', result.error || '请按左侧说明重试', 10000)
       }
@@ -781,6 +864,28 @@ export default function App() {
       setBusy(false)
       setBusyLabel('')
       setKeyStatus('')
+    }
+  }
+
+  async function confirmKeyAndConnect() {
+    if (busy) return
+    if (!keyOk) {
+      pushToast('err', '密钥格式不正确', '请输入完整的 64 位十六进制密钥')
+      return
+    }
+    setBusy(true)
+    setBusyLabel('正在验证密钥并连接数据库…')
+    try {
+      const result = await persistAndConnectKey(decryptKey)
+      if (result.success) {
+        setKeyHookReady(false)
+        pushToast('ok', '密钥已确认，数据库已连接', '已读取会话，可以开始导出')
+      } else {
+        pushToast('err', '数据库连接失败', result.error, 10000)
+      }
+    } finally {
+      setBusy(false)
+      setBusyLabel('')
     }
   }
 
@@ -1011,6 +1116,42 @@ export default function App() {
       }
     } else {
       setNotifyListening(false)
+    }
+  }
+
+  async function updateNotificationPosition(value: NotificationPosition) {
+    const previous = notificationPosition
+    setNotificationPosition(value)
+    try {
+      const result = await api.config.set('notificationPosition', value)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setNotificationPosition(previous)
+      pushToast('err', '弹窗位置保存失败', String(error))
+    }
+  }
+
+  async function updateNotificationDuration(value: number) {
+    const previous = notificationDuration
+    setNotificationDuration(value)
+    try {
+      const result = await api.config.set('notificationDuration', value)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setNotificationDuration(previous)
+      pushToast('err', '弹窗时长保存失败', String(error))
+    }
+  }
+
+  async function toggleNotificationAnimation(on: boolean) {
+    const previous = notificationAnimationEnabled
+    setNotificationAnimationEnabled(on)
+    try {
+      const result = await api.config.set('notificationAnimationEnabled', on)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setNotificationAnimationEnabled(previous)
+      pushToast('err', '弹窗动效设置失败', String(error))
     }
   }
 
@@ -1387,10 +1528,6 @@ export default function App() {
                     onChange={(e) => {
                       const v = e.target.value.trim()
                       setDecryptKey(v)
-                      if (v.length === 64) {
-                        void persist({ decryptKey: v })
-                        void saveAccountKey(selectedWxid, v)
-                      }
                     }}
                     spellCheck={false}
                     autoComplete="off"
@@ -1414,9 +1551,20 @@ export default function App() {
                   <KeyRound size={14} />
                   {busy && !progress ? '提取中…' : '提取密钥'}
                 </button>
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={() => void confirmKeyAndConnect()}
+                  disabled={busy || !dbReady || !accountReady || !keyOk}
+                >
+                  <PlugZap size={14} />
+                  确认密钥并连接
+                </button>
               </div>
               <p className="hint">
-                {keyOk ? '密钥已就绪，可在右侧开始导出。' : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
+                {keyOk
+                  ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
+                  : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
               </p>
             </section>
 
@@ -1998,6 +2146,66 @@ export default function App() {
                   <BellRing size={13} />
                   测试通知弹窗
                 </button>
+              </div>
+
+              <div className="notification-settings" aria-label="弹窗行为设置">
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <MapPin size={14} />
+                    <div>
+                      <strong>弹窗位置</strong>
+                      <span className="hint">选择通知卡片出现的屏幕位置</span>
+                    </div>
+                  </div>
+                  <select
+                    className="notification-select"
+                    value={notificationPosition}
+                    onChange={(e) => void updateNotificationPosition(e.target.value as NotificationPosition)}
+                    aria-label="弹窗位置"
+                  >
+                    {NOTIFICATION_POSITION_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Timer size={14} />
+                    <div>
+                      <strong>显示时长</strong>
+                      <span className="hint">右键卡片可立即关闭</span>
+                    </div>
+                  </div>
+                  <select
+                    className="notification-select"
+                    value={notificationDuration}
+                    onChange={(e) => void updateNotificationDuration(Number(e.target.value))}
+                    aria-label="弹窗显示时长"
+                  >
+                    {NOTIFICATION_DURATION_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Sparkles size={14} />
+                    <div>
+                      <strong>弹窗动效</strong>
+                      <span className="hint">关闭后直接显示和隐藏，减少干扰</span>
+                    </div>
+                  </div>
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={notificationAnimationEnabled}
+                      onChange={(e) => void toggleNotificationAnimation(e.target.checked)}
+                    />
+                    <span className="track" />
+                  </label>
+                </div>
               </div>
 
               <div className="checklist">

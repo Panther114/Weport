@@ -31,6 +31,16 @@ export function setNotificationNavigateHandler(
 let notificationWindow: BrowserWindow | null = null;
 let closeTimer: NodeJS.Timeout | null = null;
 
+const DEFAULT_NOTIFICATION_DURATION_MS = 5000;
+const MIN_NOTIFICATION_DURATION_MS = 1000;
+const MAX_NOTIFICATION_DURATION_MS = 60_000;
+
+function normalizeNotificationDuration(value: unknown): number {
+  const duration = Number(value);
+  if (!Number.isFinite(duration)) return DEFAULT_NOTIFICATION_DURATION_MS;
+  return Math.min(MAX_NOTIFICATION_DURATION_MS, Math.max(MIN_NOTIFICATION_DURATION_MS, Math.round(duration)));
+}
+
 // 空闲销毁：隐藏的通知窗口（含渲染进程）常驻占用 ~120MB 工作集，
 // 通知稀少时不值得养着。隐藏后闲置超时即销毁，下一条通知重新冷启动
 const IDLE_DESTROY_DELAY_MS = 3 * 60 * 1000;
@@ -343,6 +353,8 @@ let lastNotificationData: any = null;
 async function showAndSend(win: BrowserWindow, data: any) {
   const config = ConfigService.getInstance();
   const position = (await config.get("notificationPosition")) || "top-right";
+  const notificationDuration = normalizeNotificationDuration(await config.get("notificationDuration"));
+  const notificationAnimationEnabled = (await config.get("notificationAnimationEnabled")) !== false;
 
   // 更新位置：基于工作区完整矩形（含原点偏移）定位。
   // macOS 菜单栏、Windows 任务栏靠上/靠左时工作区原点不为 (0,0)，
@@ -388,6 +400,8 @@ async function showAndSend(win: BrowserWindow, data: any) {
   const payload = {
     ...data,
     position,
+    notificationDuration,
+    notificationAnimationEnabled,
     backdrop: {
       native: Boolean(nativeGlass),
       sourceId: null,

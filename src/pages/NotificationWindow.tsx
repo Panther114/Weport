@@ -12,6 +12,15 @@ import './NotificationWindow.scss'
 
 /** 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值） */
 const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 4, displacementScale: 85, aberrationIntensity: 1.5, saturation: 175 }
+const DEFAULT_NOTIFICATION_DURATION_MS = 5000
+const MIN_NOTIFICATION_DURATION_MS = 1000
+const MAX_NOTIFICATION_DURATION_MS = 60_000
+
+function normalizeNotificationDuration(value: unknown): number {
+    const duration = Number(value)
+    if (!Number.isFinite(duration)) return DEFAULT_NOTIFICATION_DURATION_MS
+    return Math.min(MAX_NOTIFICATION_DURATION_MS, Math.max(MIN_NOTIFICATION_DURATION_MS, Math.round(duration)))
+}
 
 export default function NotificationWindow() {
     const [notification, setNotification] = useState<NotificationData | null>(null)
@@ -46,7 +55,9 @@ export default function NotificationWindow() {
                 content: data.content,
                 timestamp: timestamp,
                 avatarUrl: data.avatarUrl,
-                persistent: Boolean(data.persistent)
+                persistent: Boolean(data.persistent),
+                notificationDuration: normalizeNotificationDuration(data.notificationDuration),
+                notificationAnimationEnabled: data.notificationAnimationEnabled !== false
             }
 
             if (data.position) {
@@ -63,8 +74,10 @@ export default function NotificationWindow() {
                 setNativeBackdrop(Boolean(data.backdrop.native))
             }
 
-            if (notificationRef.current) {
+            if (notificationRef.current && newNoti.notificationAnimationEnabled !== false) {
                 setPrevNotification(notificationRef.current)
+            } else {
+                setPrevNotification(null)
             }
             setNotification(newNoti)
         }
@@ -194,7 +207,7 @@ export default function NotificationWindow() {
             <div
                 id="notification-root"
                 style={{
-                    width: '100vw',
+                    width: '100%',
                     height: 'auto',
                     background: 'transparent',
                     position: 'relative', // Context for absolute children
@@ -223,6 +236,8 @@ export default function NotificationWindow() {
                             initialVisible={true}
                             backdropImage={backdrop}
                             nativeBackdrop={nativeBackdrop}
+                            duration={prevNotification.notificationDuration}
+                            animationEnabled={prevNotification.notificationAnimationEnabled !== false}
                         />
                     </div>
                 )}
@@ -232,7 +247,10 @@ export default function NotificationWindow() {
                     <div
                         id="notification-current"
                         key={notification.id}
-                        className={position === 'top-center' ? 'anim-center' : ''}
+                        className={[
+                            position === 'top-center' ? 'anim-center' : '',
+                            notification.notificationAnimationEnabled === false ? 'motion-disabled' : ''
+                        ].filter(Boolean).join(' ')}
                         style={{
                             position: 'relative', // Takes up space
                             zIndex: 2,
@@ -246,6 +264,8 @@ export default function NotificationWindow() {
                             initialVisible={true}
                             backdropImage={backdrop}
                             nativeBackdrop={nativeBackdrop}
+                            duration={notification.notificationDuration}
+                            animationEnabled={notification.notificationAnimationEnabled !== false}
                             // 退场动画开始的一刻同步淡出原生面板（与卡片 0.3s 渐隐节奏匹配）
                             onHideStart={nativeBackdrop ? () => window.electronAPI?.notification?.glassHide?.() : undefined}
                         />

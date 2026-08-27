@@ -16,6 +16,10 @@ export interface NotificationData {
     timestamp: number
     /** 常驻模式：不自动淡出（QA 截图模式用，保证捕获完整不透明卡片） */
     persistent?: boolean
+    /** 主进程根据用户配置下发的显示时长（毫秒） */
+    notificationDuration?: number
+    /** 是否播放弹窗入场/退场动效 */
+    notificationAnimationEnabled?: boolean
 }
 
 interface NotificationToastProps {
@@ -27,6 +31,8 @@ interface NotificationToastProps {
     backdropImage?: LiquidGlassBackdropImage
     /** 原生玻璃模式（Windows）：折射由主进程原生面板渲染，卡片背景透明 */
     nativeBackdrop?: boolean
+    /** 是否播放入场、退场和卡片过渡动效 */
+    animationEnabled?: boolean
     /** 退场动画开始的一刻触发（原生模式用来提前淡出原生面板） */
     onHideStart?: () => void
 }
@@ -34,7 +40,7 @@ interface NotificationToastProps {
 /**
  * 通知卡片：始终渲染为全局液态玻璃（LiquidGlass 兼容层），在独立通知窗口内展示。
  * 折射背景：原生面板（默认关闭）或主进程下发的静态桌面快照（CSS 滤镜就地加工）。
- * 除悬停平滑放大外无任何鼠标交互（不可点击、无关闭按钮，5 秒后自动消失）。
+ * 卡片不导航、不弹出菜单；右键当前卡片即可关闭，默认按配置时长自动消失。
  */
 export function NotificationToast({
     data,
@@ -43,12 +49,17 @@ export function NotificationToast({
     initialVisible = false,
     backdropImage,
     nativeBackdrop = false,
+    animationEnabled = true,
     onHideStart
 }: NotificationToastProps) {
     const [isVisible, setIsVisible] = useState(initialVisible)
     const [currentData, setCurrentData] = useState<NotificationData | null>(null)
     const onHideStartRef = useRef(onHideStart)
+    const onCloseRef = useRef(onClose)
+    const closeTimerRef = useRef<number | null>(null)
+    const dismissedRef = useRef(false)
     onHideStartRef.current = onHideStart
+    onCloseRef.current = onClose
 
     // 任何路径（超时）触发的退场都在动画开始的一刻通知外层
     const beginHide = () => {
@@ -56,30 +67,52 @@ export function NotificationToast({
         onHideStartRef.current?.()
     }
 
+    const dismiss = () => {
+        if (dismissedRef.current) return
+        dismissedRef.current = true
+        beginHide()
+        closeTimerRef.current = window.setTimeout(() => {
+            closeTimerRef.current = null
+            onCloseRef.current()
+        }, animationEnabled ? 300 : 0)
+    }
+
     useEffect(() => {
         if (data) {
+            dismissedRef.current = false
+            if (closeTimerRef.current !== null) {
+                window.clearTimeout(closeTimerRef.current)
+                closeTimerRef.current = null
+            }
             setCurrentData(data)
             setIsVisible(true)
 
             if (data.persistent) return
 
-            const timer = setTimeout(() => {
-                beginHide()
-                // clean up data after animation
-                setTimeout(onClose, 300)
-            }, duration)
+            const timer = window.setTimeout(dismiss, duration)
 
-            return () => clearTimeout(timer)
+            return () => window.clearTimeout(timer)
         } else {
             setIsVisible(false)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [data, duration, onClose])
+    }, [data, duration])
+
+    useEffect(() => () => {
+        if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+    }, [])
 
     if (!currentData) return null
 
     return (
-        <div className={`notification-toast-container ${isVisible ? 'visible' : ''}`}>
+        <div
+            className={`notification-toast-container ${isVisible ? 'visible' : ''} ${animationEnabled ? '' : 'motion-disabled'}`.trim()}
+            onContextMenu={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                dismiss()
+            }}
+        >
             <LiquidGlass
                 cornerRadius={16}
                 padding="12px 10px"
