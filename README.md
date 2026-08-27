@@ -213,4 +213,10 @@ WeportAI 例外：为了让模型回答问题，会把相关**聊天文本**发�
 
 ## 📄 License
 
-[MIT](./LICENSE) — 自由使用、修改与分发。
+Weport 是基于 **cc / hicccc77 与 WeFlow 贡献者**作品修改而来的适配项目。
+原始项目与主要改动范围见 [NOTICE.md](./NOTICE.md)，第三方组件及原生资源来源见
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)。
+
+本项目整体依据 [CC BY-NC-SA 4.0](./LICENSE) 分发：必须保留署名，仅限非商业用途，
+发布修改版本时必须采用相同或兼容的许可证。单独标明的第三方组件继续适用其各自许可证。
+详细的来源核查记录见 [docs/LEGAL-PROVENANCE.md](./docs/LEGAL-PROVENANCE.md)。

@@ -49,6 +49,7 @@ COPY --from=build /app/dist ./dist
 # Built SPA (index.html + assets) served by @fastify/static; NOT the host
 # public/ placeholder — that stays dev-only.
 COPY --from=web-build /app/public ./public
+COPY LICENSE NOTICE.md ./
 
 RUN mkdir -p /data
 
