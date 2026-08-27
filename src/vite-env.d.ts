@@ -236,10 +236,6 @@ interface ElectronApi {
     }>
     delete: (id: string, remote?: boolean) => Promise<{ success: boolean; error?: string }>
     setVisibility: (id: string, visibility: 'private' | 'public' | 'link') => Promise<{ success: boolean; shareUrl?: string; error?: string }>
-    upload: (id: string) => Promise<{ success: boolean; serverId?: string; error?: string }>
-    getModelCatalog: () => Promise<{ success: boolean; models?: string[]; error?: string }>
-    getModelOverride: () => Promise<string>
-    setModelOverride: (model: string) => Promise<{ success: boolean; model: string }>
     getServerStatus: () => Promise<{
       configured: boolean
       enabled: boolean
@@ -309,11 +305,6 @@ interface ElectronApi {
           apiKeyHint: string
         }
       }
-      error?: string
-    }>
-    chatLocal: (payload: { id: string; message: string; history?: Array<{ role: string; content: string }> }) => Promise<{
-      success: boolean
-      reply?: string
       error?: string
     }>
     onProgress: (callback: (payload: { stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done'; progress: number; message: string; detail?: any }) => void) => () => void

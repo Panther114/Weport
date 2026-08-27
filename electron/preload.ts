@@ -267,18 +267,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     get: (id: string) => ipcRenderer.invoke('weclone:get', id),
     delete: (id: string, remote?: boolean) => ipcRenderer.invoke('weclone:delete', id, remote),
     setVisibility: (id: string, visibility: string) => ipcRenderer.invoke('weclone:setVisibility', id, visibility),
-    upload: (id: string) => ipcRenderer.invoke('weclone:upload', id),
-    getModelCatalog: () => ipcRenderer.invoke('weclone:getModelCatalog'),
-    getModelOverride: () => ipcRenderer.invoke('weclone:getModelOverride'),
-    setModelOverride: (model: string) => ipcRenderer.invoke('weclone:setModelOverride', model),
     getServerStatus: () => ipcRenderer.invoke('weclone:getServerStatus'),
     getProgress: () => ipcRenderer.invoke('weclone:getProgress'),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),
     getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
     ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),
     setForcedApiKey: (payload: { apiKey: string }) => ipcRenderer.invoke('weclone:setForcedApiKey', payload),
-    chatLocal: (payload: { id: string; message: string; history?: Array<{ role: string; content: string }> }) =>
-      ipcRenderer.invoke('weclone:chatLocal', payload),
     onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
   },
 

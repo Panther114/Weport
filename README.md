@@ -115,12 +115,9 @@ WeportAI 把你自定义的模型与 17 个本地检索工具组合成一个**�
 
 从聊天记录提炼你的 AI 分身：本地生成人格知识库，身份证、手机号、住址等隐私自动脱敏后才上传；生成后可设为私密、公开或链接分享，浏览器打开链接即可与分身对话。
 
-- **本地对话** — 不经服务器，直接在本地与分身对话（OpenCode Go 网关，固定使用 `muse-spark-1.2-contributor`，不做跨模型降级以保证语气一致）
-- **克隆分享** — 上传到私有服务器后获得公开浏览页 / 分享链接
-
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/github/Weport/weport)
 
-私有服务器已固定为 `https://weport.up.railway.app`：Railway 部署（变量、域名绑定、Volume、故障排查）见 [`docs/DEPLOY-RAILWAY.md`](docs/DEPLOY-RAILWAY.md)；部署完成后在 App「人格克隆」里「保存并测试」→ 克隆卡片点「上传到服务器」即可。
+私有服务器已固定为 `https://weport.up.railway.app`，无需配置 URL，仅需在 App「人格克隆 → 私有服务器」填入 OpenCode Go API Key（模型 `muse-spark-1.2-contributor`）保存即可。完整三步流程见 [`weclone-server/README.md`](weclone-server/README.md)。
 
 ## 📦 导出格式
 

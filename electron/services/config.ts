@@ -186,10 +186,6 @@ interface ConfigSchema {
   weCloneEnabled: boolean
   /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
   weCloneLastCutoff: string
-  /** 克隆对话/生成首选模型（留空 = 默认 muse-spark-1.2-contributor） */
-  weCloneModel: string
-  /** 上游故障后实测可用的模型（sticky，由服务自动写入，仅诊断用） */
-  weCloneEffectiveModel: string
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -385,8 +381,6 @@ export class ConfigService {
       weCloneServerToken: '',
       weCloneEnabled: true,
       weCloneLastCutoff: '',
-      weCloneModel: '',
-      weCloneEffectiveModel: '',
     }
 
     const storeOptions: any = {

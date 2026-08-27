@@ -14,7 +14,6 @@
  */
 import { app } from 'electron'
 import { join, dirname } from 'path'
-import { randomUUID } from 'crypto'
 import {
   existsSync,
   mkdirSync,
@@ -49,9 +48,7 @@ import {
   WECLONE_SYSTEM_PROMPT,
   WECLONE_MD_PROMPTS,
   WECLONE_FILTER_PROMPT,
-  buildWeCloneChatSystemPrompt,
 } from './weClonePrompts'
-import { computeVoiceDna, renderVoiceSheet } from './weCloneVoice'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -184,11 +181,12 @@ const CHUNK_CHAR_LIMIT = 800
 const MAX_CHUNKS_UPLOAD_BYTES = 20 * 1024 * 1024
 /** 单份 MD 字符上限 */
 const MD_CHAR_LIMIT = 12_000
-/** 生成上下文采样：随机 + 最近（gen3：扩大覆盖，配合模型降级链兜底长上下文） */
-const SAMPLE_RANDOM_CHUNKS = 400
-const SAMPLE_RECENT_CHUNKS = 120
+/** 生成上下文采样：随机 + 最近 */
+const SAMPLE_RANDOM_CHUNKS = 200
+const SAMPLE_RECENT_CHUNKS = 50
 /** 生成上下文总字符上限 */
-const GENERATION_CONTEXT_CHAR_LIMIT = 180_000
+const GENERATION_CONTEXT_CHAR_LIMIT = 120_000
+
 // ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
@@ -406,13 +404,7 @@ export class WeCloneService {
 
   private formatChunkLine(isSend: boolean, sender: string, myWxid: string, text: string): string {
     const who = isSend ? '我' : sender && sender !== myWxid ? sender : '对方'
-    // 群聊 message_content 自带 "发送者: " 前缀，与我们的行前缀重复 → 去重
-    let body = text.replace(/\r?\n/g, ' ')
-    if (sender) {
-      const prefix = `${sender}: `
-      if (body.startsWith(prefix)) body = body.slice(prefix.length).trimStart()
-    }
-    return `${who}: ${body}`
+    return `${who}: ${text.replace(/\r?\n/g, ' ')}`
   }
 
   /**
@@ -692,39 +684,6 @@ export class WeCloneService {
     }
   }
 
-  /**
-   * 克隆可用模型目录（gen3 模型选择）：用强制 provider 的 key 拉 OpenCode Go
-   * /models 列表，供设置 UI 下拉选择；key 不出主进程。
-   */
-  async listAvailableModels(): Promise<{ success: boolean; models?: string[]; error?: string }> {
-    try {
-      const profile = await this.ensureForcedProvider()
-      const adapter = getProviderAdapter(profile)
-      const models = await adapter.listModels(profile, AbortSignal.timeout(15_000))
-      const ids = Array.from(new Set((models || []).map((m) => String(m).trim()).filter(Boolean))).sort()
-      if (ids.length === 0) return { success: false, error: '网关未返回任何模型' }
-      return { success: true, models: ids }
-    } catch (e) {
-      return { success: false, error: String((e as Error)?.message || e) }
-    }
-  }
-
-  /** 当前克隆模型覆盖（空 = 默认 muse-spark-1.2-contributor） */
-  getModelOverride(): string {
-    return String(this.cfgGet('weCloneModel') || '').trim()
-  }
-
-  setModelOverride(model: string): { success: boolean; model: string } {
-    const cleaned = String(model || '').trim().slice(0, 120)
-    try {
-      this.configService.set('weCloneModel', cleaned)
-    } catch (e) {
-      return { success: false, model: this.getModelOverride() }
-    }
-    console.log(`[WeClone] 克隆模型覆盖已设置: ${cleaned || '(默认)'}`)
-    return { success: true, model: cleaned }
-  }
-
   private assertProfileReady(profile: ProviderProfile | null): void {
     if (!profile) throw new Error('未配置 AI 服务，请先在 WeportAI 设置中添加服务配置')
     if (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional) {
@@ -740,45 +699,6 @@ export class WeCloneService {
       .replace(/(?<![\uD800-\uDFFF])[\uDC00-\uDFFF]/g, '\uFFFD')
   }
 
-  /** 克隆固定使用强制 provider 的模型（muse-spark-1.2-contributor）。
-   * gen3 起不做跨模型降级：不同模型语气差异会污染人格一致性（用户明确要求）。 */
-  private resolveCloneModel(profile: ProviderProfile): string {
-    return (
-      String(this.cfgGet('weCloneModel') || '').trim() ||
-      profile.model ||
-      WECLONE_FORCED_MODEL
-    )
-  }
-
-  /**
-   * 固定模型的流式调用（单模型，不降级）。
-   * 返回实际使用的模型名。失败时原样抛出上游错误。
-   */
-  private async streamLlm(input: {
-    profile: ProviderProfile
-    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
-    reasoningEffort: string
-    signal?: AbortSignal
-    onText?: (chunk: string) => void
-  }): Promise<{ content: string; model: string }> {
-    const model = this.resolveCloneModel(input.profile)
-    if (input.signal?.aborted) throw new WeCloneAbortedError()
-    const result = await getProviderAdapter({ ...input.profile, model }).stream({
-      profile: { ...input.profile, model },
-      messages: input.messages as never,
-      tools: [],
-      reasoningEffort: input.reasoningEffort,
-      signal: input.signal ?? AbortSignal.timeout(300_000),
-      onText: (chunk: string) => {
-        try { input.onText?.(chunk) } catch { /* noop */ }
-      },
-      onReasoning: () => undefined,
-    })
-    const content = String(result?.content || '').trim()
-    console.log(`[WeClone] LLM 调用成功 model=${model} chars=${content.length}`)
-    return { content, model }
-  }
-
   private async callLlm(
     profile: ProviderProfile,
     systemContent: string,
@@ -787,21 +707,23 @@ export class WeCloneService {
     onText?: (chunk: string) => void
   ): Promise<string> {
     const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
-    const { content } = await this.streamLlm({
+    const result = await getProviderAdapter(profile).stream({
       profile,
       messages: [
         { role: 'system', content: this.sanitizeForApi(systemContent) },
         { role: 'user', content: this.sanitizeForApi(userContent) },
       ],
+      tools: [],
       reasoningEffort,
-      signal,
+      signal: signal ?? AbortSignal.timeout(300_000),
+      onReasoning: () => undefined,
       onText: onText
         ? (chunk: string) => {
             try { onText(String(chunk)) } catch { /* noop */ }
           }
-        : undefined,
+        : () => undefined,
     })
-    return content
+    return String(result.content || '')
   }
 
   // -------------------------------------------------------------------------
@@ -1028,18 +950,10 @@ export class WeCloneService {
       renameSync(jsonlPart, jsonlFinal) // 原子收尾
       if (stats.messageCount === 0) throw new Error('没有扫到可用的文本消息')
 
-      // ---- 3. Voice DNA + 采样 + 逐份生成 MD --------------------------------
-      report('generate', 30, '正在计算语音硬指标（Voice DNA）…')
-      const voiceDna = await computeVoiceDna(jsonlFinal)
-      this.ensureNotAborted(signal)
-      const voiceSheet = renderVoiceSheet(voiceDna)
-      try {
-        this.atomicWriteFile(join(dir, 'voice.json'), JSON.stringify(voiceDna, null, 2))
-      } catch { /* 诊断文件，失败不阻塞 */ }
-      console.log(`[WeClone] Voice DNA 样本 ${voiceDna.sampleCount} 条，中位长度 ${voiceDna.length.p50} 字符`)
+      // ---- 3. 采样 + 逐份生成 MD -------------------------------------------
       report('generate', 30, '正在采样语料…')
       const { sampled } = await this.sampleChunksFromJsonl(jsonlFinal, SAMPLE_RANDOM_CHUNKS, SAMPLE_RECENT_CHUNKS)
-      const contextBase = `${voiceSheet}\n\n${this.buildGenerationContext(sampled, names)}`
+      const contextBase = this.buildGenerationContext(sampled, names)
       const mdKeys = Object.keys(WECLONE_MD_PROMPTS) as Array<keyof WeCloneMds>
       const mds: Partial<WeCloneMds> = {}
       for (let i = 0; i < mdKeys.length; i += 1) {
@@ -1059,13 +973,8 @@ export class WeCloneService {
           report('generate', baseProgress + sub, `正在生成 ${key}.md…`)
         }
         const content = await this.callLlm(profile, WECLONE_SYSTEM_PROMPT, prompt, signal, onText)
-        let cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
+        const cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
         if (!cleaned) throw new Error(`${key}.md 生成结果为空`)
-        // gen3：language.md 机器前置 Voice DNA 硬指标段（聊天端语气锚点，
-        // 不依赖 LLM 是否复写数字；随上传原样带到服务端）
-        if (key === 'language' && !cleaned.includes('## Voice DNA 硬指标')) {
-          cleaned = `${voiceSheet}\n\n${cleaned}`.slice(0, MD_CHAR_LIMIT + 2_600)
-        }
         mds[key] = cleaned
         this.atomicWriteFile(join(dir, `${key}.md`), cleaned)
         // ensure stage end snaps to next boundary
@@ -1117,7 +1026,7 @@ export class WeCloneService {
 
       // ---- 6. 上传 ----------------------------------------------------------
       let status: 'local_only' | 'uploaded' | 'failed' = 'local_only'
-      const serverCfg = this.resolveUploadServerConfig()
+      const serverCfg = this.getServerConfig()
       if (options.localOnly !== true && serverCfg.configured) {
         report('upload', 85, '正在上传到私有服务…')
         try {
@@ -1175,24 +1084,6 @@ export class WeCloneService {
   // -------------------------------------------------------------------------
   // 上传 / 服务端交互
   // -------------------------------------------------------------------------
-
-  private normalizeBaseUrl(url: string): string {
-    return String(url || '').trim().replace(/\/+$/, '')
-  }
-
-  private isHtmlBody(text: string): boolean {
-    const t = String(text || '').trim().toLowerCase()
-    return t.startsWith('<!doctype') || t.startsWith('<html')
-  }
-
-  private buildHtmlError(baseUrl: string): string {
-    const u = this.normalizeBaseUrl(baseUrl)
-    return `服务器返回 HTML 而非 JSON — Railway 可能部署的是 Weport 主应用而非 weclone 服务，请检查根 Dockerfile 是否为 weclone-server 构建 (当前访问 ${u} 返回 HTML)`
-  }
-
-  private buildNotFoundHtmlError(): string {
-    return '服务未找到 (404) — 请确认 Railway 服务已部署且健康检查 /health 通过'
-  }
 
   private async fetchWithTimeout(url: string, init: Parameters<typeof fetch>[1], timeoutMs: number, externalSignal?: AbortSignal): Promise<Response> {
     const ctrl = new AbortController()
@@ -1271,8 +1162,7 @@ export class WeCloneService {
     }
 
     const body = gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
-    const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
-    const url = `${normalizedBaseUrl}/api/weclone/upload`
+    const url = `${serverCfg.baseUrl}/api/weclone/upload`
     const resp = await this.fetchWithTimeout(
       url,
       {
@@ -1288,126 +1178,15 @@ export class WeCloneService {
       signal
     )
     const text = await resp.text().catch(() => '')
-    const contentType = resp.headers.get('content-type') || ''
-    const isHtmlCt = contentType.toLowerCase().includes('text/html')
-    const bodyIsHtml = this.isHtmlBody(text)
     if (!resp.ok) {
-      if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
-        throw new Error(this.buildNotFoundHtmlError())
-      }
-      if (isHtmlCt || bodyIsHtml) {
-        throw new Error(this.buildHtmlError(normalizedBaseUrl))
-      }
       throw new Error(`上传失败 HTTP ${resp.status}${text ? `：${text.slice(0, 200)}` : ''}`)
     }
-    if (isHtmlCt || bodyIsHtml) {
-      throw new Error(this.buildHtmlError(normalizedBaseUrl))
-    }
     let parsed: { success?: boolean; id?: string; error?: string } = {}
-    try {
-      parsed = JSON.parse(text) as { success?: boolean; id?: string; error?: string }
-    } catch (e) {
-      if (bodyIsHtml) throw new Error(this.buildHtmlError(normalizedBaseUrl))
-      throw new Error(`上传响应解析失败：${String((e as Error)?.message || e)}`)
-    }
+    try { parsed = JSON.parse(text) as { success?: boolean; id?: string; error?: string } } catch { /* noop */ }
     if (parsed.success === false) throw new Error(parsed.error || '服务端拒绝上传')
     const serverId = String(parsed.id || '').trim()
     if (!serverId) throw new Error('服务端未返回 clone id')
     return serverId
-  }
-
-  /**
-   * 上传前确保存在 ownerToken：服务端 /upload 要求 Bearer（owner 身份即 token）。
-   * 历史版本允许留空，这里首次上传时自动生成并持久化（safeStorage 加密），
-   * 之后所有上传/删除/可见性操作都用同一身份。
-   */
-  private resolveUploadServerConfig(): { configured: boolean; baseUrl: string; token: string } {
-    const cfg = this.getServerConfig()
-    let token = cfg.token
-    if (!token) {
-      token = `wc_${randomUUID()}`
-      try {
-        this.configService.set('weCloneServerToken', token)
-        console.log('[WeClone] 已自动生成 ownerToken 并写入配置（safeStorage 加密）')
-      } catch (e) {
-        console.warn('[WeClone] ownerToken 持久化失败（本次上传仍会使用内存值）:', e)
-      }
-    }
-    return { configured: cfg.configured, baseUrl: this.normalizeBaseUrl(cfg.baseUrl), token }
-  }
-
-  /**
-   * 上传一个已存在的本地克隆（v0.9.10 补充能力）：
-   * 直接复用 staging 目录里的 mds/*.md + chunks.jsonl（无二审补丁可应用），
-   * 让「Railway 已部署但克隆是 local_only」的老档案无需重新生成即可分享。
-   */
-  async uploadExistingClone(id: string): Promise<{ success: boolean; serverId?: string; error?: string }> {
-    const root = this.getStagingRoot()
-    let targetDir: string | null = null
-    let meta: WeCloneMeta | null = null
-    for (const entry of readdirSyncSafe(root)) {
-      const dir = join(root, entry)
-      const m = this.readMeta(dir)
-      if (m && m.id === id) {
-        targetDir = dir
-        meta = m
-        break
-      }
-    }
-    if (!targetDir || !meta) return { success: false, error: '找不到该克隆' }
-
-    const serverCfg = this.resolveUploadServerConfig()
-    if (!serverCfg.configured || !serverCfg.baseUrl) {
-      return { success: false, error: '未配置克隆服务器（weport.up.railway.app 不可达或被禁用）' }
-    }
-
-    // 读取本地 MD
-    const mds: Partial<WeCloneMds> = {}
-    for (const { key, path } of this.mdFilePaths(targetDir)) {
-      try {
-        if (existsSync(path)) (mds as Record<string, string>)[key] = readFileSync(path, 'utf8')
-      } catch { /* 单份缺失不阻断 */ }
-    }
-    if (!mds.profile && !mds.relationships && !mds.knowledge) {
-      return { success: false, error: '本地档案缺少知识文件（profile/relationships/knowledge 至少需要一份）' }
-    }
-    const jsonlPath = join(targetDir, 'chunks.jsonl')
-    if (!existsSync(jsonlPath)) {
-      return { success: false, error: '本地档案缺少语料文件 chunks.jsonl，无法上传' }
-    }
-
-    const fullMds: WeCloneMds = {
-      profile: mds.profile || '',
-      relationships: mds.relationships || '',
-      knowledge: mds.knowledge || '',
-      timeline: mds.timeline || '',
-      language: mds.language || '',
-    }
-
-    try {
-      const serverId = await this.uploadToServer(
-        { baseUrl: serverCfg.baseUrl, token: serverCfg.token },
-        meta,
-        fullMds,
-        jsonlPath,
-        new Map<string, string>(),
-        undefined
-      )
-      meta.serverId = serverId
-      meta.uploaded = true
-      meta.uploadStatus = 'uploaded'
-      this.writeMeta(targetDir, meta)
-      console.log(`[WeClone] 本地克隆 ${id} 已上传为 serverId=${serverId}`)
-      return { success: true, serverId }
-    } catch (e) {
-      const message = String((e as Error)?.message || e)
-      console.warn(`[WeClone] 本地克隆 ${id} 上传失败:`, e)
-      try {
-        meta.uploadStatus = 'failed'
-        this.writeMeta(targetDir, meta)
-      } catch { /* noop */ }
-      return { success: false, error: message }
-    }
   }
 
   async deleteClone(id: string, remote: boolean): Promise<{ success: boolean; error?: string }> {
@@ -1428,20 +1207,12 @@ export class WeCloneService {
     const serverCfg = this.getServerConfig()
     if (remote && serverCfg.configured && meta.serverId) {
       try {
-        const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
         const resp = await this.fetchWithTimeout(
-          `${normalizedBaseUrl}/api/weclone/${encodeURIComponent(meta.serverId)}`,
+          `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(meta.serverId)}`,
           { method: 'DELETE', headers: this.authHeaders(serverCfg.token) },
           30_000
         )
         if (!resp.ok && resp.status !== 404) {
-          const text = await resp.text().catch(() => '')
-          const ct = resp.headers.get('content-type') || ''
-          const isHtml = ct.toLowerCase().includes('text/html') || this.isHtmlBody(text)
-          if (isHtml) {
-            const msg = resp.status === 404 ? this.buildNotFoundHtmlError() : this.buildHtmlError(normalizedBaseUrl)
-            return { success: false, error: `服务端删除失败：${msg}` }
-          }
           return { success: false, error: `服务端删除失败 HTTP ${resp.status}` }
         }
       } catch (e) {
@@ -1470,9 +1241,8 @@ export class WeCloneService {
       const remoteId = meta.serverId
       if (serverCfg.configured && remoteId) {
         try {
-          const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
           const resp = await this.fetchWithTimeout(
-            `${normalizedBaseUrl}/api/weclone/${encodeURIComponent(remoteId)}/visibility`,
+            `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(remoteId)}/visibility`,
             {
               method: 'PATCH',
               headers: { ...this.authHeaders(serverCfg.token), 'Content-Type': 'application/json' },
@@ -1481,28 +1251,11 @@ export class WeCloneService {
             30_000
           )
           const text = await resp.text().catch(() => '')
-          const ct = resp.headers.get('content-type') || ''
-          const isHtmlCt = ct.toLowerCase().includes('text/html')
-          const bodyIsHtml = this.isHtmlBody(text)
-          if (!resp.ok) {
-            if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
-              return { success: false, error: `服务端更新失败：${this.buildNotFoundHtmlError()}` }
-            }
-            if (isHtmlCt || bodyIsHtml) {
-              return { success: false, error: `服务端更新失败：${this.buildHtmlError(normalizedBaseUrl)}` }
-            }
-            return { success: false, error: `服务端更新失败 HTTP ${resp.status}` }
-          }
-          if (isHtmlCt || bodyIsHtml) {
-            return { success: false, error: `服务端更新失败：${this.buildHtmlError(normalizedBaseUrl)}` }
-          }
+          if (!resp.ok) return { success: false, error: `服务端更新失败 HTTP ${resp.status}` }
           try {
             const parsed = JSON.parse(text) as { shareUrl?: string }
             if (parsed.shareUrl) return { success: true, shareUrl: parsed.shareUrl }
-          } catch (e) {
-            if (bodyIsHtml) return { success: false, error: `服务端更新失败：${this.buildHtmlError(normalizedBaseUrl)}` }
-            // JSON parse failure on success is non-fatal; treat as success without shareUrl
-          }
+          } catch { /* noop */ }
         } catch (e) {
           return { success: false, error: `服务端更新失败：${String((e as Error)?.message || e)}` }
         }
@@ -1512,7 +1265,7 @@ export class WeCloneService {
     return { success: false, error: '找不到该克隆' }
   }
 
-  /** 合并本地 + 远端克隆列表 — 远端失败仅记 remoteError，仍回退到本地档案 */
+  /** 合并本地 + 远端克隆列表 */
   async getClones(): Promise<{ success: boolean; clones: WeCloneListItem[]; error?: string }> {
     const local = this.listLocalClones().map<WeCloneListItem>((m) => ({ ...m, source: 'local' }))
     const serverCfg = this.getServerConfig()
@@ -1521,56 +1274,21 @@ export class WeCloneService {
     type RemoteRow = { id?: string; displayName?: string; cutoff?: string; visibility?: string; createdAt?: number }
     let remoteRows: RemoteRow[] = []
     let remoteError: string | undefined
-    const normalizedBaseUrl = this.normalizeBaseUrl(serverCfg.baseUrl)
     try {
       const resp = await this.fetchWithTimeout(
-        `${normalizedBaseUrl}/api/weclone/list`,
+        `${serverCfg.baseUrl}/api/weclone/list`,
         { method: 'GET', headers: this.authHeaders(serverCfg.token) },
         15_000
       )
       const text = await resp.text().catch(() => '')
-      const contentType = resp.headers.get('content-type') || ''
-      const isHtmlCt = contentType.toLowerCase().includes('text/html')
-      const bodyIsHtml = this.isHtmlBody(text)
-
-      if (!resp.ok) {
-        if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
-          throw new Error(this.buildNotFoundHtmlError())
-        }
-        if (isHtmlCt || bodyIsHtml) {
-          throw new Error(this.buildHtmlError(normalizedBaseUrl))
-        }
-        throw new Error(`HTTP ${resp.status}${text ? `：${text.slice(0, 200)}` : ''}`)
+      if (resp.ok) {
+        const parsed = JSON.parse(text) as { clones?: RemoteRow[] }
+        remoteRows = Array.isArray(parsed.clones) ? parsed.clones : []
+      } else {
+        remoteError = `HTTP ${resp.status}`
       }
-
-      // resp.ok — still verify not HTML before parsing
-      if (isHtmlCt) {
-        throw new Error(this.buildHtmlError(normalizedBaseUrl))
-      }
-      if (bodyIsHtml) {
-        throw new Error(this.buildHtmlError(normalizedBaseUrl))
-      }
-
-      let parsed: { clones?: RemoteRow[] }
-      try {
-        parsed = JSON.parse(text) as { clones?: RemoteRow[] }
-      } catch (e) {
-        if (bodyIsHtml || isHtmlCt) {
-          throw new Error(this.buildHtmlError(normalizedBaseUrl))
-        }
-        // Re-check raw body prefix even if content-type missing
-        const trimmed = String(text || '').trim().toLowerCase()
-        if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
-          throw new Error(this.buildHtmlError(normalizedBaseUrl))
-        }
-        throw new Error(`响应解析失败：${String((e as Error)?.message || e)}`)
-      }
-      remoteRows = Array.isArray(parsed.clones) ? parsed.clones : []
     } catch (e) {
-      const msg = String((e as Error)?.message || e)
-      remoteError = msg
-      // Ensure confusing JSON parse error never surfaces as raw "Unexpected token '<'"
-      console.warn(`[WeClone] 远端列表获取失败 (baseUrl=${normalizedBaseUrl})：`, msg, e)
+      remoteError = String((e as Error)?.message || e)
     }
 
     const byServerId = new Map(local.filter((m) => m.serverId).map((m) => [m.serverId as string, m]))
@@ -1608,237 +1326,26 @@ export class WeCloneService {
 
   async getServerStatus(): Promise<WeCloneServerStatus> {
     const cfg = this.getServerConfig()
-    const normalizedBaseUrl = this.normalizeBaseUrl(cfg.baseUrl)
     const base: WeCloneServerStatus = {
       configured: cfg.configured,
       enabled: cfg.enabled,
-      baseUrl: normalizedBaseUrl,
+      baseUrl: cfg.baseUrl,
       hasToken: Boolean(cfg.token),
     }
     if (!cfg.configured) return base
     try {
-      const resp = await this.fetchWithTimeout(`${normalizedBaseUrl}/health`, { method: 'GET' }, 8_000)
+      const resp = await this.fetchWithTimeout(`${cfg.baseUrl}/health`, { method: 'GET' }, 8_000)
       const text = await resp.text().catch(() => '')
-      const ct = resp.headers.get('content-type') || ''
-      const isHtmlCt = ct.toLowerCase().includes('text/html')
-      const bodyIsHtml = this.isHtmlBody(text)
-      if (!resp.ok) {
-        if (resp.status === 404 && (isHtmlCt || bodyIsHtml)) {
-          return { ...base, online: false, error: this.buildNotFoundHtmlError() }
-        }
-        if (isHtmlCt || bodyIsHtml) {
-          return { ...base, online: false, error: this.buildHtmlError(normalizedBaseUrl) }
-        }
-        return { ...base, online: false, error: `HTTP ${resp.status}` }
-      }
-      if (isHtmlCt || bodyIsHtml) {
-        return { ...base, online: false, error: this.buildHtmlError(normalizedBaseUrl) }
-      }
+      if (!resp.ok) return { ...base, online: false, error: `HTTP ${resp.status}` }
       try {
         const parsed = JSON.parse(text) as { ok?: boolean; version?: string }
         return { ...base, online: parsed.ok !== false, version: parsed.version }
       } catch {
-        if (bodyIsHtml) return { ...base, online: false, error: this.buildHtmlError(normalizedBaseUrl) }
         return { ...base, online: resp.ok }
       }
     } catch (e) {
       return { ...base, online: false, error: String((e as Error)?.message || e) }
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // 本地对话（不走 Railway，复用强制 provider 直接在本地跑 agent）
-  // -------------------------------------------------------------------------
-
-  private tokenizeForLocalSearch(text: string): string[] {
-    const s = String(text || '').toLowerCase().trim()
-    if (!s) return []
-    const tokens: string[] = []
-    // 空白分词
-    for (const part of s.split(/\s+/)) {
-      if (!part) continue
-      if (/[\u4e00-\u9fff]/.test(part)) {
-        // CJK 按字 + 二元组
-        for (let i = 0; i < part.length; i += 1) tokens.push(part[i])
-        for (let i = 0; i < part.length - 1; i += 1) tokens.push(part.slice(i, i + 2))
-      } else {
-        tokens.push(part)
-      }
-    }
-    return tokens
-  }
-
-  private scoreChunkLocal(queryTokens: string[], chunkText: string): number {
-    const chunkLower = chunkText.toLowerCase()
-    let score = 0
-    for (const tok of queryTokens) {
-      if (!tok) continue
-      if (chunkLower.includes(tok)) score += tok.length > 1 ? 2 : 1
-    }
-    // 长度惩罚：超长 chunk 轻微惩罚
-    const len = chunkText.length
-    if (len > 1000) score *= 0.9
-    return score
-  }
-
-  async chatLocal(
-    id: string,
-    message: string,
-    history: Array<{ role: string; content: string }> = [],
-    onDelta?: (delta: string) => void,
-    externalSignal?: AbortSignal
-  ): Promise<{ success: boolean; reply?: string; error?: string }> {
-    const msg = String(message || '').trim()
-    if (!msg) return { success: false, error: '消息为空' }
-    // 定位克隆目录
-    const root = this.getStagingRoot()
-    let targetDir: string | null = null
-    let meta: WeCloneMeta | null = null
-    for (const entry of readdirSyncSafe(root)) {
-      const dir = join(root, entry)
-      const m = this.readMeta(dir)
-      if (m && m.id === id) {
-        targetDir = dir
-        meta = m
-        break
-      }
-    }
-    if (!targetDir || !meta) return { success: false, error: '找不到该克隆' }
-
-    // 读取 MD
-    const mds: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>> = {}
-    for (const { key, path } of this.mdFilePaths(targetDir)) {
-      try {
-        if (existsSync(path)) (mds as Record<string, string>)[key] = readFileSync(path, 'utf8')
-      } catch (e) {
-        console.warn(`[WeClone] 读取 ${key}.md 失败:`, e)
-      }
-    }
-    // 读取 chunks 并检索 top 8
-    const jsonlPath = join(targetDir, 'chunks.jsonl')
-    const allChunks: WeCloneChunk[] = []
-    if (existsSync(jsonlPath)) {
-      try {
-        const rl = createInterface({ input: createReadStream(jsonlPath, { encoding: 'utf8' }), crlfDelay: Infinity })
-        for await (const line of rl) {
-          const t = line.trim()
-          if (!t) continue
-          try {
-            const c = JSON.parse(t) as WeCloneChunk
-            if (c && typeof c.text === 'string') allChunks.push(c)
-          } catch { /* noop */ }
-          if (allChunks.length > 5000) break
-        }
-        rl.close()
-      } catch { /* noop */ }
-    }
-    const queryTokens = this.tokenizeForLocalSearch(msg)
-    const scored = allChunks
-      .map((c) => ({ c, score: this.scoreChunkLocal(queryTokens, c.text) }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8)
-      .map((x) => x.c.text.slice(0, 800))
-
-    // 若无匹配，取最近 3 条作兜底
-    const retrieved = scored.length > 0 ? scored : allChunks.slice(-3).map((c) => c.text.slice(0, 800))
-    console.log(`[WeClone] chatLocal id=${id} mdsKeys=${Object.keys(mds).join(',')} allChunks=${allChunks.length} queryTokens=${queryTokens.length} retrieved=${retrieved.length}`)
-
-    const systemPrompt = buildWeCloneChatSystemPrompt({
-      displayName: meta.displayName || meta.wxid || '我',
-      knowledgeCutoff: meta.knowledgeCutoff,
-      mds: mds as Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>,
-      retrievedChunks: retrieved,
-    })
-
-    // 强制 provider
-    let profile: ProviderProfile | null = null
-    try {
-      profile = await this.ensureForcedProvider()
-      this.assertProfileReady(profile)
-    } catch (e) {
-      return { success: false, error: String((e as Error)?.message || e) }
-    }
-
-    const historyMessages = (Array.isArray(history) ? history : [])
-      .filter((h) => h && typeof h.role === 'string' && typeof h.content === 'string')
-      .slice(-20)
-      .map((h) => ({ role: h.role as 'user' | 'assistant', content: String(h.content).slice(0, 4000) }))
-
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-      { role: 'system', content: this.sanitizeForApi(systemPrompt) },
-      ...historyMessages.map((h) => ({ role: h.role as 'user' | 'assistant', content: this.sanitizeForApi(h.content) })),
-      { role: 'user', content: this.sanitizeForApi(msg) },
-    ]
-
-    const abortCtrl = new AbortController()
-    const onExternalAbort = () => abortCtrl.abort()
-    externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
-    const timeout = setTimeout(() => abortCtrl.abort(), 120_000)
-    let full = ''
-    try {
-      const { content, model } = await this.streamLlm({
-        profile: profile as ProviderProfile,
-        messages,
-        reasoningEffort: String(this.cfgGet('weportAiReasoningEffort') || 'high'),
-        signal: abortCtrl.signal as unknown as AbortSignal,
-        onText: (chunk: string) => {
-          const d = String(chunk || '')
-          if (!d) return
-          full += d
-          try { onDelta?.(d) } catch { /* noop */ }
-        },
-      })
-      void model
-      const reply = String(content || full || '').trim()
-      if (!reply) return { success: false, error: '模型未返回内容' }
-      return { success: true, reply }
-    } catch (e) {
-      console.error('[WeClone] chatLocal LLM error:', e)
-      if ((e as Error)?.name === 'AbortError' || (e as Error)?.name === 'WeCloneAbortedError' || abortCtrl.signal.aborted || externalSignal?.aborted) {
-        return { success: false, error: '已取消' }
-      }
-      const msg = String((e as Error)?.message || e)
-      // 常见：API Key 未配置、网络、模型不存在
-      if (msg.includes('401') || msg.toLowerCase().includes('unauthorized')) {
-        return { success: false, error: 'API Key 无效或未配置，请在 人格克隆 → OpenCode Go API Key 中设置 muse-spark-1.2-contributor 的 Key' }
-      }
-      if (msg.includes('404') || msg.toLowerCase().includes('not found')) {
-        return { success: false, error: `模型或服务未找到：${msg}（已固定为 opencode-go/muse-spark-1.2-contributor，请检查服务是否可用）` }
-      }
-      if (/internal server error|HTTP 5\d{2}|500/i.test(msg)) {
-        return {
-          success: false,
-          error: `上游模型 muse-spark-1.2-contributor 暂时不可用（${msg}）。这是 OpenCode Go 网关侧的故障，与本地配置无关 — 请稍后重试`,
-        }
-      }
-      return { success: false, error: msg }
-    } finally {
-      clearTimeout(timeout)
-      externalSignal?.removeEventListener('abort', onExternalAbort)
-    }
-  }
-
-  // 兼容别名：供旧调用方或测试使用的远端拉取入口
-  async getRemoteClones(): Promise<{ success: boolean; clones: WeCloneListItem[]; error?: string }> {
-    return this.getClones()
-  }
-
-  async fetchRemote(path: string, init?: RequestInit, timeoutMs = 15_000): Promise<Response> {
-    const cfg = this.getServerConfig()
-    const normalizedBaseUrl = this.normalizeBaseUrl(cfg.baseUrl)
-    const normalizedPath = String(path || '').startsWith('/') ? String(path) : `/${String(path || '')}`
-    const url = `${normalizedBaseUrl}${normalizedPath}`
-    const resp = await this.fetchWithTimeout(url, init as Parameters<typeof fetch>[1], timeoutMs)
-    const ct = resp.headers.get('content-type') || ''
-    // 预检 HTML 以便调用方获得更清晰的错误（仍返回 Response 供上层决定）
-    if (ct.toLowerCase().includes('text/html')) {
-      const text = await resp.clone().text().catch(() => '')
-      if (this.isHtmlBody(text)) {
-        console.warn(`[WeClone] fetchRemote 收到 HTML 响应 (${url}) — ${this.buildHtmlError(normalizedBaseUrl)}`)
-      }
-    }
-    return resp
   }
 }
 

@@ -2764,10 +2764,6 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weCloneService.deleteClone(String(id || ''), remote !== false))
   ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
     weCloneService.setVisibility(String(id || ''), String(visibility || '')))
-  ipcMain.handle('weclone:upload', (_e, id: string) => weCloneService.uploadExistingClone(String(id || '')))
-  ipcMain.handle('weclone:getModelCatalog', () => weCloneService.listAvailableModels())
-  ipcMain.handle('weclone:getModelOverride', () => weCloneService.getModelOverride())
-  ipcMain.handle('weclone:setModelOverride', (_e, model: string) => weCloneService.setModelOverride(String(model || '')))
   ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
   ipcMain.handle('weclone:cancel', () => {
     wecloneControllers.get('generate')?.abort()
@@ -2792,20 +2788,6 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
       return { success: true, status: weCloneService.getForcedProviderStatus() }
     } catch (e) {
       return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
-    }
-  })
-  ipcMain.handle('weclone:chatLocal', async (_e, payload: { id?: string; message?: string; history?: Array<{ role: string; content: string }> }) => {
-    try {
-      const id = String(payload?.id || '').trim()
-      const message = String(payload?.message || '').trim()
-      const history = Array.isArray(payload?.history) ? payload?.history : []
-      console.log(`[WeClone] chatLocal IPC id=${id} history=${history.length} msgLen=${message.length}`)
-      const result = await weCloneService.chatLocal(id, message, history)
-      console.log(`[WeClone] chatLocal result success=${result.success} hasReply=${Boolean(result.reply)} error=${result.error || ''}`)
-      return result
-    } catch (e) {
-      console.error('[WeClone] chatLocal IPC unhandled error:', e)
-      return { success: false, error: `本地对话服务异常：${String((e as Error)?.message || e)}` }
     }
   })
 
