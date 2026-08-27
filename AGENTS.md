@@ -8,19 +8,48 @@
 ## Tech Stack (Permanent)
 
 Weport is an **Electron + React + Vite + TypeScript** desktop app for
-**Windows and macOS (Apple Silicon, arm64)**. The engine
+**Windows, macOS (Apple Silicon, arm64) and Linux (x64, v0.9.10+)**. The engine
 (`electron/services/`) is a TypeScript port of WeFlow's WCDB stack (koffi FFI
-+ native `wcdb_api.dll` / `libwcdb_api.dylib`). There is **no Rust, no Tauri,
-no CLI** anymore — the v0.6.x Rust/egui stack and the headless engine CLI were
-removed in 0.7.0.
++ native `wcdb_api.dll` / `libwcdb_api.dylib` / `libwcdb_api.so`). There is
+**no Rust, no Tauri, no CLI** anymore — the v0.6.x Rust/egui stack and the
+headless engine CLI were removed in 0.7.0.
 
 Platform split lives in `process.platform` branches (same tree, no fork):
-- Key service: Windows `keyService.ts` vs macOS `keyServiceMac.ts`
-  (selected in `appMain.ts` `key:autoGetDbKey`; Linux not supported).
-- Autostart: Windows HKCU Run key vs macOS `app.setLoginItemSettings`
-  (see `appMain.ts` `setSystemLaunchAtStartup`).
-- Notification glass: `@hicccc77/electron-liquid-glass` is Windows-only;
-  macOS uses the Chromium desktop-stream fallback (already the default).
+- Key service: Windows `keyService.ts` vs macOS `keyServiceMac.ts` vs Linux
+  `keyServiceLinux.ts` (selected in `appMain.ts` `key:autoGetDbKey`; Linux
+  wired in v0.9.10 — helper `resources/key/linux/x64/xkey_helper_linux`,
+  sudo via `@vscode/sudo-prompt`, prompt name **Weport**).
+- Autostart: Windows HKCU Run key vs macOS/Linux `app.setLoginItemSettings`
+  (Linux → XDG autostart; see `appMain.ts` `setSystemLaunchAtStartup`).
+- Notification glass: `@hicccc77/electron-liquid-glass` is Windows-only
+  (explicitly gated on `process.platform === 'win32'`);
+  macOS/Linux use the Chromium desktop-stream fallback (already the default).
+- WeChat data dir: Linux 微信 4.x lives at `~/xwechat_files`
+  (`dbPathService.autoDetect/getDefaultPath` linux branches).
+
+## Linux Packaging (v0.9.10)
+
+- `npm run build:linux` → AppImage + tar.gz x64 (`build.linux` in
+  package.json; artifactName `Weport-${version}-${arch}.${ext}` — do NOT let
+  it inherit the top-level `-Setup.` name). CI: `release.yml` `build-linux`
+  job on ubuntu-latest; must `chmod +x resources/key/linux/x64/xkey_helper_linux`
+  before packaging (Git-on-Windows loses the exec bit).
+- Native artifacts ship from `resources/{wcdb,key,wedecrypt}/linux/x64/`
+  via per-platform `extraResources`. `welive` is NOT shipped on Linux
+  (no runtime consumer). koffi's platform binary comes from the optional dep
+  `@koromix/koffi-linux-x64`, installed automatically when npm runs ON Linux;
+  `asarUnpack` includes `node_modules/@koromix/**/*`.
+- Read-only install dirs (AppImage squashfs, `/opt`, `/usr/bin`): hardlink
+  creation next to the exe fails, so `wcdbHostClient.resolveHostExe()` falls
+  back to COPYING the Electron binary to `{userData}/wcdb-host/WeFlow`
+  (mtime-aligned for reuse detection) and adds both the copy dir and the real
+  Electron dist dir to `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
+- The `-1006` name check for `libwcdb_api.so` under a host named `WeFlow` is
+  unverified on real Linux hardware (upstream ships its own exe as lowercase
+  `weflow`, suggesting the check may be looser there); treat first-boot DB
+  connect on Linux as the acceptance test.
+- safeStorage on headless Linux often has no backend: config falls back to
+  plaintext secrets (existing graceful degradation, unchanged).
 
 ## WCDB Host Process (Permanent — Do Not Change)
 
@@ -299,12 +328,14 @@ npm run typecheck                             # renderer + electron typecheck
 npm run build                                 # clean → tsc → vite build → prepare-host-bundle → electron-builder (NSIS, Windows)
 npm run build:dir                             # unpacked build (faster iteration; same chain)
 npm run build:mac                             # macOS DMG + ZIP (arm64, 需在 macOS 上执行)
+npm run build:linux                           # Linux AppImage + tar.gz (x64, 需在 Linux 上执行)
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
 ```
 
 macOS packaging requires restoring the exec bit on the key helpers first
 (Git does not track file modes): `chmod +x resources/key/macos/universal/*`
 and `resources/welive/macos/arm64/welive` — CI workflows already do this.
+Linux packaging likewise: `chmod +x resources/key/linux/x64/xkey_helper_linux`.
 
 `capture-ui.ps1` launches the app in `WEPORT_SCREENSHOT_POPUP` mode (the app
 captures its own window via `capturePage`), then asserts all captures are
@@ -323,7 +354,7 @@ two-frame-identical settle check, so README popup.png can't be a fading frame.
 ## CI
 
 - `.github/workflows/release.yml` — builds Windows (NSIS) + macOS (DMG/ZIP,
-  arm64) and publishes on tag push
+  arm64) + Linux (AppImage/tar.gz, ubuntu-latest) and publishes on tag push
 - `.github/workflows/mac-attach-release.yml` — manual: builds the macOS
   installer from a branch and attaches it to the **existing** latest release
   (used to backfill a mac installer onto an already-published version)

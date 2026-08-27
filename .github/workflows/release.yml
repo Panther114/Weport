@@ -111,3 +111,48 @@ jobs:
             release/latest-mac.yml
           body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: false
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        run: |
+          pkg_version="$(node -p "require('./package.json').version")"
+          ref_name="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          tag_version="${ref_name#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "Tag $tag_version does not match package version $pkg_version" >&2
+            exit 1
+          fi
+
+      # Git on Windows 不保留可执行位：Linux 原生 helper 打包前必须恢复 +x
+      - name: Ensure linux helpers are executable
+        run: |
+          chmod +x resources/key/linux/x64/xkey_helper_linux
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build Linux packages (AppImage + tar.gz)
+        run: npm run build:linux
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Weport-*.AppImage
+            release/Weport-*.tar.gz
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: false

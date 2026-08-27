@@ -27,7 +27,7 @@
 import { EventEmitter } from 'events'
 import { spawn, type ChildProcess } from 'child_process'
 import { join, dirname, delimiter } from 'path'
-import { existsSync, linkSync, unlinkSync, statSync } from 'fs'
+import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync } from 'fs'
 
 function resolveHostExe(): string {
   const override = process.env.WEPORT_WCDB_HOST_EXE
@@ -35,27 +35,59 @@ function resolveHostExe(): string {
 
   const target = process.execPath
   const hostName = process.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
-  const hostPath = join(dirname(target), hostName)
+  const exeDir = dirname(target)
+  const hostPath = join(exeDir, hostName)
 
   // 已存在且大小+修改时间一致 → 直接复用（覆盖安装/更新后 exe 变化则重建链接；
   // 只比大小会漏掉「新 exe 与旧版本恰好同尺寸」的更新——硬链接指向的仍是旧文件）
-  const needRefresh = (() => {
+  const matchesTarget = (p: string): boolean => {
     try {
-      const s = statSync(hostPath)
+      const s = statSync(p)
       const t = statSync(target)
-      return s.size !== t.size || Math.floor(s.mtimeMs) !== Math.floor(t.mtimeMs)
+      return s.size === t.size && Math.floor(s.mtimeMs) === Math.floor(t.mtimeMs)
     } catch {
-      return true
+      return false
     }
-  })()
-  if (needRefresh) {
+  }
+  if (!matchesTarget(hostPath)) {
     try {
       if (existsSync(hostPath)) unlinkSync(hostPath)
       linkSync(target, hostPath)
     } catch (e) {
+      // Linux 常见：exe 目录只读（AppImage squashfs、/usr/bin、deb /opt）。
+      // 硬链接必须同文件系统 —— 退化为复制到 userData（跨设备只能复制，
+      // mtime 对齐以复用上面的「同版本跳过」检查；-1006 检查的是宿主进程
+      // 自身路径名，复制出的 WeFlow 同样满足）。
+      let fallbackDir = ''
+      try {
+        // app 仅在主进程可用；本模块只在主进程使用
+        const { app } = require('electron') as typeof import('electron')
+        fallbackDir = join(app.getPath('userData'), 'wcdb-host')
+        mkdirSync(fallbackDir, { recursive: true })
+      } catch {
+        /* 无 electron（理论不可达），保持原错误 */
+      }
+      if (fallbackDir) {
+        const copiedPath = join(fallbackDir, hostName)
+        try {
+          copyFileSync(target, copiedPath)
+          try {
+            const t = statSync(target)
+            utimesSync(copiedPath, t.atime, t.mtime)
+            chmodSync(copiedPath, 0o755)
+          } catch { /* 权限位/mtime 尽力而为 */ }
+          console.warn(`[wcdb-host] exe 目录不可写，宿主已复制到 ${copiedPath}`)
+          return copiedPath
+        } catch (e2) {
+          throw new Error(
+            `无法创建 WCDB 宿主进程：硬链接失败于 ${hostPath} (${String((e as Error)?.message || e)})，` +
+            `复制兜底也失败于 ${copiedPath} (${String((e2 as Error)?.message || e2)})。`
+          )
+        }
+      }
       throw new Error(
         `无法创建 WCDB 宿主进程 (${hostPath}): ${String((e as Error)?.message || e)}。` +
-        '请确认安装目录可写（Windows: NTFS / macOS: APFS），或以管理员身份运行。'
+        '请确认安装目录可写（Windows: NTFS / macOS: APFS / Linux: 非 AppImage 只读挂载），或以管理员身份运行。'
       )
     }
   }
@@ -93,8 +125,13 @@ export class WcdbHostClient extends EventEmitter {
     const args: string[] = [hostScript]
 
     const exeDir = dirname(hostExe)
+    const originExeDir = dirname(process.execPath)
     const resourcesPath = process.env.WEPORT_RESOURCES_PATH || ''
+    // exeDir：宿主（硬链接/复制件）所在目录；originExeDir：真实 Electron 发行目录 ——
+    // Linux 复制兜底时二者不同，复制的二进制靠 LD_LIBRARY_PATH 找回同发行版的
+    // 共享库（AppImage 场景还需继承 $APPDIR，spawn 默认透传 process.env 已覆盖）
     const extraPathParts: string[] = [exeDir]
+    if (originExeDir !== exeDir) extraPathParts.push(originExeDir)
     if (resourcesPath) {
       extraPathParts.push(join(resourcesPath, 'wcdb', process.platform, process.arch))
       extraPathParts.push(join(resourcesPath, 'runtime', process.platform))
@@ -109,6 +146,10 @@ export class WcdbHostClient extends EventEmitter {
       PATH: [...extraPathParts, process.env.PATH || ''].filter(Boolean).join(delimiter),
       // 兼容 wcdbCore.getDllPath() 探测 WCDB_RESOURCES_PATH（历史仅 annualReportWorker 设置）
       WCDB_RESOURCES_PATH: process.env.WEPORT_RESOURCES_PATH || resourcesPath || ''
+    }
+    // Linux：dlopen 依赖库查找路径（libwcdb_api.so 及其依赖）
+    if (process.platform !== 'win32') {
+      env.LD_LIBRARY_PATH = [...extraPathParts, process.env.LD_LIBRARY_PATH || ''].filter(Boolean).join(delimiter)
     }
     // 打包版：koffi 不在脚本的 node_modules 走查链上（resources/host/libs，
     // 见 scripts/prepare-host-bundle.cjs），用 NODE_PATH 补解析；dev 走项目

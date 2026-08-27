@@ -4,7 +4,7 @@
   "private": true,
   "description": "WeClone 静态前端（Vite + React SPA）— 构建产物输出到 ../public，由 Fastify(@fastify/static) 托管",
   "type": "module",
-  "license": "MIT",
+  "license": "CC-BY-NC-SA-4.0",
   "engines": {
     "node": ">=20"
   },

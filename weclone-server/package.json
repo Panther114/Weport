@@ -4,7 +4,7 @@
   "private": true,
   "description": "WeClone personality-clone chat server — Fastify + JSON-file meta + FS blobs (JSONL/mds) + hand-rolled BM25 + OpenAI-compat LLM proxy (Railway-deployable, <100MB RAM, zero native deps)",
   "main": "dist/server.js",
-  "license": "MIT",
+  "license": "CC-BY-NC-SA-4.0",
   "engines": {
     "node": ">=18"
   },

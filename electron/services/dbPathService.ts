@@ -110,6 +110,11 @@ export class DbPathService {
         }
         // macOS 旧路径兜底
         possiblePaths.push(join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files'))
+      } else if (process.platform === 'linux') {
+        // Linux 微信 4.x 原生客户端数据目录（~/xwechat_files）
+        possiblePaths.push(join(home, 'xwechat_files'))
+        // 部分发行版/手动安装会放在文档目录下
+        possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
       } else {
         // Windows 微信4.x 数据目录
         possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
@@ -444,6 +449,12 @@ export class DbPathService {
       }
       // 旧版本路径兜底
       return join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files')
+    }
+    if (process.platform === 'linux') {
+      // Linux 微信 4.x 原生客户端数据目录
+      const linuxDefault = join(home, 'xwechat_files')
+      if (existsSync(linuxDefault)) return linuxDefault
+      return join(home, 'Documents', 'xwechat_files')
     }
     return join(home, 'Documents', 'xwechat_files')
   }

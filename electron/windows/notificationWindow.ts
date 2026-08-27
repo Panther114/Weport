@@ -6,11 +6,15 @@ import { ConfigService } from "../services/config";
 // 感知滞后中位 ~6ms（Chromium 流方案 ~77ms），渲染完全不经过 Electron 进程。
 // 默认关闭：原生面板在部分 GPU/驱动组合下会把折射区域画成黑块（弹窗背后出现
 // 黑色矩形）。需要时用 WEPORT_NATIVE_GLASS=1 显式开启，回退路径为 Chromium 桌面流。
+// 仅 win32 加载：模块本身是 Windows 原生实现（DXGI/D3D11），macOS/Linux 一律走回退。
 type NativeGlassModule = typeof import("@hicccc77/electron-liquid-glass");
 let nativeGlass: NativeGlassModule | null = null;
 try {
   const mod: NativeGlassModule = require("@hicccc77/electron-liquid-glass");
-  nativeGlass = process.env.WEPORT_NATIVE_GLASS === "1" && mod.isSupported() ? mod : null;
+  nativeGlass =
+    process.platform === "win32" && process.env.WEPORT_NATIVE_GLASS === "1" && mod.isSupported()
+      ? mod
+      : null;
 } catch {
   nativeGlass = null;
 }

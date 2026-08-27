@@ -47,13 +47,14 @@ Railway 构建以 **GitHub 仓库根目录** 为上下文。本仓库根目录�
 
    | 变量 | 默认 | 说明 |
    |------|------|------|
-   | `WECLONE_LLM_MODEL` | `muse-spark-1.2-contributor` | 首选模型 |
-   | `WECLONE_LLM_FALLBACK_MODELS` | `glm-5,minimax-m2.5,deepseek-v4-flash` | 首选模型网关 500/404 时依次降级 |
+   | `WECLONE_LLM_MODEL` | `muse-spark-1.2-contributor` | 克隆固定模型（不跨模型降级，保证语气一致性） |
+   | `WECLONE_LLM_FALLBACK_MODELS` | （空 = 不降级） | 仅在显式设置时启用：首选模型网关 500/404 时依次降级 |
    | `WECLONE_LLM_BASE_URL` | `https://opencode.ai/zen/go/v1` | 自建网关才改 |
 
-   > **模型降级链是自动的**：首选模型如果像 2026-08 的
-   > `muse-spark-1.2-contributor` 一样整段返回 `Internal server error`(500)，
-   > 服务会按顺序换备选模型重试并记住可用的那个，无需人工干预。
+   > **模型是固定的**：克隆只使用 `muse-spark-1.2-contributor`。如果它像
+   > 2026-08 那样整段返回 `Internal server error`(500)，对话会直接报错——
+   > 这是 OpenCode Go 网关侧的故障，等网关恢复即可；如需临时换模型可设
+   > `WECLONE_LLM_MODEL`（会影响语气一致性，不建议长期使用）。
 
 3. 改完变量 Railway 会自动重新部署。
 
@@ -94,7 +95,7 @@ https://weport.up.railway.app/health
   "ok": true,
   "version": "0.9.10",
   "llm": "configured",          // "mock" = 第 2 步的 key 没配上
-  "llmModels": ["muse-spark-1.2-contributor", "glm-5", "..."]
+  "llmModels": ["muse-spark-1.2-contributor"]
 }
 ```
 

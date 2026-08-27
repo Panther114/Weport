@@ -848,9 +848,9 @@ export default function App() {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
       return
     }
-    // issue #9a：Windows 上图片 .dat 需要图片密钥，缺失时导出只会得到 [图片] 占位符。
+    // issue #9a：Windows/Linux 上图片 .dat 需要图片密钥，缺失时导出只会得到 [图片] 占位符。
     // 提前拦截并指引导出密钥（macOS 图片为明文，无需密钥）。
-    if (exportMedia.images && api.process.platform === 'win32' && !imageKeysOk) {
+    if (exportMedia.images && (api.process.platform === 'win32' || api.process.platform === 'linux') && !imageKeysOk) {
       pushToast('err', '尚未配置图片密钥', '请先点击「获取图片密钥」，否则导出的图片将全部失败', 10000)
       return
     }
@@ -1727,7 +1727,7 @@ export default function App() {
                   </label>
                 )}
               </div>
-              {exportMedia.images && api.process.platform === 'win32' && (
+              {exportMedia.images && (api.process.platform === 'win32' || api.process.platform === 'linux') && (
                 <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
                   <button
                     type="button"

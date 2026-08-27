@@ -45,6 +45,7 @@ import { windowsHelloService } from './services/windowsHelloService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
 import { KeyServiceMac } from './services/keyServiceMac'
+import { KeyServiceLinux } from './services/keyServiceLinux'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 import { weCloneService } from './services/weCloneService'
@@ -202,7 +203,7 @@ const getLaunchAtStartupUnsupportedReason = (): string | null => {
 }
 
 const getSystemLaunchAtStartup = (): boolean => {
-  if (isMacHost) {
+  if (isMacHost || process.platform === 'linux') {
     try {
       return app.getLoginItemSettings({ path: process.execPath }).openAtLogin
     } catch {
@@ -233,7 +234,8 @@ const getMacLoginItemArgs = (): string[] => {
 }
 
 const setSystemLaunchAtStartup = (enabled: boolean): { success: boolean; enabled: boolean; error?: string } => {
-  if (isMacHost) {
+  if (isMacHost || process.platform === 'linux') {
+    // Linux：Electron 写 XDG autostart（~/.config/autostart），桌面环境支持时生效
     const silent = configService?.get('silentStartup') === true
     try {
       app.setLoginItemSettings({
@@ -1953,16 +1955,27 @@ function registerIpcHandlers() {
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
   ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
-  ipcMain.handle('auth:verifyHello', (_e, message: string) => windowsHelloService.verify(String(message || '请验证您的身份')))
+  ipcMain.handle('auth:verifyHello', (_e, message: string) => {
+    // Windows Hello（mac 为 Touch ID 路径）：Linux 无对应生物认证后端，直接给出明确错误
+    if (process.platform !== 'win32' && process.platform !== 'darwin') {
+      return Promise.resolve({ success: false, error: '生物识别解锁仅支持 Windows / macOS' })
+    }
+    return windowsHelloService.verify(String(message || '请验证您的身份'))
+  })
 
   // 数据库路径
   ipcMain.handle('dbpath:autoDetect', () => dbPathService.autoDetect())
   ipcMain.handle('dbpath:scanWxids', (_e, rootPath: string) => dbPathService.scanWxids(String(rootPath || '')))
   ipcMain.handle('dbpath:getDefault', () => dbPathService.getDefaultPath())
 
-  // 密钥
+  // 密钥（Linux：keyServiceLinux 自 v0.7.5 起随仓库携带，v0.9.10 接线）
   ipcMain.handle('key:autoGetDbKey', async () => {
-    const keyService = process.platform === 'darwin' ? new KeyServiceMac() : new KeyService()
+    const keyService =
+      process.platform === 'darwin'
+        ? new KeyServiceMac()
+        : process.platform === 'linux'
+          ? new KeyServiceLinux()
+          : new KeyService()
     const result = await keyService.autoGetDbKey(180_000, (message, level) => {
       mainWindow?.webContents.send('key:dbKeyStatus', { message, level })
     })
@@ -1975,14 +1988,28 @@ function registerIpcHandlers() {
       if (!event.sender.isDestroyed()) event.sender.send('key:imageKeyStatus', { message: String(message || '') })
     } catch { /* noop */ }
   }
+  const createImageKeyService = (): KeyService | KeyServiceMac | KeyServiceLinux =>
+    process.platform === 'darwin'
+      ? new KeyServiceMac()
+      : process.platform === 'linux'
+        ? new KeyServiceLinux()
+        : new KeyService()
   ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {
-    if (process.platform !== 'win32') {
-      return { success: false, error: '图片密钥提取仅支持 Windows（macOS 图片为明文存储，无需密钥）' }
+    if (process.platform === 'win32') {
+      const dir = manualDir ? String(manualDir).trim() : ''
+      if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
+      return new KeyService().autoGetImageKey(
+        dir || undefined,
+        (message) => sendImageKeyStatus(event, message),
+        wxid ? String(wxid) : undefined
+      )
+    }
+    if (process.platform !== 'linux' && process.platform !== 'darwin') {
+      return { success: false, error: '图片密钥提取不支持当前平台' }
     }
     const dir = manualDir ? String(manualDir).trim() : ''
     if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
-    const keyService = new KeyService()
-    return keyService.autoGetImageKey(
+    return createImageKeyService().autoGetImageKey(
       dir || undefined,
       (message) => sendImageKeyStatus(event, message),
       wxid ? String(wxid) : undefined
@@ -1994,8 +2021,7 @@ function registerIpcHandlers() {
     }
     const dir = String(userDir || '').trim()
     if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
-    const keyService = new KeyService()
-    return keyService.autoGetImageKeyByMemoryScan(
+    return new KeyService().autoGetImageKeyByMemoryScan(
       dir,
       (message) => sendImageKeyStatus(event, message)
     )
@@ -2739,6 +2765,9 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
     weCloneService.setVisibility(String(id || ''), String(visibility || '')))
   ipcMain.handle('weclone:upload', (_e, id: string) => weCloneService.uploadExistingClone(String(id || '')))
+  ipcMain.handle('weclone:getModelCatalog', () => weCloneService.listAvailableModels())
+  ipcMain.handle('weclone:getModelOverride', () => weCloneService.getModelOverride())
+  ipcMain.handle('weclone:setModelOverride', (_e, model: string) => weCloneService.setModelOverride(String(model || '')))
   ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
   ipcMain.handle('weclone:cancel', () => {
     wecloneControllers.get('generate')?.abort()
@@ -5364,8 +5393,8 @@ function installMainProcessErrorHandlers() {
 function startApp() {
   installMainProcessErrorHandlers()
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
-  if (process.platform !== 'win32' && process.platform !== 'darwin') {
-    console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS）')
+  if (process.platform !== 'win32' && process.platform !== 'darwin' && process.platform !== 'linux') {
+    console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS / Linux）')
   }
 
   // ---------------------------------------------------------------------------
