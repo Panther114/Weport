@@ -38,10 +38,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     glassHide: () => ipcRenderer.send('notification:glassHide'),
     showTest: () => ipcRenderer.invoke('notification:showTest'),
     onLuma: (callback: (bands: any) => void) => subscribe('notification:luma', callback),
-    onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback),
-    onNavigate: (callback: (payload: any) => void) => subscribe('notification:navigate', callback),
-    onNavigateToSession: (callback: (sessionId: string) => void) => subscribe('navigate-to-session', callback),
-    onNavigateToRoute: (callback: (route: string) => void) => subscribe('navigate-to-route', callback)
+    onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback)
   },
 
   // 对话框
@@ -258,22 +255,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     send: (chatId: string, text: string) => ipcRenderer.invoke('ai:send', chatId, text),
     abort: (chatId: string) => ipcRenderer.invoke('ai:abort', chatId),
     onEvent: (callback: (event: any) => void) => subscribe('ai:event', callback)
-  },
-
-  // WeClone（v0.9.10 人格克隆）
-  weclone: {
-    generate: (opts?: { localOnly?: boolean }) => ipcRenderer.invoke('weclone:generate', opts),
-    list: () => ipcRenderer.invoke('weclone:list'),
-    get: (id: string) => ipcRenderer.invoke('weclone:get', id),
-    delete: (id: string, remote?: boolean) => ipcRenderer.invoke('weclone:delete', id, remote),
-    setVisibility: (id: string, visibility: string) => ipcRenderer.invoke('weclone:setVisibility', id, visibility),
-    getServerStatus: () => ipcRenderer.invoke('weclone:getServerStatus'),
-    getProgress: () => ipcRenderer.invoke('weclone:getProgress'),
-    cancel: () => ipcRenderer.invoke('weclone:cancel'),
-    getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
-    ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),
-    setForcedApiKey: (payload: { apiKey: string }) => ipcRenderer.invoke('weclone:setForcedApiKey', payload),
-    onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
   },
 
   process: {

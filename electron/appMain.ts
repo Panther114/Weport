@@ -48,8 +48,6 @@ import { KeyServiceMac } from './services/keyServiceMac'
 import { KeyServiceLinux } from './services/keyServiceLinux'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
-import { weCloneService } from './services/weCloneService'
-import type { WeCloneProgressInfo } from './services/weCloneService'
 import { getProviderCatalog } from './services/ai/providerCatalog'
 import {
   registerNotificationHandlers,
@@ -675,78 +673,13 @@ function setupNotificationPipeline() {
     ensureWeChatRequestHeaderInterceptor()
     void showNotification(buildPopupData(payload))
   })
-  setNotificationNavigateHandler((payload: unknown) => {
-    handleNotificationClickNavigation(payload)
+  setNotificationNavigateHandler(() => {
+    // 静默启动不建主窗口：通知点击时按需创建/显示
+    showMainWindow()
   })
   chatService.addDbMonitorListener((type, json) => {
     messagePushService?.handleDbMonitorChange(type, json)
   })
-}
-
-// 弹窗点击 → 主窗口导航（复用 WeFlow 逻辑，适配 WePort）
-// 支持 targetRoute / ai-insight / sessionId 三种载荷，且兼容隐藏窗口的 about:blank 回收态
-function focusMainWindowAndNavigate(sessionId: string): void {
-  if (!sessionId) {
-    showMainWindow()
-    return
-  }
-  showMainWindow()
-  const target = mainWindow
-  if (!target || target.isDestroyed()) return
-  const send = () => {
-    try {
-      target.webContents.send('notification:navigate', { sessionId })
-      // 兼容旧监听（WeFlow 风格）
-      target.webContents.send('navigate-to-session', sessionId)
-    } catch { /* noop */ }
-  }
-  try {
-    if (target.webContents.isLoading()) target.webContents.once('did-finish-load', send)
-    else send()
-  } catch { send() }
-}
-
-function focusMainWindowAndNavigateRoute(route: string): void {
-  if (!route) { showMainWindow(); return }
-  showMainWindow()
-  const target = mainWindow
-  if (!target || target.isDestroyed()) return
-  const send = () => {
-    try {
-      target.webContents.send('notification:navigate', { targetRoute: route })
-      target.webContents.send('navigate-to-route', route)
-    } catch { /* noop */ }
-  }
-  try {
-    if (target.webContents.isLoading()) target.webContents.once('did-finish-load', send)
-    else send()
-  } catch { send() }
-}
-
-function handleNotificationClickNavigation(payload: unknown): void {
-  if (payload && typeof payload === 'object') {
-    const data = payload as { sessionId?: string; channel?: string; insightRecordId?: string; targetRoute?: string }
-    const targetRoute = String((data as any).targetRoute || '').trim()
-    if (targetRoute.startsWith('/')) {
-      focusMainWindowAndNavigateRoute(targetRoute)
-      return
-    }
-    if (data.channel === 'ai-insight' && (data as any).insightRecordId) {
-      focusMainWindowAndNavigateRoute(`/insight-inbox?recordId=${encodeURIComponent(String((data as any).insightRecordId))}`)
-      return
-    }
-    const sid = String((data as any).sessionId || '').trim()
-    if (sid) {
-      focusMainWindowAndNavigate(sid)
-      return
-    }
-    // 载荷无可导航字段：仅显示主窗口
-    showMainWindow()
-    return
-  }
-  const sid = String(payload || '').trim()
-  if (sid) focusMainWindowAndNavigate(sid)
-  else showMainWindow()
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,11 +963,7 @@ function scheduleMainWindowDiscard(): void {
     mainWindowDiscardTimer = null
   }
   if (isAppQuitting || isAnyQaMode) return
-  if (
-    exportTaskControlService.hasActiveTasks() ||
-    weCloneService.isGenerating?.() ||
-    weCloneService.getLastProgress?.()?.status === 'running'
-  ) {
+  if (exportTaskControlService.hasActiveTasks()) {
     // 导出中不卸载渲染层（进度事件目标需存活），导出结束后再试
     mainWindowDiscardTimer = setTimeout(() => {
       mainWindowDiscardTimer = null
@@ -1048,11 +977,7 @@ function scheduleMainWindowDiscard(): void {
     discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode}`)
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
     if (isAppQuitting || isAnyQaMode) return
-    if (
-      exportTaskControlService.hasActiveTasks() ||
-      weCloneService.isGenerating?.() ||
-      weCloneService.getLastProgress?.()?.status === 'running'
-    ) {
+    if (exportTaskControlService.hasActiveTasks()) {
       scheduleMainWindowDiscard()
       return
     }
@@ -1844,8 +1769,8 @@ async function runRealDataDump() {
 function registerIpcHandlers() {
   void registerNotificationHandlers()
 
-  ipcMain.on('notification-clicked', (_event, payload) => {
-    handleNotificationClickNavigation(payload)
+  ipcMain.on('notification-clicked', (_event, _payload) => {
+    showMainWindow()
   })
 
   // 配置
@@ -2701,94 +2626,6 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('ai:abort', (_e, chatId: string) => {
     weportAiService.abort(String(chatId || ''))
     return { success: true }
-  })
-
-  // -------------------------------------------------------------------------
-  // WeClone（v0.9.10 人格克隆）
-  // -------------------------------------------------------------------------
-  // WeClone progress notification throttling (avoid flooding notification window)
-  let weCloneProgressLastShow = 0
-  let weCloneProgressLastValue = -1
-  function showWeCloneProgressNotification(p: WeCloneProgressInfo) {
-    const now = Date.now()
-    const isTerminal =
-      p.stage === 'done' || p.stage === 'error' || p.stage === 'cancelled' || p.status === 'done' || p.status === 'error' || p.status === 'cancelled'
-    const progressDiff = Math.abs((p.progress ?? 0) - weCloneProgressLastValue)
-    const timeDiff = now - weCloneProgressLastShow
-    const isGenerateLike = p.stage === 'generate' || p.stage === 'filter'
-    const threshold = isGenerateLike ? 1 : 1
-    if (!isTerminal && weCloneProgressLastValue !== -1 && timeDiff > 3000) {
-      // heartbeat: force notification even if progress unchanged for >3s
-    } else if (!isTerminal && weCloneProgressLastValue !== -1 && progressDiff < threshold && timeDiff < 1000) return
-    weCloneProgressLastShow = now
-    weCloneProgressLastValue = p.progress ?? 0
-    void showNotification(
-      {
-        id: 'weclone-progress',
-        sessionId: 'weport-weclone',
-        title: '人格克隆',
-        content: `${p.stage} ${p.message} ${p.progress}%`,
-        body: `${p.stage} ${p.message} ${p.progress}%`,
-        position: 'top-left',
-        persistent: p.status === 'running',
-        progress: p.progress,
-        channel: 'weclone',
-      },
-      { force: true }
-    )
-  }
-
-  const wecloneControllers = new Map<string, AbortController>()
-  ipcMain.handle('weclone:getProgress', () => weCloneService.getProgressSnapshot())
-  ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
-    const taskId = 'generate'
-    if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
-    const ctrl = new AbortController()
-    wecloneControllers.set(taskId, ctrl)
-    try {
-      return await weCloneService.generateClone(
-        (progress) => {
-          mainWindow?.webContents.send('weclone:progress', progress)
-          showWeCloneProgressNotification(progress as WeCloneProgressInfo)
-        },
-        ctrl.signal,
-        opts && typeof opts === 'object' ? opts : {}
-      )
-    } finally {
-      wecloneControllers.delete(taskId)
-    }
-  })
-  ipcMain.handle('weclone:list', () => weCloneService.getClones())
-  ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
-  ipcMain.handle('weclone:delete', (_e, id: string, remote?: boolean) =>
-    weCloneService.deleteClone(String(id || ''), remote !== false))
-  ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
-    weCloneService.setVisibility(String(id || ''), String(visibility || '')))
-  ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
-  ipcMain.handle('weclone:cancel', () => {
-    wecloneControllers.get('generate')?.abort()
-    weCloneService.cancel()
-    return { success: true }
-  })
-  // 强制 provider（opencode-go / muse-spark-1.2-contributor）
-  ipcMain.handle('weclone:getForcedProviderStatus', () => weCloneService.getForcedProviderStatus())
-  ipcMain.handle('weclone:ensureProvider', async (_e, payload?: { apiKey?: string }) => {
-    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
-    try {
-      await weCloneService.ensureForcedProvider(apiKey || undefined)
-      return { success: true, status: weCloneService.getForcedProviderStatus() }
-    } catch (e) {
-      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
-    }
-  })
-  ipcMain.handle('weclone:setForcedApiKey', async (_e, payload?: { apiKey?: string }) => {
-    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
-    try {
-      await weCloneService.ensureForcedProvider(apiKey || undefined)
-      return { success: true, status: weCloneService.getForcedProviderStatus() }
-    } catch (e) {
-      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
-    }
   })
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
@@ -5701,7 +5538,6 @@ try { tray?.destroy() } catch { /* noop */ }
     for (const chatId of weportAiService.listChats().map((c) => c.id)) {
       weportAiService.abort(chatId)
     }
-    weCloneService.cancel()
     const forceExitTimer = setTimeout(() => {
       console.warn('[Weport] Force exit after timeout')
       // app.exit 会等待 IPC 子进程（WCDB 宿主）回收；先强杀宿主再退出

@@ -21,10 +21,6 @@
         }
     }
 
-    &.clickable {
-        cursor: pointer;
-    }
-
     // 玻璃材质与文字颜色均由 useNotificationAdaptiveTheme 按桌面背景的实际对比度
     // 无级计算后写入 <html> 的 --noti-* 变量（纱层方向/浓度、分区连续文字色、光晕强度）；
     // 此处提供采样失败/过亮背景下的安全默认值：白字 + 深色文字纱层，任何背景下都可读

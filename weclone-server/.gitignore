@@ -1,8 +1,0 @@
-node_modules/
-dist/
-data/
-data-test/
-.env
-*.log
-*.tsbuildinfo
-.server-pid.txt

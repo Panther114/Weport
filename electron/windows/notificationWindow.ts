@@ -30,7 +30,6 @@ export function setNotificationNavigateHandler(
 
 let notificationWindow: BrowserWindow | null = null;
 let closeTimer: NodeJS.Timeout | null = null;
-let lastNotificationData: any = null;
 
 // 空闲销毁：隐藏的通知窗口（含渲染进程）常驻占用 ~120MB 工作集，
 // 通知稀少时不值得养着。隐藏后闲置超时即销毁，下一条通知重新冷启动
@@ -45,20 +44,12 @@ function cancelIdleDestroy() {
 }
 
 function scheduleIdleDestroy() {
-  // For weclone-progress, suppress idleDestroy while persistent: keep window alive
-  if (lastNotificationData && (lastNotificationData as any).id === 'weclone-progress' && (lastNotificationData as any).persistent) {
-    return;
-  }
   cancelIdleDestroy();
   idleDestroyTimer = setTimeout(() => {
     idleDestroyTimer = null;
     // 可见期间不销毁（cancel/schedule 时序兜底）
     if (notificationWindow && !notificationWindow.isDestroyed() && notificationWindow.isVisible()) {
       scheduleIdleDestroy();
-      return;
-    }
-    // Persistent weclone-progress should not be destroyed on idle
-    if (lastNotificationData && (lastNotificationData as any).id === 'weclone-progress' && (lastNotificationData as any).persistent) {
       return;
     }
     destroyNotificationWindow();
@@ -347,24 +338,18 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
   }
 }
 
+let lastNotificationData: any = null;
+
 async function showAndSend(win: BrowserWindow, data: any) {
   const config = ConfigService.getInstance();
-  const VALID_POSITIONS = new Set(["top-left", "top-right", "bottom-left", "bottom-right", "top-center"]);
-  let position = (await config.get("notificationPosition")) || "top-right";
-  if (typeof data.position === "string" && VALID_POSITIONS.has(data.position)) {
-    position = data.position as typeof position;
-  }
-  const isWeCloneProgress = data.id === "weclone-progress";
-  if (isWeCloneProgress) {
-    position = "top-left";
-  }
+  const position = (await config.get("notificationPosition")) || "top-right";
 
   // 更新位置：基于工作区完整矩形（含原点偏移）定位。
   // macOS 菜单栏、Windows 任务栏靠上/靠左时工作区原点不为 (0,0)，
   // 只用 workAreaSize 会把通知压进系统栏下面
   const display = screen.getPrimaryDisplay();
   const workArea = display.workArea;
-  const winWidth = isWeCloneProgress ? 344 : position === "top-center" ? 280 : 344;
+  const winWidth = position === "top-center" ? 280 : 344;
   const winHeight = 114;
   const padding = 20;
 
@@ -413,27 +398,6 @@ async function showAndSend(win: BrowserWindow, data: any) {
       height: display.size.height,
     },
   };
-
-  // For weclone-progress, update-in-place: if window already visible with same id, just update position/content without queuing prevNotification fade.
-  const isUpdateInPlace =
-    isWeCloneProgress &&
-    !win.isDestroyed() &&
-    win.isVisible() &&
-    lastNotificationData &&
-    (lastNotificationData as any).id === "weclone-progress";
-  if (isUpdateInPlace) {
-    lastNotificationData = payload;
-    win.setPosition(winX, winY);
-    const [, currentHeight] = win.getSize();
-    applyWindowSize(win, winWidth, currentHeight);
-    win.webContents.send("notification:show", payload);
-    win.setIgnoreMouseEvents(false);
-    // keep persistent window on top without hiding
-    win.showInactive();
-    win.setAlwaysOnTop(true, "screen-saver");
-    return;
-  }
-
   lastNotificationData = payload;
 
   win.setPosition(winX, winY);

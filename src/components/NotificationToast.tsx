@@ -29,8 +29,6 @@ interface NotificationToastProps {
     nativeBackdrop?: boolean
     /** 退场动画开始的一刻触发（原生模式用来提前淡出原生面板） */
     onHideStart?: () => void
-    /** 点击卡片回调（用于触发主窗口显示与会话导航） */
-    onClick?: () => void
 }
 
 /**
@@ -45,8 +43,7 @@ export function NotificationToast({
     initialVisible = false,
     backdropImage,
     nativeBackdrop = false,
-    onHideStart,
-    onClick
+    onHideStart
 }: NotificationToastProps) {
     const [isVisible, setIsVisible] = useState(initialVisible)
     const [currentData, setCurrentData] = useState<NotificationData | null>(null)
@@ -81,17 +78,8 @@ export function NotificationToast({
 
     if (!currentData) return null
 
-    const clickable = typeof onClick === 'function'
-
     return (
-        <div
-            className={`notification-toast-container ${isVisible ? 'visible' : ''} ${clickable ? 'clickable' : ''}`}
-            onClick={clickable ? onClick : undefined}
-            role={clickable ? 'button' : undefined}
-            tabIndex={clickable ? 0 : undefined}
-            onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick?.() } } : undefined}
-            style={clickable ? { cursor: 'pointer' } : undefined}
-        >
+        <div className={`notification-toast-container ${isVisible ? 'visible' : ''}`}>
             <LiquidGlass
                 cornerRadius={16}
                 padding="12px 10px"

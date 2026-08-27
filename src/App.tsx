@@ -6,7 +6,6 @@ import {
   Bell,
   Eye,
   EyeOff,
-  Fingerprint,
   ChevronDown,
   Archive,
   HardDrive,
@@ -50,12 +49,10 @@ import WeportAiPanel from './components/weportAi/WeportAiPanel'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
-import WeClonePage from './pages/WeClonePage'
 import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
 import './styles/v09.scss'
-import './styles/weclone.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'weclone' | 'settings'
+type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -176,7 +173,6 @@ const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: n
   { id: 'analytics', label: '分析', icon: LineChart },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
   { id: 'notifications', label: '消息通知', icon: Bell },
-  { id: 'weclone', label: '人格克隆', icon: Fingerprint },
   { id: 'ai', label: 'WeportAI', icon: Sparkles },
   { id: 'settings', label: '设置', icon: SettingsIcon },
 ]
@@ -686,45 +682,6 @@ export default function App() {
       toastTimers.current.forEach((t) => window.clearTimeout(t))
     }
   }, [api, detectDb, refreshAccounts, refreshExportLog, loadAccountKey, pushToast])
-
-  // 通知弹窗点击 → 主窗口导航（sessionId / targetRoute）
-  useEffect(() => {
-    let lastKey = ''
-    let lastAt = 0
-    const shouldHandle = (key: string) => {
-      const now = Date.now()
-      if (key === lastKey && now - lastAt < 800) return false
-      lastKey = key
-      lastAt = now
-      return true
-    }
-    const handleNavigate = (payload: any) => {
-      const sid = String(payload?.sessionId || '').trim()
-      const route = String(payload?.targetRoute || '').trim()
-      const key = route ? `route:${route}` : sid ? `sid:${sid}` : `empty`
-      if (!shouldHandle(key)) return
-      if (route) {
-        if (route.includes('insight') || payload?.channel === 'ai-insight') {
-          switchTab('ai')
-          pushToast('info', '已打开 AI 洞察', undefined, 3000)
-          return
-        }
-        pushToast('info', '已收到导航请求', route.slice(0, 80), 3000)
-        return
-      }
-      if (sid) {
-        pushToast('info', '已跳转到会话', sid.slice(0, 48), 3500)
-        return
-      }
-    }
-    const handleSession = (sessionId: string) => handleNavigate({ sessionId })
-    const handleRoute = (route: string) => handleNavigate({ targetRoute: route })
-    const subs: Array<() => void> = []
-    try { subs.push(api.notification.onNavigate(handleNavigate)) } catch { /* noop */ }
-    try { subs.push(api.notification.onNavigateToSession(handleSession)) } catch { /* noop */ }
-    try { subs.push(api.notification.onNavigateToRoute(handleRoute)) } catch { /* noop */ }
-    return () => subs.forEach((u) => { try { u() } catch { /* noop */ } })
-  }, [api, pushToast])
 
   useEffect(() => {
     void refreshExportLog(exportPath)
@@ -1929,7 +1886,6 @@ export default function App() {
         {tab === 'ai' && <WeportAiPanel />}
         {tab === 'sns' && <SnsPage />}
         {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
-        {tab === 'weclone' && <WeClonePage />}
 
         {tab === 'antirecall' && (
           <div className="single-col">

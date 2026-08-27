@@ -28,23 +28,6 @@ interface ExportRequest {
   sessionIds?: string[]
 }
 
-interface WeCloneMetaInfo {
-  id: string
-  wxid: string
-  displayName: string
-  knowledgeCutoff: string
-  messageCount: number
-  sessionCount: number
-  chunkCount: number
-  generatedAt: string
-  visibility: 'private' | 'public' | 'link'
-  uploaded: boolean
-  uploadStatus?: 'local_only' | 'uploaded' | 'failed'
-  serverId?: string
-  piiHits?: number
-  truncated?: boolean
-}
-
 interface ElectronApi {
   config: {
     get: (key: string) => Promise<any>
@@ -63,9 +46,6 @@ interface ElectronApi {
     showTest: () => Promise<{ success: boolean }>
     onLuma: (callback: (bands: any) => void) => () => void
     onShow: (callback: (event: any, data: any) => void) => () => void
-    onNavigate: (callback: (payload: any) => void) => () => void
-    onNavigateToSession: (callback: (sessionId: string) => void) => () => void
-    onNavigateToRoute: (callback: (route: string) => void) => () => void
   }
   dialog: {
     openDirectory: (options?: any) => Promise<string | null>
@@ -214,100 +194,6 @@ interface ElectronApi {
     send: (chatId: string, text: string) => Promise<{ success: boolean; error?: string }>
     abort: (chatId: string) => Promise<{ success: boolean }>
     onEvent: (callback: (event: any) => void) => () => void
-  }
-  weclone: {
-    generate: (opts?: { localOnly?: boolean }) => Promise<{
-      success: boolean
-      clone?: WeCloneMetaInfo
-      status?: 'local_only' | 'uploaded' | 'failed'
-      aborted?: boolean
-      error?: string
-    }>
-    list: () => Promise<{
-      success: boolean
-      clones: Array<WeCloneMetaInfo & { source: 'local' | 'remote' | 'both'; shareUrl?: string }>
-      error?: string
-    }>
-    get: (id: string) => Promise<{
-      success: boolean
-      clone?: WeCloneMetaInfo
-      mds?: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>
-      error?: string
-    }>
-    delete: (id: string, remote?: boolean) => Promise<{ success: boolean; error?: string }>
-    setVisibility: (id: string, visibility: 'private' | 'public' | 'link') => Promise<{ success: boolean; shareUrl?: string; error?: string }>
-    getServerStatus: () => Promise<{
-      configured: boolean
-      enabled: boolean
-      baseUrl: string
-      hasToken: boolean
-      online?: boolean
-      version?: string
-      error?: string
-    }>
-    getProgress: () => Promise<{
-      lastProgress: { stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'error' | 'cancelled'; progress: number; message: string; status?: 'running' | 'done' | 'error' | 'cancelled'; ts?: number } | null
-      history: Array<{ stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'error' | 'cancelled'; progress: number; message: string; status?: string; ts?: number }>
-      isGenerating: boolean
-    }>
-    cancel: () => Promise<{ success: boolean }>
-    getForcedProviderStatus: () => Promise<{
-      providerId: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      isForced: boolean
-      activeProfileSummary?: {
-        id: string
-        name: string
-        providerId: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        apiKeyHint: string
-      }
-    }>
-    ensureProvider: (payload?: { apiKey?: string }) => Promise<{
-      success: boolean
-      status?: {
-        providerId: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        isForced: boolean
-        activeProfileSummary?: {
-          id: string
-          name: string
-          providerId: string
-          baseUrl: string
-          model: string
-          hasApiKey: boolean
-          apiKeyHint: string
-        }
-      }
-      error?: string
-    }>
-    setForcedApiKey: (payload: { apiKey: string }) => Promise<{
-      success: boolean
-      status?: {
-        providerId: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        isForced: boolean
-        activeProfileSummary?: {
-          id: string
-          name: string
-          providerId: string
-          baseUrl: string
-          model: string
-          hasApiKey: boolean
-          apiKeyHint: string
-        }
-      }
-      error?: string
-    }>
-    onProgress: (callback: (payload: { stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done'; progress: number; message: string; detail?: any }) => void) => () => void
   }
   sns: {
     getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => Promise<{ success: boolean; timeline?: any[]; error?: string }>
