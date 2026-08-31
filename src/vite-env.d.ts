@@ -222,7 +222,7 @@ interface ElectronApi {
   analytics: {
     getOverallStatistics: (force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
     getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) => Promise<{ success: boolean; data?: any[]; error?: string }>
-    getTimeDistribution: () => Promise<{ success: boolean; data?: any; error?: string }>
+    getTimeDistribution: (force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
     getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) => Promise<{ success: boolean; data?: any; error?: string }>
     getExcludedUsernames: () => Promise<{ success: boolean; data?: string[]; error?: string }>
     setExcludedUsernames: (usernames: string[]) => Promise<{ success: boolean; data?: string[]; error?: string }>

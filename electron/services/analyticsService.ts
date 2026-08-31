@@ -3,7 +3,7 @@ import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import { extractAnalyticsText, topWordFrequency, tokenizeText, WordFrequencyItem } from './wordFrequency'
 import { join } from 'path'
-import { readFile, writeFile, rm } from 'fs/promises'
+import { rm } from 'fs/promises'
 import { app } from 'electron'
 import { createHash } from 'crypto'
 
@@ -192,10 +192,10 @@ class AnalyticsService {
     cleanedWxid: string,
     excludedUsernames?: Set<string>,
     includeGroupChats = false,
-  ): Promise<{ usernames: string[]; numericIds: string[] }> {
+  ): Promise<{ usernames: string[]; numericIds: string[]; revision: string }> {
     const sessionResult = await wcdbService.getSessions()
     if (!sessionResult.success || !sessionResult.sessions) {
-      return { usernames: [], numericIds: [] }
+      return { usernames: [], numericIds: [], revision: 'empty' }
     }
     const rows = sessionResult.sessions as Record<string, any>[]
     const excluded = excludedUsernames ?? this.getExcludedUsernamesSet()
@@ -216,7 +216,13 @@ class AnalyticsService {
         row.chatroom_id ??
         row.chatroomId ??
         null
-      return { username, idValue }
+      const lastTimestamp = Number(
+        row.last_timestamp ?? row.lastTimestamp ?? row.last_msg_time ?? row.lastMsgTime ?? row.sort_timestamp ?? row.sortTimestamp ?? 0,
+      ) || 0
+      const messageCount = Number(
+        row.message_count ?? row.messageCount ?? row.msg_count ?? row.msgCount ?? row.total_count ?? row.totalCount ?? 0,
+      ) || 0
+      return { username, idValue, lastTimestamp, messageCount }
     })
     const usernames = sessions.map((s) => s.username)
     const privateSessions = sessions.filter((s) => {
@@ -229,7 +235,14 @@ class AnalyticsService {
       .map((s) => s.idValue)
       .filter((id) => typeof id === 'number' || (typeof id === 'string' && /^\d+$/.test(id)))
       .map((id) => String(id))
-    return { usernames: privateUsernames, numericIds }
+    const revision = createHash('sha1')
+      .update(privateSessions
+        .map((session) => `${String(session.username)}:${session.lastTimestamp}:${session.messageCount}`)
+        .sort()
+        .join('|'))
+      .digest('hex')
+      .slice(0, 12)
+    return { usernames: privateUsernames, numericIds, revision }
   }
 
   private async iterateSessionMessages(
@@ -344,13 +357,13 @@ class AnalyticsService {
     }
   }
 
-  private buildAggregateCacheKey(sessionIds: string[], beginTimestamp: number, endTimestamp: number): string {
+  private buildAggregateCacheKey(sessionIds: string[], beginTimestamp: number, endTimestamp: number, revision = ''): string {
     if (sessionIds.length === 0) {
-      return `${beginTimestamp}-${endTimestamp}-0-empty`
+      return `${beginTimestamp}-${endTimestamp}-0-empty-${revision}`
     }
     const normalized = Array.from(new Set(sessionIds.map((id) => String(id)))).sort()
     const hash = createHash('sha1').update(normalized.join('|')).digest('hex').slice(0, 12)
-    return `${beginTimestamp}-${endTimestamp}-${normalized.length}-${hash}`
+    return `${beginTimestamp}-${endTimestamp}-${normalized.length}-${hash}-${revision}`
   }
 
   private async computeAggregateByCursor(sessionIds: string[], beginTimestamp = 0, endTimestamp = 0): Promise<any> {
@@ -493,15 +506,6 @@ class AnalyticsService {
       }
     }
 
-    // 尝试从文件加载缓存
-    if (!force) {
-      const fileCache = await this.loadCacheFromFile()
-      if (fileCache && fileCache.key === cacheKey) {
-        this.aggregateCache = fileCache
-        return { success: true, data: fileCache.data, source: 'file-cache' }
-      }
-    }
-
     if (this.aggregatePromise && this.aggregatePromise.key === cacheKey) {
       return this.aggregatePromise.promise
     }
@@ -532,10 +536,6 @@ class AnalyticsService {
     this.aggregatePromise = { key: cacheKey, promise }
     try {
       const result = await promise
-      // 如果计算成功，同时写入此文件缓存
-      if (result.success && result.data && result.source !== 'cache') {
-        this.saveCacheToFile({ key: cacheKey, data: this.aggregateCache?.data, updatedAt: Date.now() })
-      }
       return result
     } finally {
       if (this.aggregatePromise && this.aggregatePromise.key === cacheKey) {
@@ -546,21 +546,6 @@ class AnalyticsService {
 
   private getCacheFilePath(): string {
     return join(app.getPath('documents'), 'WeFlow', 'analytics_cache.json')
-  }
-
-  private async loadCacheFromFile(): Promise<{ key: string; data: any; updatedAt: number } | null> {
-    try {
-      const raw = await readFile(this.getCacheFilePath(), 'utf-8')
-      return JSON.parse(raw)
-    } catch { return null }
-  }
-
-  private async saveCacheToFile(data: any) {
-    try {
-      await writeFile(this.getCacheFilePath(), JSON.stringify(data))
-    } catch (e) {
-      console.error('保存统计缓存失败:', e)
-    }
   }
 
   private normalizeAggregateSessions(
@@ -654,7 +639,7 @@ class AnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, undefined, true)
       if (sessionInfo.usernames.length === 0) {
         return { success: false, error: '未找到消息会话' }
       }
@@ -663,7 +648,7 @@ class AnalyticsService {
       const win = BrowserWindow.getAllWindows()[0]
       this.setProgress(win, '正在执行原生数据聚合...', 30)
 
-      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0, win, force)
+      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0, win, force, `global:${sessionInfo.revision}`)
 
       if (!result.success || !result.data) {
         return { success: false, error: result.error || '聚合统计失败' }
@@ -684,11 +669,11 @@ class AnalyticsService {
       const emojiMessages = d.typeCounts[47] || 0
       const otherMessages = d.total - textMessages - imageMessages - voiceMessages - videoMessages - emojiMessages
 
-      // 估算活跃天数（按月分布估算或从日期列表中提取，由于 C++ 只返回了月份映射，
-      // 我们这里暂时返回月份数作为参考，或者如果需要精确天数，原生层需要返回 Set 大小）
-      // 为了性能，我们先用月份数，或者后续再优化 C++ 返回 activeDays 计数。
-      // 当前 C++ 逻辑中 gs.monthly.size() 就是活跃月份。
-      const activeMonths = Object.keys(d.monthly).length
+      // Native aggregation does not consistently return daily details. Calculate
+      // this metric from the cursor rather than displaying a fabricated estimate.
+      const activeDays = d.daily && typeof d.daily === 'object'
+        ? Object.keys(d.daily).length
+        : Object.keys((await this.computeAggregateByCursor(sessionInfo.usernames)).daily).length
 
       return {
         success: true,
@@ -704,7 +689,7 @@ class AnalyticsService {
           receivedMessages: d.received,
           firstMessageTime: d.firstTime || null,
           lastMessageTime: d.lastTime || null,
-          activeDays: activeMonths * 20, // 粗略估算，或改为返回活跃月份
+          activeDays,
           messageTypeCounts: d.typeCounts
         }
       }
@@ -735,7 +720,7 @@ class AnalyticsService {
         endTimestamp,
         undefined,
         false,
-        includeGroupChats ? 'rankings:with-groups' : 'rankings:private-only',
+        `${includeGroupChats ? 'rankings:with-groups' : 'rankings:private-only'}:${sessionInfo.revision}`,
       )
       if (!result.success || !result.data) {
         return { success: false, error: result.error || '聚合统计失败' }
@@ -791,30 +776,28 @@ class AnalyticsService {
     }
   }
 
-  async getTimeDistribution(): Promise<{ success: boolean; data?: TimeDistribution; error?: string }> {
+  async getTimeDistribution(force = false): Promise<{ success: boolean; data?: TimeDistribution; error?: string }> {
     try {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, undefined, true)
       if (sessionInfo.usernames.length === 0) {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0)
+      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0, undefined, force, `global:${sessionInfo.revision}`)
       if (!result.success || !result.data) {
         return { success: false, error: result.error || '聚合统计失败' }
       }
 
       const d = result.data
 
-      // SQLite strftime('%w') 返回 0=周日, 1=周一...6=周六
-      // 前端期望 1=周一...7=周日
+      // API contract: 0=周日, 1=周一...6=周六, matching Date#getDay and the chart.
       const weekdayDistribution: Record<number, number> = {}
       for (const [w, count] of Object.entries(d.weekday)) {
-        const sqliteW = parseInt(w, 10)
-        const jsW = sqliteW === 0 ? 7 : sqliteW
-        weekdayDistribution[jsW] = count as number
+        const weekday = parseInt(w, 10)
+        if (weekday >= 0 && weekday <= 6) weekdayDistribution[weekday] = count as number
       }
 
       // 补全 24 小时
@@ -845,12 +828,12 @@ class AnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, undefined, true)
       if (sessionInfo.usernames.length === 0) {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const cacheKey = `self-sent-daily-${this.buildAggregateCacheKey(sessionInfo.usernames, beginTimestamp, endTimestamp)}`
+      const cacheKey = `self-sent-daily-${this.buildAggregateCacheKey(sessionInfo.usernames, beginTimestamp, endTimestamp, sessionInfo.revision)}`
       if (force) this.selfSentDailyCache = null
 
       if (!force && this.selfSentDailyCache && this.selfSentDailyCache.key === cacheKey) {
@@ -884,12 +867,12 @@ class AnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
 
-      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, undefined, true)
       if (sessionInfo.usernames.length === 0) {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const cacheKey = `daily-activity-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0)}`
+      const cacheKey = `daily-activity-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0, sessionInfo.revision)}`
       if (force) this.dailyActivityCache = null
 
       if (!force && this.dailyActivityCache && this.dailyActivityCache.key === cacheKey) {
@@ -898,7 +881,7 @@ class AnalyticsService {
         }
       }
 
-      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0, undefined, force)
+      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0, undefined, force, `global:${sessionInfo.revision}`)
       const d = result.data
       if (
         result.success &&
@@ -943,7 +926,7 @@ class AnalyticsService {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const cacheKey = `word-freq-all-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0)}-${limit}`
+      const cacheKey = `word-freq-all-${this.buildAggregateCacheKey(sessionInfo.usernames, 0, 0, sessionInfo.revision)}-${limit}`
       if (force) this.wordFrequencyCache = null
 
       if (!force && this.wordFrequencyCache && this.wordFrequencyCache.key === cacheKey) {

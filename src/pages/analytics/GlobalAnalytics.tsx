@@ -150,7 +150,7 @@ export const GlobalAnalytics: React.FC = () => {
     try {
       const [statsRes, timeRes, selfRes, exclRes, dailyRes, wordRes] = await Promise.all([
         window.electronAPI.analytics.getOverallStatistics(force),
-        window.electronAPI.analytics.getTimeDistribution(),
+        window.electronAPI.analytics.getTimeDistribution(force),
         window.electronAPI.analytics.getSelfSentDailyDistribution(undefined, undefined, force),
         window.electronAPI.analytics.getExcludedUsernames(),
         window.electronAPI.analytics.getDailyActivity(force),

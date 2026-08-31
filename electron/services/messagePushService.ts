@@ -119,7 +119,7 @@ export class MessagePushService {
   private startFallbackPolling(): void {
     if (this.fallbackPollTimer) return
     this.fallbackPollTimer = setInterval(() => {
-      if (!this.started || !this.isPushEnabled()) return
+      if (!this.started || !this.isMonitoringEnabled()) return
       this.scheduleSync()
     }, this.fallbackPollIntervalMs)
     this.fallbackPollTimer.unref?.()
@@ -154,7 +154,7 @@ export class MessagePushService {
 
   handleDbMonitorChange(type: string, json: string): void {
     if (!this.started) return
-    if (!this.isPushEnabled()) return
+    if (!this.isMonitoringEnabled()) return
 
     let payload: Record<string, unknown> | null = null
     try {
@@ -211,6 +211,11 @@ export class MessagePushService {
     return this.configService.get('messagePushEnabled') === true
   }
 
+  /** Automatic anti-revoke needs the database monitor even when notifications are off. */
+  private isMonitoringEnabled(): boolean {
+    return this.isPushEnabled() || this.isAntiRevokeNewGroupsEnabled()
+  }
+
   /** The toggle is read at queue time so it never adds work to notifications. */
   private isAntiRevokeNewGroupsEnabled(): boolean {
     try {
@@ -248,7 +253,7 @@ export class MessagePushService {
   }
 
   private async refreshConfiguration(reason: string): Promise<void> {
-    if (!this.isPushEnabled()) {
+    if (!this.isMonitoringEnabled()) {
       this.resetRuntimeState()
       return
     }
@@ -298,7 +303,7 @@ export class MessagePushService {
     const tableNames = [...messageTableNames]
     this.messageTableRescanTimer = setTimeout(() => {
       this.messageTableRescanTimer = null
-      if (!this.started || !this.isPushEnabled()) return
+      if (!this.started || !this.isMonitoringEnabled()) return
       this.scheduleSync({
         scanMessageBackedSessions: true,
         messageTableNames: tableNames
@@ -314,7 +319,7 @@ export class MessagePushService {
 
     this.processing = true
     try {
-      if (!this.isPushEnabled()) return
+      if (!this.isMonitoringEnabled()) return
       const scanMessageBackedSessions = this.messageTableScanRequested
       this.messageTableScanRequested = false
       const pendingMessageTableNames = Array.from(this.pendingMessageTableNames)
@@ -345,6 +350,16 @@ export class MessagePushService {
       // group. Enqueue without awaiting so notification/session processing is
       // never held up by anti-revoke trigger installation.
       this.enqueueNewObservedAntiRevokeGroups(sessions, previousBaseline)
+
+      // Discovery is sufficient for automatic anti-revoke. Do not process or
+      // emit notifications unless the user explicitly enabled message push.
+      if (!this.isPushEnabled()) {
+        for (const session of sessions) {
+          const sessionId = String(session.username || '').trim()
+          this.updateObservedBaseline(session, previousBaseline.get(sessionId))
+        }
+        return
+      }
 
       const candidates = sessions.filter((session) => {
         const sessionId = String(session.username || '').trim()

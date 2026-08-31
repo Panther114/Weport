@@ -1783,10 +1783,10 @@ function registerIpcHandlers() {
     if (key === 'silentStartup' && configService?.get('launchAtStartup')) {
       applyLaunchAtStartupPreference(true)
     }
-    if (['messagePushEnabled', 'notificationEnabled', 'dbPath', 'decryptKey', 'myWxid'].includes(key)) {
+    if (['messagePushEnabled', 'notificationEnabled', 'antiRevokeAutoApplyNewGroups', 'dbPath', 'decryptKey', 'myWxid'].includes(key)) {
       // 关闭推送时同步停掉轮询/监控并释放 WCDB 连接（此前只会在开启时 start，
       // 关闭路径从不 stop，连接会一直占着）
-      if (configService?.get('messagePushEnabled')) messagePushService?.start()
+      if (configService?.get('messagePushEnabled') || configService?.get('antiRevokeAutoApplyNewGroups')) messagePushService?.start()
       else messagePushService?.stop()
       await messagePushService?.handleConfigChanged(key)
     }
@@ -2265,7 +2265,7 @@ function registerIpcHandlers() {
   ipcMain.handle('analytics:getOverallStatistics', (_e, force?: boolean) => analyticsService.getOverallStatistics(force === true))
   ipcMain.handle('analytics:getContactRankings', (_e, limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) =>
     analyticsService.getContactRankings(limit, beginTimestamp, endTimestamp, { includeGroupChats: options?.includeGroupChats === true }))
-  ipcMain.handle('analytics:getTimeDistribution', () => analyticsService.getTimeDistribution())
+  ipcMain.handle('analytics:getTimeDistribution', (_e, force?: boolean) => analyticsService.getTimeDistribution(force === true))
   ipcMain.handle('analytics:getSelfSentDailyDistribution', (_e, beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
     analyticsService.getSelfSentDailyDistribution(beginTimestamp, endTimestamp, force === true))
   ipcMain.handle('analytics:getExcludedUsernames', () => analyticsService.getExcludedUsernames())
@@ -5392,7 +5392,7 @@ function startApp() {
     createTray()
 
     // 通知服务：推送开关开启时启动（连接数据库并开启监控管道）
-    if (configService.get('messagePushEnabled')) {
+    if (configService.get('messagePushEnabled') || configService.get('antiRevokeAutoApplyNewGroups')) {
       messagePushService?.start()
     }
 

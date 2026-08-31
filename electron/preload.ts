@@ -174,7 +174,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getOverallStatistics: (force?: boolean) => ipcRenderer.invoke('analytics:getOverallStatistics', force),
     getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) =>
       ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp, options),
-    getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
+    getTimeDistribution: (force?: boolean) => ipcRenderer.invoke('analytics:getTimeDistribution', force),
     getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
       ipcRenderer.invoke('analytics:getSelfSentDailyDistribution', beginTimestamp, endTimestamp, force),
     getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
