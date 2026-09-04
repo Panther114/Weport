@@ -31,7 +31,7 @@ export function setNotificationNavigateHandler(
 let notificationWindow: BrowserWindow | null = null;
 let closeTimer: NodeJS.Timeout | null = null;
 
-const DEFAULT_NOTIFICATION_DURATION_MS = 5000;
+const DEFAULT_NOTIFICATION_DURATION_MS = 3000;
 const MIN_NOTIFICATION_DURATION_MS = 1000;
 const MAX_NOTIFICATION_DURATION_MS = 60_000;
 

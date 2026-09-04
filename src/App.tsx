@@ -4,6 +4,7 @@ import {
   Download,
   ShieldCheck,
   Bell,
+  BellOff,
   Eye,
   EyeOff,
   ChevronDown,
@@ -37,6 +38,7 @@ import {
   Info,
   Rocket,
   Minimize2,
+  ScrollText,
   Sparkles,
   Images,
   LineChart,
@@ -48,6 +50,8 @@ import {
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
+import AiMarkdown from './components/weportAi/AiMarkdown'
+import { Avatar } from './components/Avatar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
@@ -61,7 +65,7 @@ type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
 type DisplayNamePref = 'group-nickname' | 'remark' | 'nickname'
 type WriteLayout = 'A' | 'B' | 'C'
 type NotificationPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
-type FilterMode = 'all' | 'whitelist' | 'blacklist'
+type FilterMode = 'all' | 'whitelist' | 'blacklist' | 'mentions'
 type SessionType = 'all' | 'private' | 'group' | 'official' | 'other'
 type ToastKind = 'ok' | 'err' | 'info'
 type Toast = { id: number; kind: ToastKind; title: string; body?: string; leaving?: boolean }
@@ -157,13 +161,6 @@ const NAME_PREF_OPTIONS: Array<{ value: DisplayNamePref; label: string }> = [
 
 const CONCURRENCY_OPTIONS = [1, 3, 5, 10]
 
-const NOTIFICATION_DURATION_OPTIONS = [
-  { value: 3000, label: '3 秒' },
-  { value: 5000, label: '5 秒' },
-  { value: 8000, label: '8 秒' },
-  { value: 15000, label: '15 秒' },
-]
-
 const NOTIFICATION_POSITION_OPTIONS: Array<{ value: NotificationPosition; label: string }> = [
   { value: 'top-right', label: '右上角' },
   { value: 'top-left', label: '左上角' },
@@ -227,8 +224,10 @@ export default function App() {
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(false)
   const [notificationPosition, setNotificationPosition] = useState<NotificationPosition>('top-right')
-  const [notificationDuration, setNotificationDuration] = useState(5000)
+  const [notificationDuration, setNotificationDuration] = useState(3000)
+  const [durationInput, setDurationInput] = useState('3')
   const [notificationAnimationEnabled, setNotificationAnimationEnabled] = useState(true)
+  const [respectWechatMute, setRespectWechatMute] = useState(true)
   const [launchAtStartup, setLaunchAtStartup] = useState(false)
   const [startupSupported, setStartupSupported] = useState(true)
   const [startupReason, setStartupReason] = useState<string | undefined>()
@@ -237,6 +236,9 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateProgress, setUpdateProgress] = useState<{ percent: number; transferred?: number; total?: number } | null>(null)
+  const [changelogOpen, setChangelogOpen] = useState(false)
+  const [changelogContent, setChangelogContent] = useState<string | null>(null)
+  const [changelogLoading, setChangelogLoading] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [backupBusy, setBackupBusy] = useState(false)
   const [backupIncludeMedia, setBackupIncludeMedia] = useState(false)
@@ -280,13 +282,21 @@ export default function App() {
   const [notifyFilterOpen, setNotifyFilterOpen] = useState(false)
   const [notifyFilterMode, setNotifyFilterMode] = useState<FilterMode>('all')
   const [notifyFilterList, setNotifyFilterList] = useState<string[]>([])
-  const [notifySessions, setNotifySessions] = useState<Array<{ username: string; displayName?: string }>>([])
+  const [notifySessions, setNotifySessions] = useState<Array<{ username: string; displayName?: string; avatarUrl?: string; sortTimestamp?: number; lastTimestamp?: number }>>([])
   const [notifyFilterSearch, setNotifyFilterSearch] = useState('')
   const [notifyFilterType, setNotifyFilterType] = useState<SessionType>('all')
   const [notifyFilterDraft, setNotifyFilterDraft] = useState<Set<string>>(new Set())
   const [notifyFilterBusy, setNotifyFilterBusy] = useState(false)
 
   const api = window.electronAPI
+  const imageKeyRequired = api.process.platform === 'win32'
+    || api.process.platform === 'darwin'
+    || api.process.platform === 'linux'
+
+  useEffect(() => {
+    setDurationInput(String(Math.round(notificationDuration / 1000)))
+  }, [notificationDuration])
+
 
   const dismissToast = useCallback((id: number) => {
     const t = toastTimers.current.get(id)
@@ -646,11 +656,15 @@ export default function App() {
           setNotificationPosition(notifPosition as NotificationPosition)
         }
         const notifDuration = await api.config.get('notificationDuration')
-        if (NOTIFICATION_DURATION_OPTIONS.some((option) => option.value === notifDuration)) {
-          setNotificationDuration(notifDuration as number)
+        if (Number.isFinite(Number(notifDuration))) {
+          setNotificationDuration(Math.min(60_000, Math.max(1000, Math.round(Number(notifDuration)))))
+        } else {
+          setNotificationDuration(3000)
         }
         const notifAnimation = await api.config.get('notificationAnimationEnabled')
         if (typeof notifAnimation === 'boolean') setNotificationAnimationEnabled(notifAnimation)
+        const respectMute = await api.config.get('messagePushRespectWechatMute')
+        if (typeof respectMute === 'boolean') setRespectWechatMute(respectMute)
         try {
           const httpOn = await api.config.get('httpApiEnabled')
           setHttpApiEnabled(httpOn === true)
@@ -697,7 +711,7 @@ export default function App() {
         // 会话通知过滤
         try {
           const mode = await api.config.get('messagePushFilterMode')
-          if (mode === 'whitelist' || mode === 'blacklist') setNotifyFilterMode(mode)
+          if (mode === 'whitelist' || mode === 'blacklist' || mode === 'mentions') setNotifyFilterMode(mode)
           const list = await api.config.get('messagePushFilterList')
           if (Array.isArray(list)) setNotifyFilterList(list.map((x) => String(x || '').trim()).filter(Boolean))
         } catch { /* 保持默认 */ }
@@ -910,9 +924,9 @@ export default function App() {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
       return
     }
-    // issue #9a：Windows/Linux 上图片 .dat 需要图片密钥，缺失时导出只会得到 [图片] 占位符。
-    // 提前拦截并指引导出密钥（macOS 图片为明文，无需密钥）。
-    if (exportMedia.images && (api.process.platform === 'win32' || api.process.platform === 'linux') && !imageKeysOk) {
+    // issue #15：微信 4.x 在 Windows/macOS/Linux 均可能使用加密 .dat 图片，
+    // 缺失图片密钥时导出只会得到 [图片] 占位符。提前拦截并指引获取密钥。
+    if (exportMedia.images && imageKeyRequired && !imageKeysOk) {
       pushToast('err', '尚未配置图片密钥', '请先点击「获取图片密钥」，否则导出的图片将全部失败', 10000)
       return
     }
@@ -998,6 +1012,26 @@ export default function App() {
     }
   }
 
+  async function openChangelog() {
+    setChangelogOpen(true)
+    if (changelogContent !== null) return
+    setChangelogLoading(true)
+    try {
+      const result = await api.app.getChangelog()
+      if (result.success && typeof result.content === 'string') {
+        setChangelogContent(result.content)
+      } else {
+        setChangelogContent('')
+        pushToast('err', '无法读取更新日志', result.error || '文件缺失', 8000)
+      }
+    } catch (e) {
+      setChangelogContent('')
+      pushToast('err', '无法读取更新日志', String(e), 8000)
+    } finally {
+      setChangelogLoading(false)
+    }
+  }
+
   async function checkForUpdates(fromAbout = false) {
     setUpdateBusy(true)
     try {
@@ -1009,7 +1043,8 @@ export default function App() {
         return
       }
       setUpdateInfo({ version: result.version || '', body: result.releaseNotes || undefined })
-      pushToast('info', `发现新版本 v${result.version}`, '点击更新横幅或下方按钮安装')
+      pushToast('info', `发现新版本 v${result.version}`, '已打开更新日志，确认后即可安装')
+      void openChangelog()
     } catch (e) {
       pushToast('err', '检查更新失败', String(e))
     } finally {
@@ -1155,6 +1190,18 @@ export default function App() {
     }
   }
 
+  async function toggleRespectWechatMute(on: boolean) {
+    const previous = respectWechatMute
+    setRespectWechatMute(on)
+    try {
+      const result = await api.config.set('messagePushRespectWechatMute', on)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setRespectWechatMute(previous)
+      pushToast('err', '免打扰同步设置失败', String(error))
+    }
+  }
+
   async function toggleLaunchAtStartup(on: boolean) {
     const result = await api.app.setLaunchAtStartup(on)
     if (result.success) {
@@ -1296,22 +1343,37 @@ export default function App() {
     setNotifyFilterBusy(true)
     try {
       const result = await api.chat.getSessions()
-      const sessions: Array<{ username: string; displayName?: string }> = []
+      const sessions: Array<{ username: string; displayName?: string; avatarUrl?: string; sortTimestamp?: number; lastTimestamp?: number }> = []
       for (const s of result?.sessions || []) {
         const username = String(s?.username || '').trim()
         if (!username || username.toLowerCase().includes('placeholder_foldgroup')) continue
-        sessions.push({ username, displayName: String(s?.displayName || '') || undefined })
+        const sortTimestamp = Number(s?.sortTimestamp ?? s?.sort_timestamp ?? 0)
+        const lastTimestamp = Number(s?.lastTimestamp ?? s?.last_timestamp ?? 0)
+        sessions.push({
+          username,
+          displayName: String(s?.displayName || '') || undefined,
+          avatarUrl: String(s?.avatarUrl || '') || undefined,
+          sortTimestamp: Number.isFinite(sortTimestamp) ? sortTimestamp : undefined,
+          lastTimestamp: Number.isFinite(lastTimestamp) ? lastTimestamp : undefined,
+        })
       }
-      const missing = sessions.filter((s) => !s.displayName).map((s) => s.username)
+      const missing = sessions.filter((s) => !s.displayName || !s.avatarUrl).map((s) => s.username)
       if (missing.length > 0) {
         try {
           const enriched = await api.chat.enrichSessionsContactInfo(missing)
           for (const s of sessions) {
-            if (!s.displayName) s.displayName = enriched?.contacts?.[s.username]?.displayName
+            const info = enriched?.contacts?.[s.username]
+            if (!s.displayName) s.displayName = info?.displayName
+            if (!s.avatarUrl) s.avatarUrl = info?.avatarUrl
           }
         } catch { /* noop */ }
       }
-      sessions.sort((a, b) => (a.displayName || a.username).localeCompare(b.displayName || b.username, 'zh-Hans-CN'))
+      sessions.sort((a, b) => {
+        const aRecent = Number(a.sortTimestamp || a.lastTimestamp || 0)
+        const bRecent = Number(b.sortTimestamp || b.lastTimestamp || 0)
+        if (bRecent !== aRecent) return bRecent - aRecent
+        return a.username.localeCompare(b.username)
+      })
       setNotifySessions(sessions)
     } catch (e) {
       pushToast('err', '加载会话失败', String(e))
@@ -1329,7 +1391,12 @@ export default function App() {
     void api.config.set('notificationFilterMode', notifyFilterMode)
     void api.config.set('notificationFilterList', list)
     setNotifyFilterOpen(false)
-    pushToast('ok', '会话过滤已保存', notifyFilterMode === 'all' ? '通知全部会话' : `已选 ${list.length} 个会话`)
+    const summary = notifyFilterMode === 'all'
+      ? '通知全部会话'
+      : notifyFilterMode === 'mentions'
+        ? '仅提醒群聊中明确 @你的消息（@所有人不触发）'
+        : `已选 ${list.length} 个会话`
+    pushToast('ok', '会话过滤已保存', summary)
   }
 
   return (
@@ -1394,11 +1461,19 @@ export default function App() {
 
       {updateInfo && (
         <div className="update-banner">
-          <div>
+          <div className="update-banner-body">
             <h2>发现新版本 v{updateInfo.version}</h2>
-            <p className="hint" style={{ marginTop: 4 }}>
-              {updateInfo.body || '建议更新以获得修复与改进。'}
-            </p>
+            {updateInfo.body ? (
+              <div className="update-banner-notes">
+                <AiMarkdown text={updateInfo.body} />
+              </div>
+            ) : (
+              <p className="hint" style={{ marginTop: 4 }}>建议更新以获得修复与改进。</p>
+            )}
+            <button className="update-banner-link" type="button" onClick={() => void openChangelog()}>
+              <ScrollText size={13} />
+              查看完整更新日志
+            </button>
             {updateBusy && updateProgress && (
               <div className="update-progress" aria-live="polite">
                 <div className="progress-track">
@@ -1832,7 +1907,7 @@ export default function App() {
                   </label>
                 )}
               </div>
-              {exportMedia.images && (api.process.platform === 'win32' || api.process.platform === 'linux') && (
+              {exportMedia.images && imageKeyRequired && (
                 <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
                   <button
                     type="button"
@@ -2177,16 +2252,27 @@ export default function App() {
                       <span className="hint">右键卡片可立即关闭</span>
                     </div>
                   </div>
-                  <select
-                    className="notification-select"
-                    value={notificationDuration}
-                    onChange={(e) => void updateNotificationDuration(Number(e.target.value))}
-                    aria-label="弹窗显示时长"
-                  >
-                    {NOTIFICATION_DURATION_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
+                  <div className="notification-duration-control">
+                    <input
+                      type="number"
+                      className="notification-select notification-duration-input"
+                      min={1}
+                      max={60}
+                      step={1}
+                      value={durationInput}
+                      onChange={(e) => {
+                        const text = e.target.value
+                        setDurationInput(text)
+                        const seconds = Number(text)
+                        if (text === '' || !Number.isFinite(seconds) || seconds < 1) return
+                        const durationMs = Math.min(60_000, Math.max(1000, Math.round(seconds * 1000)))
+                        if (durationMs !== notificationDuration) void updateNotificationDuration(durationMs)
+                      }}
+                      onBlur={() => setDurationInput(String(Math.round(notificationDuration / 1000)))}
+                      aria-label="弹窗显示时长（秒）"
+                    />
+                    <span className="hint">秒</span>
+                  </div>
                 </div>
 
                 <div className="setting-row">
@@ -2202,6 +2288,24 @@ export default function App() {
                       type="checkbox"
                       checked={notificationAnimationEnabled}
                       onChange={(e) => void toggleNotificationAnimation(e.target.checked)}
+                    />
+                    <span className="track" />
+                  </label>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <BellOff size={14} />
+                    <div>
+                      <strong>跟随微信消息免打扰</strong>
+                      <span className="hint">微信中标记“消息免打扰”的会话不显示 Weport 弹窗（默认开启）</span>
+                    </div>
+                  </div>
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={respectWechatMute}
+                      onChange={(e) => void toggleRespectWechatMute(e.target.checked)}
                     />
                     <span className="track" />
                   </label>
@@ -2244,7 +2348,9 @@ export default function App() {
                     ? '接收所有会话的通知'
                     : notifyFilterMode === 'whitelist'
                       ? `仅通知已选 ${notifyFilterList.length} 个会话`
-                      : `屏蔽 ${notifyFilterList.length} 个会话的通知`}
+                      : notifyFilterMode === 'blacklist'
+                        ? `屏蔽 ${notifyFilterList.length} 个会话的通知`
+                        : '仅提醒群聊中明确 @你的消息（@所有人不触发）'}
                 </span>
               </div>
 
@@ -2488,6 +2594,9 @@ export default function App() {
                 <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
                   {updateBusy ? '检查中…' : '检查更新'}
                 </button>
+                <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
+                  更新日志
+                </button>
                 {updateInfo && (
                   <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
                     {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
@@ -2545,6 +2654,41 @@ export default function App() {
         </div>
       )}
 
+      {changelogOpen && (
+        <div className="modal-backdrop" onClick={() => setChangelogOpen(false)}>
+          <div className="modal modal-wide changelog-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="changelog-title">
+            <h3 id="changelog-title">
+              <ScrollText size={15} />
+              更新日志
+            </h3>
+            {updateInfo && (
+              <div className="changelog-new">
+                <span className="changelog-new-tag">新版本 v{updateInfo.version}</span>
+                {updateInfo.body ? (
+                  <AiMarkdown text={updateInfo.body} />
+                ) : (
+                  <p className="hint" style={{ margin: '6px 0 0' }}>暂无该版本的更新说明。</p>
+                )}
+              </div>
+            )}
+            <div className="changelog-body">
+              {changelogLoading ? (
+                <div className="empty">正在加载更新日志…</div>
+              ) : changelogContent ? (
+                <AiMarkdown text={changelogContent} />
+              ) : (
+                <div className="empty">暂无更新日志</div>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" onClick={() => setChangelogOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {notifyFilterOpen && (
         <div className="modal-backdrop" onClick={() => !notifyFilterBusy && setNotifyFilterOpen(false)}>
           <div className="modal modal-wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="filter-title">
@@ -2554,7 +2698,7 @@ export default function App() {
             </h3>
             <p className="hint">
               勾选要接收通知的会话。仅通知已选时，白名单为空表示不通知任何会话；
-              屏蔽已选时，黑名单为空表示不屏蔽任何会话。
+              屏蔽已选时，黑名单为空表示不屏蔽任何会话。选择“仅提醒 @我”时，仅群聊中明确提及你的消息会触发，@所有人不会触发。
             </p>
 
             <div className="chip-row" style={{ marginTop: 12 }} role="radiogroup" aria-label="过滤模式">
@@ -2562,6 +2706,7 @@ export default function App() {
                 ['all', '接收所有通知'],
                 ['whitelist', '仅通知已选'],
                 ['blacklist', '屏蔽已选'],
+                ['mentions', '仅 @我'],
               ] as Array<[FilterMode, string]>).map(([m, label]) => (
                 <button
                   key={m}
@@ -2575,7 +2720,7 @@ export default function App() {
               ))}
             </div>
 
-            <div className="filter-toolbar">
+            {notifyFilterMode !== 'mentions' && <div className="filter-toolbar">
               <input
                 className="path-input"
                 placeholder="搜索会话…"
@@ -2601,9 +2746,13 @@ export default function App() {
                   </button>
                 ))}
               </div>
-            </div>
+            </div>}
 
-            <div className="notify-filter-list">
+            {notifyFilterMode === 'mentions' ? (
+              <div className="empty" style={{ marginTop: 12 }}>
+                当前模式只提醒群聊中明确 @你的消息；私聊不会触发，@所有人也不会触发。
+              </div>
+            ) : <div className="notify-filter-list">
               {notifyFilterBusy ? (
                 <div className="empty">正在加载会话…</div>
               ) : notifyFilteredSessions.length === 0 ? (
@@ -2623,15 +2772,16 @@ export default function App() {
                           setNotifyFilterDraft(next)
                         }}
                       />
+                      <Avatar src={s.avatarUrl} name={s.displayName || s.username} size={22} shape={sessionTypeOf(s.username) === 'group' ? 'rounded' : 'circle'} className="notify-avatar" />
                       <span className="notify-name">{s.displayName || s.username}</span>
                       <span className="notify-id">{s.username}</span>
                     </label>
                   )
                 })
               )}
-            </div>
+            </div>}
 
-            <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
+            {notifyFilterMode !== 'mentions' && <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
               <div className="btn-row">
                 <button
                   className="ghost-btn"
@@ -2652,7 +2802,17 @@ export default function App() {
                   保存
                 </button>
               </div>
-            </div>
+            </div>}
+            {notifyFilterMode === 'mentions' && <div className="modal-actions" style={{ justifyContent: 'flex-end' }}>
+              <div className="btn-row">
+                <button className="secondary-btn" type="button" onClick={() => setNotifyFilterOpen(false)}>
+                  取消
+                </button>
+                <button className="primary-btn" type="button" onClick={() => saveNotifyFilter()}>
+                  保存
+                </button>
+              </div>
+            </div>}
           </div>
         </div>
       )}

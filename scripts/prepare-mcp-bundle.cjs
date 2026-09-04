@@ -1,5 +1,5 @@
 /**
- * Prepares the MCP stdio bridge bundle for packaged builds (v0.9.10).
+ * Prepares the MCP stdio bridge bundle for packaged builds (v0.9.11).
  *
  * The bridge runs under the AI host's own Node (Claude Desktop etc.), not
  * Electron, so it must not depend on ESM-only SDK resolution or NODE_PATH.

@@ -159,18 +159,40 @@ export class KeyServiceMac {
     }
   }
 
+  /**
+   * SIP can block task_for_pid for an ad-hoc/unentitled helper, but it does
+   * not prove that every key-capture path will fail (the elevated helper may
+   * still work).  Keep the diagnostic focused on permission-shaped errors so
+   * version/signature failures are not misreported as a SIP problem.
+   */
+  private isSipPermissionFailure(code?: string, detail?: string): boolean {
+    const normalizedCode = String(code || '').toUpperCase()
+    const normalizedDetail = String(detail || '').toLowerCase()
+    if (normalizedCode === 'ATTACH_FAILED') return true
+    return normalizedDetail.includes('task_for_pid')
+      || normalizedDetail.includes('permission')
+      || normalizedDetail.includes('patch_breakpoint_failed')
+      || normalizedDetail.includes('thread_get_state_failed')
+  }
+
+  private getSipPermissionHint(): string {
+    return '当前 macOS SIP 已开启，系统可能拒绝 task_for_pid。请优先使用已签名/已授权的 Weport.app，并在“系统设置 → 隐私与安全性 → 开发者工具”中允许 Weport；关闭 SIP 会降低系统安全性，仅在确认风险后临时使用。'
+  }
+
   async autoGetDbKey(
     timeoutMs = 60_000,
     onStatus?: (message: string, level: number) => void
   ): Promise<DbKeyResult> {
+    let sipEnabled = false
     try {
-      // 检测 SIP 状态
+      // SIP 是能力提示而不是硬门槛：管理员 helper 可能在 SIP 开启时成功，
+      // 因此先尝试完整流程，只有权限形态的失败才追加针对性排障提示。
       const sipStatus = await this.checkSipStatus()
+      sipEnabled = sipStatus.enabled
       if (sipStatus.enabled) {
-        return {
-          success: false,
-          error: 'SIP (系统完整性保护) 已开启，无法获取密钥。请关闭 SIP 后重试。\n\n关闭方法：\n1. Intel 芯片：重启 Mac 并按住 Command + R 进入恢复模式\n2. Apple 芯片（M 系列）：关机后长按开机（指纹）键，选择“设置（选项）”进入恢复模式\n3. 打开终端，输入: csrutil disable\n4. 重启电脑'
-        }
+        onStatus?.('检测到系统完整性保护已开启，先尝试管理员授权流程...', 0)
+      } else if (sipStatus.error) {
+        console.warn('[KeyServiceMac] 无法读取 SIP 状态，将继续尝试密钥流程:', sipStatus.error)
       }
 
       onStatus?.('正在获取数据库密钥...', 0)
@@ -189,11 +211,14 @@ export class KeyServiceMac {
       }
 
       if (!parsed.success) {
-        const errorMsg = this.enrichDbKeyErrorMessage(
+        let errorMsg = this.enrichDbKeyErrorMessage(
           this.mapDbKeyErrorMessage(parsed.code, parsed.detail),
           parsed.code,
           parsed.detail
         )
+        if (sipEnabled && this.isSipPermissionFailure(parsed.code, parsed.detail)) {
+          errorMsg = `${errorMsg}\n${this.getSipPermissionHint()}`
+        }
         onStatus?.(errorMsg, 2)
         return { success: false, error: errorMsg }
       }
@@ -205,7 +230,13 @@ export class KeyServiceMac {
       console.error('[KeyServiceMac] Error:', e)
       console.error('[KeyServiceMac] Stack:', e.stack)
       const rawError = `${e?.message || e || ''}`.trim()
-      const resolvedError = this.resolveUnexpectedDbKeyErrorMessage(rawError)
+      let resolvedError = this.resolveUnexpectedDbKeyErrorMessage(rawError)
+      if (sipEnabled) {
+        const inferred = this.extractDbKeyErrorFromAnyText(rawError)
+        if (this.isSipPermissionFailure(inferred.code, inferred.detail) || /task_for_pid|permission denied/i.test(rawError)) {
+          resolvedError = `${resolvedError}\n${this.getSipPermissionHint()}`
+        }
+      }
       onStatus?.(resolvedError, 2)
       return { success: false, error: resolvedError }
     }

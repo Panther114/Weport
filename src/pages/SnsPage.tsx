@@ -74,6 +74,7 @@ const toDayKey = (ts: number) => {
 export default function SnsPage() {
   const [authors, setAuthors] = useState<SnsAuthor[]>([])
   const [authorsLoading, setAuthorsLoading] = useState(true)
+  const [authorSearch, setAuthorSearch] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [keyword, setKeyword] = useState('')
   const [keywordDraft, setKeywordDraft] = useState('')
@@ -122,6 +123,15 @@ export default function SnsPage() {
     () => `${activeUsernames.join(',')}|${keyword}|${searchComments ? 'c' : ''}|${dateJump ? `${dateJump.start}-${dateJump.end}` : ''}`,
     [activeUsernames, keyword, searchComments, dateJump],
   )
+  // 发布者侧栏搜索：只过滤列表显示，不影响动态流查询（中英/拼音前缀按 displayName 匹配）
+  const authorKw = authorSearch.trim().toLowerCase()
+  const visibleAuthors = useMemo(() => {
+    if (!authorKw) return authors
+    return authors.filter((a) =>
+      (a.displayName || '').toLowerCase().includes(authorKw) ||
+      (a.username || '').toLowerCase().includes(authorKw),
+    )
+  }, [authors, authorKw])
 
   // ------------------------------------------------------------------ 页缓存
   const ensureCacheScope = useCallback(async (): Promise<string> => {
@@ -966,10 +976,32 @@ export default function SnsPage() {
             </div>
           </div>
 
+          <div className="sns-author-search">
+            <Search size={13} />
+            <input
+              value={authorSearch}
+              placeholder="搜索发布者"
+              spellCheck={false}
+              onChange={(e) => setAuthorSearch(e.target.value)}
+            />
+            {authorSearch && (
+              <button
+                className="sns-author-search-clear"
+                title="清除发布者搜索"
+                onClick={() => setAuthorSearch('')}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
           <div className="sns-author-list">
             {authorsLoading && <div className="wp-loading">加载发布者…</div>}
             {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
-            {authors.map((a) => (
+            {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
+              <div className="wp-empty">无匹配发布者</div>
+            )}
+            {visibleAuthors.map((a) => (
               <button
                 key={a.username}
                 type="button"

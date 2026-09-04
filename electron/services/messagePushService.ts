@@ -37,12 +37,15 @@ export interface MessagePushPayload {
   groupName?: string
   content: string | null
   timestamp: number
+  /** True only for a structured <atuserlist> mention of the current account. */
+  mentionsMe?: boolean
 }
 
 const PUSH_CONFIG_KEYS = new Set([
   'messagePushEnabled',
   'messagePushFilterMode',
   'messagePushFilterList',
+  'messagePushRespectWechatMute',
   'antiRevokeAutoApplyNewGroups',
   'dbPath',
   'decryptKey',
@@ -68,6 +71,8 @@ export class MessagePushService {
   private readonly directRevokeScanLimit = 20
   /** 弹窗新鲜窗口：消息时间距今超过该秒数视为同步回填（不弹窗），避免打开微信后补弹旧消息 */
   private readonly freshPushWindowSeconds = 120
+  /** Refresh mute flags often enough to follow changes made in WeChat. */
+  private readonly sessionStatusRefreshIntervalMs = 30_000
   /** 防撤回自动应用只在显式开启后工作；新群聊发现后延迟处理，避免抢占消息同步。 */
   private readonly antiRevokeNewGroupsDebounceMs = 1500
   private readonly antiRevokeNewGroupsRetryDelaysMs = [5000, 15000, 60000]
@@ -79,6 +84,9 @@ export class MessagePushService {
   private rerunRequested = false
   private started = false
   private baselineReady = false
+  private sessionStatusesRefreshRequested = true
+  private lastSessionStatusesRefreshAt = 0
+  private lastSessionStatusFailureLogAt = 0
   private messageTableScanRequested = false
   private readonly pendingMessageTableNames = new Set<string>()
   private readonly pendingAntiRevokeNewGroupsSessionIds = new Set<string>()
@@ -165,7 +173,11 @@ export class MessagePushService {
 
     const tableName = String(payload?.table || '').trim()
     const messageTableNames = this.collectMessageTableNamesFromPayload(payload)
-    if (this.isSessionTableChange(tableName)) {
+    if (this.isSessionTableChange(tableName) || this.isContactTableChange(tableName)) {
+      // WeChat writes the mute flag alongside session/contact updates. Force
+      // a status refresh on the next debounced pass so toggles take effect
+      // without waiting for the cache TTL.
+      this.sessionStatusesRefreshRequested = true
       this.scheduleSync()
       return
     }
@@ -186,6 +198,9 @@ export class MessagePushService {
 
   async handleConfigChanged(key: string): Promise<void> {
     if (!PUSH_CONFIG_KEYS.has(String(key || '').trim())) return
+    if (key === 'messagePushRespectWechatMute') {
+      this.sessionStatusesRefreshRequested = true
+    }
     if (key === 'antiRevokeAutoApplyNewGroups' && !this.isAntiRevokeNewGroupsEnabled()) {
       this.pendingAntiRevokeNewGroupsSessionIds.clear()
       this.antiRevokeNewGroupsAttempts.clear()
@@ -216,6 +231,70 @@ export class MessagePushService {
     return this.isPushEnabled() || this.isAntiRevokeNewGroupsEnabled()
   }
 
+  private shouldRespectWechatMute(): boolean {
+    return this.configService.get('messagePushRespectWechatMute') !== false
+  }
+
+  private shouldSkipMutedSession(session: ChatSession): boolean {
+    return this.shouldRespectWechatMute() && session.isMuted === true
+  }
+
+  private reportSessionStatusFailure(error: unknown): void {
+    const now = Date.now()
+    if (now - this.lastSessionStatusFailureLogAt < 5 * 60 * 1000) return
+    this.lastSessionStatusFailureLogAt = now
+    console.warn('[MessagePushService] 会话免打扰状态不可用，通知将按 fail-open 继续:', String(error || 'unknown error'))
+  }
+
+  /**
+   * Hydrate per-session flags used by notification filtering. The native
+   * status call is batched to keep large accounts bounded; failures leave the
+   * previous values untouched so notification delivery remains available.
+   */
+  private async refreshSessionStatuses(sessions: ChatSession[], force = false): Promise<void> {
+    if (!this.shouldRespectWechatMute()) return
+    const now = Date.now()
+    if (!force && !this.sessionStatusesRefreshRequested && now - this.lastSessionStatusesRefreshAt < this.sessionStatusRefreshIntervalMs) {
+      return
+    }
+
+    const usernames = Array.from(new Set(
+      sessions
+        .map((session) => String(session.username || '').trim())
+        .filter(Boolean)
+    ))
+    if (usernames.length === 0) return
+
+    let refreshedAny = false
+    const batchSize = 200
+    for (let offset = 0; offset < usernames.length; offset += batchSize) {
+      const batch = usernames.slice(offset, offset + batchSize)
+      try {
+        const result = await chatService.getSessionStatuses(batch)
+        if (!result.success || !result.map) {
+          this.reportSessionStatusFailure(result.error || 'native status lookup failed')
+          continue
+        }
+        const statusMap = result.map
+        for (const session of sessions) {
+          const username = String(session.username || '').trim()
+          const status = statusMap[username]
+          if (!status) continue
+          session.isMuted = status.isMuted === true
+          session.isFolded = status.isFolded === true
+        }
+        refreshedAny = true
+      } catch (error) {
+        this.reportSessionStatusFailure(error)
+      }
+    }
+
+    if (refreshedAny) {
+      this.lastSessionStatusesRefreshAt = Date.now()
+      this.sessionStatusesRefreshRequested = false
+    }
+  }
+
   /** The toggle is read at queue time so it never adds work to notifications. */
   private isAntiRevokeNewGroupsEnabled(): boolean {
     try {
@@ -234,6 +313,9 @@ export class MessagePushService {
     this.seenPrimedSessions.clear()
     this.groupNicknameCache.clear()
     this.baselineReady = false
+    this.sessionStatusesRefreshRequested = true
+    this.lastSessionStatusesRefreshAt = 0
+    this.lastSessionStatusFailureLogAt = 0
     this.messageTableScanRequested = false
     this.pendingMessageTableNames.clear()
     this.pendingAntiRevokeNewGroupsSessionIds.clear()
@@ -272,7 +354,9 @@ export class MessagePushService {
     if (!sessionsResult.success || !sessionsResult.sessions) {
       return
     }
-    this.setBaseline(sessionsResult.sessions as ChatSession[])
+    const sessions = sessionsResult.sessions as ChatSession[]
+    await this.refreshSessionStatuses(sessions, true)
+    this.setBaseline(sessions)
     this.baselineReady = true
   }
 
@@ -337,6 +421,7 @@ export class MessagePushService {
       }
 
       const sessions = sessionsResult.sessions as ChatSession[]
+      await this.refreshSessionStatuses(sessions)
       if (!this.baselineReady) {
         this.setBaseline(sessions)
         this.baselineReady = true
@@ -377,6 +462,12 @@ export class MessagePushService {
         const sessionId = String(session.username || '').trim()
         if (sessionId) candidateIds.add(sessionId)
         const previous = previousBaseline.get(session.username) || this.sessionBaseline.get(session.username)
+        if (this.shouldSkipMutedSession(session)) {
+          // Advance the baseline without fetching/replaying messages from a
+          // muted conversation. If unmuted later, only newer messages qualify.
+          this.updateObservedBaseline(session, previousBaseline.get(sessionId))
+          continue
+        }
         // 撤回不再推送弹窗（仅真实私聊/群聊消息触发）
         const result = await this.pushSessionMessages(session, previous, { scanRecentRevokes: false })
         this.updateInspectedBaseline(session, previousBaseline.get(session.username), result)
@@ -953,6 +1044,7 @@ export class MessagePushService {
       const groupName = session.displayName || groupInfo?.displayName || sessionId
       const sourceName = await this.resolveGroupSourceName(sessionId, message, session)
       const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || groupInfo?.avatarUrl)
+      const mentionsMe = chatService.isMessageMentionedMe(message)
       return {
         event: 'message.new',
         sessionId,
@@ -962,7 +1054,8 @@ export class MessagePushService {
         groupName,
         sourceName,
         content,
-        timestamp: createTime
+        timestamp: createTime,
+        mentionsMe
       }
     }
 
@@ -1434,6 +1527,12 @@ export class MessagePushService {
       return false
     }
     const filterMode = this.getMessagePushFilterMode()
+    if (filterMode === 'mentions') {
+      // Structured @ targets are only meaningful for group messages. The
+      // payload flag is derived from msgsource, not visible text, and excludes
+      // @all broadcasts.
+      return payload.sessionType === 'group' && payload.mentionsMe === true
+    }
     if (filterMode === 'all') {
       return true
     }
@@ -1446,9 +1545,9 @@ export class MessagePushService {
     return !listed
   }
 
-  private getMessagePushFilterMode(): 'all' | 'whitelist' | 'blacklist' {
+  private getMessagePushFilterMode(): 'all' | 'whitelist' | 'blacklist' | 'mentions' {
     const value = this.configService.get('messagePushFilterMode')
-    if (value === 'whitelist' || value === 'blacklist') return value
+    if (value === 'whitelist' || value === 'blacklist' || value === 'mentions') return value
     return 'all'
   }
 
@@ -1493,6 +1592,10 @@ export class MessagePushService {
 
   private isSessionTableChange(tableName: string): boolean {
     return String(tableName || '').trim().toLowerCase() === 'session'
+  }
+
+  private isContactTableChange(tableName: string): boolean {
+    return String(tableName || '').trim().toLowerCase() === 'contact'
   }
 
   private isMessageTableChange(tableName: string): boolean {

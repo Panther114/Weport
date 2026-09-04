@@ -51,6 +51,28 @@ Platform split lives in `process.platform` branches (same tree, no fork):
 - safeStorage on headless Linux often has no backend: config falls back to
   plaintext secrets (existing graceful degradation, unchanged).
 
+## v0.9.11 Notification / Platform Constraints
+
+- Chat notifications respect WeChat `isMuted` by default. Muted messages must
+  still advance the push baseline so unmuting never replays old messages.
+- The `mentions` filter mode uses structured message-source `atuserlist`
+  metadata and the account identity set. Never infer mentions from visible
+  `@name` text, and do not treat `@所有人` as a direct mention.
+- Notification filter session lists are newest-first by session timestamp;
+  contact-name enrichment must not reorder them.
+- Notification duration is stored in milliseconds, edited as a numeric seconds
+  field (1-60), and defaults to 3000 ms for new installs.
+- macOS packaging must run `scripts/after-pack.cjs` to rewrite the WCDB
+  framework install name to the colocated `libWCDB.dylib`. Do not remove the
+  `afterPack` hook without replacing and verifying this dependency repair.
+- Shipped macOS native WCDB/key artifacts require macOS 15+ and Apple Silicon;
+  Linux artifacts require glibc 2.34+, GLIBCXX 3.4.30+, and OpenSSL 3.
+- Linux key capture must discover/attach to one WeChat process. Never restore
+  kill-all or concurrent multi-candidate launching. Linux autostart is an XDG
+  desktop entry; Electron `setLoginItemSettings` is not a Linux API.
+- Weport remains read-only with no personal-account send transport. Do not add
+  auto-reply by writing WCDB rows or importing version-specific injection/RPA.
+
 ## WCDB Host Process (Permanent — Do Not Change)
 
 `wcdb_api.dll` / `libwcdb_api.dylib` refuses to initialize (`-1006`) unless

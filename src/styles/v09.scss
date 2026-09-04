@@ -452,6 +452,42 @@
 .sns-sidebar-clear:hover {
   color: var(--text);
 }
+.sns-author-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 10px 0;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line, #1c1c21);
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+}
+.sns-author-search input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 12.5px;
+  min-width: 0;
+}
+.sns-author-search input::placeholder {
+  color: var(--text-faint);
+}
+.sns-author-search-clear {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.sns-author-search-clear:hover {
+  color: var(--text);
+}
 .sns-sidebar-head {
   display: flex;
   align-items: center;

@@ -89,11 +89,13 @@ interface ConfigSchema {
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
   notificationDuration: number
   notificationAnimationEnabled: boolean
-  notificationFilterMode: 'all' | 'whitelist' | 'blacklist'
+  notificationFilterMode: 'all' | 'whitelist' | 'blacklist' | 'mentions'
   notificationFilterList: string[]
   messagePushEnabled: boolean
-  messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
+  messagePushFilterMode: 'all' | 'whitelist' | 'blacklist' | 'mentions'
   messagePushFilterList: string[]
+  /** Follow WeChat's per-conversation "Do Not Disturb" flag for desktop pushes. */
+  messagePushRespectWechatMute: boolean
   httpApiEnabled: boolean
   httpApiPort: number
   httpApiHost: string
@@ -277,7 +279,7 @@ export class ConfigService {
       notificationEnabled: true,
       aiInsightNotificationEnabled: true,
       notificationPosition: 'top-right',
-      notificationDuration: 5000,
+      notificationDuration: 3000,
       notificationAnimationEnabled: true,
       notificationFilterMode: 'all',
       notificationFilterList: [],
@@ -292,6 +294,7 @@ export class ConfigService {
       messagePushEnabled: false,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
+      messagePushRespectWechatMute: true,
       windowCloseBehavior: 'tray',
       quoteLayout: 'quote-top',
       wordCloudExcludeWords: [],

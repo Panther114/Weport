@@ -60,6 +60,7 @@ interface ElectronApi {
     getLaunchAtStartupStatus: () => Promise<{ enabled: boolean; supported: boolean; reason?: string }>
     setLaunchAtStartup: (enabled: boolean) => Promise<any>
     checkForUpdates: () => Promise<{ hasUpdate: boolean; version?: string; releaseNotes?: string; error?: string }>
+    getChangelog: () => Promise<{ success: boolean; version?: string; content?: string; error?: string }>
     downloadAndInstall: () => Promise<{ success: boolean; restarting?: boolean; error?: string }>
     ignoreUpdate: (version: string) => Promise<{ success: boolean }>
     onDownloadProgress: (callback: (progress: any) => void) => () => void

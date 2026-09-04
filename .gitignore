@@ -61,3 +61,7 @@ replay-payload.json
 
 # 产品演示视频 — 体积过大，GitHub 无法渲染，仅在本地播放
 docs/media/weport-demo.mp4
+
+# WeClone server local test artifacts
+weclone-server/.server-pid.txt
+weclone-server/data-test/
