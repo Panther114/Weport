@@ -57,7 +57,7 @@ class HttpService {
     try {
       switch (path) {
         case '/health':
-          send({ success: true, version: '0.9.10', running: this.running })
+          send({ success: true, version: '0.9.11', running: this.running })
           return
 
         case '/sessions': {

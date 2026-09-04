@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -20,8 +20,8 @@
     "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vite build && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
     "build": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
     "build:dir": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --dir --publish never",
-    "build:mac": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
-    "build:linux": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
+    "build:mac": "node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
+    "build:linux": "node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
     "package": "node scripts/clean-dist-electron.cjs && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never"
   },
   "dependencies": {
@@ -80,6 +80,7 @@
       "electron/assets/wasm/**/*",
       "LICENSE",
       "NOTICE.md",
+      "RELEASE_NOTES.md",
       "THIRD-PARTY-NOTICES.md",
       "LICENSES/**/*"
     ],
@@ -244,6 +245,7 @@
       "license": "LICENSE"
     },
     "asar": true,
+    "afterPack": "scripts/after-pack.cjs",
     "asarUnpack": [
       "node_modules/@hicccc77/electron-liquid-glass/**/*",
       "node_modules/koffi/**/*",

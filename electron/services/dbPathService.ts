@@ -85,6 +85,28 @@ export class DbPathService {
     }
   }
 
+  /**
+   * Linux WeChat has used several roots across native, UOS and Flatpak
+   * packages.  Keep the list deterministic and de-duplicated so discovery
+   * does not depend on filesystem enumeration order.
+   */
+  private getLinuxCandidatePaths(home = homedir()): string[] {
+    const xdgDataHomeRaw = String(process.env.XDG_DATA_HOME || '').trim()
+    const xdgDataHome = xdgDataHomeRaw && (/^\//.test(xdgDataHomeRaw) || /^~[\\/]/.test(xdgDataHomeRaw))
+      ? expandHomePath(xdgDataHomeRaw)
+      : join(home, '.local', 'share')
+    const candidates = [
+      join(home, 'xwechat_files'),
+      join(home, 'Documents', 'xwechat_files'),
+      join(home, '.xwechat', 'xwechat_files'),
+      join(home, '.xwechat'),
+      join(xdgDataHome, 'xwechat_files'),
+      join(home, '.var', 'app', 'com.tencent.WeChat', 'data', 'xwechat_files'),
+      join(home, '.var', 'app', 'com.tencent.wechat', 'data', 'xwechat_files'),
+    ]
+    return [...new Set(candidates)]
+  }
+
 
   /**
    * 自动检测微信数据库根目录
@@ -111,10 +133,7 @@ export class DbPathService {
         // macOS 旧路径兜底
         possiblePaths.push(join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files'))
       } else if (process.platform === 'linux') {
-        // Linux 微信 4.x 原生客户端数据目录（~/xwechat_files）
-        possiblePaths.push(join(home, 'xwechat_files'))
-        // 部分发行版/手动安装会放在文档目录下
-        possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
+        possiblePaths.push(...this.getLinuxCandidatePaths(home))
       } else {
         // Windows 微信4.x 数据目录
         possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
@@ -451,10 +470,14 @@ export class DbPathService {
       return join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files')
     }
     if (process.platform === 'linux') {
-      // Linux 微信 4.x 原生客户端数据目录
-      const linuxDefault = join(home, 'xwechat_files')
-      if (existsSync(linuxDefault)) return linuxDefault
-      return join(home, 'Documents', 'xwechat_files')
+      // Linux 微信 4.x 原生、UOS 与 Flatpak 客户端数据目录
+      const candidates = this.getLinuxCandidatePaths(home)
+      const valid = candidates.find((candidate) => existsSync(candidate) && (
+        this.findAccountDirs(candidate).length > 0 || this.isAccountDir(candidate)
+      ))
+      if (valid) return valid
+      const existing = candidates.find((candidate) => existsSync(candidate))
+      return existing || candidates[0]
     }
     return join(home, 'Documents', 'xwechat_files')
   }

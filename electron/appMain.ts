@@ -189,11 +189,46 @@ function migrateLegacySettings() {
 // - Windows：直接写 HKCU Run 键（Electron 的 setLoginItemSettings 在本构建上
 //   静默失效，且旧版 Rust 应用就是写注册表，保持同一机制）
 // - macOS：LoginItems（app.setLoginItemSettings）
+// - Linux：XDG autostart desktop entry（Electron API 不提供 Linux LoginItems）
 // ---------------------------------------------------------------------------
 const RUN_KEY_PATH = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 const RUN_VALUE_NAME = 'Weport'
 const isWindowsHost = process.platform === 'win32'
 const isMacHost = process.platform === 'darwin'
+const isLinuxHost = process.platform === 'linux'
+
+const getLinuxAutostartPath = (): string => {
+  const configuredHome = String(process.env.XDG_CONFIG_HOME || '').trim()
+  const configHome = configuredHome
+    ? (configuredHome.startsWith('/') ? configuredHome : join(app.getPath('home'), configuredHome))
+    : join(app.getPath('home'), '.config')
+  return join(configHome, 'autostart', 'com.weport.desktop.desktop')
+}
+
+const quoteDesktopExecArg = (value: string): string => {
+  const escaped = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return `"${escaped}"`
+}
+
+const getLinuxAutostartEntry = (): string => [
+  '[Desktop Entry]',
+  'Type=Application',
+  'Version=1.0',
+  'Name=Weport',
+  `Exec=${quoteDesktopExecArg(process.execPath)}${configService?.get('silentStartup') === true ? ' --background' : ''}`,
+  'Terminal=false',
+  'StartupNotify=false',
+  'X-GNOME-Autostart-enabled=true',
+  '',
+].join('\n')
+
+const isLinuxAutostartCurrent = (): boolean => {
+  try {
+    return readFileSync(getLinuxAutostartPath(), 'utf8') === getLinuxAutostartEntry()
+  } catch {
+    return false
+  }
+}
 
 const getLaunchAtStartupUnsupportedReason = (): string | null => {
   if (!app.isPackaged) return '仅安装后的版本支持开机自启动'
@@ -201,7 +236,18 @@ const getLaunchAtStartupUnsupportedReason = (): string | null => {
 }
 
 const getSystemLaunchAtStartup = (): boolean => {
-  if (isMacHost || process.platform === 'linux') {
+  if (isLinuxHost) {
+    try {
+      const autostartPath = getLinuxAutostartPath()
+      if (!existsSync(autostartPath)) return false
+      const content = readFileSync(autostartPath, 'utf8')
+      return !/^Hidden\s*=\s*true\s*$/im.test(content) &&
+        !/^X-GNOME-Autostart-enabled\s*=\s*false\s*$/im.test(content)
+    } catch {
+      return false
+    }
+  }
+  if (isMacHost) {
     try {
       return app.getLoginItemSettings({ path: process.execPath }).openAtLogin
     } catch {
@@ -232,8 +278,25 @@ const getMacLoginItemArgs = (): string[] => {
 }
 
 const setSystemLaunchAtStartup = (enabled: boolean): { success: boolean; enabled: boolean; error?: string } => {
-  if (isMacHost || process.platform === 'linux') {
-    // Linux：Electron 写 XDG autostart（~/.config/autostart），桌面环境支持时生效
+  if (isLinuxHost) {
+    const autostartPath = getLinuxAutostartPath()
+    try {
+      if (enabled) {
+        mkdirSync(dirname(autostartPath), { recursive: true })
+        writeFileSync(autostartPath, getLinuxAutostartEntry(), { encoding: 'utf8', mode: 0o644 })
+      } else if (existsSync(autostartPath)) {
+        rmSync(autostartPath, { force: true })
+      }
+      return { success: true, enabled: getSystemLaunchAtStartup() }
+    } catch (e) {
+      return {
+        success: false,
+        enabled: getSystemLaunchAtStartup(),
+        error: `设置 Linux 开机自启动失败: ${String((e as Error)?.message || e)}`,
+      }
+    }
+  }
+  if (isMacHost) {
     const silent = configService?.get('silentStartup') === true
     try {
       app.setLoginItemSettings({
@@ -354,6 +417,14 @@ const syncLaunchAtStartupPreference = () => {
     setSystemLaunchAtStartup(true)
     return
   }
+  if (isLinuxHost) {
+    // The XDG desktop entry is rewritten when the stored preference and file
+    // state diverge (for example after an app update changes execPath).
+    if (getSystemLaunchAtStartup() !== stored || (stored && !isLinuxAutostartCurrent())) {
+      setSystemLaunchAtStartup(stored)
+    }
+    return
+  }
 }
 
 /**
@@ -395,6 +466,8 @@ const cleanupLegacyAutostartEntries = () => {
 // 更新（electron-updater + GitHub Releases）
 // ---------------------------------------------------------------------------
 let updateCheckTimer: NodeJS.Timeout | null = null
+const isUpdaterSupported = isWindowsHost || isMacHost
+const updaterUnsupportedReason = '当前 Linux 版本不提供内置自动更新，请从 Releases 下载最新安装包。'
 
 const getUpdaterFeedUrl = (): string => {
   // WEPORT_UPDATE_URL 可覆盖更新源（测试镜像/自建源）；默认 GitHub Releases
@@ -403,7 +476,11 @@ const getUpdaterFeedUrl = (): string => {
   return 'https://github.com/Panther114/Weport/releases/latest/download'
 }
 
-const applyUpdaterChannel = () => {
+const applyUpdaterChannel = (): boolean => {
+  if (!isUpdaterSupported) {
+    console.info('[Weport] 跳过更新器初始化:', updaterUnsupportedReason)
+    return false
+  }
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.disableDifferentialDownload = true
@@ -412,6 +489,7 @@ const applyUpdaterChannel = () => {
   } catch (e) {
     console.warn('[Weport] 设置更新源失败:', e)
   }
+  return true
 }
 
 // 简单 semver 比较（a > b 返回 true），区分预发布：
@@ -448,6 +526,7 @@ async function checkForUpdatesManual(): Promise<{
   error?: string
 }> {
   if (!app.isPackaged) return { hasUpdate: false, error: '开发模式不检查更新' }
+  if (!isUpdaterSupported) return { hasUpdate: false, error: updaterUnsupportedReason }
   applyUpdaterChannel()
   try {
     const result = await autoUpdater.checkForUpdates()
@@ -455,16 +534,24 @@ async function checkForUpdatesManual(): Promise<{
     if (!info || !isNewerVersion(String(info.version || ''), APP_VERSION)) return { hasUpdate: false }
     const ignored = configService?.get('ignoredUpdateVersion')
     if (ignored && ignored === info.version) return { hasUpdate: false }
-    return { hasUpdate: true, version: info.version, releaseNotes: String(info.releaseNotes || '') }
+    return { hasUpdate: true, version: info.version, releaseNotes: normalizeReleaseNotes(info.releaseNotes) }
   } catch (e) {
     return { hasUpdate: false, error: String((e as Error)?.message || e) }
   }
 }
 
+/** electron-updater 的 releaseNotes 可能是字符串，也可能是多段 {note, version} 数组 */
+function normalizeReleaseNotes(notes: unknown): string {
+  if (Array.isArray(notes)) {
+    return notes.map((entry) => String((entry as { note?: unknown })?.note || '')).filter(Boolean).join('\n\n')
+  }
+  return String(notes || '')
+}
+
 let updateCheckScheduled = false
 
 function checkForUpdatesOnStartup() {
-  if (!app.isPackaged || updateCheckScheduled) return
+  if (!isUpdaterSupported || !app.isPackaged || updateCheckScheduled) return
   updateCheckScheduled = true
   const ignored = configService?.get('ignoredUpdateVersion')
   updateCheckTimer = setTimeout(async () => {
@@ -475,7 +562,7 @@ function checkForUpdatesOnStartup() {
       if (ignored && ignored === info.version) return
       mainWindow?.webContents.send('app:updateAvailable', {
         version: info.version,
-        releaseNotes: String(info.releaseNotes || ''),
+        releaseNotes: normalizeReleaseNotes(info.releaseNotes),
       })
     } catch (e) {
       console.warn('[Weport] 启动更新检查失败:', e)
@@ -504,6 +591,7 @@ let isDownloadInProgress = false
  */
 async function downloadAndInstall(): Promise<{ success: boolean; restarting?: boolean; error?: string }> {
   if (!app.isPackaged) return { success: false, error: '开发模式不可更新' }
+  if (!isUpdaterSupported) return { success: false, error: updaterUnsupportedReason }
   if (isDownloadInProgress) return { success: false, error: '正在下载中' }
   applyUpdaterChannel()
   isDownloadInProgress = true
@@ -1783,10 +1871,10 @@ function registerIpcHandlers() {
     if (key === 'silentStartup' && configService?.get('launchAtStartup')) {
       applyLaunchAtStartupPreference(true)
     }
-    if (['messagePushEnabled', 'notificationEnabled', 'dbPath', 'decryptKey', 'myWxid'].includes(key)) {
+    if (['messagePushEnabled', 'messagePushRespectWechatMute', 'notificationEnabled', 'antiRevokeAutoApplyNewGroups', 'dbPath', 'decryptKey', 'myWxid'].includes(key)) {
       // 关闭推送时同步停掉轮询/监控并释放 WCDB 连接（此前只会在开启时 start，
       // 关闭路径从不 stop，连接会一直占着）
-      if (configService?.get('messagePushEnabled')) messagePushService?.start()
+      if (configService?.get('messagePushEnabled') || configService?.get('antiRevokeAutoApplyNewGroups')) messagePushService?.start()
       else messagePushService?.stop()
       await messagePushService?.handleConfigChanged(key)
     }
@@ -1842,6 +1930,14 @@ function registerIpcHandlers() {
   ipcMain.handle('app:ignoreUpdate', (_e, version: string) => {
     configService?.set('ignoredUpdateVersion', String(version || ''))
     return { success: true }
+  })
+  ipcMain.handle('app:getChangelog', () => {
+    try {
+      const content = readFileSync(join(app.getAppPath(), 'RELEASE_NOTES.md'), 'utf8').trim()
+      return { success: true, version: APP_VERSION, content }
+    } catch (e) {
+      return { success: false, version: APP_VERSION, error: String((e as Error)?.message || e) }
+    }
   })
 
   // 数据备份（v0.9.4：本地聊天数据库快照备份/恢复）
@@ -1941,12 +2037,12 @@ function registerIpcHandlers() {
     )
   })
   ipcMain.handle('key:scanImageKeyFromMemory', async (event, userDir: string) => {
-    if (process.platform !== 'win32') {
-      return { success: false, error: '内存扫描仅支持 Windows' }
+    if (process.platform !== 'win32' && process.platform !== 'darwin' && process.platform !== 'linux') {
+      return { success: false, error: '图片密钥内存扫描不支持当前平台' }
     }
     const dir = String(userDir || '').trim()
     if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
-    return new KeyService().autoGetImageKeyByMemoryScan(
+    return createImageKeyService().autoGetImageKeyByMemoryScan(
       dir,
       (message) => sendImageKeyStatus(event, message)
     )
@@ -2265,7 +2361,7 @@ function registerIpcHandlers() {
   ipcMain.handle('analytics:getOverallStatistics', (_e, force?: boolean) => analyticsService.getOverallStatistics(force === true))
   ipcMain.handle('analytics:getContactRankings', (_e, limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) =>
     analyticsService.getContactRankings(limit, beginTimestamp, endTimestamp, { includeGroupChats: options?.includeGroupChats === true }))
-  ipcMain.handle('analytics:getTimeDistribution', () => analyticsService.getTimeDistribution())
+  ipcMain.handle('analytics:getTimeDistribution', (_e, force?: boolean) => analyticsService.getTimeDistribution(force === true))
   ipcMain.handle('analytics:getSelfSentDailyDistribution', (_e, beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
     analyticsService.getSelfSentDailyDistribution(beginTimestamp, endTimestamp, force === true))
   ipcMain.handle('analytics:getExcludedUsernames', () => analyticsService.getExcludedUsernames())
@@ -2665,8 +2761,20 @@ function demoConfigValue(key: string): unknown {
       return 'colorful'
     case 'messagePushEnabled':
       return true
+    case 'messagePushRespectWechatMute':
+      return true
+    case 'messagePushFilterMode':
+      return 'all'
+    case 'messagePushFilterList':
+      return []
+    case 'notificationFilterMode':
+      return 'all'
+    case 'notificationFilterList':
+      return []
     case 'notificationEnabled':
       return false
+    case 'notificationDuration':
+      return 3000
     case 'antiRevokeAutoApplyNewGroups':
       return false
     default:
@@ -5392,7 +5500,7 @@ function startApp() {
     createTray()
 
     // 通知服务：推送开关开启时启动（连接数据库并开启监控管道）
-    if (configService.get('messagePushEnabled')) {
+    if (configService.get('messagePushEnabled') || configService.get('antiRevokeAutoApplyNewGroups')) {
       messagePushService?.start()
     }
 

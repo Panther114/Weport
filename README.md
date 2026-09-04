@@ -51,7 +51,7 @@
 3. 按页面提示**获取解密密钥**（见下方说明）
 4. 切到「导出数据」页，选择格式与输出文件夹，点击**导出全部聊天记录**
 
-### macOS（Apple Silicon）
+### macOS 15+（Apple Silicon）
 
 1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-arm64.dmg`），打开后将 Weport 拖入「应用程序」
 2. 首次打开：右键 Weport →「打开」（未经 Apple 公证的 ad-hoc 签名应用首次需要手动放行）
@@ -59,7 +59,7 @@
 4. 按页面提示**获取解密密钥**（见下方说明）
 5. 切到「导出数据」页，选择格式与输出文件夹，点击**导出全部聊天记录**
 
-> macOS 自动获取密钥依赖系统调试权限（`task_for_pid`）：需要**关闭 SIP**（`csrutil disable`）或在系统提示授权时输入管理员密码；获取失败时界面会给出当前微信版本对应的排障步骤。防撤回、导出与弹窗功能不需要关闭 SIP。
+> macOS 自动获取密钥依赖系统调试权限（`task_for_pid`）。Weport 会先请求管理员授权并尝试现有 helper；若微信受 SIP/AMFI 保护，授权本身仍不能绕过系统限制，界面会在实际附加失败后给出排障步骤。不要仅为使用 Weport 长期关闭 SIP。数据库读取、导出与通知在密钥已配置后不需要调试权限。
 
 ### 🔑 获取解密密钥（重要）
 
@@ -187,10 +187,12 @@ $env:WEPORT_V09_DUMP_OUT = "$env:TEMP\v09-dump"
 | 平台 | 架构 | 安装包 | 备注 |
 |------|------|--------|------|
 | Windows | x64 | `.exe`（NSIS） | 微信 4.x，完整功能 |
-| macOS | Apple Silicon（arm64） | `.dmg` / `.zip` | 微信 4.x；自动获取密钥需关闭 SIP 或按提示授权 |
-| Linux | x64 | `.AppImage` / `.tar.gz` | 微信 4.x；自动获取密钥时可能需要输入 sudo 密码 |
+| macOS | Apple Silicon（arm64） | `.dmg` / `.zip` | macOS 15+、微信 4.x；自动获取密钥受 SIP/AMFI 调试权限限制 |
+| Linux | x64 | `.AppImage` / `.tar.gz` | glibc 2.34+、GLIBCXX 3.4.30+、OpenSSL 3、微信 4.x；密钥提取可能需要 sudo |
 
-> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）。Linux 提供 x64 AppImage 与 tar.gz 安装包。
+> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 提供 x64 AppImage 与 tar.gz 安装包，自动更新采用手动下载新版本。
+
+Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share/xwechat_files` 和 Flatpak 数据目录。若密钥提取失败，请检查 `libcrypto.so.3`、`libcurl.so.4`、helper 可执行权限及 `/proc/sys/kernel/yama/ptrace_scope`；Weport 只报告限制，不会自动降低系统安全策略。AppImage 无法启动时可安装发行版的 FUSE 2 兼容包，或使用 `.tar.gz` 安装包。
 
 ## 🔐 隐私
 

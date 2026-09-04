@@ -53,6 +53,8 @@ export interface Message {
   senderAvatarUrl?: string
   parsedContent: string
   rawContent: string
+  /** Raw WeChat msgsource metadata (contains <atuserlist> for group @mentions). */
+  source?: unknown
   content?: string  // 原始XML内容（与rawContent相同，供前端使用）
   // 表情包相关
   emojiCdnUrl?: string
@@ -3082,6 +3084,20 @@ class ChatService {
     }
   }
 
+  /**
+   * Preserve the raw msgsource column across the message mapping boundary.
+   * WeChat stores group @ targets in <atuserlist> inside this field; the
+   * notification pipeline needs the metadata while regular renderers can
+   * continue to ignore it.
+   */
+  private getMessageSourceFromRow(row: Record<string, any>): unknown {
+    return row.source
+      ?? row.msg_source
+      ?? row.message_source
+      ?? row.msgsource
+      ?? row.msgSource
+  }
+
   private buildMessageKey(input: {
     localId: number
     serverId: number
@@ -5577,6 +5593,7 @@ class ChatService {
         senderUsername,
         parsedContent: '',
         rawContent: content,
+        source: this.getMessageSourceFromRow(row),
         content,
         _db_path: sourceInfo.dbPath
       })
@@ -5826,6 +5843,7 @@ class ChatService {
         senderUsername,
         parsedContent: this.parseMessageContent(content, localType),
         rawContent: content,
+        source: this.getMessageSourceFromRow(row),
         emojiCdnUrl,
         emojiMd5,
         quotedContent,
@@ -11208,6 +11226,37 @@ class ChatService {
     return tokens.some((token) => this.matchesMyFootprintIdentity(token, selfIdentitySet))
   }
 
+  /**
+   * Return whether a received group message explicitly targets this account.
+   *
+   * WeChat records group targets in msgsource's <atuserlist> (often encoded
+   * or wrapped in a Buffer), so checking the visible "@name" text is not
+   * sufficient and produces false positives. Reuse the same source decoder
+   * and identity normalisation used by My Footprint, while treating @all as a
+   * broadcast rather than a direct mention.
+   */
+  isMessageMentionedMe(message: Message): boolean {
+    const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
+    if (!myWxid || !message) return false
+
+    // Some database versions expose msgsource as a separate `source` field;
+    // older rows may leave it embedded in the raw content. The extractor is
+    // intentionally strict and only returns tokens from an atuserlist node.
+    const source = message.source ?? message.rawContent
+    const candidates = this.buildFootprintSourceCandidates(source)
+
+    const tokens = this.extractAtUserListTokensFromSource(source, candidates)
+    if (tokens.length === 0) return false
+    const directTokens = tokens.filter((token) => {
+      const normalized = String(token || '').trim().replace(/^@+/, '').toLowerCase()
+      return normalized !== 'all' && normalized !== '所有人' && !normalized.endsWith('@all')
+    })
+    if (directTokens.length === 0) return false
+
+    const identitySet = this.buildMyFootprintIdentitySet(myWxid)
+    return directTokens.some((token) => this.matchesMyFootprintIdentity(token, identitySet))
+  }
+
   private async resolveMyFootprintGroupSessionIds(
     groupSessionIds: string[],
     beginTimestamp = 0,
@@ -12620,6 +12669,7 @@ class ChatService {
       rawContent: rawContent,
       content: rawContent,  // 添加原始内容供视频MD5解析使用
       parsedContent: this.parseMessageContent(rawContent, localType),
+      source: this.getMessageSourceFromRow(row),
       _db_path: sourceInfo.dbPath
     }
 

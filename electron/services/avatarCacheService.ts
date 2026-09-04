@@ -13,7 +13,7 @@
  */
 import { net } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, renameSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, renameSync, readFileSync, statSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { createHash } from 'crypto'
 import { ConfigService } from './config'
@@ -66,6 +66,20 @@ class AvatarCacheService {
   private headImageCacheLoadAt = 0
   private readonly headImageNegativeTtlMs = 24 * 60 * 60 * 1000
   private readonly headImageCacheFlushMs = 2000
+
+  /**
+   * head_image.db 修改时间（节流 10s 读取一次）。
+   *
+   * 用户更换微信头像后 head_image.db 会写入新的头像数据，但定位缓存
+   * （headImages.json）仍指向旧文件 —— 若只校验「文件存在」，弹窗 /
+   * 群成员 / 作者面板会永远显示旧头像（负缓存同理：新头像最长 24h 不生效）。
+   * 以数据库 mtime 为失效依据：记录时间早于最近一次数据库写入 → 强制重查。
+   */
+  private headImageDbMtime = 0
+  private headImageDbMtimeCheckedAt = 0
+  private readonly headImageDbMtimeThrottleMs = 10_000
+  /** mtime 与本机时钟的安全余量（避免文件系统时间戳精度/偏差导致误判） */
+  private readonly headImageStaleSkewMs = 60_000
 
   /** 由 appMain 在 ready 后调用（cacheBasePath 即 contacts.json 所在目录） */
   init(cacheBasePath?: string): void {
@@ -282,6 +296,27 @@ class AvatarCacheService {
   // head_image.db 头像定位缓存（内存 + headImages.json 持久化）
   // -------------------------------------------------------------------------
 
+  /** head_image.db 最近写入时间（0 = 未知/不可读，不做失效判断） */
+  private getHeadImageDbMtime(): number {
+    const now = Date.now()
+    if (now - this.headImageDbMtimeCheckedAt < this.headImageDbMtimeThrottleMs) {
+      return this.headImageDbMtime
+    }
+    this.headImageDbMtimeCheckedAt = now
+    try {
+      const cfg = ConfigService.getInstance()
+      const accountDir = cfg.getAccountDir(String(cfg.get('dbPath') || ''), String(cfg.get('myWxid') || ''))
+      if (accountDir) {
+        this.headImageDbMtime = statSync(join(accountDir, 'db_storage', 'head_image.db')).mtimeMs
+      } else {
+        this.headImageDbMtime = 0
+      }
+    } catch {
+      this.headImageDbMtime = 0
+    }
+    return this.headImageDbMtime
+  }
+
   private loadHeadImageCache(): void {
     if (!this.headImageCacheFile || !existsSync(this.headImageCacheFile)) return
     try {
@@ -333,10 +368,17 @@ class AvatarCacheService {
     const map: Record<string, string> = {}
     const missing: string[] = []
     const now = Date.now()
+    const dbMtime = this.getHeadImageDbMtime()
     for (const raw of usernames) {
       const username = String(raw || '').trim()
       if (!username) continue
-      const entry = this.headImageCache.get(username)
+      let entry = this.headImageCache.get(username)
+      // head_image.db 在该记录落盘之后有更新 → 头像可能已更换/新增，强制重查
+      if (entry && dbMtime > 0 && dbMtime - this.headImageStaleSkewMs > entry.savedAt) {
+        this.headImageCache.delete(username)
+        this.scheduleHeadImageCacheFlush()
+        entry = undefined
+      }
       if (entry && entry.path) {
         if (existsSync(entry.path)) {
           map[username] = toProtocolUrl(entry.path)
@@ -344,6 +386,7 @@ class AvatarCacheService {
         }
         this.headImageCache.delete(username)
         this.scheduleHeadImageCacheFlush()
+        entry = undefined
       }
       if (entry && now - entry.savedAt < this.headImageNegativeTtlMs) {
         continue // 已知无本地头像，24h 内不再查询

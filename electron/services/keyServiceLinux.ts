@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
@@ -15,6 +15,23 @@ type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; veri
 
 export class KeyServiceLinux {
   private sudo: any
+  /** Process names used by native, UOS and Flatpak WeChat builds. */
+  private readonly wechatProcessNames = ['xwechat', 'wechat-uos', 'weixin', 'wechat', 'wechat-bin']
+  /** Ordered launch candidates.  At most one candidate is ever started. */
+  private readonly wechatLaunchCandidates = [
+    { command: 'xwechat', args: [], label: 'xwechat' },
+    { command: 'wechat-uos', args: [], label: 'wechat-uos' },
+    { command: 'weixin', args: [], label: 'weixin' },
+    { command: 'wechat', args: [], label: 'wechat' },
+    { command: 'wechat-bin', args: [], label: 'wechat-bin' },
+    { command: '/opt/wechat/wechat', args: [], label: '/opt/wechat/wechat' },
+    { command: '/opt/apps/com.tencent.wechat/files/wechat', args: [], label: 'UOS WeChat' },
+    { command: '/usr/bin/wechat', args: [], label: '/usr/bin/wechat' },
+    { command: '/usr/local/bin/wechat', args: [], label: '/usr/local/bin/wechat' },
+    { command: '/usr/bin/wechat-bin', args: [], label: '/usr/bin/wechat-bin' },
+    { command: '/usr/local/bin/wechat-bin', args: [], label: '/usr/local/bin/wechat-bin' },
+    { command: 'flatpak', args: ['run', 'com.tencent.WeChat'], label: 'Flatpak com.tencent.WeChat' },
+  ]
 
   constructor() {
     try {
@@ -22,6 +39,217 @@ export class KeyServiceLinux {
     } catch (e) {
       console.error('Failed to load @vscode/sudo-prompt', e);
     }
+  }
+
+  private getCommandEnvironment(): NodeJS.ProcessEnv {
+    const pathEntries = [
+      ...(process.env.PATH || '').split(':').filter(Boolean),
+      '/bin',
+      '/usr/bin',
+      '/sbin',
+      '/usr/sbin',
+      '/usr/local/bin',
+    ]
+    return {
+      ...process.env,
+      PATH: [...new Set(pathEntries)].join(':'),
+    }
+  }
+
+  private parsePidOutput(stdout: string): number[] {
+    return String(stdout || '')
+      .split(/\s+/)
+      .map((value) => Number.parseInt(value, 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0)
+  }
+
+  /**
+   * Find exact WeChat process names without shell interpolation.  `pgrep -x`
+   * is preferred; the `ps` fallback keeps this working on minimal distros
+   * where pgrep is not installed.
+   */
+  private async findWeChatPids(env: NodeJS.ProcessEnv): Promise<number[]> {
+    const found = new Set<number>()
+    const pgrepPaths = ['/usr/bin/pgrep', '/bin/pgrep']
+
+    for (const pgrepPath of pgrepPaths) {
+      if (!existsSync(pgrepPath)) continue
+      for (const name of this.wechatProcessNames) {
+        try {
+          const { stdout } = await execFileAsync(pgrepPath, ['-x', name], { env })
+          for (const pid of this.parsePidOutput(stdout)) found.add(pid)
+        } catch {
+          // Exit code 1 means the exact name is not running.
+        }
+      }
+      if (found.size > 0) break
+    }
+
+    if (found.size === 0) {
+      try {
+        const psPath = existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps'
+        const { stdout } = await execFileAsync(psPath, ['-A', '-o', 'pid=,comm='], { env })
+        for (const line of String(stdout || '').split(/\r?\n/)) {
+          const match = line.trim().match(/^(\d+)\s+(\S+)$/)
+          if (!match) continue
+          const pid = Number.parseInt(match[1], 10)
+          const comm = basename(match[2])
+          if (this.wechatProcessNames.includes(comm) && pid > 0) found.add(pid)
+        }
+      } catch {
+        // Report no process; the caller provides the actionable message.
+      }
+    }
+
+    return [...found].sort((a, b) => a - b)
+  }
+
+  private async findWeChatPid(env: NodeJS.ProcessEnv): Promise<number | null> {
+    const pids = await this.findWeChatPids(env)
+    if (pids.length === 0) return null
+
+    // Prefer an oldest root process over a newer helper/renderer with the same
+    // executable name. Picking the highest PID commonly attaches to a child.
+    const pidSet = new Set(pids)
+    for (const pid of pids) {
+      try {
+        const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+        const parentPid = Number.parseInt(status.match(/^PPid:\s*(\d+)/m)?.[1] || '0', 10)
+        if (!pidSet.has(parentPid)) return pid
+      } catch {
+        // Fall through to the oldest discovered PID when /proc is restricted.
+      }
+    }
+    return pids[0]
+  }
+
+  private resolveExecutable(command: string, env: NodeJS.ProcessEnv): string | null {
+    if (command.includes('/')) {
+      try {
+        if (existsSync(command) && (statSync(command).mode & 0o111) !== 0) return command
+      } catch { }
+      return null
+    }
+
+    for (const directory of String(env.PATH || '').split(':').filter(Boolean)) {
+      const candidate = join(directory, command)
+      try {
+        if (existsSync(candidate) && (statSync(candidate).mode & 0o111) !== 0) return candidate
+      } catch { }
+    }
+    return null
+  }
+
+  /** Start one known client only when no exact-name process is already alive. */
+  private launchOneWeChat(env: NodeJS.ProcessEnv, onStatus?: (message: string, level: number) => void): boolean {
+    const candidate = this.wechatLaunchCandidates.find((item) => this.resolveExecutable(item.command, env))
+    if (!candidate) return false
+
+    const executable = this.resolveExecutable(candidate.command, env)
+    if (!executable) return false
+
+    const cleanEnv = { ...env }
+    delete cleanEnv.ELECTRON_RUN_AS_NODE
+    delete cleanEnv.ELECTRON_NO_ATTACH_CONSOLE
+    delete cleanEnv.APPDIR
+    delete cleanEnv.APPIMAGE
+
+    try {
+      const child = spawn(executable, candidate.args, {
+        detached: true,
+        stdio: 'ignore',
+        env: cleanEnv,
+      })
+      child.once('error', (error) => {
+        console.warn(`[KeyServiceLinux] 启动 ${candidate.label} 失败:`, error.message)
+      })
+      child.unref()
+      console.log(`[KeyServiceLinux] 已尝试启动单个微信客户端: ${candidate.label}`)
+      onStatus?.(`正在启动微信客户端（${candidate.label}）...`, 0)
+      return true
+    } catch (error: any) {
+      console.warn(`[KeyServiceLinux] 启动 ${candidate.label} 发生异常:`, error?.message || error)
+      return false
+    }
+  }
+
+  private getWcdbLibraryPath(): string {
+    const archDir = process.arch === 'arm64' ? 'arm64' : 'x64'
+    const resourcesRoot = app.isPackaged
+      ? join(process.resourcesPath, 'resources')
+      : join(app.getAppPath(), 'resources')
+    return join(resourcesRoot, 'wcdb', 'linux', archDir, 'libwcdb_api.so')
+  }
+
+  /**
+   * Return actionable diagnostics before invoking a native helper.  Missing
+   * execute bits and dynamic libraries otherwise surface as opaque EACCES or
+   * ELF loader errors from child_process.
+   */
+  private async getLinuxRuntimeDiagnostics(checkPtrace = false): Promise<{ fatal: string[]; warnings: string[] }> {
+    const fatal: string[] = []
+    const warnings: string[] = []
+    let helperPath: string | null = null
+
+    try {
+      helperPath = this.getHelperPath()
+      const mode = statSync(helperPath).mode
+      if ((mode & 0o111) === 0) {
+        fatal.push(`xkey_helper_linux 没有执行权限：${helperPath}（可尝试 chmod +x）`)
+      }
+    } catch (error: any) {
+      fatal.push(String(error?.message || '找不到 xkey_helper_linux'))
+    }
+
+    const env = this.getCommandEnvironment()
+    const ldd = this.resolveExecutable('ldd', env)
+    if (ldd) {
+      const targets = [helperPath, this.getWcdbLibraryPath()].filter((value): value is string => !!value && existsSync(value))
+      for (const target of targets) {
+        const recordLddFailures = (output: string) => {
+          const missing = output
+            .split(/\r?\n/)
+            .map((line) => line.match(/^\s*([^\s]+)\s*=>\s*not found\s*$/)?.[1])
+            .filter((name): name is string => !!name)
+          for (const name of [...new Set(missing)]) {
+            fatal.push(`${name} 未找到（请安装对应系统运行库）`)
+          }
+          for (const match of output.matchAll(/version\s+([A-Za-z0-9_.+-]+)\s+not found/gi)) {
+            fatal.push(`${match[1]} 版本不兼容（请升级 glibc/libstdc++/OpenSSL）`)
+          }
+        }
+        try {
+          const { stdout, stderr } = await execFileAsync(ldd, [target], { env, maxBuffer: 256 * 1024 })
+          recordLddFailures(`${stdout || ''}\n${stderr || ''}`)
+        } catch (error: any) {
+          // ldd can return non-zero for an incompatible ELF while still
+          // printing useful diagnostics; keep the child invocation as the
+          // final authority and only expose a bounded warning here.
+          const detail = String(error?.stdout || error?.stderr || '').trim()
+          recordLddFailures(detail)
+          if (detail) warnings.push(`ldd 检查 ${target}：${detail.split(/\r?\n/)[0]}`)
+        }
+      }
+    } else {
+      warnings.push('系统未找到 ldd，无法预检 Linux 原生依赖')
+    }
+
+    if (checkPtrace) {
+      try {
+        const scope = Number.parseInt(readFileSync('/proc/sys/kernel/yama/ptrace_scope', 'utf8').trim(), 10)
+        if (scope >= 3) {
+          fatal.push('Yama ptrace_scope=3 禁止进程附加；请改用缓存密钥或在确认安全风险后调整内核策略')
+        } else if (scope >= 2) {
+          warnings.push(`Yama ptrace_scope=${scope} 需要 CAP_SYS_PTRACE，管理员授权可能仍被策略拒绝`)
+        } else if (scope === 1) {
+          warnings.push('Yama ptrace_scope=1 仅允许受信任的进程附加，若 Hook 被拒绝请检查调试权限')
+        }
+      } catch {
+        // Non-Yama kernels or restricted containers simply omit this hint.
+      }
+    }
+
+    return { fatal: [...new Set(fatal)], warnings: [...new Set(warnings)] }
   }
 
   private getHelperPath(): string {
@@ -56,109 +284,40 @@ export class KeyServiceLinux {
       onStatus?: (message: string, level: number) => void
   ): Promise<DbKeyResult> {
     try {
-      // 1. 构造一个包含常用系统命令路径的环境变量，防止打包后找不到命令
-      const envWithPath = {
-        ...process.env,
-        PATH: `${process.env.PATH || ''}:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin`
-      };
+      const diagnostics = await this.getLinuxRuntimeDiagnostics(true)
+      diagnostics.warnings.forEach((warning) => onStatus?.(`Linux 环境提示：${warning}`, 0))
+      if (diagnostics.fatal.length > 0) {
+        const error = `Linux 原生组件无法运行：${diagnostics.fatal.join('；')}`
+        onStatus?.(error, 2)
+        return { success: false, error }
+      }
 
-      onStatus?.('正在尝试结束当前微信进程...', 0)
-      console.log('[Debug] 开始执行进程清理逻辑...');
+      const envWithPath = this.getCommandEnvironment()
+      onStatus?.('正在查找已运行的微信进程...', 0)
+      let pid = await this.findWeChatPid(envWithPath)
 
-      try {
-        const { stdout, stderr } = await execAsync('killall -9 wechat wechat-bin xwechat', { env: envWithPath });
-        console.log(`[Debug] killall 成功退出. stdout: ${stdout}, stderr: ${stderr}`);
-      } catch (err: any) {
-        // 命令如果没找到进程通常会返回 code 1，这也是正常的，但我们需要记录下来
-        console.log(`[Debug] killall 报错或未找到进程: ${err.message}`);
-
-        // Fallback: 尝试使用 pkill 兜底
-        try {
-          console.log('[Debug] 尝试使用备用命令 pkill...');
-          await execAsync('pkill -9 -x "wechat|wechat-bin|xwechat"', { env: envWithPath });
-          console.log('[Debug] pkill 执行完成');
-        } catch (e: any) {
-          console.log(`[Debug] pkill 报错或未找到进程: ${e.message}`);
+      if (!pid) {
+        onStatus?.('未检测到微信，尝试启动一个可用客户端...', 0)
+        const launched = this.launchOneWeChat(envWithPath, onStatus)
+        if (!launched) {
+          onStatus?.('未找到可自动启动的微信客户端，请先手动启动并登录微信。', 2)
         }
       }
 
-      // 稍微等待进程完全退出
-      await new Promise(r => setTimeout(r, 1000))
-
-      onStatus?.('正在尝试拉起微信...', 0)
-
-      const cleanEnv = { ...process.env };
-      delete cleanEnv.ELECTRON_RUN_AS_NODE;
-      delete cleanEnv.ELECTRON_NO_ATTACH_CONSOLE;
-      delete cleanEnv.APPDIR;
-      delete cleanEnv.APPIMAGE;
-
-      const wechatBins = [
-        'wechat',
-        'wechat-bin',
-        'xwechat',
-        '/opt/wechat/wechat',
-        '/usr/bin/wechat',
-        '/usr/local/bin/wechat',
-        '/usr/bin/wechat',
-        '/opt/apps/com.tencent.wechat/files/wechat',
-        '/usr/bin/wechat-bin',
-        '/usr/local/bin/wechat-bin',
-        'com.tencent.wechat'
-      ]
-
-      for (const binName of wechatBins) {
-        try {
-          const child = spawn(binName, [], {
-            detached: true,
-            stdio: 'ignore',
-            env: cleanEnv
-          });
-
-          child.on('error', (err) => {
-            console.log(`[Debug] 拉起 ${binName} 失败:`, err.message);
-          });
-
-          child.unref();
-          console.log(`[Debug] 尝试拉起 ${binName} 完毕`);
-        } catch (e: any) {
-          console.log(`[Debug] 尝试拉起 ${binName} 发生异常:`, e.message);
-        }
-      }
-
-      onStatus?.('等待微信进程出现...', 0)
-      let pid = 0
-      for (let i = 0; i < 15; i++) { // 最多等 15 秒
-        await new Promise(r => setTimeout(r, 1000))
-
-        try {
-          const { stdout } = await execAsync('pidof wechat wechat-bin xwechat', { env: envWithPath });
-          const pids = stdout.trim().split(/\s+/).filter(p => p);
-          if (pids.length > 0) {
-            pid = parseInt(pids[0], 10);
-            console.log(`[Debug] 第 ${i + 1} 秒，通过 pidof 成功获取 PID: ${pid}`);
-            break;
-          }
-        } catch (err: any) {
-          console.log(`[Debug] 第 ${i + 1} 秒，pidof 失败: ${err.message.split('\n')[0]}`);
-
-          // Fallback: 使用 pgrep 兜底
-          try {
-            const { stdout: pgrepOut } = await execAsync('pgrep -x "wechat|wechat-bin|xwechat"', { env: envWithPath });
-            const pids = pgrepOut.trim().split(/\s+/).filter(p => p);
-            if (pids.length > 0) {
-              pid = parseInt(pids[0], 10);
-              console.log(`[Debug] 第 ${i + 1} 秒，通过 pgrep 成功获取 PID: ${pid}`);
-              break;
-            }
-          } catch (e: any) {
-            console.log(`[Debug] 第 ${i + 1} 秒，pgrep 也失败: ${e.message.split('\n')[0]}`);
+      if (!pid) {
+        onStatus?.('等待微信进程出现...', 0)
+        for (let i = 0; i < 15; i++) { // 最多等 15 秒
+          await new Promise(r => setTimeout(r, 1000))
+          pid = await this.findWeChatPid(envWithPath)
+          if (pid) {
+            console.log(`[KeyServiceLinux] 第 ${i + 1} 秒检测到微信 PID=${pid}`)
+            break
           }
         }
       }
 
       if (!pid) {
-        const err = '未能自动启动微信，或获取PID失败，请查看控制台日志或手动启动微信，看到登录窗口后点击确认。'
+        const err = '未检测到微信主进程。请先启动并登录微信，再重试密钥获取。'
         onStatus?.(err, 2)
         return { success: false, error: err }
       }
@@ -265,6 +424,10 @@ export class KeyServiceLinux {
       wxid?: string
   ): Promise<ImageKeyResult> {
     try {
+      const diagnostics = await this.getLinuxRuntimeDiagnostics(false)
+      if (diagnostics.fatal.length > 0) {
+        return { success: false, error: `Linux 原生组件无法运行：${diagnostics.fatal.join('；')}` }
+      }
       onProgress?.('正在初始化缓存扫描...');
       const helperPath = this.getHelperPath()
       const { stdout } = await execFileAsync(helperPath, ['image_local'])
@@ -327,6 +490,11 @@ export class KeyServiceLinux {
       onProgress?: (msg: string) => void
   ): Promise<ImageKeyResult> {
     try {
+      const diagnostics = await this.getLinuxRuntimeDiagnostics(true)
+      diagnostics.warnings.forEach((warning) => onProgress?.(`Linux 环境提示：${warning}`))
+      if (diagnostics.fatal.length > 0) {
+        return { success: false, error: `Linux 原生组件无法运行：${diagnostics.fatal.join('；')}` }
+      }
       onProgress?.('正在查找模板文件...')
       let result = await this._findTemplateData(accountPath, 32)
       let { ciphertext, xorKey } = result
@@ -342,11 +510,9 @@ export class KeyServiceLinux {
 
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
-      // 2. 找微信 PID
-      const { stdout } = await execAsync('pidof wechat wechat-bin xwechat').catch(() => ({ stdout: '' }))
-      const pids = stdout.trim().split(/\s+/).filter(p => p)
-      if (pids.length === 0) return { success: false, error: '微信未运行，无法扫描内存' }
-      const pid = parseInt(pids[0], 10)
+      // 2. 找微信 PID（仅匹配已知的精确进程名，避免 shell 注入/误匹配）
+      const pid = await this.findWeChatPid(this.getCommandEnvironment())
+      if (!pid) return { success: false, error: '微信未运行，无法扫描内存' }
 
       onProgress?.(`已找到微信进程 PID=${pid}，正在提权扫描进程内存...`);
 

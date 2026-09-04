@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getLaunchAtStartupStatus: () => ipcRenderer.invoke('app:getLaunchAtStartupStatus'),
     setLaunchAtStartup: (enabled: boolean) => ipcRenderer.invoke('app:setLaunchAtStartup', enabled),
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+    getChangelog: () => ipcRenderer.invoke('app:getChangelog'),
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
     ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
     onDownloadProgress: (callback: (progress: any) => void) => subscribe('app:downloadProgress', callback),
@@ -174,7 +175,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getOverallStatistics: (force?: boolean) => ipcRenderer.invoke('analytics:getOverallStatistics', force),
     getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number, options?: { includeGroupChats?: boolean }) =>
       ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp, options),
-    getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
+    getTimeDistribution: (force?: boolean) => ipcRenderer.invoke('analytics:getTimeDistribution', force),
     getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
       ipcRenderer.invoke('analytics:getSelfSentDailyDistribution', beginTimestamp, endTimestamp, force),
     getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
