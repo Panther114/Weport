@@ -384,13 +384,30 @@ two-frame-identical settle check, so README popup.png can't be a fading frame.
 
 ## Releases
 
+**CRITICAL — never pass the full `RELEASE_NOTES.md` as a release body.**
+`softprops/action-gh-release` `body_path` **overwrites an existing release's
+body** (observed on v0.9.11: a pre-created, correct release was replaced with
+the entire changelog). Therefore:
+
+- `.github/workflows/release.yml` runs
+  `node scripts/extract-release-notes.mjs "<package version>"` in **all three
+  build jobs** (win/mac/linux) and publishes with
+  `body_path: release-notes-current.md` — a per-version extraction that only
+  contains this version's section. Do NOT change `body_path` back to
+  `RELEASE_NOTES.md`.
+- `release-notes-current.md` is gitignored (generated in CI and for local
+  checks via the same script).
+- Local sanity check before releasing:
+  `node scripts/extract-release-notes.mjs <version>` then verify the file
+  starts with `# Weport v<version>` and contains no older-version headings.
+
 When releasing a new version on GitHub, write the release body as
 **concise, natural Chinese bullet points** — short plain bullets, no English
 fluff, no boilerplate. Create the release with `gh release create` BEFORE the
-CI publish step finishes: release.yml passes `body_path: RELEASE_NOTES.md` with
-default `update_release_body: false`, so a pre-created release keeps its body
-and CI only attaches installers. Tag name must match `package.json` version
-(`v0.9.9` ↔ `0.9.9`) — the workflow fails otherwise.
+CI publish step finishes (pre-created release wins on assets timing; the
+extraction step now also guards the body if CI creates it first). Tag name
+must match `package.json` version (`v0.9.9` ↔ `0.9.9`) — the workflow fails
+otherwise.
 
 - Release title MUST be `Weport vX.X.X` (e.g. `Weport v0.9.9`), never bare `vX.X.X` with `gh release create vX.X.X --title "Weport vX.X.X"`.
 - Release body MUST contain ONLY that version's section from `RELEASE_NOTES.md`

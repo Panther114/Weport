@@ -65,3 +65,6 @@ docs/media/weport-demo.mp4
 # WeClone server local test artifacts
 weclone-server/.server-pid.txt
 weclone-server/data-test/
+
+# Generated per-version release notes (CI body_path)
+release-notes-current.md
