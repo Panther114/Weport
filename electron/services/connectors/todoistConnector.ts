@@ -62,15 +62,23 @@ const LABEL_TARGET_PREFIX = 'label:'
 
 async function call<T>(token: string, path: string, init?: RequestInit & { query?: Record<string, string> }): Promise<ConnectorResult<T>> {
   const query = init?.query ? `?${new URLSearchParams(init.query).toString()}` : ''
+  const url = `${BASE}${path}${query}`
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+    ...(init?.headers || {}),
+  }
   try {
-    const response = await fetch(`${BASE}${path}${query}`, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        ...(init?.headers || {}),
-      },
-    })
+    let response = await fetch(url, { ...init, headers })
+    // Todoist still moves endpoints between API versions and answers a POST with a
+    // 307/308; `fetch` does not replay a body onto the new location for those on its
+    // own, so follow it explicitly rather than reporting a "fetch failed" that has
+    // nothing to do with the network.
+    for (let hop = 0; hop < 3 && [301, 302, 307, 308].includes(response.status); hop += 1) {
+      const location = response.headers.get('location')
+      if (!location) break
+      response = await fetch(new URL(location, url).toString(), { ...init, headers })
+    }
     const text = await response.text().catch(() => '')
     if (!response.ok) {
       // Todoist answers errors as `{"error": "..."}`; anything else is surfaced raw

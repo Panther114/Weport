@@ -112,6 +112,7 @@ const isAnyQaMode =
   process.env.WEPORT_SELFTEST === '1' ||
   process.env.WEPORT_AI_SELFTEST === '1' ||
   process.env.WEPORT_AI_PROBE === '1' ||
+  process.env.WEPORT_AI_SETUP === '1' ||
   isCliMode
 
 // ---------------------------------------------------------------------------
@@ -6750,6 +6751,103 @@ function installMainProcessErrorHandlers() {
 //   WEPORT_AI_PROBE_MODELS   设为 1 时先做一次模型发现，把网关 /models 的结果写进 JSON
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+// 一次性服务配置（WEPORT_AI_SETUP=1）
+//
+// 存在的理由：provider 配置存在 safeStorage 加密的 blob 里，脚本 / 自动化没有任何
+// 受支持的写入路径（手工改配置文件会毁掉加密信封）。这个模式只做一件事——把
+// "唯一一个服务" 写进去并验证它能调通——因此它既是首次引导，也是密钥轮换的工具。
+//
+// 环境变量：
+//   WEPORT_AI_SETUP_KEY       API key（必填）
+//   WEPORT_AI_SETUP_MODEL     模型 id（默认 deepseek-v4.1-flash）
+//   WEPORT_AI_SETUP_BASE_URL  服务地址（默认 opencode-go 网关）
+//   WEPORT_AI_SETUP_PROVIDER  provider id（默认 opencode-go）
+//   WEPORT_AI_SETUP_NAME      显示名称
+// ---------------------------------------------------------------------------
+async function runAiSetup() {
+  const outDir = process.env.WEPORT_AI_PROBE_OUT || join(app.getPath('temp'), 'weport-ai-setup')
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'setup.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+  }
+
+  const apiKey = String(process.env.WEPORT_AI_SETUP_KEY || '').trim()
+  if (!apiKey) {
+    log('FAIL: 缺少 WEPORT_AI_SETUP_KEY')
+    app.exit(1)
+    return
+  }
+  const model = String(process.env.WEPORT_AI_SETUP_MODEL || 'deepseek-v4.1-flash').trim()
+  const providerId = String(process.env.WEPORT_AI_SETUP_PROVIDER || 'opencode-go').trim()
+  const baseUrl = String(process.env.WEPORT_AI_SETUP_BASE_URL || 'https://opencode.ai/zen/go/v1').trim()
+  const name = String(process.env.WEPORT_AI_SETUP_NAME || 'OpenCode Go · DeepSeek V4.1 Flash').trim()
+
+  const before = weportAiService.listProviderProfiles().map((profile) => profile.id)
+  const saved = weportAiService.saveProviderProfile({ name, providerId, protocol: 'openai-compatible', baseUrl, model, apiKey })
+  if (!saved.success || !saved.profile) {
+    log(`FAIL: 保存失败：${saved.error}`)
+    app.exit(1)
+    return
+  }
+  const profileId = saved.profile.id
+  log(`saved profile ${profileId} (${providerId}/${model})`)
+
+  // 只保留这一个服务：用户明确要求"只有 opencode + deepseek v4.1"，留着指向已失效
+  // 密钥的旧 profile 只会让其它功能面在 401 里打转。
+  for (const id of before) {
+    if (id === profileId) continue
+    const removed = weportAiService.deleteProviderProfile(id)
+    log(`removed old profile ${id}: ${removed.success}`)
+  }
+  log(`activate: ${weportAiService.activateProviderProfile(profileId).success}`)
+  for (const consumer of ['chat', 'weclone', 'webot'] as const) {
+    log(`assign ${consumer}: ${weportAiService.assignConsumerProfile(consumer, profileId).success}`)
+  }
+
+  // 验证：真发一轮请求，确认这把钥匙在**这台机器**上可用（网关按地区拒模型）。
+  const chat = weportAiService.createChat('[setup]')
+  let doneResolve: ((value: { usage?: Record<string, unknown>; context?: Record<string, unknown> }) => void) | null = null
+  weportAiService.setEventEmitter((ev) => {
+    if (ev.type === 'done' && doneResolve) {
+      const resolve = doneResolve
+      doneResolve = null
+      resolve({ usage: ev.usage as unknown as Record<string, unknown>, context: ev.context as unknown as Record<string, unknown> })
+    }
+  })
+  const completion = new Promise<{ usage?: Record<string, unknown>; context?: Record<string, unknown> }>((resolve) => {
+    doneResolve = resolve
+    setTimeout(() => { doneResolve = null; resolve({}) }, 180000).unref?.()
+  })
+  const result = await weportAiService.runChat(chat.id, '回复两个字：就绪', { consumer: 'chat' })
+  const done = await completion
+  const usage = done.usage || {}
+  log(`verify: ok=${result.success} error=${result.error || ''} prompt=${Number(usage.promptTokens) || 0} cacheHit=${Number((usage as Record<string, unknown>).promptCacheHitTokens) || 0}`)
+  weportAiService.deleteChat(chat.id)
+
+  const payload = {
+    profileId,
+    providerId,
+    baseUrl,
+    model,
+    verified: result.success === true,
+    error: result.error,
+    usage,
+    profiles: weportAiService.listProviderProfiles().map((profile) => ({ id: profile.id, name: profile.name, model: profile.model })),
+  }
+  try { writeFileSync(join(outDir, 'setup.json'), JSON.stringify(payload, null, 2), 'utf8') } catch { /* noop */ }
+  log(`${result.success ? 'PASS' : 'FAIL'} (out: ${outDir})`)
+  isAppQuitting = true
+  try { chatService.close() } catch { /* noop */ }
+  try { await wcdbService.shutdown() } catch { /* noop */ }
+  try { mainWindow?.destroy() } catch { /* noop */ }
+  mainWindow = null
+  app.exit(result.success ? 0 : 1)
+}
+
+// ---------------------------------------------------------------------------
 // TUI 引擎模式（`--cli`）：把服务层接到 stdio 上，供 packages/weport-tui 驱动
 //
 // 通道用 Node 的 IPC（`process.send`/`message`）而不是管道 JSON：Windows 上
@@ -7179,6 +7277,12 @@ function startApp() {
     // TUI 引擎：不建窗口、不建托盘，`weport` 在终端里通过 stdio 驱动服务层。
     if (isCliMode) {
       await runCliHost()
+      return
+    }
+
+    // 一次性服务配置（引导 / 密钥轮换）。放在窗口创建前，因为它要么改配置要么退出。
+    if (process.env.WEPORT_AI_SETUP === '1') {
+      await runAiSetup()
       return
     }
 

@@ -22,26 +22,25 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { build } from 'vite'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 async function loadConnector() {
   const outDir = mkdtempSync(join(tmpdir(), 'weport-todoist-'))
-  await build({
-    root,
-    configFile: false,
+  const outFile = join(outDir, 'connector.mjs')
+  // esbuild rather than Vite: this is a single dependency-free module, and the Vite lib
+  // build mirrors the entry path under `outDir` when the entry sits outside the root.
+  const esbuild = await import('esbuild')
+  await esbuild.build({
+    entryPoints: [join(root, 'electron/services/connectors/todoistConnector.ts')],
+    outfile: outFile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    target: 'node20',
     logLevel: 'error',
-    build: {
-      lib: { entry: join(root, 'electron/services/connectors/todoistConnector.ts'), formats: ['es'], fileName: () => 'connector.mjs' },
-      outDir,
-      emptyOutDir: false,
-      target: 'node20',
-      minify: false,
-      ssr: true,
-    },
   })
-  const mod = await import(pathToFileURL(join(outDir, 'connector.mjs')).href)
+  const mod = await import(pathToFileURL(outFile).href)
   return { mod, cleanup: () => rmSync(outDir, { recursive: true, force: true }) }
 }
 

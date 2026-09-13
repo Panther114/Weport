@@ -80,6 +80,31 @@ describe('todoist connector', () => {
     expect('due_date' in (calls[0].body || {})).toBe(false)
   })
 
+  it('follows a version redirect instead of reporting a network failure', async () => {
+    // Regression: Todoist answers `POST /api/v1/tasks` with a 308 to a newer API
+    // version, and `fetch` will not replay the body — the live call failed with a bare
+    // "fetch failed" until the connector followed the Location header itself.
+    let redirects = 0
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init, body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined })
+      if (String(url).includes('/api/v1/tasks')) {
+        redirects += 1
+        return {
+          ok: false,
+          status: 308,
+          headers: { get: (name: string) => (name.toLowerCase() === 'location' ? 'https://api.todoist.com/api/v2/tasks' : null) },
+          text: async () => '',
+        } as unknown as Response
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ id: '9', content: 'x' }) } as unknown as Response
+    })
+    const result = await todoistConnector.createTask('t', { content: 'x' })
+    expect(redirects).toBe(1)
+    expect(result.success).toBe(true)
+    expect(calls.at(-1)?.url).toContain('/api/v2/tasks')
+    expect(calls.at(-1)?.body?.content).toBe('x')
+  })
+
   it('answers a network failure with an actionable message', async () => {
     vi.stubGlobal('fetch', async () => {
       throw new Error('fetch failed')

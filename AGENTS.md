@@ -143,6 +143,28 @@ Rules:
   `build:dir`, `build:mac` and `build:linux` run `build:tui` first so the shipped app
   and the TUI never disagree about the command surface.
 
+## Connectors (`electron/services/connectors/`) — v1.0
+
+Third-party tools Weport writes to (Todoist first). A connector is a transport + capability
+list; `connectorsService` owns credentials and is the only thing that may hand a token to a
+connector.
+
+- Credentials live in **one** safeStorage-encrypted config value (`weportConnectorsBlob`), like
+  provider profiles. The renderer only ever receives a mask (`····9f2c`) — never add an IPC
+  path that returns the token.
+- `connect` verifies before it stores: a saved-but-unverified credential shows a green
+  "connected" badge on a broken integration, so a failed check must store nothing.
+- Todoist specifics that cost real debugging time: `POST /api/v1/tasks` answers **308** to a
+  newer API version and Node's `fetch` will not replay a body across it (the connector follows
+  the `Location` header itself — without that the live call reports a bare "fetch failed");
+  priority is **inverted** between the REST body (1 = normal … 4 = urgent) and Todoist's own
+  Quick Add syntax (`p1` = urgent); an omitted `project_id` means the Inbox, so "no target" is
+  a valid request. Chunked uploads to `weclone-server` cap at 1200 chars per chunk.
+- The agent reaches a connector only through `list_connector_targets` /
+  `create_connector_task`, which appear **only when a connector is connected** and are gated by
+  `connectorsAllowAgent`. The tool table is frozen per run, so connecting or disconnecting in
+  settings takes effect on the next turn — never mid-epoch.
+
 ## Notification Popup (Permanent — Do Not Change)
 
 The popup is `electron/windows/notificationWindow.ts` (WeFlow port): a separate

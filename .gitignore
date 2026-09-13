@@ -65,6 +65,10 @@ docs/media/weport-demo.mp4
 # WeClone server local test artifacts
 weclone-server/.server-pid.txt
 weclone-server/data-test/
+# 运行期数据：上传的克隆语料 = 真实聊天记录，绝不提交（服务端可重建）
+weclone-server/data/
+weclone-server/node_modules/
+weclone-server/*.log
 
 # Generated per-version release notes (CI body_path)
 release-notes-current.md

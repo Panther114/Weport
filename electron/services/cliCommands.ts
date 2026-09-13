@@ -244,6 +244,25 @@ export function registerCliCommands(): void {
 
     // ------------------------------------------------------------------ 连接器
     {
+      name: 'connectors.connect',
+      summary: 'Store a credential for a connector and verify it immediately.',
+      mutating: true,
+      args: [
+        { name: 'id', type: 'string', description: '连接器 id（默认 todoist）' },
+        { name: 'token', type: 'string', required: true },
+      ],
+      run: async (args) => {
+        const id = String(args.id || 'todoist')
+        const token = String(args.token || '').trim()
+        if (!token) return { success: false, error: '缺少 token 参数' }
+        const result = await connectorsService.connect(id, token)
+        // Never echo the credential back, not even on failure: the caller already has it.
+        return result.success
+          ? { success: true, data: { id, connected: true, credentialHint: result.data?.credentialHint } }
+          : { success: false, error: result.error }
+      },
+    },
+    {
       name: 'connectors.list',
       summary: 'Connector status (connected services and their credential masks).',
       mutating: false,
@@ -334,6 +353,84 @@ export function registerCliCommands(): void {
           .reverse()
           .find((message) => message.role === 'assistant')
         return { success: true, data: { chatId, answer: answer?.content || '' }, text: answer?.content || '' }
+      },
+    },
+
+    {
+      name: 'ai.setup',
+      summary: 'Replace the provider configuration with one service and verify it end to end.',
+      mutating: true,
+      args: [
+        { name: 'key', type: 'string', required: true },
+        { name: 'model', type: 'string', description: '默认 deepseek-v4.1-flash' },
+        { name: 'baseUrl', type: 'string' },
+        { name: 'providerId', type: 'string' },
+        { name: 'name', type: 'string' },
+        { name: 'keepOthers', type: 'string', description: '传 1 则保留其它服务' },
+      ],
+      run: async (args) => {
+        const key = String(args.key || '').trim()
+        if (!key) return { success: false, error: '缺少 key 参数' }
+        const model = String(args.model || 'deepseek-v4.1-flash').trim()
+        const providerId = String(args.providerId || 'opencode-go').trim()
+        const baseUrl = String(args.baseUrl || 'https://opencode.ai/zen/go/v1').trim()
+        const name = String(args.name || `OpenCode Go · ${model}`).trim()
+        const existing = weportAiService.listProviderProfiles()
+        const saved = weportAiService.saveProviderProfile({ name, providerId, protocol: 'openai-compatible', baseUrl, model, apiKey: key })
+        if (!saved.success || !saved.profile) return { success: false, error: saved.error || '保存失败' }
+        if (String(args.keepOthers || '') !== '1') {
+          for (const profile of existing) {
+            if (profile.id !== saved.profile.id) weportAiService.deleteProviderProfile(profile.id)
+          }
+        }
+        weportAiService.activateProviderProfile(saved.profile.id)
+        for (const consumer of ['chat', 'weclone', 'webot'] as const) weportAiService.assignConsumerProfile(consumer, saved.profile.id)
+        return { success: true, data: { profileId: saved.profile.id, providerId, baseUrl, model }, text: `已配置 ${providerId}/${model}` }
+      },
+    },
+    {
+      name: 'ai.probe',
+      summary: 'Send N turns through the configured service and report cache hits and latency.',
+      mutating: true,
+      args: [
+        { name: 'turns', type: 'number', description: '默认 4' },
+        { name: 'consumer', type: 'string', description: 'chat | weclone | webot' },
+      ],
+      run: async (args) => {
+        const turns = Math.max(1, Math.min(12, asInt(args.turns, 4, 1, 12)))
+        const consumer = (String(args.consumer || 'chat') as 'chat' | 'weclone' | 'webot')
+        const prompts = [
+          '用一句话说明你能做什么，不要调用工具。',
+          '把刚才那句改短，仍然不要调用工具。',
+          '用两条要点总结上面的内容，不要调用工具。',
+          '再补一句：这些要点里哪条最重要，为什么。不要调用工具。',
+          '最后：回答"收到"两个字即可，不要调用工具。',
+        ]
+        const chat = weportAiService.createChat('[cli-probe]')
+        const rows: Array<Record<string, unknown>> = []
+        for (let index = 0; index < turns; index += 1) {
+          const startedAt = Date.now()
+          const result = await weportAiService.runChat(chat.id, prompts[index % prompts.length], { consumer })
+          if (!result.success) {
+            weportAiService.deleteChat(chat.id)
+            return { success: false, error: result.error }
+          }
+          const stored = weportAiService.getChat(chat.id)
+          const usage = (stored as { usage?: { promptTokens?: number; promptCacheHitTokens?: number } }).usage || {}
+          const promptTokens = Number(usage.promptTokens) || 0
+          const hit = Number(usage.promptCacheHitTokens) || 0
+          rows.push({
+            turn: index + 1,
+            elapsedMs: Date.now() - startedAt,
+            promptTokens,
+            cacheHitTokens: hit,
+            cacheHitRate: promptTokens > 0 ? Math.round((hit / promptTokens) * 10000) / 100 : null,
+          })
+        }
+        weportAiService.deleteChat(chat.id)
+        const rates = rows.slice(1).map((row) => Number(row.cacheHitRate)).filter((value) => Number.isFinite(value))
+        const steady = rates.length > 0 ? Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 100) / 100 : null
+        return { success: true, data: { turns: rows, steadyStateCacheHitRate: steady } }
       },
     },
 
