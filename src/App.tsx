@@ -321,6 +321,8 @@ export default function App() {
   const [antiRevokeInstalled, setAntiRevokeInstalled] = useState<Record<string, boolean>>({})
   const [antiRevokeBusy, setAntiRevokeBusy] = useState(false)
   const [antiRevokeNewGroupsEnabled, setAntiRevokeNewGroupsEnabled] = useState(false)
+  const [antiRevokeQuery, setAntiRevokeQuery] = useState('')
+  const [antiRevokeFilter, setAntiRevokeFilter] = useState<'all' | 'installed' | 'pending'>('all')
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
   const colorMode = useColorMode()
@@ -1439,6 +1441,46 @@ export default function App() {
   const installedCount = Object.values(antiRevokeInstalled).filter(Boolean).length
   const isExporting = busy && tab === 'export' && !!progress && progress.phase !== 'complete'
 
+  // 会话一多，防撤回列表就没法用了 —— 没有搜索，也没法只看「还没装的」。
+  const filteredAntiRevokeSessions = useMemo(() => {
+    const kw = antiRevokeQuery.trim().toLowerCase()
+    return antiRevokeSessions.filter((s) => {
+      const installed = antiRevokeInstalled[s.username] === true
+      if (antiRevokeFilter === 'installed' && !installed) return false
+      if (antiRevokeFilter === 'pending' && installed) return false
+      if (!kw) return true
+      return (s.displayName || '').toLowerCase().includes(kw) || s.username.toLowerCase().includes(kw)
+    })
+  }, [antiRevokeSessions, antiRevokeInstalled, antiRevokeQuery, antiRevokeFilter])
+
+  const antiRevokeActions = () => (
+    <div className="panel-actions">
+      <span className="hint">
+        当前显示 {filteredAntiRevokeSessions.length} / {antiRevokeSessions.length} 个会话
+      </span>
+      <div className="panel-actions-buttons">
+        <button
+          className="secondary-btn"
+          type="button"
+          disabled={!allReady || antiRevokeBusy || antiRevokeSessions.length === 0}
+          onClick={() => void installAntiRevoke(antiRevokeSessions.map((s) => s.username))}
+        >
+          <ShieldPlus size={14} />
+          全部安装
+        </button>
+        <button
+          className="danger-btn"
+          type="button"
+          disabled={!allReady || antiRevokeBusy || installedCount === 0}
+          onClick={() => void uninstallAntiRevoke(Object.keys(antiRevokeInstalled).filter((id) => antiRevokeInstalled[id]))}
+        >
+          <Undo2 size={14} />
+          全部还原
+        </button>
+      </div>
+    </div>
+  )
+
   function switchTab(next: Tab) {
     setTab(next)
     void api.config.set('lastTab', next)
@@ -2367,72 +2409,102 @@ export default function App() {
         {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
 
         {tab === 'antirecall' && (
-          <div className="single-col">
-            <section className="panel">
-              <p className="hint">
-                对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
-                安装/卸载针对具体会话，微信升级后一般无需重装；触发器安装在微信侧，
-                之后无需保持 Weport 运行。
-              </p>
-              <div className="btn-row" style={{ alignItems: 'center' }}>
-                <label className="switch-label">
-                  <input
-                    type="checkbox"
-                    checked={antiRevokeNewGroupsEnabled}
-                    disabled={!allReady || antiRevokeBusy}
-                    onChange={(e) => void toggleAntiRevokeNewGroups(e.target.checked)}
-                  />
-                  <span>新群聊自动安装</span>
-                </label>
-                <span className="hint" style={{ margin: 0 }}>
-                  仅处理开启后首次观察到的 @chatroom，会延迟排队，不影响消息通知；默认关闭。
-                </span>
+          /* 重排：原来第一屏是三行解释 + 一个复选框 + 三个按钮 + 一长条会话列表，
+             用户在动手之前必须先读完一段说明，而且列表多起来没法找。现在说明
+             折进 details，顶部只留「装了多少」和刷新，列表带搜索与筛选。 */
+          <div className="page-stack">
+            <div className="status-bar" data-live={installedCount > 0}>
+              <ShieldPlus size={15} />
+              <div className="status-bar-text">
+                <strong>
+                  {antiRevokeSessions.length === 0
+                    ? '尚未读取会话'
+                    : `已安装 ${installedCount} / ${antiRevokeSessions.length} 个会话`}
+                </strong>
+                <span className="hint">触发器装在微信侧，装好后不必保持 Weport 运行</span>
               </div>
-              <div className="btn-row">
-                <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
-                  <RefreshCw size={14} />
-                  {antiRevokeBusy ? '刷新中…' : '刷新状态'}
-                </button>
-                <button
-                  className="primary-btn"
-                  type="button"
-                  disabled={!allReady || antiRevokeBusy || antiRevokeSessions.length === 0}
-                  onClick={() => void installAntiRevoke(antiRevokeSessions.map((s) => s.username))}
-                >
-                  <ShieldPlus size={14} />
-                  全部安装 ({installedCount}/{antiRevokeSessions.length})
-                </button>
-                <button
-                  className="danger-btn"
-                  type="button"
-                  disabled={!allReady || antiRevokeBusy || installedCount === 0}
-                  onClick={() => void uninstallAntiRevoke(Object.keys(antiRevokeInstalled).filter((id) => antiRevokeInstalled[id]))}
-                >
-                  <Undo2 size={14} />
-                  全部还原
-                </button>
-              </div>
-              {!allReady && (
-                <p className="hint" style={{ marginTop: 8 }}>
-                  完成「连接」页的数据目录 / 账号 / 密钥后即可使用。
+              <details className="status-bar-details">
+                <summary>说明</summary>
+                <p>
+                  对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
+                  安装 / 卸载针对具体会话，微信升级后一般无需重装。
                 </p>
-              )}
+              </details>
+              <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
+                <RefreshCw size={14} />
+                {antiRevokeBusy ? '刷新中…' : '刷新状态'}
+              </button>
+            </div>
+
+            {!allReady && (
+              <div className="status-warn">
+                完成「连接微信」页的数据目录 / 账号 / 密钥后即可使用。
+              </div>
+            )}
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <ShieldCheck size={15} />
+                  会话
+                </h2>
+                <div className="panel-head-actions">
+                  <input
+                    className="filter-input"
+                    value={antiRevokeQuery}
+                    disabled={!allReady}
+                    placeholder="搜索会话…"
+                    aria-label="搜索会话"
+                    onChange={(e) => setAntiRevokeQuery(e.target.value)}
+                  />
+                  <div className="segmented" role="radiogroup" aria-label="会话筛选">
+                    {(
+                      [
+                        { id: 'all', label: '全部' },
+                        { id: 'installed', label: '已安装' },
+                        { id: 'pending', label: '未安装' },
+                      ] as const
+                    ).map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={antiRevokeFilter === option.id}
+                        className="segmented-item"
+                        data-active={antiRevokeFilter === option.id}
+                        onClick={() => setAntiRevokeFilter(option.id)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {antiRevokeActions()}
+
               {allReady && antiRevokeSessions.length === 0 && !antiRevokeBusy && (
                 <div className="empty" style={{ marginTop: 12 }}>
                   未找到可安装防撤回的会话（联系人或群聊）。点击「刷新状态」重试。
                 </div>
               )}
-              {antiRevokeSessions.length > 0 && (
+
+              {antiRevokeSessions.length > 0 && filteredAntiRevokeSessions.length === 0 && (
+                <div className="empty" style={{ marginTop: 12 }}>
+                  没有符合当前筛选的会话。
+                </div>
+              )}
+
+              {filteredAntiRevokeSessions.length > 0 && (
                 <div className="account-list anti-revoke-list" role="listbox" aria-label="防撤回会话">
-                  {antiRevokeSessions.map((s) => {
+                  {filteredAntiRevokeSessions.map((s) => {
                     const installed = antiRevokeInstalled[s.username] === true
                     return (
                       <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
                         <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
-                        <span className="ar-id">{s.username}</span>
-                        <span className={`badge ${installed ? 'ok' : ''}`}>{installed ? '已安装' : '未安装'}</span>
+                        <span className="ar-id" title={s.username}>{s.username}</span>
                         <button
-                          className="ghost-btn"
+                          className={installed ? 'ghost-btn' : 'secondary-btn'}
                           type="button"
                           disabled={antiRevokeBusy}
                           onClick={() => (installed ? void uninstallAntiRevoke([s.username]) : void installAntiRevoke([s.username]))}
@@ -2445,144 +2517,162 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Undo2 size={15} />
+                  自动与批量
+                </h2>
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <ShieldPlus size={14} />
+                  <div>
+                    <strong>新群聊自动安装</strong>
+                    <span className="hint">只处理开启后首次观察到的群聊，会延迟排队，不影响消息通知</span>
+                  </div>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={antiRevokeNewGroupsEnabled}
+                    disabled={!allReady || antiRevokeBusy}
+                    onChange={(e) => void toggleAntiRevokeNewGroups(e.target.checked)}
+                  />
+                  <span className="track" />
+                </label>
+              </div>
+            </section>
           </div>
         )}
 
         {tab === 'notifications' && (
-          <div className="single-col">
+          /* 重排：原来一张面板里塞了「开不开」「长什么样」「收谁的」「现在有没有在跑」，
+             全部同权，于是每一行都要读一遍才知道自己在看什么。现在分成
+             状态条（是否在跑 + 总开关）/ 弹窗外观 / 接收范围 三层。 */
+          <div className="page-stack">
+            <div className="status-bar" data-live={notificationsEnabled && allReady && notifyListening}>
+              <span className={`status-dot${notificationsEnabled && allReady && notifyListening ? ' listening' : ''}`} />
+              <div className="status-bar-text">
+                <strong>
+                  {!notificationsEnabled
+                    ? '消息提醒已关闭'
+                    : !allReady
+                      ? '等待配置完成'
+                      : notifyListening
+                        ? '正在监听新消息与撤回事件'
+                        : '已开启，连接数据库后开始监听'}
+                </strong>
+                <span className="hint">
+                  {!allReady
+                    ? `还需完成：${[
+                        ['微信数据目录', dbReady],
+                        ['微信账号', accountReady],
+                        ['解密密钥', keyOk],
+                      ].filter(([, ok]) => !ok).map(([label]) => label as string).join('、')}`
+                    : '弹窗出现在屏幕一角，右键卡片可立即关闭'}
+                </span>
+              </div>
+              <button className="ghost-btn" type="button" onClick={() => void api.notification.showTest()}>
+                <BellRing size={13} />
+                测试弹窗
+              </button>
+              <label className="switch" title="启用消息提醒">
+                <input
+                  type="checkbox"
+                  checked={notificationsEnabled}
+                  onChange={(e) => void toggleNotifications(e.target.checked)}
+                />
+                <span className="track" />
+              </label>
+            </div>
+
             <section className="panel">
-              <div className="btn-row" style={{ alignItems: 'center' }}>
-                <label className="switch-label">
+              <div className="panel-head">
+                <h2>
+                  <Sparkles size={15} />
+                  弹窗外观
+                </h2>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <MapPin size={14} />
+                  <div>
+                    <strong>弹窗位置</strong>
+                    <span className="hint">通知卡片出现在屏幕的哪个角</span>
+                  </div>
+                </div>
+                <select
+                  className="notification-select"
+                  value={notificationPosition}
+                  onChange={(e) => void updateNotificationPosition(e.target.value as NotificationPosition)}
+                  aria-label="弹窗位置"
+                >
+                  {NOTIFICATION_POSITION_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Timer size={14} />
+                  <div>
+                    <strong>显示时长</strong>
+                    <span className="hint">到点自动淡出，右键卡片可立即关闭</span>
+                  </div>
+                </div>
+                <div className="notification-duration-control">
+                  <input
+                    type="number"
+                    className="notification-select notification-duration-input"
+                    min={1}
+                    max={60}
+                    step={1}
+                    value={durationInput}
+                    onChange={(e) => {
+                      const text = e.target.value
+                      setDurationInput(text)
+                      const seconds = Number(text)
+                      if (text === '' || !Number.isFinite(seconds) || seconds < 1) return
+                      const durationMs = Math.min(60_000, Math.max(1000, Math.round(seconds * 1000)))
+                      if (durationMs !== notificationDuration) void updateNotificationDuration(durationMs)
+                    }}
+                    onBlur={() => setDurationInput(String(Math.round(notificationDuration / 1000)))}
+                    aria-label="弹窗显示时长（秒）"
+                  />
+                  <span className="hint">秒</span>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Sparkles size={14} />
+                  <div>
+                    <strong>弹窗动效</strong>
+                    <span className="hint">关闭后直接显示和隐藏，减少干扰</span>
+                  </div>
+                </div>
+                <label className="switch">
                   <input
                     type="checkbox"
-                    checked={notificationsEnabled}
-                    onChange={(e) => void toggleNotifications(e.target.checked)}
+                    checked={notificationAnimationEnabled}
+                    onChange={(e) => void toggleNotificationAnimation(e.target.checked)}
                   />
-                  <span>启用消息提醒</span>
+                  <span className="track" />
                 </label>
-                <button className="ghost-btn" type="button" onClick={() => void api.notification.showTest()}>
-                  <BellRing size={13} />
-                  测试通知弹窗
-                </button>
               </div>
+            </section>
 
-              <div className="notification-settings" aria-label="弹窗行为设置">
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <MapPin size={14} />
-                    <div>
-                      <strong>弹窗位置</strong>
-                      <span className="hint">选择通知卡片出现的屏幕位置</span>
-                    </div>
-                  </div>
-                  <select
-                    className="notification-select"
-                    value={notificationPosition}
-                    onChange={(e) => void updateNotificationPosition(e.target.value as NotificationPosition)}
-                    aria-label="弹窗位置"
-                  >
-                    {NOTIFICATION_POSITION_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <Timer size={14} />
-                    <div>
-                      <strong>显示时长</strong>
-                      <span className="hint">右键卡片可立即关闭</span>
-                    </div>
-                  </div>
-                  <div className="notification-duration-control">
-                    <input
-                      type="number"
-                      className="notification-select notification-duration-input"
-                      min={1}
-                      max={60}
-                      step={1}
-                      value={durationInput}
-                      onChange={(e) => {
-                        const text = e.target.value
-                        setDurationInput(text)
-                        const seconds = Number(text)
-                        if (text === '' || !Number.isFinite(seconds) || seconds < 1) return
-                        const durationMs = Math.min(60_000, Math.max(1000, Math.round(seconds * 1000)))
-                        if (durationMs !== notificationDuration) void updateNotificationDuration(durationMs)
-                      }}
-                      onBlur={() => setDurationInput(String(Math.round(notificationDuration / 1000)))}
-                      aria-label="弹窗显示时长（秒）"
-                    />
-                    <span className="hint">秒</span>
-                  </div>
-                </div>
-
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <Sparkles size={14} />
-                    <div>
-                      <strong>弹窗动效</strong>
-                      <span className="hint">关闭后直接显示和隐藏，减少干扰</span>
-                    </div>
-                  </div>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={notificationAnimationEnabled}
-                      onChange={(e) => void toggleNotificationAnimation(e.target.checked)}
-                    />
-                    <span className="track" />
-                  </label>
-                </div>
-
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <BellOff size={14} />
-                    <div>
-                      <strong>跟随微信消息免打扰</strong>
-                      <span className="hint">微信中标记“消息免打扰”的会话不显示 Weport 弹窗（默认开启）</span>
-                    </div>
-                  </div>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={respectWechatMute}
-                      onChange={(e) => void toggleRespectWechatMute(e.target.checked)}
-                    />
-                    <span className="track" />
-                  </label>
-                </div>
-              </div>
-
-              {/* 「提醒的前置条件」原本是一个嵌套面板，逐条重复左侧栏已经常驻
-                  显示的连接状态。同一个事实在一屏里出现两次只会让人怀疑哪个
-                  才是最新的；这里保留它真正提供的信息 —— 不满足时给出原因。 */}
-              {!allReady ? (
-                <p className="hint" style={{ marginBottom: 10 }}>
-                  提醒尚未生效：{[
-                    ['微信数据目录', dbReady],
-                    ['微信账号', accountReady],
-                    ['解密密钥', keyOk],
-                  ].filter(([, ok]) => !ok).map(([label]) => label as string).join('、')}
-                  {' '}尚未就绪，请先到「连接微信」完成配置。
-                </p>
-              ) : null}
-
-              <div className="btn-row" style={{ alignItems: 'center', marginTop: 12 }}>
-                {!allReady ? (
-                  <span className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
-                    <button className="secondary-btn" type="button" disabled>
-                      配置会话过滤
-                    </button>
-                  </span>
-                ) : (
-                  <button className="secondary-btn" type="button" onClick={() => void openNotifyFilter()}>
-                    <Filter size={14} />
-                    配置会话过滤
-                  </button>
-                )}
-                <span className="hint">
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Filter size={15} />
+                  接收范围
+                </h2>
+                <span>
                   {notifyFilterMode === 'all'
                     ? '接收所有会话的通知'
                     : notifyFilterMode === 'whitelist'
@@ -2593,20 +2683,45 @@ export default function App() {
                 </span>
               </div>
 
-              <p className="hint">
-                {!notificationsEnabled ? (
-                  '消息提醒已关闭'
-                ) : !allReady ? (
-                  '已开启，完成上面的准备条件后开始监听'
-                ) : notifyListening ? (
-                  <>
-                    <span className="status-dot listening" />
-                    正在监听当前账号的新消息和撤回事件
-                  </>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <BellOff size={14} />
+                  <div>
+                    <strong>跟随微信消息免打扰</strong>
+                    <span className="hint">微信里标了「消息免打扰」的会话不发弹窗（默认开启）</span>
+                  </div>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={respectWechatMute}
+                    onChange={(e) => void toggleRespectWechatMute(e.target.checked)}
+                  />
+                  <span className="track" />
+                </label>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Filter size={14} />
+                  <div>
+                    <strong>会话过滤</strong>
+                    <span className="hint">按会话白名单 / 黑名单，或只提醒 @你 的消息</span>
+                  </div>
+                </div>
+                {!allReady ? (
+                  <span className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+                    <button className="secondary-btn" type="button" disabled>
+                      配置…
+                    </button>
+                  </span>
                 ) : (
-                  '已开启，连接数据库后开始监听'
+                  <button className="secondary-btn" type="button" onClick={() => void openNotifyFilter()}>
+                    <Filter size={14} />
+                    配置…
+                  </button>
                 )}
-              </p>
+              </div>
             </section>
           </div>
         )}
