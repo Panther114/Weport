@@ -129,6 +129,24 @@ interface ElectronApi {
     glassRect: (payload: any) => void
     glassHide: () => void
     showTest: () => Promise<{ success: boolean }>
+    getMuteReport: () => Promise<{
+      success: boolean
+      sessionCount: number
+      sessionFlagMutedCount: number
+      mutedCount: number
+      flagBefore: number
+      flagAfter: number
+      unknownStatusCount: number
+      nativeRawKeyCount: number
+      foldedCount: number
+      nativeAvailable: boolean
+      returnedKeyCount: number
+      returnedKeysSample: string[]
+      missingKeys: number
+      muted: Array<{ username: string; displayName: string; isMuted: boolean; isFolded: boolean }>
+      all: Array<{ username: string; displayName: string; isMuted: boolean; isFolded: boolean }>
+      error?: string
+    }>
     onLuma: (callback: (bands: any) => void) => () => void
     onShow: (callback: (event: any, data: any) => void) => () => void
   }

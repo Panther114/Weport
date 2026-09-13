@@ -1015,10 +1015,12 @@ button:disabled {
   border: 1px solid var(--line-strong);
 }
 
-.account-item[data-active="true"] .account-avatar.fallback {
-  color: rgba(0, 0, 0, 0.6);
-  border-color: rgba(0, 0, 0, 0.2);
-}
+/* `.account-item[data-active="true"] .account-avatar.fallback { color: rgba(0,0,0,.6) }`
+   removed: it belonged to the old #fff-background design. v1.scss replaced the
+   selected row with an accent-tinted background, but this rule has specificity
+   (0,4,0) and kept forcing black text onto it - measured contrast 1.02, i.e. the
+   selected account's avatar letter was invisible. The fallback colour now comes
+   from v1.scss like every other element in the row. */
 
 .badge {
   font-size: 11px;

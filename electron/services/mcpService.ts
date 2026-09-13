@@ -103,6 +103,17 @@ class McpService {
     )
 
     server.registerTool(
+      'get_mute_report',
+      {
+        title: '会话免打扰自检',
+        description:
+          '报告「跟随微信消息免打扰」这条链路是否真的在工作：原生接口是否可用、请求了多少会话、原生返回了多少个键、其中多少条被标为免打扰。只读。',
+        inputSchema: { limit: z.number().int().min(1).max(500).optional().describe('最多返回多少个会话，默认 40') },
+      },
+      async ({ limit }) => text(await chatService.getSessionMuteReport(limit || 40)),
+    )
+
+    server.registerTool(
       'list_bot_tasks',
       {
         title: '列出 WeBot 任务',
@@ -132,6 +143,7 @@ class McpService {
           lastTimestamp: s.lastTimestamp,
           messageCountHint: s.messageCountHint ?? null,
           isFolded: s.isFolded ?? false,
+          isMuted: s.isMuted ?? null,
         }))
         return text({ success: true, count: sessions.length, sessions })
       },

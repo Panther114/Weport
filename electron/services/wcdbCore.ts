@@ -3582,7 +3582,7 @@ export class WcdbCore {
     }
   }
 
-  async getContactStatus(usernames: string[]): Promise<{ success: boolean; map?: Record<string, { isFolded: boolean; isMuted: boolean }>; error?: string }> {
+  async getContactStatus(usernames: string[]): Promise<{ success: boolean; map?: Record<string, { isFolded: boolean; isMuted: boolean }>; rawKeys?: string[]; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
@@ -3599,6 +3599,7 @@ export class WcdbCore {
       if (!jsonStr) return { success: false, error: '解析会话状态失败' }
 
       const rawMap = JSON.parse(jsonStr) || {}
+      const rawKeys = Object.keys(rawMap)
       const map: Record<string, { isFolded: boolean; isMuted: boolean }> = {}
       for (const username of usernames || []) {
         const state = rawMap[username] || {}
@@ -3607,7 +3608,9 @@ export class WcdbCore {
           isMuted: Boolean(state.isMuted)
         }
       }
-      return { success: true, map }
+      // rawKeys 供免打扰自检使用：原生返回的键和请求的 username 对不上时，上面的
+      // 循环会给每个会话填 {isMuted:false} —— 看起来成功，实际一条都不生效。
+      return { success: true, map, rawKeys }
     } catch (e) {
       return { success: false, error: String(e) }
     }

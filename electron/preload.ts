@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     glassRect: (payload: any) => ipcRenderer.send('notification:glassRect', payload),
     glassHide: () => ipcRenderer.send('notification:glassHide'),
     showTest: () => ipcRenderer.invoke('notification:showTest'),
+    getMuteReport: () => ipcRenderer.invoke('notification:getMuteReport'),
     onLuma: (callback: (bands: any) => void) => subscribe('notification:luma', callback),
     onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback)
   },

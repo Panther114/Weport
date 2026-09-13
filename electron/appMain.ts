@@ -112,6 +112,13 @@ function resolveResourcesPath(): string {
 // 旧版设置迁移（Rust egui v0.6.x → electron-store）
 // ---------------------------------------------------------------------------
 function migrateLegacySettings() {
+  // 截图 / 转储模式**绝不**迁移：`settings.json` 是 v0.6.x 遗留的真实配置，
+  // 里面就是真实的 dbPath 与解密密钥。迁移之后，harness 用的那个一次性
+  // user-data-dir 会连上真实数据库 —— 演示数据只覆盖了「有 override 的那些
+  // 通道」，任何新加的、没写 override 的通道（例如新的自检对话框）都会把真实
+  // 会话 id 截进 README 截图里。实测过一次，就是这么漏的。
+  if (isScreenshotMode) return
+
   const store = configService!
   const fresh = !store.get('dbPath') && !store.get('myWxid') && !store.get('decryptKey') && !store.get('onboardingDone')
   // 修复模式：旧版存在密钥而 store 为空时也要迁移（早期迁移可能因字段名不一致漏掉）
@@ -2778,6 +2785,10 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     return { success: true }
   })
 
+  // 免打扰自检：「跟随微信消息免打扰」跨四层，任何一层悄悄返回空都表现成
+  // 「通知照发且没有报错」。这个通道把每层的中间结果摊开给用户看。
+  ipcMain.handle('notification:getMuteReport', () => chatService.getSessionMuteReport())
+
   // -------------------------------------------------------------------------
   // WeportAI（v0.8 聊天历史分析助手）
   // -------------------------------------------------------------------------
@@ -2943,6 +2954,14 @@ function demoConfigValue(key: string): unknown {
       return process.env.WEPORT_THEME_MODE === 'light' ? 'light' : 'dark'
     case 'appearanceAccent':
       return process.env.WEPORT_THEME_ACCENT || 'blue'
+    // 视频背景自检：给截图模式指定一个背景文件（图片或视频），用来验证
+    // <video> 图层真的渲染出来了 —— 这条路径只有真实文件才能跑到。
+    case 'appearanceBackgroundPath':
+      return process.env.WEPORT_BG_PATH || ''
+    case 'appearanceBackgroundDim':
+      return 55
+    case 'appearanceBackgroundBlur':
+      return 0
     case 'colorMode':
       return 'colorful'
     case 'messagePushEnabled':
@@ -3229,6 +3248,30 @@ function installScreenshotDemoHandlers() {
   override('webot:updateTask', () => demoWebBotTask)
   override('webot:deleteTask', () => true)
   override('webot:runNow', () => ({ success: true }))
+  // 免打扰自检：必须给演示数据。它是 v1.0.1 新加的通道，没有 override 时会打到
+  // 真实数据库，把真实会话 id 画进对话框 —— 而截图 harness 正是用它来出图的。
+  override('notification:getMuteReport', () => ({
+    success: true,
+    sessionCount: 8,
+    sessionFlagMutedCount: 3,
+    mutedCount: 3,
+    flagBefore: 3,
+    flagAfter: 3,
+    unknownStatusCount: 0,
+    nativeRawKeyCount: 8,
+    foldedCount: 1,
+    error: undefined,
+    muted: [
+      { username: 'daily@chatroom', displayName: '工作日报群', isMuted: true, isFolded: false },
+      { username: 'alumni@chatroom', displayName: '老同学', isMuted: true, isFolded: false },
+      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', isMuted: true, isFolded: true },
+    ],
+    all: [],
+    nativeAvailable: true,
+    returnedKeyCount: 8,
+    returnedKeysSample: ['family@chatroom', 'proj@chatroom', 'alumni@chatroom'],
+    missingKeys: 0,
+  }))
 
   // WeClone 演示数据：让「人格克隆」页在截图/转储模式下有内容可渲染。
   // 与其余演示数据一样脱敏且确定。
@@ -4716,6 +4759,24 @@ async function runScreenshotMode() {
   // 1) 连接页（演示数据：假路径 / 假密钥 / 演示账号，无任何真实个人信息）
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
+      // 视频背景会让每一帧都不一样，后面的 saveStable 永远等不到"连续两帧相同"。
+      // 先读出它的状态（证明它真的在播），再暂停，之后所有截图才能稳定。
+      if (process.env.WEPORT_BG_PATH) {
+        const bgState = await mainWindow.webContents
+          .executeJavaScript(
+            `(() => {
+               const v = document.querySelector('.app-bg video');
+               return v ? { readyState: v.readyState, paused: v.paused, currentTime: v.currentTime, w: v.videoWidth } : null;
+             })()`,
+            true,
+          )
+          .catch(() => null)
+        log(`[screenshot] initial video background = ${JSON.stringify(bgState)}`)
+        await mainWindow.webContents
+          .executeJavaScript(`(() => { const v = document.querySelector('.app-bg video'); if (v) v.pause(); return !!v; })()`, true)
+          .catch(() => false)
+        await sleep(400)
+      }
       await saveStable(mainWindow, 'main.png')
       await dumpRects('main-rects.json', [
         '.tab', '.rail-item', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
@@ -5055,7 +5116,11 @@ async function runScreenshotMode() {
              return bg
            }
            const out = []
-           const nodes = document.querySelectorAll('body *')
+           // 有浮层时只审视浮层内部：被遮罩盖住的元素，用户根本看不到它们的
+           // 真实底色（遮罩是兄弟节点，祖先链里找不到），继续审计只会产生假警报。
+           const scrim = document.querySelector('.modal-backdrop')
+           const scope = scrim || document.body
+           const nodes = scope.querySelectorAll('*')
            for (const el of nodes) {
              if (el.closest('[aria-hidden="true"], .app-bg, script, style')) continue
              const style = getComputedStyle(el)
@@ -5077,6 +5142,27 @@ async function runScreenshotMode() {
                  color: style.color,
                  bg: 'rgb(' + Math.round(bg.r) + ',' + Math.round(bg.g) + ',' + Math.round(bg.b) + ')',
                  size: Number.parseFloat(style.fontSize) || 12,
+                 // 哪个元素：只有文字是不够的 —— 光看 "演" 没人能定位到规则。
+                 node: el.tagName.toLowerCase() + (el.className ? '.' + String(el.className).split(' ').join('.') : ''),
+                 parent: el.parentElement ? el.parentElement.tagName.toLowerCase() + (el.parentElement.className ? '.' + String(el.parentElement.className).split(' ').join('.') : '') : '',
+                 // 整条祖先链的计算背景色。只报"实际底色"时无法判断是"元素本身透明"
+                 // 还是"祖先链上没有不透明层"，这条链能一次说清。
+                 chain: (() => {
+                   const parts = []
+                   let node = el
+                   let depth = 0
+                   while (node && node.nodeType === 1 && depth < 8) {
+                     const cs = getComputedStyle(node)
+                     parts.push(
+                       node.tagName.toLowerCase() +
+                         (node.className ? '.' + String(node.className).split(' ').slice(0, 2).join('.') : '') +
+                         '[' + cs.backgroundColor + ']'
+                     )
+                     node = node.parentElement
+                     depth += 1
+                   }
+                   return parts.join(' < ')
+                 })(),
                })
              }
            }
@@ -5135,8 +5221,25 @@ async function runScreenshotMode() {
   }
 
   // 7.1) 朋友圈
-  await captureV09('sns', 'sns.png', ['.sns-post-item', '.sns-page'], async () => {
+  //
+  // 断言的是**页面**而不是某条动态：动态来自一次异步时间线加载，等它出现会让
+  // 这一步随机失败（已经发生过两次）。时间线是否真的有内容由下面这条日志和
+  // 非空白断言兜底。
+  await captureV09('sns', 'sns.png', ['.sns-page', '.sns-post-item'], async () => {
     await clickTab('朋友圈')
+    await sleep(2000)
+    const state = await mainWindow!.webContents
+      .executeJavaScript(
+        `(() => ({
+           posts: document.querySelectorAll('.sns-post-item').length,
+           empty: !!document.querySelector('.sns-feed .empty, .sns-feed .wp-empty'),
+           error: (document.querySelector('.wp-error') || {}).textContent || '',
+           authors: document.querySelectorAll('.sns-author-list > *').length,
+         }))()`,
+        true,
+      )
+      .catch(() => null)
+    log(`[screenshot] sns state = ${JSON.stringify(state)}`)
   })
   // 7.2) 分析入口（两个大卡片并排）
   await captureV09('analytics-hub', 'analytics-hub.png', ['.analytics-big-card'], async () => {
@@ -5225,9 +5328,90 @@ async function runScreenshotMode() {
     ).catch(() => false)
     await sleep(1500)
   }, 1800)
+  // 7.5.2) 免打扰自检对话框：「跟随微信消息免打扰」到底有没有生效，只能靠它看，
+  // 所以它本身也得有截图（否则这个新界面等于没验证过）。
+  await captureV09('mute-report', 'mute-report.png', ['.mute-report-grid'], async () => {
+    const tab = await clickTab('消息通知').catch(() => false)
+    await sleep(700)
+    const clicked = await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('button')).find((x) => x.textContent.includes('检测结果'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(1500)
+    const state = await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const active = document.querySelector('.rail-item[data-active="true"], .tab[data-active="true"]');
+         return {
+           tab: active ? active.textContent.trim() : '(none)',
+           modal: !!document.querySelector('.modal-backdrop'),
+           grid: !!document.querySelector('.mute-report-grid'),
+         };
+       })()`,
+      true,
+    ).catch(() => null)
+    log(`[screenshot] mute-report pre: clickTab=${tab} clickedButton=${clicked} state=${JSON.stringify(state)}`)
+    await sleep(1200)
+  }, 1200)
+
+  // 关掉对话框再往下走：它是全局浮层，不随标签切换消失 —— 忘了关的话，后面每一张
+  // 截图都会压着这个对话框（视频背景那张就是这么被污染的）。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    await mainWindow.webContents
+      .executeJavaScript(
+        `(() => {
+           const close = Array.from(document.querySelectorAll('.modal-backdrop button')).find((b) => b.textContent.trim() === '关闭');
+           if (close) { close.click(); return true; }
+           const backdrop = document.querySelector('.modal-backdrop');
+           if (backdrop) { backdrop.click(); return true; }
+           return false;
+         })()`,
+        true,
+      )
+      .catch(() => false)
+    await sleep(600)
+  }
+
+  // 7.5.3) 视频背景：图片背景是 background-image，视频是真实的 <video> 图层 ——
+  // 只有给一个真文件才跑得到这条路径。
+  if (process.env.WEPORT_BG_PATH) {
+    await captureV09('video-bg', 'video-bg.png', ['.app-bg video'], async () => {
+      await clickTab('连接微信')
+      await sleep(1200)
+      const state = await mainWindow!.webContents
+        .executeJavaScript(
+          `(() => {
+             const v = document.querySelector('.app-bg video');
+             const root = document.documentElement;
+             return {
+               present: !!v,
+               readyState: v ? v.readyState : -1,
+               paused: v ? v.paused : null,
+               currentTime: v ? Math.round(v.currentTime * 100) / 100 : -1,
+               videoWidth: v ? v.videoWidth : 0,
+               bgKind: root.dataset.bgKind || '(unset)',
+               hasBg: root.dataset.hasBg || '(unset)',
+               dim: getComputedStyle(root).getPropertyValue('--app-bg-dim').trim(),
+             };
+           })()`,
+          true,
+        )
+        .catch(() => null)
+      log(`[screenshot] video background state = ${JSON.stringify(state)}`)
+      // 播放中的视频不可能有两帧完全相同，saveStable 会一直等不到稳定帧 —— 它在
+      // 这里已经被证明在播放了（currentTime），暂停它只是为了能截到一张稳定的图。
+      await mainWindow!.webContents
+        .executeJavaScript(`(() => { const v = document.querySelector('.app-bg video'); if (v) { v.pause(); return true; } return false; })()`, true)
+        .catch(() => false)
+      await sleep(300)
+    }, 1200)
+  }
+
   // 7.6) 设置（默认落在「常规」分类 + 左侧分类列）
-  await captureV09('settings', 'settings.png', ['.settings-nav-item', '.settings-page'], async () => {
-    await clickTab('设置')
+  await captureV09('settings', 'settings.png', ['.settings-nav-item', '.settings-page'], async () => {    await clickTab('设置')
   })
   // 7.7) 设置 → 外观：合并后的外观分类（背景 / 强调色 / 密度 / 主题卡片）
   await captureV09('settings-appearance', 'settings-appearance.png', ['.theme-card', '.settings-pane'], async () => {

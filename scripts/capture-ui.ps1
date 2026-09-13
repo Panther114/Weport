@@ -15,6 +15,8 @@ param(
   [switch]$LightMode,
   # 覆盖强调色（blue / violet / teal / rose / amber / graphite），用于逐套抽查。
   [string]$Accent = '',
+  # 背景文件（图片或视频）的绝对路径；设置后额外截一张，用来验证视频背景图层。
+  [string]$BackgroundPath = '',
   [switch]$PublishToDocs
 )
 
@@ -69,6 +71,7 @@ $env:WEPORT_SCREENSHOT_POPUP = '1'
 $env:WEPORT_SCREENSHOT_OUT = $OutputDir
 if ($LightMode) { $env:WEPORT_THEME_MODE = 'light' } else { Remove-Item Env:WEPORT_THEME_MODE -ErrorAction SilentlyContinue }
 if ($Accent) { $env:WEPORT_THEME_ACCENT = $Accent } else { Remove-Item Env:WEPORT_THEME_ACCENT -ErrorAction SilentlyContinue }
+if ($BackgroundPath) { $env:WEPORT_BG_PATH = $BackgroundPath } else { Remove-Item Env:WEPORT_BG_PATH -ErrorAction SilentlyContinue }
 Remove-Item Env:ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue
 
 Write-Output "Launching $Executable (screenshot mode)..."
@@ -118,6 +121,7 @@ $globalPng = Join-Path $OutputDir 'analytics-global.png'
 $annualPng = Join-Path $OutputDir 'annual-report.png'
 $groupPng = Join-Path $OutputDir 'analytics-group.png'
 $dualPng = Join-Path $OutputDir 'dual-report.png'
+$muteReportPng = Join-Path $OutputDir 'mute-report.png'
 $settingsPng = Join-Path $OutputDir 'settings.png'
 $settingsAppearancePng = Join-Path $OutputDir 'settings-appearance.png'
 $settingsConnectPng = Join-Path $OutputDir 'settings-connect.png'
@@ -161,6 +165,7 @@ Assert-Captured $globalPng 'analytics-global.png'
 Assert-Captured $annualPng 'annual-report.png'
 Assert-Captured $groupPng 'analytics-group.png'
 Assert-Captured $dualPng 'dual-report.png'
+Assert-Captured $muteReportPng 'mute-report.png'
 Assert-Captured $settingsPng 'settings.png'
 Assert-Captured $settingsAppearancePng 'settings-appearance.png'
 Assert-Captured $settingsConnectPng 'settings-connect.png'
@@ -185,6 +190,7 @@ Assert-ImageHasContent $globalPng 'global analytics'
 Assert-ImageHasContent $annualPng 'annual report'
 Assert-ImageHasContent $groupPng 'group analytics'
 Assert-ImageHasContent $dualPng 'dual report'
+Assert-ImageHasContent $muteReportPng 'mute report'
 Assert-ImageHasContent $settingsPng 'settings'
 Assert-ImageHasContent $settingsAppearancePng 'settings appearance'
 Assert-ImageHasContent $settingsConnectPng 'settings connections'
@@ -290,6 +296,10 @@ if ($contrastOffenders.Count -gt 0) {
   throw ("contrast below 3.0 - " + ($contrastOffenders -join ' | ') + " (see contrast-audit.json). Aborting.")
 }
 Write-Output "  [contrast] no text below 3.0 on any captured screen"
+
+if ($BackgroundPath) {
+  Assert-ImageHasContent (Join-Path $OutputDir 'video-bg.png') 'video background'
+}
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {

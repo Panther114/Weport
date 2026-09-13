@@ -31,6 +31,7 @@ import {
   // ListChecks 已不再导入：v1.0 移除了通知页的「前置条件」清单，
   // 它与左侧栏的全局状态栏重复表达同一件事。
   Filter,
+  Search,
   BellRing,
   ShieldPlus,
   Undo2,
@@ -51,6 +52,7 @@ import {
   Pin,
   Fingerprint,
   Copy,
+  Loader2,
   Server,
   Settings2 as SettingsIcon,
 } from 'lucide-react'
@@ -321,6 +323,9 @@ export default function App() {
   const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'data' | 'connect' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
+  // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
+  const [muteReport, setMuteReport] = useState<Awaited<ReturnType<typeof window.electronAPI.notification.getMuteReport>> | null>(null)
+  const [muteReportBusy, setMuteReportBusy] = useState(false)
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
@@ -1292,6 +1297,24 @@ export default function App() {
     }
   }
 
+  /**
+   * 拉取免打扰自检报告。
+   *
+   * 「跟随微信消息免打扰」跨四层（原生 → wcdbCore → chatService 缓存 → 推送
+   * 过滤），任何一层返回空都只会表现成「通知照发」，不会有任何报错。所以这里
+   * 把每层的中间数字都取回来给用户看，而不是只显示一句「已开启」。
+   */
+  async function openMuteReport() {
+    setMuteReportBusy(true)
+    try {
+      setMuteReport(await api.notification.getMuteReport())
+    } catch (e) {
+      pushToast('err', '自检失败', String((e as Error)?.message || e), 9000)
+    } finally {
+      setMuteReportBusy(false)
+    }
+  }
+
   async function toggleNotifications(on: boolean) {
     setNotificationsEnabled(on)
     await api.config.set('notificationEnabled', on)
@@ -1604,13 +1627,19 @@ export default function App() {
   async function pickBackgroundImage(): Promise<void> {
     try {
       const selected = await api.dialog.openFile({
-        title: '选择背景图片',
-        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+        title: '选择背景（图片或视频）',
+        // 视频背景在 v1.0.1 已经支持，但这里的过滤器还只写着图片 —— 用户根本
+        // 选不到 mp4。第一项是"全部支持的类型"，Windows 的资源管理器会默认选中它。
+        filters: [
+          { name: '图片与视频', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'mp4', 'webm', 'm4v', 'mov', 'ogv'] },
+          { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif'] },
+          { name: '视频', extensions: ['mp4', 'webm', 'm4v', 'mov', 'ogv'] },
+        ],
       })
       if (!selected) return
       setBackgroundPath(selected)
     } catch (error) {
-      pushToast('err', '选择背景图片失败', String((error as Error)?.message || error), 9000)
+      pushToast('err', '选择背景失败', String((error as Error)?.message || error), 9000)
     }
   }
 
@@ -2743,14 +2772,20 @@ export default function App() {
                     <span className="hint">微信里标了「消息免打扰」的会话不发弹窗（默认开启）</span>
                   </div>
                 </div>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={respectWechatMute}
-                    onChange={(e) => void toggleRespectWechatMute(e.target.checked)}
-                  />
-                  <span className="track" />
-                </label>
+                <div className="setting-inline">
+                  <button className="secondary-btn" type="button" onClick={() => void openMuteReport()}>
+                    {muteReportBusy ? <Loader2 size={13} className="spin" /> : <Search size={13} />}
+                    检测结果…
+                  </button>
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={respectWechatMute}
+                      onChange={(e) => void toggleRespectWechatMute(e.target.checked)}
+                    />
+                    <span className="track" />
+                  </label>
+                </div>
               </div>
 
               <div className="setting-row">
@@ -3330,6 +3365,99 @@ export default function App() {
             </div>
             <div className="modal-actions">
               <button className="secondary-btn" type="button" onClick={() => setChangelogOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {muteReport && (
+        <div className="modal-backdrop" onClick={() => setMuteReport(null)}>
+          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="mute-report-title">
+            <h3 id="mute-report-title">
+              <BellOff size={15} />
+              免打扰检测结果
+            </h3>
+
+            <div className="mute-report-grid">
+              <div className="mute-report-cell" data-state={muteReport.success ? 'ok' : 'fail'}>
+                <span>读取会话</span>
+                <b>{muteReport.success ? `${muteReport.sessionCount} 个` : '失败'}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.nativeAvailable ? 'ok' : 'fail'}>
+                <span>原生接口</span>
+                <b>{muteReport.nativeAvailable ? '可用' : '不可用'}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.returnedKeyCount > 0 ? 'ok' : 'fail'}>
+                <span>原生返回</span>
+                <b>{muteReport.nativeRawKeyCount ?? muteReport.returnedKeyCount}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.unknownStatusCount === 0 ? 'ok' : 'warn'}>
+                <span>状态未知</span>
+                <b>{muteReport.unknownStatusCount}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.mutedCount > 0 ? 'ok' : 'warn'}>
+                <span>判定免打扰</span>
+                <b>{muteReport.mutedCount} 个</b>
+              </div>
+            </div>
+
+            {!muteReport.success && (
+              <p className="mute-report-note fail">读取失败：{muteReport.error || '未知错误'}</p>
+            )}
+            {muteReport.success && !muteReport.nativeAvailable && (
+              <p className="mute-report-note fail">
+                原生接口没有就绪（{muteReport.error || '接口未就绪'}），因此**任何会话都不会被判定为免打扰** ——
+                通知会照常弹出。这是「跟随微信免打扰」失效最常见的原因。
+              </p>
+            )}
+            {muteReport.success && muteReport.nativeAvailable && muteReport.returnedKeyCount === 0 && (
+              <p className="mute-report-note fail">
+                原生接口返回了 0 条 —— 和请求的 {muteReport.sessionCount} 个会话对不上，同样会导致全部按「未免打扰」处理。
+              </p>
+            )}
+            {muteReport.success && muteReport.nativeAvailable && muteReport.returnedKeyCount > 0 && muteReport.mutedCount === 0 && (
+              <p className="mute-report-note warn">
+                接口正常但一个免打扰都没识别出来。如果你在微信里确实给某些会话开了免打扰，这一条就是问题所在。
+              </p>
+            )}
+            {muteReport.success && muteReport.unknownStatusCount > 0 && (
+              <p className="mute-report-note warn">
+                有 {muteReport.unknownStatusCount} 个会话的状态没查到。v1.0.0 之前「状态未知」会被当成「未免打扰」，
+                这些会话的免打扰设置不会生效 —— 现在会在每次同步时补查（补查后带标记的会话：{muteReport.flagBefore} → {muteReport.flagAfter}）。
+              </p>
+            )}
+
+            <div className="mute-report-list">
+              {muteReport.muted.length === 0 ? (
+                <div className="empty">没有被判定为免打扰的会话</div>
+              ) : (
+                muteReport.muted.map((row) => (
+                  <div className="mute-report-row" key={row.username}>
+                    <strong>{row.displayName}</strong>
+                    <span className="mute-report-id">{row.username}</span>
+                    <span className="badge">{row.isMuted ? '免打扰' : '正常'}</span>
+                    {row.isFolded && <span className="badge">已折叠</span>}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={() => void navigator.clipboard.writeText(JSON.stringify(muteReport, null, 2)).then(() => pushToast('ok', '已复制自检结果', '', 4000))}
+              >
+                <Copy size={13} />
+                复制结果
+              </button>
+              <button className="secondary-btn" type="button" onClick={() => void openMuteReport()}>
+                <RefreshCw size={13} />
+                重新检测
+              </button>
+              <button className="secondary-btn" type="button" onClick={() => setMuteReport(null)}>
                 关闭
               </button>
             </div>

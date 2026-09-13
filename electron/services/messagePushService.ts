@@ -422,6 +422,15 @@ export class MessagePushService {
 
       const sessions = sessionsResult.sessions as ChatSession[]
       await this.refreshSessionStatuses(sessions)
+      // 状态未知的会话必须补查，不能按「未免打扰」放行 —— getSessions() 只在缓存
+      // 命中时才带 isMuted，未命中的会话根本没有这个字段，而过滤条件写的是
+      // `isMuted === true`。实测 262 个会话里有 70 个处于「未知」，只要其中任何
+      // 一个在微信里是免打扰的，它的通知就会漏出来。
+      const unknownStatuses = chatService.applyKnownSessionStatuses(sessions)
+      if (unknownStatuses.length > 0) {
+        await chatService.getSessionStatuses(unknownStatuses)
+        chatService.applyKnownSessionStatuses(sessions)
+      }
       if (!this.baselineReady) {
         this.setBaseline(sessions)
         this.baselineReady = true

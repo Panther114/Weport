@@ -390,6 +390,15 @@
   }
 }
 
+// 视频背景例外：逐帧 backdrop-filter 是视频背景卡顿的主因（静态图片的结果可以
+// 复用，播放中的视频不能）。theme.scss 会把这两条覆盖成不透明面板。
+:root[data-bg-kind='video'] {
+  .rail,
+  .topbar {
+    backdrop-filter: none;
+  }
+}
+
 // -----------------------------------------------------------------------------
 // 8. 强调色
 // -----------------------------------------------------------------------------
@@ -1617,5 +1626,127 @@
     outline: none;
     border-color: var(--accent);
   }
+}
+
+// 一个设置行里放多个控件（按钮 + 开关），它们应当成组靠右，而不是各自占据
+// 控件列、被推到两头。
+.setting-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+// -----------------------------------------------------------------------------
+// 22. 免打扰自检对话框
+// -----------------------------------------------------------------------------
+
+.mute-report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.mute-report-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+
+  span {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  b {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  &[data-state='ok'] b {
+    color: var(--ok);
+  }
+
+  &[data-state='warn'] b {
+    color: var(--warn);
+  }
+
+  &[data-state='fail'] b {
+    color: var(--danger);
+  }
+}
+
+.mute-report-note {
+  margin: 0 0 var(--space-3);
+  padding: 8px var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+
+  &.fail {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    color: var(--text);
+  }
+
+  &.warn {
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+    color: var(--text);
+  }
+}
+
+.mute-report-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+
+  .empty {
+    padding: var(--space-4);
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+}
+
+.mute-report-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px var(--space-3);
+
+  & + & {
+    border-top: 1px solid var(--line);
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.mute-report-id {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 

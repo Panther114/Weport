@@ -158,6 +158,8 @@
   z-index: -1;
   overflow: hidden;
   pointer-events: none;
+  // 独立合成层：否则整屏都在变的图层会把同层的其它元素一起卷进重绘。
+  contain: strict;
 }
 
 .app-bg video {
@@ -168,6 +170,9 @@
   // 模糊量由设置页控制；0 时浏览器不会为 0px 建立滤镜层，开销可忽略。
   filter: blur(var(--app-bg-blur, 0px));
   transform: scale(1.04); // 模糊会在边缘露出底色，放大一点点补掉
+  // 让合成器自己持有这一层，不要每帧回到主线程布局。
+  will-change: transform;
+  backface-visibility: hidden;
 }
 
 .app-bg-dim {
@@ -181,6 +186,47 @@
 :root[data-bg-kind='video'] .shell {
   background-color: transparent;
   background-image: none;
+}
+
+// -----------------------------------------------------------------------------
+// 视频背景的性能取舍
+// -----------------------------------------------------------------------------
+//
+// 卡顿的主因不是视频解码，而是 `backdrop-filter`：v1.scss 给 .rail / .topbar
+// 加了 `backdrop-filter: blur(14px)`，浏览器必须**每帧**重新模糊它们背后的内容。
+// 静态图片时这个结果可以复用，播放中的视频则不能 —— 于是每帧都在做一次全屏
+// 模糊，CPU/GPU 都被吃满。
+//
+// 视频模式下改成不透明面板：省掉逐帧模糊，同时保证文字对比度（面板越透明，
+// 视频越亮的地方越容易让文字糊掉）。
+
+:root[data-bg-kind='video'] .rail,
+:root[data-bg-kind='video'] .topbar {
+  backdrop-filter: none;
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+}
+
+// 视频背景用的面板底色。
+//
+// 注意不能写成 `--bg-raised: color-mix(..., var(--bg-raised), ...)` —— 自定义
+// 属性引用自己会构成环，computed value 直接失效，于是面板底色变成透明的，
+// 视频反而把文字压没了。所以先定义一组**不带 modifer 的中性底色**，再由它派生。
+:root {
+  --surface-raised: #111116;
+  --surface-panel: #17171d;
+  --surface-elevated: #1e1e26;
+}
+
+:root[data-mode='light'] {
+  --surface-raised: #ffffff;
+  --surface-panel: #ffffff;
+  --surface-elevated: #eef0f6;
+}
+
+:root[data-bg-kind='video'] {
+  --bg-raised: color-mix(in srgb, var(--surface-raised) 94%, transparent);
+  --panel: color-mix(in srgb, var(--surface-panel) 90%, transparent);
+  --elevated: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
 }
 
 // -----------------------------------------------------------------------------
