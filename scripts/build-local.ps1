@@ -1,20 +1,23 @@
-# build-local.ps1 — 在本机构建 Weport。
+# build-local.ps1 - build Weport on this machine.
 #
-# 为什么需要这个包装：本机（以及任何 github.com:443 不可达的网络）上，
-# electron-builder 会去 github.com 下载 Electron 压缩包并**超时失败**：
+# Why this wrapper exists: on this network github.com:443 is unreachable, so
+# electron-builder's download of the Electron archive fails with
 #
-#   ⨯ connect ETIMEDOUT 20.205.243.166:443
+#   connect ETIMEDOUT 20.205.243.166:443
 #
-# 设置国内镜像后可以正常完成。这个脚本把镜像环境变量固定下来，避免每次构建
-# 都要重新回忆一遍 —— 那是很容易忘、忘了就浪费十分钟的坑。
+# Setting a mirror makes the build succeed. Pinning the mirror environment here
+# means nobody has to remember it - forgetting costs ten minutes and looks like
+# a code failure.
 #
-# 用法：
-#   powershell -ExecutionPolicy Bypass -File scripts/build-local.ps1              # 默认 build:dir
-#   powershell -ExecutionPolicy Bypass -File scripts/build-local.ps1 build        # NSIS 安装包
-#   powershell -ExecutionPolicy Bypass -File scripts/build-local.ps1 build:dir
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File scripts/build-local.ps1           # build:dir
+#   powershell -ExecutionPolicy Bypass -File scripts/build-local.ps1 build     # NSIS installer
 #
-# 注意：build:mac / build:linux 需要对应的宿主系统（electron-builder 不做交叉
-# 打包），本脚本不做拦截 —— 传进去会得到 electron-builder 自己的报错。
+# build:mac and build:linux need their own host OS (electron-builder does not
+# cross-package); this script does not block them, electron-builder will.
+#
+# NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1 files as
+# ANSI unless they carry a UTF-8 BOM, and non-ASCII bytes can corrupt the parse.
 
 param(
   [string]$Task = 'build:dir',
@@ -24,7 +27,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not $SkipMirror) {
-  # 只在未显式设置时覆盖，方便有代理的机器自己指定镜像。
+  # Only fill in when unset, so a machine with a working proxy keeps its own values.
   if (-not $env:ELECTRON_MIRROR) {
     $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
   }
@@ -37,8 +40,10 @@ if (-not $SkipMirror) {
 
 $projectRoot = (Resolve-Path "$PSScriptRoot\..").Path
 Push-Location $projectRoot
+
+$exit = 1
 try {
-  Write-Output "构建 $Task ..."
+  Write-Output "Building: $Task"
   npm run $Task
   $exit = $LASTEXITCODE
 } finally {
@@ -46,12 +51,12 @@ try {
 }
 
 if ($exit -ne 0) {
-  Write-Output "构建失败（exit=$exit）。若报错是下载 Electron 超时，先确认上面的镜像变量已生效。"
+  Write-Output "Build FAILED (exit=$exit). If the error was an Electron download timeout, check that the mirror variables above are set."
   exit $exit
 }
 
-Write-Output '构建完成。'
+Write-Output 'Build finished.'
 Get-ChildItem (Join-Path $projectRoot 'release') -File -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending |
-  Select-Object -First 3 Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }, LastWriteTime |
+  Select-Object -First 3 Name, LastWriteTime |
   Format-Table -AutoSize
