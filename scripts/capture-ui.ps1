@@ -9,10 +9,15 @@ param(
   [string]$UserDataDir = (Join-Path $env:TEMP ("weport-electron-screenshot-user-data-" + [guid]::NewGuid().ToString('N'))),
   # 17 张截图 + 一次响应式窗口重排。120s 是 12 张时代的预算，机器一忙就会在
   # 中途（WeportAI 那一步）超时，看起来像"截图失败"，其实是预算不够。
-  [int]$TimeoutSeconds = 300,
+  # 300 是 24 张时代的预算；加上全量清屏（每个页面 + 每个设置分类各截顶部/底部，
+  # 34 张额外截图）后需要更长。截图本身很快，真正的成本是每屏的稳定帧等待。
+  [int]$TimeoutSeconds = 600,
   # 浅色模式整套跑一遍：捕获 + 对比度审计。浅色最容易出的问题（白底白字）
   # 用"截图非空白"是抓不到的。
   [switch]$LightMode,
+  # 保留 GPU：软件渲染下桌面采集（WGC）会失败，弹窗玻璃只能退回静态快照。
+  # 跑这个开关时才断言 popup-glass.json 必须是动态管线（stream/frames）且帧差 > 1.0。
+  [switch]$KeepGpu,
   # 覆盖强调色（blue / violet / teal / rose / amber / graphite），用于逐套抽查。
   [string]$Accent = '',
   # 背景文件（图片或视频）的绝对路径；设置后额外截一张，用来验证视频背景图层。
@@ -72,6 +77,7 @@ $env:WEPORT_SCREENSHOT_OUT = $OutputDir
 if ($LightMode) { $env:WEPORT_THEME_MODE = 'light' } else { Remove-Item Env:WEPORT_THEME_MODE -ErrorAction SilentlyContinue }
 if ($Accent) { $env:WEPORT_THEME_ACCENT = $Accent } else { Remove-Item Env:WEPORT_THEME_ACCENT -ErrorAction SilentlyContinue }
 if ($BackgroundPath) { $env:WEPORT_BG_PATH = $BackgroundPath } else { Remove-Item Env:WEPORT_BG_PATH -ErrorAction SilentlyContinue }
+if ($KeepGpu) { $env:WEPORT_SCREENSHOT_KEEP_GPU = '1' } else { Remove-Item Env:WEPORT_SCREENSHOT_KEEP_GPU -ErrorAction SilentlyContinue }
 Remove-Item Env:ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue
 
 Write-Output "Launching $Executable (screenshot mode)..."
@@ -299,6 +305,41 @@ if ($contrastOffenders.Count -gt 0) {
   throw ("contrast below 3.0 - " + ($contrastOffenders -join ' | ') + " (see contrast-audit.json). Aborting.")
 }
 Write-Output "  [contrast] no text below 3.0 on any captured screen"
+
+# 弹窗玻璃折射管线：必须是动态的，而且是**真的在动**。
+#
+# 用户报过"玻璃背景在弹出那一刻就被钉住"。判据是端到端的帧序号，而不是渲染层的
+# 自述（`data-glass` 来自 React 状态，实测过它在该收到帧时仍报 snapshot）：
+# 主进程每推一帧带一个递增 seq，渲染层把它写进 `data-glass-seq`；QA 读回来比对，
+# 「玻璃上应用的是第 N 帧、主进程发到了第 N 帧」就证明背景一路在更新。
+#   stream = WGC 视频流（30fps，需要真实 GPU/驱动支持）
+#   frames = 主进程定帧推送（约 3fps；WGC 不可用时的兜底，本机就是这条）
+$popupGlass = Join-Path $OutputDir 'popup-glass.json'
+Assert-Captured $popupGlass 'popup-glass.json'
+$glass = Get-Content $popupGlass -Raw | ConvertFrom-Json
+Write-Output "  [popup] glass pipeline=$($glass.pipeline) framesSent=$($glass.framesSent) appliedSeq=$($glass.appliedSeq)/$($glass.sentSeq)"
+if ([int]$glass.framesSent -lt 2) {
+  throw "popup glass got only $($glass.framesSent) desktop frame(s) - the refraction loop is not feeding the popup. Aborting."
+}
+# 核心断言：**渲染层应用到玻璃上的帧，必须是主进程最新发出的那一帧**。
+#
+# 为什么不用像素差当主判据：QA 里内容保护是关掉的（否则 capturePage 只能拿到空白
+# 帧），于是抓帧会拍到弹窗自身，玻璃采样区域被它自己的模糊残影占住 —— 背景变化
+# 落在像素上只剩 0.4-5 的差别，量级取决于纱层浓度，判不稳。帧序号是端到端的确定
+# 事实：玻璃上显示的是第 N 帧，主进程发到了第 N 帧，就说明它一路在更新，而不是
+# "钉在出现那一刻"。
+#
+# 允许落后 1 帧（采样时可能正好有新帧在飞）。
+if ([int]$glass.appliedSeq -le 0) {
+  throw "popup glass never applied a backdrop frame (appliedSeq=$($glass.appliedSeq)) - the renderer is not consuming frames. Aborting."
+}
+if ([int]$glass.sentSeq - [int]$glass.appliedSeq -gt 1) {
+  throw "popup glass is stuck: applied frame $($glass.appliedSeq) while the main process already sent $($glass.sentSeq) - the backdrop is frozen. Aborting."
+}
+# 像素差只记录不判定：QA 里内容保护必须关掉（否则 capturePage 是空白帧），于是抓帧
+# 会拍到弹窗自身，玻璃采样区被自己的模糊残影占住，背景变化落在像素上只有 0.3-5，
+# 量级取决于纱层与窗口层叠，判不稳。真实证据是上面那对帧序号。
+Write-Output "  [popup] pixel delta (informational only) = $($glass.liveFrameDelta)"
 
 if ($BackgroundPath) {
   Assert-ImageHasContent (Join-Path $OutputDir 'video-bg.png') 'video background'

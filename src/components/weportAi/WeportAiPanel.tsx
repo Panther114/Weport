@@ -832,19 +832,26 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
         <div className="ai-topbar">
           <h1>{chats.find((c) => c.id === activeId)?.title || 'WeportAI'}</h1>
           <div className="ai-topbar-meta">
-            {setup?.model ? <span className="ai-meter" title="当前 AI 服务与模型">{setup.model}</span> : null}
+            {setup?.model ? (
+              <span className="ai-meter ai-meter-model" title={`当前 AI 服务与模型：${setup.model}`}>
+                <span className="ai-meter-label">模型</span>
+                <b>{setup.model}</b>
+              </span>
+            ) : null}
             {ctxStats && ctxStats.contextWindow > 0 ? (
               <span
                 className="ai-meter"
                 data-tone={ctxStats.promptTokens / ctxStats.contextWindow > 0.75 ? 'warn' : undefined}
                 title="最近一次请求的上下文占用"
               >
-                上下文 <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
+                <span className="ai-meter-label">上下文</span>
+                <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
               </span>
             ) : null}
             {usage ? (
               <span className="ai-meter" data-tone="ok" title="最近一次请求的缓存命中率">
-                缓存 <b>{usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0}%</b>
+                <span className="ai-meter-label">缓存</span>
+                <b>{usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0}%</b>
               </span>
             ) : null}
           </div>

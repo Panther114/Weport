@@ -26,9 +26,14 @@ export default function NotificationWindow() {
     const [notification, setNotification] = useState<NotificationData | null>(null)
     const [prevNotification, setPrevNotification] = useState<NotificationData | null>(null)
     const [position, setPosition] = useState<string>('top-right')
-    // 主进程随通知下发的屏幕几何信息（尺寸 + 窗口坐标）+ 静态桌面快照（dataUrl）。
-    // 回退管线用快照就地加工成玻璃（CSS 滤镜），无实时采集流、零常驻开销
+    // 主进程随通知下发的屏幕几何信息（尺寸 + 窗口坐标）+ 首帧快照 + 采集源 ID。
+    // 快照只是视频流出现前的底色；实时折射由下面的 backdropStream 提供
     const [backdrop, setBackdrop] = useState<LiquidGlassBackdropImage | undefined>(undefined)
+    // 实时桌面视频流（getUserMedia + 主进程下发的采集源）：玻璃逐帧跟随桌面。
+    // 只在弹窗可见期间存在，隐藏时立刻停掉全部 track（零常驻开销）
+    const [backdropStream, setBackdropStream] = useState<MediaStream | null>(null)
+    // 收到过多少帧桌面推送：>0 才算"玻璃在动"（见 data-glass 断言）
+    const [frameCount, setFrameCount] = useState(0)
     // 原生玻璃模式（Windows）：折射由主进程的原生面板在窗口下方提供，
     // 渲染层不开视频流、不渲染折射画布，只负责上报卡片几何与内容层
     const [nativeBackdrop, setNativeBackdrop] = useState(false)
@@ -37,6 +42,8 @@ export default function NotificationWindow() {
     // 上次上报的窗口尺寸：重复上报会触发主进程 setSize，
     // 可见状态下反复设置尺寸会让 DWM 短暂拉伸旧帧缓冲，闪出一圈幽灵轮廓
     const lastSizeRef = useRef<{ width: number; height: number } | null>(null)
+    // 采集源 ID：与窗口/流生命周期解耦，事件回调里读 ref
+    const sourceIdRef = useRef<string | null>(null)
 
     useEffect(() => {
         notificationRef.current = notification
@@ -72,6 +79,7 @@ export default function NotificationWindow() {
                     dataUrl: data.backdrop.dataUrl ?? null
                 })
                 setNativeBackdrop(Boolean(data.backdrop.native))
+                sourceIdRef.current = data.backdrop.sourceId ?? null
             }
 
             if (notificationRef.current && newNoti.notificationAnimationEnabled !== false) {
@@ -99,11 +107,108 @@ export default function NotificationWindow() {
         }
     }, [prevNotification])
 
-    // 分区无级自适应：整卡驱动玻璃纱层方向与浓度，标题行/正文按各自背后区域
-    // 的实际对比度连续取色（静态快照单次采样；算法详见 useNotificationAdaptiveTheme）。
-    // 流模式从视频帧采样；原生模式吃原生面板回读的亮度带事件
-    useNotificationAdaptiveTheme(null, backdrop)
+    // 实时桌面折射（两条路，按可用性自动选）。
+    //
+    // 之前这里是"一条通知只拍一次"的静态快照 —— 弹出瞬间的画面被钉在玻璃里，
+    // 之后桌面怎么动都不变，看起来像贴了一张旧截图。现在：
+    //   1. 优选 WGC 视频流：desktopCapturer 的采集源 + getUserMedia，30fps、GPU
+    //      合成、主进程零成本；
+    //   2. WGC 不可用（虚拟机 / 无 GPU / 驱动不支持，本机实测 CreateForMonitor
+    //      返回 E_ACCESSDENIED）时退回**主进程的定帧推送**（notification:backdrop，
+    //      约 3fps，按实测帧成本自适应）—— 帧率低，但背景确实在动。
+    //
+    // 两条路都只在弹窗可见期间运行：隐藏即停 track / 主进程停循环。
+    const visible = Boolean(notification || prevNotification)
+    useEffect(() => {
+        if (!visible || nativeBackdrop) return
+        const sourceId = sourceIdRef.current
+        if (!sourceId) return
+        let stream: MediaStream | null = null
+        let cancelled = false
+        void (async () => {
+            try {
+                const media = await navigator.mediaDevices.getUserMedia({
+                    audio: false,
+                    video: {
+                        // Electron 的桌面采集约束（非标准枚举值，TS 类型里没有）
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        ...({ mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, maxFrameRate: 30 } } as any)
+                    }
+                })
+                if (cancelled) {
+                    media.getTracks().forEach(track => track.stop())
+                    return
+                }
+                stream = media
+                setBackdropStream(media)
+                // 告诉主进程：折射由视频流接管，别再抓帧了
+                window.electronAPI?.notification?.setGlassMode?.('stream')
+            } catch (error) {
+                // 采集失败（权限/驱动/虚拟桌面）时不要放弃：主进程的定帧推送继续
+                // 供帧，玻璃依然是"跟着桌面走"的，只是帧率低一些
+                console.warn('[NotificationWindow] WGC desktop stream unavailable, falling back to main-process frames:', error)
+            }
+        })()
+        return () => {
+            cancelled = true
+            setBackdropStream(null)
+            stream?.getTracks().forEach(track => track.stop())
+        }
+    }, [visible, nativeBackdrop])
+
+    // 主进程定帧推送：只替换快照来源（几何信息沿用首次下发的那份）
+    useEffect(() => {
+        if (nativeBackdrop) return
+        const api = window.electronAPI?.notification
+        if (!api?.onBackdrop) {
+            console.warn('[NotificationWindow] onBackdrop missing from preload - glass cannot follow the desktop')
+            return
+        }
+        console.log('[NotificationWindow] subscribing to desktop backdrop frames')
+        let first = true
+        return api.onBackdrop((frame) => {
+            if (first) {
+                first = false
+                console.log('[NotificationWindow] first backdrop frame received')
+            }
+            // 每帧内容指纹（长度 + 中段字符）+ 帧序号：截图 QA 用它们断言
+            // “玻璃上显示的确实是主进程最新发出的那一帧”，比只看像素差少一层猜测。
+            try {
+                const url = String(frame.dataUrl || '')
+                document.documentElement.dataset.glassHash = `${url.length}:${url.slice(2000, 2012)}`
+                document.documentElement.dataset.glassSeq = String(frame.seq ?? '')
+            } catch { /* noop */ }
+            setBackdrop(prev => ({
+                width: frame.width,
+                height: frame.height,
+                screenX: frame.winX,
+                screenY: frame.winY,
+                dataUrl: frame.dataUrl
+            }))
+            // 收到真实帧才算"动起来了"；在此之前 data-glass 保持 snapshot
+            setFrameCount(count => (count < 1000 ? count + 1 : count))
+        })
+    }, [nativeBackdrop])
+
+    // 分区无级自适应：整卡驱动玻璃纱层方向与浓度，标题行/正文按各自背后区域的
+    // 实际对比度连续取色。有实时流时逐帧采样（桌面动，文字颜色跟着动），
+    // 没有则退回单帧采样
+    useNotificationAdaptiveTheme(backdropStream, backdrop)
     useNotificationNativeAdaptiveTheme(nativeBackdrop)
+
+    // 折射管线状态挂在 <html data-glass> 上：截图 QA 据此断言"弹窗真的是实时
+    // 玻璃"，而不是只在代码里以为接上了（采集失败会静默退回静态快照）。
+    //   native = 原生面板；stream = WGC 视频流；frames = 主进程定帧推送；
+    //   snapshot = 一帧都没收到（真·静态）
+    useEffect(() => {
+        document.documentElement.dataset.glass = nativeBackdrop
+            ? 'native'
+            : backdropStream
+                ? 'stream'
+                : frameCount > 0
+                    ? 'frames'
+                    : 'snapshot'
+    }, [nativeBackdrop, backdropStream, frameCount])
 
     const handleClose = () => {
         setNotification(null)
@@ -235,6 +340,7 @@ export default function NotificationWindow() {
                             onClose={() => { }} // No-op for background item
                             initialVisible={true}
                             backdropImage={backdrop}
+                            backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
                             duration={prevNotification.notificationDuration}
                             animationEnabled={prevNotification.notificationAnimationEnabled !== false}
@@ -263,6 +369,7 @@ export default function NotificationWindow() {
                             onClose={handleClose}
                             initialVisible={true}
                             backdropImage={backdrop}
+                            backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
                             duration={notification.notificationDuration}
                             animationEnabled={notification.notificationAnimationEnabled !== false}

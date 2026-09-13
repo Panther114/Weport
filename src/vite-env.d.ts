@@ -85,6 +85,57 @@ interface WeCloneMetaInfo {
   piiHits?: number
   truncated?: boolean
 }
+/**
+ * Connector types (v1.0). Mirrors electron/services/connectors/types.ts — the main
+ * process is the source of truth; these declarations exist so the settings panel
+ * can be typed without importing electron code into the renderer.
+ */
+type ConnectorPriority = 'none' | 'low' | 'medium' | 'high' | 'urgent'
+interface ConnectorDescriptor {
+  id: string
+  name: string
+  description: string
+  authKind: 'token' | 'oauth'
+  capabilities: { read: boolean; write: boolean; hasTargets: boolean }
+  credentialUrl: string
+  credentialHelp: string[]
+  credentialPlaceholder: string
+}
+interface ConnectorConnectionState {
+  id: string
+  connected: boolean
+  credentialHint?: string
+  connectedAt?: number
+  lastCheck?: { at: number; ok: boolean; error?: string; accountName?: string }
+}
+interface ConnectorView extends ConnectorConnectionState {
+  descriptor: ConnectorDescriptor
+}
+interface ConnectorTarget {
+  id: string
+  name: string
+  kind: 'project' | 'label' | 'inbox'
+}
+interface ConnectorTaskInput {
+  content: string
+  description?: string
+  dueDate?: string
+  dueDatetime?: string
+  dueText?: string
+  dueLang?: string
+  priority?: ConnectorPriority
+  labels?: string[]
+  targetId?: string
+  parentId?: string
+}
+interface ConnectorTaskResult {
+  id: string
+  content: string
+  url?: string
+  dueText?: string
+  priority?: ConnectorPriority
+  targetName?: string
+}
 interface ExportRequest {
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
@@ -149,6 +200,10 @@ interface ElectronApi {
     }>
     onLuma: (callback: (bands: any) => void) => () => void
     onShow: (callback: (event: any, data: any) => void) => () => void
+    /** 主进程的定帧折射帧（弹窗可见期间约 3fps） */
+    onBackdrop: (callback: (frame: { seq: number; dataUrl: string; winX: number; winY: number; width: number; height: number }) => void) => () => void
+    /** 通知主进程：渲染层的实时视频流已接管折射，不必再抓帧 */
+    setGlassMode: (mode: 'stream' | 'frames' | 'native') => void
   }
   dialog: {
     openDirectory: (options?: any) => Promise<string | null>
@@ -439,6 +494,20 @@ interface ElectronApi {
       checks: Array<{ id: string; label: string; state: 'ok' | 'warn' | 'fail' | 'unknown'; detail: string; raw?: string }>
       summary: string
     }>
+  }
+  /**
+   * 连接器（第三方工具，v1.0）。字段与 electron/services/connectors/types.ts 对应；
+   * 令牌只在 `connect` 单向流入主进程，读接口永远只返回 `····9f2c` 掩码。
+   */
+  connectors: {
+    list: () => Promise<ConnectorView[]>
+    connect: (id: string, token: string) => Promise<{ success: boolean; data?: ConnectorView; error?: string }>
+    disconnect: (id: string) => Promise<{ success: boolean; data?: ConnectorView; error?: string }>
+    verify: (id: string) => Promise<{ success: boolean; data?: ConnectorView; error?: string }>
+    listTargets: (id: string) => Promise<{ success: boolean; data?: ConnectorTarget[]; error?: string }>
+    createTask: (id: string, input: ConnectorTaskInput) => Promise<{ success: boolean; data?: ConnectorTaskResult; error?: string }>
+    getAgentSettings: () => Promise<{ allowAgentWrite: boolean }>
+    setAgentSettings: (patch: { allowAgentWrite?: boolean }) => Promise<{ allowAgentWrite: boolean }>
   }
   weclone: {
     generate: (opts?: { localOnly?: boolean }) => Promise<{

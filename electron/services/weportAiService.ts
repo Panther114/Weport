@@ -19,6 +19,7 @@ import { join, dirname, basename, extname, relative, resolve, normalize, isAbsol
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, renameSync, rmSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { ConfigService } from './config'
+import { connectorsService } from './connectors/connectorsService'
 import { chatService } from './chatService'
 import { wcdbService } from './wcdbService'
 import type { ChatSession, Message } from './chatService'
@@ -438,10 +439,43 @@ class WeportAiService {
   private emitter: EventEmitter | null = null
   private sessionListCache: { at: number; sessions: ChatSession[] } = { at: 0, sessions: [] }
   private titleUpgrading = new Set<string>()
+  /** 见 {@link applyProbeOverride}：仅在 `WEPORT_AI_PROBE_MODEL` 进程里非空。 */
+  private probeModel = String(process.env.WEPORT_AI_PROBE_MODEL || '').trim()
 
   constructor() {
     this.configService = ConfigService.getInstance()
     this.providerProfiles = new ProviderProfileService(this.configService)
+  }
+
+  /**
+   * 诊断用的模型覆盖（`WEPORT_AI_PROBE_MODEL`）。
+   *
+   * 存在的理由：网关按 **模型** 而不是按 profile 决定协议，而"配置里存着某个
+   * 模型"不等于"这台机器、这把钥匙真的能调用它"（OpenCode Go 对部分模型会回
+   * `This model is not available in your country.`）。想知道某个模型 id 是否可用，
+   * 就得能拿同一个 profile 换模型试一次，而不是去改用户配置或建一个持久化 profile。
+   *
+   * 只在探针进程里生效，且只改内存里的这一份副本，绝不落盘。
+   */
+  private applyProbeOverride(profile: ProviderProfile): ProviderProfile {
+    if (!this.probeModel) return profile
+    const baseUrl = String(process.env.WEPORT_AI_PROBE_BASE_URL || '').trim().replace(/\/+$/, '')
+    const providerId = String(process.env.WEPORT_AI_PROBE_PROVIDER || '').trim()
+    return {
+      ...profile,
+      model: this.probeModel,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(providerId ? { providerId } : {}),
+    }
+  }
+
+  /** 探针模式的只读状态（供 `WEPORT_AI_PROBE` 打印，便于确认覆盖是否生效）。 */
+  probeOverrideState(): { model: string; baseUrl: string; providerId: string } {
+    return {
+      model: this.probeModel,
+      baseUrl: String(process.env.WEPORT_AI_PROBE_BASE_URL || '').trim(),
+      providerId: String(process.env.WEPORT_AI_PROBE_PROVIDER || '').trim(),
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -647,8 +681,8 @@ class WeportAiService {
    * 也会显示成「用了 4%」，而且永远不会触发压缩。provider 层带回 per-model
    * 元数据后优先使用它，config 只作为未知时的兜底。
    */
-  private resolveContextWindow(consumer: ProviderConsumer = 'chat'): number {
-    const profile = this.providerProfiles.getForConsumer(consumer)
+  private resolveContextWindow(consumer: ProviderConsumer = 'chat', resolved?: ProviderProfile | null): number {
+    const profile = resolved || this.providerProfiles.getForConsumer(consumer)
     const perModel = Number(profile?.modelContextWindow)
     if (Number.isFinite(perModel) && perModel > 0) return perModel
     const configured = Number(this.configService.get('weportAiContextWindow'))
@@ -1156,6 +1190,25 @@ class WeportAiService {
   /** 「设置 → AI 服务」用：三个功能面各自指向哪个服务。 */
   getConsumerAssignments() {
     return this.providerProfiles.consumerAssignments()
+  }
+
+  /**
+   * 拉一次某个服务的 `/models` 清单（探针/诊断用）。
+   *
+   * 这里是**只读**的包装：`discoverProfileModels` 会把结果写回 profile 的
+   * discovery 字段（设置页要显示），诊断场景不应该产生这种副作用。
+   */
+  async discoverModelsForProfile(profileId: string): Promise<{ models: string[]; error: string }> {
+    const profile = this.providerProfiles.getById(String(profileId || '').trim()) || this.providerProfiles.getActive()
+    if (!profile) return { models: [], error: '找不到 AI 服务配置' }
+    try {
+      const models = await this.listModelsWithRetry(profile)
+      return { models, error: '' }
+    } catch (error) {
+      const status = Number((error as { status?: number })?.status)
+      const detail = String((error as Error)?.message || error).trim()
+      return { models: [], error: `${status ? `HTTP ${status}：` : ''}${detail || '模型发现失败'}` }
+    }
   }
 
   /** 已配置的服务清单（带已解析的模型元数据），设置页直接渲染它。 */
@@ -2083,7 +2136,82 @@ class WeportAiService {
           }
         },
       },
+      ...this.connectorTools(),
     ]
+  }
+
+  /**
+   * 连接器工具（Todoist 等）。
+   *
+   * 只在「确实连上了」的时候才挂进工具表：没连上的账号里出现一个 todoist_add_task
+   * 只会浪费一轮上下文，还会让模型去猜一个不存在的连接。工具清单在 run 开始时
+   * 冻结，所以在设置页连接/断开连接器只影响下一轮，不会中途改写前缀缓存。
+   *
+   * 写入默认开启（`connectorsAllowAgent`），关掉之后只保留只读的目标列表工具。
+   */
+  private connectorTools(): ToolDefinition[] {
+    const connected = connectorsService.listConnectedIds()
+    if (connected.length === 0) return []
+    const allowWrite = connectorsService.agentWriteAllowed()
+    const tools: ToolDefinition[] = [
+      {
+        name: 'list_connector_targets',
+        description:
+          'List the places a task can be filed in a connected third-party service (Todoist projects, labels, inbox). Call this before creating a task when you need a project or label id; omit the target to file into the Inbox.',
+        parameters: {
+          type: 'object',
+          properties: {
+            connector: { type: 'string', enum: connected, description: 'Connected service id (default the first connected one)' },
+          },
+        },
+        friendly: (args) => `查看了 ${String(args.connector || 'todoist')} 的目标列表`,
+        handler: async (args) => {
+          const id = String(args.connector || connected[0])
+          const result = await connectorsService.listTargets(id)
+          if (!result.success) return `获取失败：${result.error}`
+          const targets = result.data || []
+          if (targets.length === 0) return '没有可用的目标（该项目/标签列表为空）。'
+          return targets.map((target) => `${target.kind === 'inbox' ? '（默认收件箱）' : `${target.id}`}\t${target.kind}\t${target.name}`).join('\n')
+        },
+      },
+    ]
+    if (!allowWrite) return tools
+    tools.push({
+      name: 'create_connector_task',
+      description:
+        'Create a task in a connected third-party service (Todoist). Use it when the user asks you to record a follow-up, reminder, or to-do outside Weport. Write the task content in the same language the user speaks, keep it one actionable line, and put supporting detail in `description`. The due date accepts natural language ("tomorrow at 5pm", "next Monday", "每周一") — pass it through as `due_text` instead of computing a date yourself.',
+      parameters: {
+        type: 'object',
+        properties: {
+          connector: { type: 'string', enum: connected, description: 'Connected service id (default the first connected one)' },
+          content: { type: 'string', description: 'One-line task title, imperative and specific' },
+          description: { type: 'string', description: 'Optional Markdown notes, evidence, or context' },
+          due_text: { type: 'string', description: 'Natural-language due date, e.g. "tomorrow at 17:00", "in 3 days", "每周一"' },
+          due_date: { type: 'string', description: 'Exact due date YYYY-MM-DD (prefer due_text when the user was vague)' },
+          priority: { type: 'string', enum: ['none', 'low', 'medium', 'high', 'urgent'], description: 'Task priority (default none)' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Label names to attach' },
+          target_id: { type: 'string', description: 'Project/label id from list_connector_targets; omit for the Inbox' },
+        },
+        required: ['content'],
+      },
+      friendly: (args) => `新建待办「${String(args.content || '').slice(0, 24)}」`,
+      handler: async (args) => {
+        const id = String(args.connector || connected[0])
+        const result = await connectorsService.createTask(id, {
+          content: String(args.content || ''),
+          description: args.description ? String(args.description) : undefined,
+          dueText: args.due_text ? String(args.due_text) : undefined,
+          dueDate: args.due_date ? String(args.due_date) : undefined,
+          priority: String(args.priority || 'none') as never,
+          labels: Array.isArray(args.labels) ? (args.labels as string[]).map(String) : undefined,
+          targetId: args.target_id ? String(args.target_id) : undefined,
+        })
+        if (!result.success) return `创建失败：${result.error}`
+        const task = result.data
+        return `已创建待办：${task?.content || String(args.content)}${task?.dueText ? `（${task.dueText}）` : ''}${task?.url ? `\n${task.url}` : ''}`
+      },
+    })
+    return tools
   }
 
   private toOpenAiTools(definitions = this.buildTools()): OpenAiToolDef[] {
@@ -2257,7 +2385,7 @@ class WeportAiService {
     // 窗口」。条数触发几乎每轮都会命中，等于每轮都把整段前缀缓存清零 —— 这是
     // 命中率被钉在 95% 的直接原因。压缩做得罕见且足够大，这一次 prefix miss
     // 才能被之后几十轮的高命中摊薄。
-    const contextWindow = this.resolveContextWindow()
+    const contextWindow = this.resolveContextWindow(consumer, activeProfile)
     const compactBudget = {
       maxChars: Math.floor(contextWindow * CHARS_PER_TOKEN * COMPACT_TRIGGER_RATIO),
       retainChars: Math.floor(contextWindow * CHARS_PER_TOKEN * COMPACT_RETAIN_RATIO),
@@ -2309,11 +2437,15 @@ class WeportAiService {
         }
         loopCount += 1
 
-        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape)
+        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape, consumer, activeProfile)
         if (!stepResult.ok) {
           error = stepResult.error || '模型调用失败'
+          // 保留网关的原文：映射后的中文只是提示，真正定位问题的是 provider 的
+          // 那一句话（例如 OpenCode Go 的「This model is not available in your
+          // country.」在旧代码里会被 401 掩盖成「密钥无效」，误导排查方向）。
+          const upstream = String(stepResult.error || '').trim().slice(0, 300)
           if (stepResult.httpStatus === 401) {
-            error = 'API 密钥无效或已过期（401），请在 WeportAI 设置中更新'
+            error = `API 密钥无效或已过期（401），请在 WeportAI 设置中更新${upstream ? `：${upstream}` : ''}`
           } else if (stepResult.httpStatus === 402) {
             error = 'API 余额不足（402），请充值后重试'
           } else if (stepResult.httpStatus === 429) {
@@ -2350,7 +2482,7 @@ class WeportAiService {
             cacheHitTokens: usage.promptCacheHitTokens,
             lastRequestTokens,
             recentRate: Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10,
-            contextWindow: this.resolveContextWindow(),
+            contextWindow: this.resolveContextWindow(consumer, activeProfile),
           })
         }
 
@@ -2492,7 +2624,7 @@ class WeportAiService {
         recentRate: recentRates.length
           ? Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10
           : 0,
-        contextWindow: this.resolveContextWindow(),
+        contextWindow: this.resolveContextWindow(consumer, activeProfile),
       }
       // 每次运行结束都记录本会话的用量/命中统计（切换会话后仍显示各自的数据）
       this.persistMessages(chatId, messages, compressed, {
@@ -2606,9 +2738,14 @@ class WeportAiService {
    */
   private async generateAITitle(userText: string): Promise<string | null> {
     try {
-      const profile = this.providerProfiles.getActive()
+      const profile = this.applyProbeOverride(this.providerProfiles.getActive() || ({} as ProviderProfile))
       if (!profile || (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional)) return null
-      const result = await getProviderAdapter(profile).stream({
+      // 标题请求也必须按**模型**挑协议：网关按模型路由（`gpt-5.6-luna` 走
+      // `/responses`，`deepseek-v4.1-flash` 走 `/chat/completions`），用
+      // profile 级别的 protocol 会把模型发到错的端点，标题就悄悄失败。
+      const resolved = this.resolveProfileModel(profile)
+      const adaptive = getProviderAdapter({ ...profile, modelProtocol: resolved.protocol })
+      const result = await adaptive.stream({
         profile,
         messages: [
           { role: 'system', content: '为对话生成简短标题。只输出标题本身，不要引号、标点或解释；中文不超过 8 个汉字，英文不超过 16 个字符。' },
@@ -2729,7 +2866,9 @@ class WeportAiService {
     history: AiMessage[],
     signal: AbortSignal,
     compressed: string | undefined,
-    requestShape: ModelRequestShape
+    requestShape: ModelRequestShape,
+    consumer: ProviderConsumer = 'chat',
+    resolvedProfile?: ProviderProfile | null
   ): Promise<{
     ok: boolean
     content?: string
@@ -2739,7 +2878,11 @@ class WeportAiService {
     error?: string
     httpStatus?: number
   }> {
-    const profile = this.providerProfiles.getActive()
+    // 功能面指定的服务优先于「默认服务」：WeClone / WeBot 可以在设置里各自指向
+    // 另一个 profile，而这里以前读的是 getActive()，于是三处配置里有两处是
+    // 摆设（选了也不生效），请求实际打到默认服务上。
+    const base = resolvedProfile || this.providerProfiles.getForConsumer(consumer)
+    const profile = base ? this.applyProbeOverride(base) : null
     if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
     if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在 WeportAI 设置中完善服务配置' }
     const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: profile.providerId === 'deepseek' })

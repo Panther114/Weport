@@ -1,5 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell } from "electron";
 import { join } from "path";
+import { writeFileSync } from "fs";
 import { ConfigService } from "../services/config";
 
 // 原生液态玻璃（Windows 专用）：DXGI 零拷贝采集 + D3D11 玻璃管线 + DComp 直接上屏，
@@ -132,23 +133,91 @@ function ensureGlassPanel(
   return glassPanel;
 }
 
-// —— 静态桌面快照（回退管线）——
-// 弹窗展示时对屏幕拍一张静态快照（半分辨率），渲染层用 CSS 滤镜就地加工成玻璃，
-// 替代 WeFlow 的 60fps 桌面视频流：零常驻开销、无 WebGL 帧循环，观感基本一致。
-// 弹窗自身已设置 content protection，不会被拍进快照造成折射回环。
-let cachedSnapshot: string | null = null;
+// —— 实时桌面折射 ——
+//
+// 玻璃背景必须在弹窗的**整个生命周期**里跟着桌面走：静态快照会让背景定格在弹出
+// 那一刻，看起来像贴了一张旧截图（用户报的就是这个）。
+//
+// 两条路，按可用性选：
+//   1. 渲染层 getUserMedia + 采集源 ID —— Windows 上走 WGC，30fps、GPU 合成、
+//      主进程零成本。部分环境（虚拟机/无 GPU/驱动不支持）WGC 会以
+//      E_ACCESSDENIED 失败，此时自动落到第 2 条。
+//   2. 主进程定帧抓取（desktopCapturer.getSources，GDI 兜底）—— 单帧在本机实测
+//      ~105ms（无 DXGI 加速），因此按实测成本自适应间隔，默认 ~3fps。玻璃本身是
+//      模糊的，低帧率不容易被察觉，但"完全不动"一眼就能看出来。
+//
+// 两条路都只在弹窗可见期间运行；隐藏/销毁立刻停（见 stopBackdropStream）。
+//
+// 自拍回环：实时画面会拍到弹窗自己。唯一可靠的排除手段是
+// WDA_EXCLUDEFROMCAPTURE（setContentProtection(true)），而它是**捕获期**属性：
+// 弹窗可见期间开着它，系统截图/录屏就拍不到弹窗本体（用户已确认接受的取舍）。
+// 隐藏时立刻关掉。
 
-async function captureDesktopSnapshot(): Promise<string | null> {
-  // 弹窗自身此时已在屏幕上（本函数用于生成玻璃回退背景）。若不临时启用
-  // 内容保护，截图会把弹窗自己也拍进去，玻璃背景里出现"弹窗套弹窗"。
-  // 拍摄期间临时排除自身，拍完立即恢复（用户要求弹窗可被系统截图/录屏）。
-  let wasProtection = false;
-  try {
-    if (notificationWindow && !notificationWindow.isDestroyed()) {
-      try { wasProtection = true; notificationWindow.setContentProtection(true); } catch { /* noop */ }
+let cachedSourceId: string | null = null;
+let sourceIdInflight: Promise<string | null> | null = null;
+
+async function refreshDesktopSourceId(): Promise<string | null> {
+  if (sourceIdInflight) return sourceIdInflight;
+  sourceIdInflight = (async () => {
+    try {
+      const display = screen.getPrimaryDisplay();
+      const sources = await desktopCapturer.getSources({
+        types: ["screen"],
+        thumbnailSize: { width: 0, height: 0 },
+      });
+      const source = sources.find((s) => s.display_id === String(display.id)) ?? sources[0];
+      cachedSourceId = source?.id ?? null;
+      return cachedSourceId;
+    } catch (error) {
+      console.warn("[NotificationWindow] Failed to resolve desktop source id:", error);
+      return null;
+    } finally {
+      sourceIdInflight = null;
     }
+  })();
+  return sourceIdInflight;
+}
+
+/** 启动时预热采集源，让首条通知不必等采集管线初始化 */
+export function prewarmDesktopSourceId(): void {
+  if (nativeGlass) return;
+  void refreshDesktopSourceId();
+}
+
+// 定帧抓取循环的状态
+let backdropTimer: NodeJS.Timeout | null = null;
+let backdropRunning = false
+/** 已推给渲染层的帧数（含重复帧；用于 QA 断言） */
+let backdropLastSeq = 0;
+let backdropFramesSent = 0;
+/** 最近一次单帧实测耗时，用于自适应间隔（慢机器上主动降帧） */
+let lastFrameCostMs = 0;
+/** 渲染层报上来的折射模式：stream = WGC 视频流已接管，主进程不需要再抓帧 */
+let backdropMode: "frames" | "stream" | "native" = "frames";
+
+function stopBackdropStream() {
+  backdropRunning = false;
+  backdropFramesSent = 0;
+  backdropLastSeq = 0;
+  if (backdropTimer) {
+    clearTimeout(backdropTimer);
+    backdropTimer = null;
+  }
+  setLiveGlassProtection(false);
+}
+
+/**
+ * 抓一帧桌面（半分辨率 JPEG）。
+ *
+ * JPEG 而不是 PNG：玻璃会再模糊一次，压缩噪点看不见；而编码成本差 5 倍以上
+ * （本机实测 PNG 7.6ms / JPEG 1.6ms，体积 56KB / 32KB），在几百毫秒一帧的循环里
+ * 这个差别直接决定能不能跑。
+ */
+async function grabDesktopFrame(): Promise<string | null> {
+  const startedAt = Date.now();
+  try {
     const display = screen.getPrimaryDisplay();
-    const scale = 0.5; // 半分辨率：玻璃模糊会抹平降采样，肉眼不可辨
+    const scale = 0.5;
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
       thumbnailSize: {
@@ -156,26 +225,129 @@ async function captureDesktopSnapshot(): Promise<string | null> {
         height: Math.round(display.size.height * scale),
       },
     });
-    const source =
-      sources.find((s) => s.display_id === String(display.id)) ?? sources[0];
+    const source = sources.find((s) => s.display_id === String(display.id)) ?? sources[0];
+    if (!cachedSourceId && source?.id) cachedSourceId = source.id;
     const thumb = source?.thumbnail;
     if (!thumb || thumb.isEmpty()) return null;
-    cachedSnapshot = thumb.toDataURL();
-    return cachedSnapshot;
+    const dataUrl = `data:image/jpeg;base64,${thumb.toJPEG(60).toString("base64")}`;
+    return dataUrl;
   } catch (error) {
-    console.warn("[NotificationWindow] Failed to capture desktop snapshot:", error);
+    console.warn("[NotificationWindow] desktop frame grab failed:", error);
     return null;
   } finally {
-    try {
-      if (wasProtection && notificationWindow && !notificationWindow.isDestroyed()) {
-        notificationWindow.setContentProtection(false);
-      }
-    } catch { /* noop */ }
+    lastFrameCostMs = Date.now() - startedAt;
   }
 }
 
+/**
+ * 定帧折射循环：抓一帧 → 推给弹窗 → 按实测帧成本决定下一帧的间隔。
+ *
+ * 间隔取 3 倍帧成本（给主进程留出处理其它 IPC 的余量），下限 200ms（约 5fps），
+ * 上限 1000ms —— 再慢就成了"几乎不动"，与静态快照无异。
+ *
+ * 循环**不能**因为"此刻不可见"就退出：showInactive() 之后 Windows 要过一小会儿
+ * 才把窗口标成可见，第一轮就判定不可见会让整个循环直接不跑（第一版就栽在这里，
+ * 表现为弹窗玻璃始终是 snapshot）。可见性只用来决定"这一轮要不要抓帧"，真正
+ * 的退出条件是 stopBackdropStream()。
+ */
+async function runBackdropStream() {
+  if (backdropRunning || nativeGlass) return;
+  if (!notificationWindow || notificationWindow.isDestroyed()) return;
+  backdropRunning = true;
+  setLiveGlassProtection(true);
+  let invisibleStreak = 0;
+  let frameIndex = 0;
+  while (backdropRunning && notificationWindow && !notificationWindow.isDestroyed()) {
+    if (backdropMode === "stream") {
+      console.log(`[NotificationWindow] backdrop loop handed over to the WGC stream after ${frameIndex} frame(s)`);
+      break;
+    }
+    const visible = notificationWindow.isVisible();
+    if (!visible) {
+      // 可见性只决定这一轮抓不抓帧，**不能**当退出条件：Windows 上 isVisible()
+      // 会在某些时刻（刚显示、被遮挡判定、DWM 状态切换）返回 false，而弹窗其实
+      // 就在屏幕上。第一版按"连续 20 轮不可见就退出"写，结果是玻璃抓了几帧之后
+      // 停住 —— 正是用户报的"背景被钉在出现那一刻"。真正的退出条件是
+      // stopBackdropStream()（notification:close / 窗口销毁）。
+      invisibleStreak += 1;
+      if (invisibleStreak % 20 === 0) {
+        console.log(`[NotificationWindow] backdrop loop: window reported invisible ${invisibleStreak}x (still running)`)
+      }
+    } else {
+      invisibleStreak = 0;
+      const dataUrl = await grabDesktopFrame();
+      if (!backdropRunning) break;
+      if (dataUrl && notificationWindow && !notificationWindow.isDestroyed()) {
+        const [winX, winY] = notificationWindow.getPosition();
+        const display = screen.getPrimaryDisplay();
+        backdropLastSeq += 1;
+        notificationWindow.webContents.send("notification:backdrop", {
+          seq: backdropLastSeq,
+          dataUrl,
+          winX,
+          winY,
+          width: display.size.width,
+          height: display.size.height,
+        });
+        frameIndex += 1;
+        backdropFramesSent += 1;
+        if (process.env.WEPORT_DUMP_BACKDROP === `1` && frameIndex <= 3) {
+          try {
+            writeFileSync(join(app.getPath(`temp`), `weport-backdrop-` + frameIndex + `.jpg`), Buffer.from(dataUrl.split(`,`)[1], `base64`));
+          } catch { /* noop */ }
+        }
+        if (frameIndex === 1 || frameIndex % 10 === 0) {
+          console.log(`[NotificationWindow] backdrop frame #${frameIndex} (${lastFrameCostMs}ms)`);
+        }
+      }
+    }
+    const interval = Math.max(200, Math.min(1000, Math.round(lastFrameCostMs * 3) || 300));
+    await new Promise<void>((resolve) => {
+      backdropTimer = setTimeout(resolve, interval);
+      backdropTimer.unref?.();
+    });
+  }
+  backdropTimer = null;
+}
+
+// 实时玻璃期间是否由我们开着内容保护（隐藏时要还原成关）
+let liveGlassProtection = false;
+/**
+ * 截图 QA 专用开关：`webContents.capturePage` 在开着内容保护的窗口上只能拿到
+ * 空白帧（见 AGENTS 的 QA 说明），QA 因此需要自己接管这块状态。置为 true 后
+ * setLiveGlassProtection 不再改动窗口的 contentProtection，由 QA 决定。
+ */
+let liveGlassProtectionSuppressed = false;
+
+export function suppressLiveGlassProtection(suppress: boolean): void {
+  liveGlassProtectionSuppressed = suppress;
+}
+
+/** 已经推给弹窗的桌面帧数（截图 QA 用它作为"折射循环真的在跑"的证据） */
+export function getBackdropFrameCount(): number {
+  return backdropFramesSent;
+}
+
+/** 最新帧序号：渲染层写进 data-glass-seq，QA 用它证明玻璃显示的是最新帧而不是首帧 */
+export function getBackdropSeq(): number {
+  return backdropLastSeq;
+}
+
+function setLiveGlassProtection(on: boolean) {
+  if (nativeGlass || liveGlassProtectionSuppressed) return;
+  if (!notificationWindow || notificationWindow.isDestroyed()) return;
+  if (liveGlassProtection === on) return;
+  try {
+    notificationWindow.setContentProtection(on);
+    liveGlassProtection = on;
+  } catch { /* noop */ }
+}
+
+
 export function destroyNotificationWindow() {
   cancelIdleDestroy();
+  stopBackdropStream();
+  liveGlassProtection = false;
   if (closeTimer) {
     clearTimeout(closeTimer);
     closeTimer = null;
@@ -248,11 +420,17 @@ export function createNotificationWindow() {
     },
   });
 
-  // 用户要求通知窗口可被系统截图（与微信弹窗行为一致）。
-  // 注意：setContentProtection(true) 会把窗口从屏幕采集排除（WDA_EXCLUDEFROMCAPTURE），
-  // 导致系统截图/录屏中看不到弹窗——因此不再启用内容保护。
-  // 玻璃回环风险由窗口尺寸小 + 渲染层重绘控制；如需恢复保护，直接启用下一行即可。
-  // notificationWindow.setContentProtection(true);
+  // 内容保护（WDA_EXCLUDEFROMCAPTURE）与"玻璃能不能实时"是同一个取舍的两端：
+  //   - 关着它：系统截图/录屏能看到弹窗，但桌面视频流会把弹窗自己拍进去，
+  //     玻璃里出现"弹窗套弹窗"，因此玻璃只能是一张静态快照（旧行为）；
+  //   - 开着它：玻璃可以逐帧跟随桌面（现在的行为），代价是弹窗可见的那几秒
+  //     不会被系统截图/录屏拍到。
+  //
+  // 2026-09-13 由用户确认选择后者（实时玻璃优先）。这里不在创建时开启，而是由
+  // setLiveGlassProtection 在**通知可见期间**开启、隐藏时立即关闭：弹窗不在画面上
+  // 时没有任何理由继续把窗口排除在截图之外。
+  // 想把弹窗拍进截图的话，改回静态快照（renderer 不传 backdropStream）并去掉
+  // setLiveGlassProtection(true)。
 
   applyWindowSize(notificationWindow, width, height);
 
@@ -394,9 +572,8 @@ async function showAndSend(win: BrowserWindow, data: any) {
   const winX = Math.floor(x);
   const winY = Math.floor(y);
 
-  // 静态桌面快照（回退管线）：一条通知只拍一次，渲染层零常驻开销。
-  // 原生玻璃可用时无需快照。
-  const snapshot = !nativeGlass ? await captureDesktopSnapshot() : null;
+  // 弹窗弹出路径上**不做任何采集**：一次桌面抓取在本机实测 ~105ms，放在这里
+  // 就是每条通知都晚出现一小截。首帧交给下面的折射循环，弹窗先出现。
   const payload = {
     ...data,
     position,
@@ -404,8 +581,9 @@ async function showAndSend(win: BrowserWindow, data: any) {
     notificationAnimationEnabled,
     backdrop: {
       native: Boolean(nativeGlass),
-      sourceId: null,
-      dataUrl: snapshot || undefined,
+      // 渲染层优先用它开 WGC 视频流（30fps、GPU 合成、主进程零成本）；不可用时
+      // 自动落到主进程的定帧循环（runBackdropStream）
+      sourceId: nativeGlass ? null : cachedSourceId,
       winX,
       winY,
       width: display.size.width,
@@ -427,6 +605,11 @@ async function showAndSend(win: BrowserWindow, data: any) {
   win.showInactive(); // 显示但不聚焦
   win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
 
+  // 显示之后才开始抓帧：此时内容保护已经能生效（排除弹窗自身），
+  // 而且首帧正好赶在入场动画期间到达
+  backdropMode = nativeGlass ? "native" : "frames";
+  void runBackdropStream();
+
   // 自动关闭计时器通常由渲染进程管理
   // 渲染进程发送 'notification:close' 来隐藏窗口
 }
@@ -440,11 +623,21 @@ export async function registerNotificationHandlers() {
   ipcMain.handle("notification:close", () => {
     // 窗口即将隐藏，玻璃面板立即消失（渲染层通常已提前发过淡出信号）
     glassPanel?.hide(0);
+    stopBackdropStream();
+    // 实时玻璃的内容保护随可见期结束一起撤掉：弹窗不在画面上时没有任何理由
+    // 继续把窗口排除在截图之外。
+    setLiveGlassProtection(false);
     if (notificationWindow && !notificationWindow.isDestroyed()) {
       notificationWindow.hide();
       notificationWindow.setIgnoreMouseEvents(true, { forward: true });
     }
     scheduleIdleDestroy();
+  });
+
+  // 渲染层接管折射（WGC 视频流已出帧）：主进程停掉定帧抓取，避免白花 CPU。
+  // 反向切回（流中断）不需要处理：流一旦建立就由渲染层持有到弹窗隐藏。
+  ipcMain.on("notification:glassMode", (_event, payload: { mode?: string }) => {
+    if (payload?.mode === "stream") backdropMode = "stream";
   });
 
   // —— 原生玻璃面板生命周期（仅 nativeGlass 可用时渲染层才会发这些消息）——
@@ -513,6 +706,7 @@ export async function registerNotificationHandlers() {
   const shouldPrewarm = (await config.get("messagePushEnabled")) === true;
   if (!shouldPrewarm) return;
   setTimeout(() => {
+    prewarmDesktopSourceId();
     const win = createNotificationWindow();
     if (nativeGlass && win) {
       const scale = screen.getPrimaryDisplay().scaleFactor;

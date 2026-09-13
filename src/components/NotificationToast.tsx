@@ -27,8 +27,10 @@ interface NotificationToastProps {
     onClose: () => void
     duration?: number
     initialVisible?: boolean
-    /** 回退管线的屏幕几何信息（含静态桌面快照），玻璃用它对齐折射采样 */
+    /** 回退管线的屏幕几何信息（含首帧快照），玻璃用它对齐折射采样 */
     backdropImage?: LiquidGlassBackdropImage
+    /** 实时桌面视频流：就绪后玻璃跟着桌面逐帧更新（静态快照只作首帧兜底） */
+    backdropStream?: MediaStream | null
     /** 原生玻璃模式（Windows）：折射由主进程原生面板渲染，卡片背景透明 */
     nativeBackdrop?: boolean
     /** 是否播放入场、退场和卡片过渡动效 */
@@ -39,7 +41,8 @@ interface NotificationToastProps {
 
 /**
  * 通知卡片：始终渲染为全局液态玻璃（LiquidGlass 兼容层），在独立通知窗口内展示。
- * 折射背景：原生面板（默认关闭）或主进程下发的静态桌面快照（CSS 滤镜就地加工）。
+ * 折射背景：原生面板（默认关闭）或桌面视频流（渲染层 getUserMedia，逐帧实时）；
+ * 视频流出帧前用主进程下发的首帧快照垫底。
  * 卡片不导航、不弹出菜单；右键当前卡片即可关闭，默认按配置时长自动消失。
  */
 export function NotificationToast({
@@ -48,6 +51,7 @@ export function NotificationToast({
     duration = 5000,
     initialVisible = false,
     backdropImage,
+    backdropStream,
     nativeBackdrop = false,
     animationEnabled = true,
     onHideStart
@@ -121,6 +125,7 @@ export function NotificationToast({
                 displacementScale={85}
                 aberrationIntensity={1.5}
                 backdropImage={backdropImage}
+                backdropStream={backdropStream}
                 nativeBackdrop={nativeBackdrop}
                 hoverEffect={false}
             >

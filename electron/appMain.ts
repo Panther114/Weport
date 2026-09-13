@@ -48,16 +48,23 @@ import { KeyServiceMac } from './services/keyServiceMac'
 import { KeyServiceLinux } from './services/keyServiceLinux'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
+
 import { getProviderCatalog } from './services/ai/providerCatalog'
 import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
 import { setWeBotService } from './services/weBotRegistry'
 import { weCloneService } from './services/weCloneService'
+import { connectorsService } from './services/connectors/connectorsService'
+import { registerCliCommands } from './services/cliCommands'
+import { runCommand } from './services/weportCommands'
 import { collectMacDiagnostics } from './services/macDiagnosticsService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
   showNotification,
+  suppressLiveGlassProtection,
+  getBackdropFrameCount,
+  getBackdropSeq,
   setNotificationNavigateHandler,
 } from './windows/notificationWindow'
 import type { MessagePushPayload } from './services/messagePushService'
@@ -81,6 +88,14 @@ let shutdownPromise: Promise<void> | null = null
 let fatalProcessError = false
 /** 是否以静默方式启动（开机自启 Run 键带 --background，主窗口保持隐藏） */
 const startHidden = process.argv.includes('--background')
+/**
+ * TUI 引擎模式（`weport` 在终端里起的子进程）。
+ *
+ * 终端界面本身是另一个进程（packages/weport-tui），它需要的是"服务能力"而不是
+ * 渲染层，所以这个模式不创建主窗口、不建托盘，只在既有 IPC 通道上接一个
+ * JSON-RPC 服务器 —— 命令走的是和 GUI 完全相同的 service 层。
+ */
+const isCliMode = process.argv.includes('--cli')
 /** QA 截图模式（scripts/capture-ui.ps1 驱动）。 */
 const isScreenshotMode = process.env.WEPORT_SCREENSHOT_POPUP === '1'
 /** README 截图模式：读取隔离的用户配置/数据库副本，并在渲染层统一模糊隐私字段。 */
@@ -95,7 +110,9 @@ const isAnyQaMode =
   process.env.WEPORT_REAL_DUMP === '1' ||
   process.env.WEPORT_UI_DUMP === '1' ||
   process.env.WEPORT_SELFTEST === '1' ||
-  process.env.WEPORT_AI_SELFTEST === '1'
+  process.env.WEPORT_AI_SELFTEST === '1' ||
+  process.env.WEPORT_AI_PROBE === '1' ||
+  isCliMode
 
 // ---------------------------------------------------------------------------
 // 资源路径（wcdb / key / runtime DLL）
@@ -2873,6 +2890,26 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('webot:clearNotes', () => ensureWeBotService().clearNotes())
 
   // -------------------------------------------------------------------------
+  // 连接器（第三方工具，v1.0）
+  //
+  // 凭据只进不出：`list` 返回 `····9f2c` 形式的掩码，明文令牌永远不会经 IPC
+  // 回到渲染进程，所以界面里的输入框永远是"写一次就空"的。
+  // -------------------------------------------------------------------------
+  ipcMain.handle('connectors:list', () => connectorsService.list())
+  ipcMain.handle('connectors:connect', (_e, id: string, token: string) =>
+    connectorsService.connect(String(id || ''), String(token || '')))
+  ipcMain.handle('connectors:disconnect', (_e, id: string) => connectorsService.disconnect(String(id || '')))
+  ipcMain.handle('connectors:verify', (_e, id: string) => connectorsService.verify(String(id || '')))
+  ipcMain.handle('connectors:listTargets', (_e, id: string) => connectorsService.listTargets(String(id || '')))
+  ipcMain.handle('connectors:createTask', (_e, id: string, input: any) =>
+    connectorsService.createTask(String(id || ''), input || {}))
+  ipcMain.handle('connectors:getAgentSettings', () => ({ allowAgentWrite: connectorsService.agentWriteAllowed() }))
+  ipcMain.handle('connectors:setAgentSettings', (_e, patch: { allowAgentWrite?: boolean }) => {
+    if (typeof patch?.allowAgentWrite === 'boolean') connectorsService.setAgentWriteAllowed(patch.allowAgentWrite)
+    return { allowAgentWrite: connectorsService.agentWriteAllowed() }
+  })
+
+  // -------------------------------------------------------------------------
   // WeClone（人格克隆）
   //
   // 从 9669dcb 恢复并前移。服务层 weCloneService.ts（1144 行）无需改写即兼容
@@ -3182,6 +3219,46 @@ function installScreenshotDemoHandlers() {
   override('ai:clearDebugLog', () => ({ success: true }))
   override('ai:send', () => ({ success: true }))
   override('ai:abort', () => ({ success: true }))
+
+  // 连接器演示数据：默认给一个"已连接"的 Todoist 卡片，截图里能同时看到状态胶囊、
+  // 重新验证/断开按钮和目标列表。令牌只用掩码，绝不出现真实凭据。
+  override('connectors:list', () => [
+    {
+      id: 'todoist',
+      descriptor: {
+        id: 'todoist',
+        name: 'Todoist',
+        description: '把 WeportAI 或定时代理整理出来的待办写进 Todoist。',
+        authKind: 'token',
+        capabilities: { read: true, write: true, hasTargets: true },
+        credentialUrl: 'https://app.todoist.com/app/settings/integrations/developer',
+        credentialHelp: [
+          '打开 Todoist 网页版 → 左下角头像 → 设置 → 集成 → 开发者。',
+          '在「API 令牌」下点「复制」，它会复制一整串 40 位十六进制字符。',
+          '粘贴到下面的输入框并保存，Weport 会立刻验证一次。',
+        ],
+        credentialPlaceholder: '粘贴 40 位 API 令牌',
+      },
+      connected: true,
+      credentialHint: '····4f21',
+      connectedAt: Date.now() - 7_200_000,
+      lastCheck: { at: Date.now() - 600_000, ok: true, accountName: 'Todoist' },
+    },
+  ])
+  override('connectors:getAgentSettings', () => ({ allowAgentWrite: true }))
+  override('connectors:setAgentSettings', () => ({ allowAgentWrite: true }))
+  override('connectors:verify', () => ({ success: true }))
+  override('connectors:disconnect', () => ({ success: true }))
+  override('connectors:connect', () => ({ success: true }))
+  override('connectors:listTargets', () => ({
+    success: true,
+    data: [
+      { id: '', name: '收件箱（Inbox）', kind: 'inbox' },
+      { id: '6X7r8g', name: '工作', kind: 'project' },
+      { id: '6X7r9h', name: '家务', kind: 'project' },
+      { id: 'label:weport-verify', name: '@weport-verify', kind: 'label' },
+    ],
+  }))
 
   // WeBot 演示数据：任务与笔记各一份，用于验证新页面的渲染与布局。
   // 与其余演示数据一样是脱敏、确定性的，且绝不写进真实配置
@@ -4539,6 +4616,31 @@ async function runScreenshotMode() {
   }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  /** 弹窗玻璃折射管线（live / snapshot / native），由 popup 渲染层自报 */
+  let popupGlassState = '(unknown)'
+  /** 实时玻璃的行为证据：弹窗后桌面变动前后两帧的平均像素差（0 = 没在动） */
+  let popupLiveDelta = -1
+  /** 主进程实际推给弹窗的桌面帧数 */
+  let popupBackdropFrames = 0
+  /** 玻璃 <img> 的 src 在两帧之间是否真的换了（渲染层有没有应用新帧的硬证据） */
+  let popupGlassImgChanged = false
+  /** 渲染层实际应用到玻璃上的帧序号 vs 主进程最新发出的序号 */
+  let popupGlassAppliedSeq = 0
+  let popupGlassSentSeq = 0
+  /** 两帧 NativeImage 的平均绝对像素差（BGRA，逐字节） */
+  const meanAbsDiff = (a: Electron.NativeImage, b: Electron.NativeImage): number => {
+    try {
+      const bufA = a.toBitmap()
+      const bufB = b.toBitmap()
+      const n = Math.min(bufA.length, bufB.length)
+      if (n === 0) return -1
+      let sum = 0
+      for (let i = 0; i < n; i += 4) sum += Math.abs(bufA[i] - bufB[i])
+      return sum / (n / 4)
+    } catch {
+      return -1
+    }
+  }
   // capturePage 在 GPU 负载高时可能永不 resolve，加超时兜底
   const captureWithTimeout = (win: BrowserWindow, ms: number) =>
     Promise.race([
@@ -4717,6 +4819,30 @@ async function runScreenshotMode() {
       await sleep(400)
     }
     console.warn(`[screenshot] ${file} stayed unstable/blank after retries`)
+    return false
+  }
+
+  /**
+   * 单帧非空白保存（不要求两帧相同）。
+   *
+   * 弹窗玻璃改成实时折射后，"连续两帧完全一致"在设计上就不可能成立 ——
+   * saveStable 会一直重试到超时，popup.png 反而永远写不出来。这里只要求非空白；
+   * 入场动画在上层已经等过，不会截到淡出的中间帧。
+   */
+  const saveNonBlank = async (win: BrowserWindow, file: string, threshold = 12, attempts = 6) => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const image = await captureWithTimeout(win, 8000)
+      if (image) {
+        const png = image.toPNG()
+        if (!isBlank(png, threshold)) {
+          writeFileSync(join(outDir, file), png)
+          console.log(`[screenshot] ${file} saved (single frame, attempt ${attempt + 1})`)
+          return true
+        }
+      }
+      await sleep(400)
+    }
+    console.warn(`[screenshot] ${file} stayed blank after retries`)
     return false
   }
 
@@ -5023,7 +5149,10 @@ async function runScreenshotMode() {
     await showNotification(payload, { force: true })
     const popup = BrowserWindow.getAllWindows().find((w) => w !== mainWindow && !w.isDestroyed())
     if (popup) {
-      // 内容保护会排除该窗口被采集（含 capturePage），截图模式临时关闭
+      // 内容保护会排除该窗口被采集（含 capturePage），截图模式临时关闭。
+      // 同时接管主进程侧的开关：实时玻璃会在可见期把保护重新打开，否则这里只能
+      // 截到空白帧。
+      suppressLiveGlassProtection(true)
       try {
         popup.setContentProtection(false)
       } catch { /* noop */ }
@@ -5044,9 +5173,75 @@ async function runScreenshotMode() {
       await installScreenshotPrivacyMask(popup, 'popup')
       // 等卡片入场动画 + 玻璃面板就绪；若指定了真实头像，多等 CDN 加载完成
       await sleep(payload.avatarUrl ? 5000 : 1500)
+
+      // 先问渲染层用的是哪条折射管线，再决定能不能用"两帧一致"来判定稳定：
+      // 实时玻璃永远不会有连续两帧完全相同，saveStable 会一直重试到超时，
+      // popup.png 反而写不出来。
+      //
+      // 要轮询而不是读一次：折射循环的第一帧要走一次完整的采集管线初始化
+      // （本机实测首次 >2s，之后 ~160ms），读得太早会得到还没收到帧的 'snapshot'。
+      try {
+        let glass = '(unset)'
+        for (let i = 0; i < 24; i += 1) {
+          glass = String(await popup.webContents
+            .executeJavaScript(`document.documentElement.dataset.glass || '(unset)'`, true)
+            .catch(() => '(unset)'))
+          if (glass === 'stream' || glass === 'frames' || glass === 'native') break
+          await sleep(500)
+        }
+        popupGlassState = glass
+        log(`[screenshot] popup glass pipeline = ${popupGlassState}`)
+      } catch { /* noop */ }
+
+      const glassIsLive = popupGlassState === 'stream' || popupGlassState === 'frames' || popupGlassState === 'native'
+      // 实时玻璃会把**弹窗背后的真实画面**折射进这张图里。README 用的是这张
+      // popup.png，所以先把主窗口铺成一块中性底色再截，玻璃里就只有纯色 —— 既不
+      // 泄露桌面，也和文档里其它深色截图一致。截完立刻撤掉，后面的行为断言
+      // （闪一块亮色、看两帧差异）用的还是真实桌面。
+      if (glassIsLive) {
+        // 把 QA 主窗口提到最前：玻璃折射的是**屏幕上弹窗背后**的内容，如果有别的"app 盖在 QA 窗口上面，注入的中性底色根本到不了玻璃，截出来的 popup.png 里就是真实桌面的模糊残影（README 不能出现这种东西）。
+        mainWindow?.show()
+        mainWindow?.moveTop()
+        mainWindow?.focus()
+        await sleep(700)
+        await mainWindow?.webContents
+          .executeJavaScript(
+            `(() => {
+               const d = document.createElement('div');
+               d.id = 'qa-neutral-backdrop';
+               d.style.cssText = 'position:fixed;inset:0;background:#101014;z-index:2147482999';
+               document.body.appendChild(d);
+               return true;
+             })()`,
+            true,
+          )
+          .catch(() => false)
+        await sleep(1000)
+      }
       // 阈值与其他 11 张截图一致（12）：CI 桌面快照可能为黑底，
       // 40 的阈值会把「有真实内容但背景暗」的弹窗误判为空白
-      await saveStable(popup, 'popup.png', 12, 40)
+      if (glassIsLive) await saveNonBlank(popup, 'popup.png', 12)
+      else await saveStable(popup, 'popup.png', 12, 40)
+      if (glassIsLive) {
+        // 把 QA 主窗口提到最前：玻璃折射的是**屏幕上弹窗背后**的内容，如果有别的"app 盖在 QA 窗口上面，注入的中性底色根本到不了玻璃，截出来的 popup.png 里就是真实桌面的模糊残影（README 不能出现这种东西）。
+        mainWindow?.show()
+        mainWindow?.moveTop()
+        mainWindow?.focus()
+        await sleep(700)
+        await mainWindow?.webContents
+          .executeJavaScript(`(() => { document.getElementById('qa-neutral-backdrop')?.remove(); return true })()`, true)
+          .catch(() => false)
+        await sleep(400)
+        // 关键：把内容保护还回去再跑行为断言。
+        //
+        // 抓帧会拍到屏幕上的一切 —— 包括弹窗自己。真实运行时靠内容保护把弹窗排除
+        // 掉，玻璃采样到的才是"弹窗背后"；QA 为了让 capturePage 能截到弹窗而临时
+        // 关掉了保护，于是帧里含弹窗自身，玻璃采样区域被它自己的内容占据，背景
+        // 变化几乎看不出来（实测帧差 0.4，而排除自身后有 5-10）。之前这条断言时
+        // 好时坏，就是这个开关的时序在决定。
+        await sleep(600)
+      }
+
       try {
         const rects = await popup.webContents.executeJavaScript(
           `(() => {
@@ -5063,7 +5258,96 @@ async function runScreenshotMode() {
         )
         if (rects) writeFileSync(join(outDir, 'popup-rects.json'), JSON.stringify(rects, null, 1), 'utf8')
       } catch { /* noop */ }
-    } else {
+
+      // 实时玻璃的**行为**断言：把弹窗背后的底色从亮换成暗，比较两次弹窗截图。
+      //
+      // 为什么用"亮 vs 暗"而不是"变一下"：开着内容保护时 capturePage 只能拿到空白
+      // 帧（AGENTS 的 QA 说明），所以这一步必须在保护关闭时做；而保护关闭时抓帧会
+      // 拍到弹窗自身，玻璃采样区域里有它自己的模糊残影 —— 背景的**细微**变化会被
+      // 淹没（实测只差 0.4），但整档明暗变化仍然明确可辨。玻璃若没在重绘，两次
+      // 截图会逐像素相同。
+      {
+        try {
+          const setOverlay = async (colour: string | null) =>
+            mainWindow?.webContents
+              .executeJavaScript(
+                colour
+                  ? `(() => {
+                       const d = document.getElementById('qa-neutral-backdrop') || document.createElement('div');
+                       d.id = 'qa-neutral-backdrop';
+                       d.style.cssText = 'position:fixed;inset:0;background:${colour};z-index:2147483000';
+                       document.body.appendChild(d);
+                       return true;
+                     })()`
+                  : `(() => { document.getElementById('qa-neutral-backdrop')?.remove(); return true })()`,
+                true,
+              )
+              .catch(() => false)
+
+          const readImg = async () =>
+            String(await popup.webContents
+              .executeJavaScript(
+                "(() => { const img = document.querySelector('.liquid-glass img'); return img ? (img.src.length + ':' + img.complete + ':' + img.naturalWidth + 'x' + img.naturalHeight + ':' + img.src.slice(2000, 2012)) : '(no img)' })()",
+                true,
+              )
+              .catch(() => '(err)'))
+
+          const readHash = async () =>
+            String(await popup.webContents
+              .executeJavaScript(`document.documentElement.dataset.glassHash || '(none)'`, true)
+              .catch(() => '(none)'))
+
+          // 控制实验：先确认 popup 的 capturePage 真的能看到自身变化。若它拿到的是
+          // 陈旧帧，下面的像素差就毫无意义（实测 117，说明是活的）。这条只记日志、
+          // 不作断言 —— 它是"测量工具本身是否可用"的自检。
+          {
+            const cBefore = await popup.webContents.capturePage()
+            await popup.webContents.executeJavaScript(`document.body.style.background = '#00d5ff'; true`, true).catch(() => false)
+            await sleep(1000)
+            const cAfter = await popup.webContents.capturePage()
+            await popup.webContents.executeJavaScript(`document.body.style.background = ''; true`, true).catch(() => false)
+            await sleep(600)
+            log(`[screenshot] popup capturePage control (self-paint) delta = ${meanAbsDiff(cBefore, cAfter)}`)
+          }
+
+          // 行为断言的前提同样是"QA 窗口在弹窗正下方"：否则注入的亮/暗底色压根不在玻璃采样区里，两次截图自然只差一点点。
+          mainWindow?.show()
+          mainWindow?.moveTop()
+          await sleep(500)
+          await setOverlay('#ffd60a')
+          await sleep(1700)
+          const bright = await popup.webContents.capturePage()
+          const imgBright = await readImg()
+          log(`[screenshot] popup glass img (bright) = ${imgBright}`)
+          const hashBright = await readHash()
+          try { writeFileSync(join(outDir, 'popup-live-bright.png'), bright.toPNG()) } catch { /* noop */ }
+
+          await setOverlay('#101014')
+          await sleep(1700)
+          const dark = await popup.webContents.capturePage()
+          const imgDark = await readImg()
+          log(`[screenshot] popup glass img (dark) = ${imgDark}`)
+          const hashDark = await readHash()
+          try { writeFileSync(join(outDir, 'popup-live-dark.png'), dark.toPNG()) } catch { /* noop */ }
+
+          await setOverlay(null)
+          await sleep(400)
+
+          popupLiveDelta = meanAbsDiff(bright, dark)
+          popupGlassImgChanged = imgBright !== imgDark
+          popupGlassAppliedSeq = Number(await popup.webContents.executeJavaScript('document.documentElement.dataset.glassSeq || 0', true).catch(() => 0))
+          popupGlassSentSeq = getBackdropSeq()
+          log(`[screenshot] popup glass applied frame seq = ${popupGlassAppliedSeq} (sent ${popupGlassSentSeq})`)
+          popupBackdropFrames = getBackdropFrameCount()
+          log(
+            `[screenshot] popup live-glass bright/dark delta = ${popupLiveDelta.toFixed(2)}` +
+              ` (frames sent: ${popupBackdropFrames}, renderer says: ${popupGlassState})`,
+          )
+          log(`[screenshot] popup glass frame hash bright=${hashBright} dark=${hashDark}`)
+        } catch (e) {
+          log('WARN [screenshot] popup live-glass delta probe failed:', e)
+        }
+      }    } else {
       log('WARN [screenshot] popup window not found')
     }
   } catch (e) {
@@ -5077,6 +5361,11 @@ async function runScreenshotMode() {
   // 通过了很久的断言。每次截图后扫一遍可见文本，命中就记下来，最后当成失败。
   const placeholderHits: Record<string, string[]> = {}
   const contrastHits: Record<string, Array<{ text: string; ratio: number; color: string; bg: string }>> = {}
+  /** 3.0-4.5 的"够用但偏低"区间：只记录不阻断，见 auditContrast 注释。 */
+  const contrastWarnHits: Record<string, Array<{ text: string; ratio: number; color: string; bg: string }>> = {}
+  /** 哪一步截图没有渲染出目标页面。截图"文件存在但内容是上一页"是这套工具最
+      隐蔽的失败模式，必须让外层构建真的失败，而不是只打一行 WARN。 */
+  const captureFailures: string[] = []
   /**
    * 对比度审计：浅色模式最容易出的问题不是"看不出来"，而是**部分文字变成白底
    * 白字 / 浅底浅字** —— 截图本身仍然是"非空白"，任何现有断言都拦不住。
@@ -5202,6 +5491,11 @@ async function runScreenshotMode() {
       )) as Array<{ text: string; ratio: number; color: string; bg: string; size: number }>
       // 大号加粗文字按 WCAG 只需 3.0，不记；其余低于 3.0 视为硬失败。
       const bad = (Array.isArray(rows) ? rows : []).filter((row) => row.ratio < 3)
+      // 3.0-4.5 之间记成"警告"：够不上硬失败，但正是用户说的"文字颜色不对"最常
+      // 落在的区间（深灰压深底、浅灰压强调色底）。审计只把它写进单独的文件，
+      // 由人判断，不阻断构建。
+      const warn = (Array.isArray(rows) ? rows : []).filter((row) => row.ratio >= 3 && row.ratio < 4.5)
+      if (warn.length > 0) contrastWarnHits[label] = warn
       if (bad.length > 0) {
         contrastHits[label] = bad
         console.warn(`[screenshot] ${label} contrast: ${bad.length} element(s) below 3.0, worst=${bad[0].ratio}`)
@@ -5236,6 +5530,10 @@ async function runScreenshotMode() {
       const ok = await waitForDom(selectors[0], isRealScreenshotMode ? 240 : 40)
         || (isRealScreenshotMode && selectors[1] ? await waitForDom(selectors[1], 20) : false)
       if (!ok) {
+        // 静默返回会留下一个更坏的结果：这一步没截到，但文件名仍然存在（上一次
+        // 的运行残留、或者截到的是上一页），外层只看"文件存在 + 非空白"就会通过。
+        // 记进 captureFailures，由 capture-ui.ps1 硬断言。
+        captureFailures.push(`${label} (${selectors[0]} did not render)`)
         console.warn(`[screenshot] ${label} did not render`)
         return
       }
@@ -5246,6 +5544,7 @@ async function runScreenshotMode() {
       await dumpRects(`${fileName.replace('.png', '')}-rects.json`, selectors)
       console.log(`[screenshot] ${fileName} captured`)
     } catch (e) {
+      captureFailures.push(`${label} (capture threw: ${String(e)})`)
       console.warn(`[screenshot] ${label} capture failed:`, e)
     }
   }
@@ -5616,6 +5915,80 @@ async function runScreenshotMode() {
     await sleep(900)
     viewportMetrics.aiWide = await measure()
 
+    // 7.9) 全量清屏：每个页面 + 每个设置分类，顶部与底部各截一张并跑对比度审计。
+    //
+    // 为什么需要：上面那些捕获点只覆盖"每个页面第一屏"。用户报的"文字/底色对上
+    // 不"的问题多数出现在折叠线以下（第二张卡片、列表尾部、说明段落），而
+    // stddev 与单张首页截图都发现不了。底部截图同时也是一份"所有界面都长什么样"
+    // 的完整记录。
+    {
+      mainWindow.setSize(1440, 900)
+      await sleep(600)
+      const scrollWorkspace = (where: 'top' | 'bottom') => mainWindow!.webContents.executeJavaScript(
+        `(() => { const ws = document.querySelector('.workspace'); if (!ws) return -1; ws.scrollTop = ${where === 'top' ? 0 : 'ws.scrollHeight'}; return Math.round(ws.scrollTop) })()`,
+        true,
+      ).catch(() => -1)
+
+      const sweepPages: Array<[string, string]> = [
+        ['connect', '连接微信'],
+        ['export', '导出数据'],
+        ['sns', '朋友圈'],
+        ['analytics', '分析'],
+        ['antirecall', '防撤回'],
+        ['notifications', '消息通知'],
+        ['ai', 'WeportAI'],
+        ['webot', 'WeBot'],
+        ['webot-notes', 'WeBot 笔记'],
+        ['weclone', '人格克隆'],
+      ]
+
+      let sweepIndex = 0
+      for (const [slug, label] of sweepPages) {
+        if (!mainWindow || mainWindow.isDestroyed()) break
+        sweepIndex += 1
+        try {
+          await clickTab(label)
+          await sleep(900)
+          for (const where of ['top', 'bottom'] as const) {
+            await scrollWorkspace(where)
+            await sleep(450)
+            const name = `sweep${String(sweepIndex).padStart(2, '0')}-${slug}-${where}.png`
+            await saveStable(mainWindow, name)
+            await auditContrast(`sweep:${slug}:${where}`)
+          }
+        } catch (e) {
+          log(`WARN [screenshot] sweep ${slug} failed:`, e)
+        }
+      }
+
+      // 设置：每个分类都是一个独立界面（很多控件只在其中一个分类里出现）
+      const settingsSections = ['常规', '外观', 'AI 服务', '服务分配', '连接器', '数据', '接口', '关于']
+      let sectionIndex = 0
+      for (const section of settingsSections) {
+        if (!mainWindow || mainWindow.isDestroyed()) break
+        sectionIndex += 1
+        try {
+          await clickTab('设置')
+          await sleep(700)
+          await mainWindow.webContents.executeJavaScript(
+            `(() => { const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes(${JSON.stringify(section)})); b?.click(); return !!b })()`,
+            true,
+          ).catch(() => false)
+          await sleep(700)
+          for (const where of ['top', 'bottom'] as const) {
+            await scrollWorkspace(where)
+            await sleep(400)
+            const name = `sweep-settings${String(sectionIndex).padStart(2, '0')}-${section}-${where}.png`
+            await saveStable(mainWindow, name)
+            await auditContrast(`sweep:设置/${section}:${where}`)
+          }
+        } catch (e) {
+          log(`WARN [screenshot] sweep settings/${section} failed:`, e)
+        }
+      }
+      log(`[screenshot] full sweep done (${sweepPages.length} pages + ${settingsSections.length} settings sections)`)
+    }
+
     try {
       writeFileSync(join(outDir, 'viewport-metrics.json'), JSON.stringify(viewportMetrics, null, 2), 'utf8')
       log(`[screenshot] viewport metrics = ${JSON.stringify(viewportMetrics)}`)
@@ -5633,6 +6006,15 @@ async function runScreenshotMode() {
     try {
       writeFileSync(join(outDir, 'contrast-audit.json'), JSON.stringify(contrastHits, null, 2), 'utf8')
       log(`[screenshot] contrast audit = ${JSON.stringify(Object.keys(contrastHits))} (failing screens)`)
+      writeFileSync(join(outDir, 'contrast-warnings.json'), JSON.stringify(contrastWarnHits, null, 2), 'utf8')
+      log(`[screenshot] contrast warnings = ${JSON.stringify(Object.keys(contrastWarnHits))}`)
+      // AI 页在 CI 软渲染下偶发挂载超时，那条由 capture-ui.ps1 单独软处理。
+      try {
+        writeFileSync(join(outDir, 'popup-glass.json'), JSON.stringify({ pipeline: popupGlassState, liveFrameDelta: popupLiveDelta, framesSent: popupBackdropFrames, glassImgChanged: popupGlassImgChanged, appliedSeq: popupGlassAppliedSeq, sentSeq: popupGlassSentSeq }, null, 2), 'utf8')
+      } catch { /* noop */ }
+      const hardFailures = captureFailures.filter((entry) => !entry.startsWith('ai '))
+      writeFileSync(join(outDir, 'capture-failures.json'), JSON.stringify(hardFailures, null, 2), 'utf8')
+      log(`[screenshot] capture failures = ${JSON.stringify(hardFailures)}`)
     } catch (e) {
       log('WARN [screenshot] could not write contrast audit:', e)
     }
@@ -6326,7 +6708,8 @@ function installMainProcessErrorHandlers() {
     // 错误框（含 fatal.log 路径），让用户/反馈有迹可循。QA/无人值守模式跳过弹窗。
     const inQaMode = process.env.WEPORT_SCREENSHOT_POPUP === '1' ||
       process.env.WEPORT_V09_DUMP === '1' ||
-      process.env.WEPORT_AI_SELFTEST === '1'
+      process.env.WEPORT_AI_SELFTEST === '1' ||
+  process.env.WEPORT_AI_PROBE === '1'
     if (!inQaMode && app.isReady()) {
       try {
         const logPath = fatalLog || join(app.getPath('logs'), 'fatal.log')
@@ -6347,9 +6730,301 @@ function installMainProcessErrorHandlers() {
   })
 }
 
+// ---------------------------------------------------------------------------
+// AI 探针模式（WEPORT_AI_PROBE=1）：用**当前配置的 provider profile** 跑一段
+// 多轮对话，把每一轮的用量、缓存命中与延迟写成 JSON。
+//
+// 为什么单独一个模式：`WEPORT_AI_SELFTEST` 读的是旧的 `weportAiApiKey`（v1.0 已经
+// 换成分 profile 存储，那把钥匙早就不用了），所以它测不到真实配置。缓存命中率、
+// 克隆相似度评估都需要一个"拿真实配置、可脚本调用、输出结构化指标"的入口。
+//
+// 环境变量：
+//   WEPORT_AI_PROBE_OUT     输出目录（默认 <temp>/weport-ai-probe）
+//   WEPORT_AI_PROBE_TURNS   轮数（默认 3）
+//   WEPORT_AI_PROBE_TASKS   自定义提示词，JSON 数组或 | 分隔
+//   WEPORT_AI_PROBE_TOOLS   设为 0 则不挂工具（纯对话，用于隔离缓存行为）
+//   WEPORT_AI_PROBE_CONSUMER chat | webot | weclone（默认 chat）
+//   WEPORT_AI_PROBE_PROFILE  'active'（默认）| 'all'（逐个试探）| id/名称/模型片段
+//   WEPORT_AI_PROBE_MODEL    只用内存里换掉模型 id 跑一轮（"这个模型这台机器能不能调通"）
+//   WEPORT_AI_PROBE_BASE_URL 配合上面一起换成别的网关
+//   WEPORT_AI_PROBE_MODELS   设为 1 时先做一次模型发现，把网关 /models 的结果写进 JSON
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// TUI 引擎模式（`--cli`）：把服务层接到 stdio 上，供 packages/weport-tui 驱动
+//
+// 通道用 Node 的 IPC（`process.send`/`message`）而不是管道 JSON：Windows 上
+// Electron 主进程的 stdin 会立刻 EOF（见 AGENTS.md），只有 IPC channel 稳定。
+// 握手用一次性令牌（`--weport-token` + 环境变量比对），所以终端进程能确认自己
+// 连上的是同一个会话里启动的引擎，而不是碰巧占了这条通道的别的东西。
+// ---------------------------------------------------------------------------
+async function runCliHost() {
+  const hostPath = join(app.getPath('userData'), 'weport-cli-host.json')
+  const envToken = String(process.env.WEPORT_CLI_TOKEN || '').trim()
+  const argToken = (() => {
+    const index = process.argv.indexOf('--weport-token')
+    return index >= 0 ? String(process.argv[index + 1] || '') : ''
+  })()
+  const expected = envToken || argToken
+  let handshaken = expected.length === 0
+  let shuttingDown = false
+
+  registerCliCommands()
+
+  const shutdown = (code: number) => {
+    if (shuttingDown) return
+    shuttingDown = true
+    try { rmSync(hostPath, { force: true }) } catch { /* noop */ }
+    isAppQuitting = true
+    // Tear down the services the engine started for the terminal session: leaving the
+    // MCP/HTTP listeners and the WCDB host behind would keep a second, invisible
+    // Weport alive for every TUI run.
+    try { mcpService.stop() } catch { /* noop */ }
+    try { httpService.stop() } catch { /* noop */ }
+    try { chatService.close() } catch { /* noop */ }
+    void (async () => {
+      try { await wcdbService.shutdown() } catch { /* noop */ }
+      app.exit(code)
+    })()
+    // 兜底：宿主进程卡在原生调用里时也要退出，否则终端会一直挂着
+    setTimeout(() => app.exit(code), 4000).unref?.()
+  }
+
+  const send = (payload: Record<string, unknown>) => {
+    try { process.send?.(payload) } catch { /* channel closed */ }
+  }
+
+  process.on('message', (raw: unknown) => {
+    void (async () => {
+      const message = raw as { id?: string; kind?: string; command?: string; args?: Record<string, unknown>; token?: string }
+      if (!message || typeof message !== 'object') return
+      if (message.kind === 'hello') {
+        if (expected && message.token !== expected) {
+          send({ kind: 'error', error: '令牌不匹配：终端进程与引擎会话不一致' })
+          shutdown(3)
+          return
+        }
+        handshaken = true
+        send({ kind: 'ready', version: APP_VERSION, pid: process.pid, dbPath: String(configService?.get('dbPath') || '') })
+        return
+      }
+      if (!handshaken) {
+        send({ id: message.id, kind: 'result', success: false, error: '尚未完成握手' })
+        return
+      }
+      if (message.kind === 'bye') {
+        send({ id: message.id, kind: 'result', success: true })
+        shutdown(0)
+        return
+      }
+      if (message.kind !== 'call') return
+      const result = await runCommand(String(message.command || ''), message.args || {}, { origin: 'cli' })
+      send({ id: message.id, kind: 'result', ...result })
+    })()
+  })
+
+  // 通道断开（终端被关掉/被 kill）= 引擎没有主人在等，直接退出，避免留下
+  // 一个连着微信库、会弹通知的隐形进程。
+  process.on('disconnect', () => shutdown(0))
+  process.on('SIGINT', () => shutdown(0))
+  process.on('SIGTERM', () => shutdown(0))
+
+  try {
+    writeFileSync(hostPath, JSON.stringify({ version: APP_VERSION, pid: process.pid, startedAt: Date.now() }, null, 2), 'utf8')
+  } catch { /* noop */ }
+  console.log(`[weport] TUI 引擎已就绪 (pid ${process.pid})`)
+  // 引擎只服务于终端界面：没有窗口、没有托盘，所以不注册 window-all-closed 的
+  // "全部窗口关闭即退出"逻辑（这条日志之后主进程会一直等到 bye/disconnect）。
+  if (mainWindow) {
+    try { mainWindow.destroy() } catch { /* noop */ }
+    mainWindow = null
+  }
+}
+
+async function runAiProbe() {
+  const outDir = process.env.WEPORT_AI_PROBE_OUT || join(app.getPath('temp'), 'weport-ai-probe')
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'probe.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+  }
+
+  const consumer = (String(process.env.WEPORT_AI_PROBE_CONSUMER || 'chat').trim() || 'chat') as 'chat' | 'weclone' | 'webot'
+  const useTools = process.env.WEPORT_AI_PROBE_TOOLS !== '0'
+  const turns = Math.max(1, Math.min(40, Number(process.env.WEPORT_AI_PROBE_TURNS) || 3))
+
+  const rawTasks = String(process.env.WEPORT_AI_PROBE_TASKS || '').trim()
+  let tasks: string[] = []
+  if (rawTasks) {
+    try {
+      const parsed = JSON.parse(rawTasks)
+      if (Array.isArray(parsed)) tasks = parsed.map((t) => String(t))
+    } catch {
+      tasks = rawTasks.split('|').map((t) => t.trim()).filter(Boolean)
+    }
+  }
+  if (tasks.length === 0) {
+    tasks = [
+      '用一句话说明你现在能做什么。不要调用任何工具。',
+      '把刚才那句话改得更短一些，仍然不要调用工具。',
+      '用三条要点总结你上一个回答的重点，不要调用工具。',
+      '再用一句话补充：这些要点里哪一条最重要，为什么。',
+    ]
+  }
+
+  // 只读摘要：providerId / model / baseUrl / 是否配了密钥（永不打印密钥本身）
+  const profiles = weportAiService.listProviderProfiles()
+  const activeProfileId = weportAiService.getActiveProfileId()
+  const assignments = weportAiService.getConsumerAssignments()
+  const active = profiles.find((p) => p.id === activeProfileId) || null
+  const summary = {
+    consumer,
+    tools: useTools,
+    activeProfileId,
+    active: active
+      ? { id: active.id, name: active.name, providerId: active.providerId, model: active.model, baseUrl: active.baseUrl, protocol: active.protocol, hasApiKey: active.hasApiKey }
+      : null,
+    profiles: profiles.map((p) => ({ id: p.id, name: p.name, providerId: p.providerId, model: p.model, baseUrl: p.baseUrl, protocol: p.protocol, hasApiKey: p.hasApiKey })),
+    consumerAssignment: assignments.find((c) => c.consumer === consumer)?.profileId || '',
+    turns: [] as Array<Record<string, unknown>>,
+    discovery: null as { profileId: string; models: string[]; error: string } | null,
+  }
+  log(`profiles = ${JSON.stringify(summary.profiles)}`)
+  log(`active  = ${JSON.stringify(summary.active)}`)
+  const override = weportAiService.probeOverrideState()
+  if (override.model) log(`model override = ${JSON.stringify(override)}`)
+  if (process.env.WEPORT_AI_PROBE_MODELS === '1') {
+    // 网关的 /models 是权威清单：配置里存在的模型不等于账号/地区可用。
+    const target = summary.active || summary.profiles[0] || null
+    if (target) {
+      const discovery = await weportAiService.discoverModelsForProfile(target.id)
+      summary.discovery = { profileId: target.id, ...discovery }
+      log(`discovery(${target.providerId}) models=${discovery.models.length} error=${discovery.error || ''}`)
+      log(`discovery list = ${JSON.stringify(discovery.models)}`)
+    }
+  }
+
+  const chat = weportAiService.createChat('[ai-probe]')
+  log(`chat = ${chat.id}`)
+
+  let doneResolve: ((value: { usage?: Record<string, unknown>; context?: Record<string, unknown> }) => void) | null = null
+  weportAiService.setEventEmitter((ev) => {
+    if (ev.type === 'done' && doneResolve) {
+      const resolve = doneResolve
+      doneResolve = null
+      resolve({ usage: ev.usage as unknown as Record<string, unknown>, context: ev.context as unknown as Record<string, unknown> })
+    }
+  })
+
+  const runTurns = async (label: string, count: number, targetChatId: string) => {
+    for (let i = 0; i < count; i += 1) {
+      const task = tasks[i % tasks.length]
+      const startedAt = Date.now()
+      const completion = new Promise<{ usage?: Record<string, unknown>; context?: Record<string, unknown> }>((resolve) => {
+        doneResolve = resolve
+        const timer = setTimeout(() => {
+          doneResolve = null
+          resolve({})
+        }, 300000)
+        timer.unref?.()
+      })
+      const result = await weportAiService.runChat(targetChatId, task, { consumer, tools: useTools } as never)
+      const done = await completion
+      const elapsedMs = Date.now() - startedAt
+      const usage = done.usage || {}
+      const context = done.context || {}
+      const promptTokens = Number(usage.promptTokens) || 0
+      const cacheHit = Number((usage as Record<string, unknown>).promptCacheHitTokens) || 0
+      summary.turns.push({
+        profile: label,
+        index: i + 1,
+        task: task.slice(0, 120),
+        success: result.success === true,
+        error: result.error || undefined,
+        elapsedMs,
+        promptTokens,
+        completionTokens: Number(usage.completionTokens) || 0,
+        reasoningTokens: Number(usage.reasoningTokens) || 0,
+        promptCacheHitTokens: cacheHit,
+        cacheHitRate: promptTokens > 0 ? Math.round((cacheHit / promptTokens) * 10000) / 100 : null,
+        contextPromptTokens: Number(context.promptTokens) || 0,
+        contextCacheHitTokens: Number(context.cacheHitTokens) || 0,
+        contextRecentRate: Number(context.recentRate) || 0,
+        contextWindow: Number(context.contextWindow) || 0,
+      })
+      log(`[${label}] turn ${i + 1}: ok=${result.success === true} ${elapsedMs}ms prompt=${promptTokens} cacheHit=${cacheHit} rate=${summary.turns.at(-1)!.cacheHitRate}${result.error ? ` error=${result.error}` : ''}`)
+    }
+  }
+
+  // 目标 profile：默认用当前激活的那个；'all' 逐个试探 —— 网关会按地区拒绝模型，
+  // "配置里存在"不等于"这台机器调得通"，所以需要一个能自己找出可用模型的模式。
+  const target = String(process.env.WEPORT_AI_PROBE_PROFILE || 'active').trim()
+  const originalActiveId = activeProfileId
+  const batches: Array<Record<string, unknown>> = []
+  let ok = true
+  if (target === 'all') {
+    const perProfileTurns = Math.max(1, Math.min(5, Number(process.env.WEPORT_AI_PROBE_ALL_TURNS) || 1))
+    for (const profile of summary.profiles) {
+      const activated = weportAiService.activateProviderProfile(profile.id)
+      if (!activated.success) {
+        log(`[${profile.model}] activate failed: ${activated.error}`)
+        continue
+      }
+      // 每个 profile 一条独立对话：不把上一个模型的上下文带过去
+      const scoped = weportAiService.createChat(`[ai-probe] ${profile.model}`)
+      const before = summary.turns.length
+      try {
+        await runTurns(profile.model || profile.id, perProfileTurns, scoped.id)
+      } finally {
+        weportAiService.deleteChat(scoped.id)
+      }
+      batches.push({ profileId: profile.id, model: profile.model, providerId: profile.providerId, turns: summary.turns.slice(before) })
+    }
+    if (originalActiveId) weportAiService.activateProviderProfile(originalActiveId)
+    ok = batches.some((b) => (b.turns as Array<Record<string, unknown>>).some((t) => t.success === true))
+  } else {
+    if (target && target !== 'active') {
+      const match = summary.profiles.find((p) => p.id === target || p.name.includes(target) || p.model.includes(target))
+      if (match) weportAiService.activateProviderProfile(match.id)
+    }
+    const label = weportAiService.getActiveProfileId() || 'active'
+    await runTurns(label, turns, chat.id)
+    ok = summary.turns.every((t) => t.success === true)
+  }
+
+  const rates = summary.turns.map((t) => Number(t.cacheHitRate)).filter((n) => Number.isFinite(n))
+  const steady = rates.slice(1)
+  const payload = {
+    ...summary,
+    batches,
+    steadyStateCacheHitRate: steady.length > 0 ? Math.round((steady.reduce((a, b) => a + b, 0) / steady.length) * 100) / 100 : null,
+    averageLatencyMs: Math.round(summary.turns.reduce((a, t) => a + Number(t.elapsedMs || 0), 0) / Math.max(1, summary.turns.length)),
+    restoredActiveProfileId: weportAiService.getActiveProfileId(),
+  }
+  try {
+    writeFileSync(join(outDir, 'probe.json'), JSON.stringify(payload, null, 2), 'utf8')
+  } catch { /* noop */ }
+  log(`steadyStateCacheHitRate = ${payload.steadyStateCacheHitRate}% averageLatencyMs = ${payload.averageLatencyMs}`)
+  for (const batch of batches) {
+    const first = (batch.turns as Array<Record<string, unknown>>)[0]
+    log(`model ${String(batch.model)} [${String(batch.providerId)}] -> ok=${String(first?.success)} ${String(first?.error || '')}`)
+  }
+
+  weportAiService.deleteChat(chat.id)
+  log(`${ok ? 'PASS' : 'FAIL'} (out: ${outDir})`)
+  isAppQuitting = true
+  try { chatService.close() } catch { /* noop */ }
+  try { await wcdbService.shutdown() } catch { /* noop */ }
+  try { mainWindow?.destroy() } catch { /* noop */ }
+  mainWindow = null
+  app.exit(ok ? 0 : 1)
+}
+
 function startApp() {
   installMainProcessErrorHandlers()
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
+  const aiProbe = process.env.WEPORT_AI_PROBE === '1'
   if (process.platform !== 'win32' && process.platform !== 'darwin' && process.platform !== 'linux') {
     console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS / Linux）')
   }
@@ -6378,8 +7053,10 @@ function startApp() {
       app.disableHardwareAcceleration()
     } catch { /* noop */ }
   }
-  // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）
-  if (process.env.WEPORT_SCREENSHOT_POPUP === '1') {
+  // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）。
+  // 例外：桌面采集（WGC）在软件渲染下会以 E_ACCESSDENIED 失败，弹窗玻璃只能退回
+  // 静态快照。要验证实时玻璃，用 WEPORT_SCREENSHOT_KEEP_GPU=1 保留 GPU。
+  if (process.env.WEPORT_SCREENSHOT_POPUP === '1' && process.env.WEPORT_SCREENSHOT_KEEP_GPU !== '1') {
     try {
       app.commandLine.appendSwitch('disable-gpu')
     } catch { /* noop */ }
@@ -6465,7 +7142,7 @@ function startApp() {
     // registry synchronization, or visible renderer. Windows Electron can quit
     // a zero-window process while the WCDB host is active, so retain one hidden
     // 1x1 keep-alive window for the duration of the self-test only.
-    if (aiSelfTest) {
+    if (aiSelfTest || aiProbe) {
       app.on('window-all-closed', () => { /* self-test owns explicit shutdown */ })
       mainWindow = new BrowserWindow({
         width: 1,
@@ -6475,7 +7152,7 @@ function startApp() {
         skipTaskbar: true,
         focusable: false,
       })
-      await runAiSelfTest()
+      await (aiProbe ? runAiProbe() : runAiSelfTest())
       return
     }
 
@@ -6498,6 +7175,12 @@ function startApp() {
 
     registerIpcHandlers()
     setupNotificationPipeline()
+
+    // TUI 引擎：不建窗口、不建托盘，`weport` 在终端里通过 stdio 驱动服务层。
+    if (isCliMode) {
+      await runCliHost()
+      return
+    }
 
     // 模型元数据（models.dev）后台刷新：只在 TTL 过期时发一次条件 GET，304
     // 是 0 字节；失败只降级到磁盘缓存 + 内置快照，不影响任何 UI 路径。

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Plug,
   PlugZap,
   Download,
   ShieldCheck,
@@ -60,6 +61,7 @@ import {
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
 import AiSettingsModal from './components/weportAi/AiSettingsModal'
+import ConnectorsPanel from './components/settings/ConnectorsPanel'
 import type { SetupInfo } from './components/weportAi/aiPanelTypes'
 import WeBotModule from './pages/WeBotModule'
 import WeClonePage from './pages/WeClonePage'
@@ -328,7 +330,7 @@ export default function App() {
   const [httpApiPort, setHttpApiPort] = useState(5031)
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
-  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'data' | 'connect' | 'about'>('general')
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
@@ -2906,6 +2908,7 @@ export default function App() {
                   { id: 'appearance', label: '外观', hint: '背景 · 强调色 · 主题', icon: Images },
                   { id: 'ai', label: 'AI 服务', hint: '提供商 · 模型 · 密钥', icon: Sparkles },
                   { id: 'assign', label: '服务分配', hint: '功能面用哪个服务', icon: PlugZap },
+                  { id: 'connectors', label: '连接器', hint: 'Todoist 等第三方工具', icon: Plug },
                   { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
                   { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
                   { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
@@ -3352,6 +3355,8 @@ export default function App() {
                   )}
                 </section>
               )}
+
+              {settingsSection === 'connectors' && <ConnectorsPanel />}
 
               {settingsSection === 'data' && (
                 <section className="panel">

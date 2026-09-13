@@ -11,8 +11,9 @@ Weport is an **Electron + React + Vite + TypeScript** desktop app for
 **Windows, macOS (Apple Silicon, arm64) and Linux (x64, v0.9.10+)**. The engine
 (`electron/services/`) is a TypeScript port of WeFlow's WCDB stack (koffi FFI
 + native `wcdb_api.dll` / `libwcdb_api.dylib` / `libwcdb_api.so`). There is
-**no Rust, no Tauri, no CLI** anymore — the v0.6.x Rust/egui stack and the
-headless engine CLI were removed in 0.7.0.
+**no Rust, no Tauri** anymore — the v0.6.x Rust/egui stack was removed in 0.7.0.
+(The v1.0 `weport` TUI in `packages/weport-tui` is a *client* of the app, not a
+second engine; see "Weport TUI" below before touching it.)
 
 Platform split lives in `process.platform` branches (same tree, no fork):
 - Key service: Windows `keyService.ts` vs macOS `keyServiceMac.ts` vs Linux
@@ -115,6 +116,32 @@ engine in a **subprocess**:
   silently drops it (use `libs/` + `NODE_PATH`).
 - A zero-window Electron process without a `window-all-closed` listener and a
   hidden 1×1 keep-alive `BrowserWindow` — Electron quits at `ready` otherwise.
+
+## Weport TUI (`packages/weport-tui`) — v1.0
+
+`weport` in a terminal opens a full TUI; `weport <command>` runs one command.
+**The TUI is a client of the main process, not a port of the renderer**: it spawns
+`Weport.exe --cli` (dev: `release/win-unpacked/Weport.exe`) and speaks JSON-RPC over
+the **Node IPC channel** — never over stdin/stdout, because Windows reads EOF on the
+main process's stdin immediately (same trap as the WCDB host transport). The engine
+side is `appMain.ts::runCliHost` + `services/weportCommands.ts` (registry) +
+`services/cliCommands.ts` (the command set, delegating to the same services the IPC
+handlers use). Add a command there and it reaches the terminal, the command palette
+and (later) MCP at once; do not add a parallel code path.
+
+Rules:
+
+- The handshake is a one-shot token (`--weport-token` + `WEPORT_CLI_TOKEN`); a client
+  that fails it gets an error and the engine exits. Do not weaken this to make a
+  debugging client work.
+- The engine exits on `process.on('disconnect')` and stops MCP/HTTP/WCDB on shutdown.
+  Keep that: an orphaned engine holds the WeChat database and keeps pushing popups.
+- `--dump <dir>` renders one frame per section to text files. It is the only way to
+  verify layout outside a real terminal, so it is a product feature, not debug
+  residue: `npm run qa:tui` asserts frame width, non-blankness and key content, and
+  `scripts/verify-tui-engine.mjs` asserts the protocol against real data. `build`,
+  `build:dir`, `build:mac` and `build:linux` run `build:tui` first so the shipped app
+  and the TUI never disagree about the command surface.
 
 ## Notification Popup (Permanent — Do Not Change)
 

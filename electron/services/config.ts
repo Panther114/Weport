@@ -190,6 +190,12 @@ interface ConfigSchema {
   weCloneEnabled: boolean
   /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
   weCloneLastCutoff: string
+
+  // 连接器（第三方工具，v1.0）
+  /** 连接器配置 + 凭据信封，整体 safeStorage 加密（同 weportAiProfilesBlob）。 */
+  weportConnectorsBlob: string
+  /** 允许 WeportAI / 定时代理调用连接器（写操作）的开关。 */
+  connectorsAllowAgent: boolean
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -204,7 +210,8 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'aiInsightWeiboCookie',
   'weportAiApiKey',
   'weportAiProfilesBlob',
-  'weCloneServerToken'
+  'weCloneServerToken',
+  'weportConnectorsBlob'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
 const ENCRYPTED_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
@@ -388,6 +395,8 @@ export class ConfigService {
       weCloneServerToken: '',
       weCloneEnabled: true,
       weCloneLastCutoff: '',
+      weportConnectorsBlob: '',
+      connectorsAllowAgent: true,
     }
 
     const storeOptions: any = {

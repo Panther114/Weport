@@ -68,3 +68,7 @@ weclone-server/data-test/
 
 # Generated per-version release notes (CI body_path)
 release-notes-current.md
+
+# 本地验证令牌（连接器 / 网关探针），绝不提交
+.todoist-token
+.opencode-key

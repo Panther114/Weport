@@ -39,6 +39,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showTest: () => ipcRenderer.invoke('notification:showTest'),
     getMuteReport: () => ipcRenderer.invoke('notification:getMuteReport'),
     onLuma: (callback: (bands: any) => void) => subscribe('notification:luma', callback),
+    // 主进程的定帧折射：弹窗可见期间持续推新的桌面帧（约 3fps，按实测帧成本自适应）
+    onBackdrop: (callback: (frame: any) => void) => subscribe('notification:backdrop', callback),
+    // 渲染层的 WGC 视频流已接管折射，主进程可以停掉抓帧
+    setGlassMode: (mode: string) => ipcRenderer.send('notification:glassMode', { mode }),
     onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback)
   },
 
@@ -290,6 +294,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // macOS 能力诊断（v1.0）：仅在 darwin 上返回真实结果
   diagnostics: {
     collectMac: () => ipcRenderer.invoke('diagnostics:collectMac')
+  },
+
+  // 连接器（第三方工具，v1.0）。`connect` 收明文令牌，其余接口只出掩码。
+  connectors: {
+    list: () => ipcRenderer.invoke('connectors:list'),
+    connect: (id: string, token: string) => ipcRenderer.invoke('connectors:connect', id, token),
+    disconnect: (id: string) => ipcRenderer.invoke('connectors:disconnect', id),
+    verify: (id: string) => ipcRenderer.invoke('connectors:verify', id),
+    listTargets: (id: string) => ipcRenderer.invoke('connectors:listTargets', id),
+    createTask: (id: string, input: any) => ipcRenderer.invoke('connectors:createTask', id, input),
+    getAgentSettings: () => ipcRenderer.invoke('connectors:getAgentSettings'),
+    setAgentSettings: (patch: { allowAgentWrite?: boolean }) => ipcRenderer.invoke('connectors:setAgentSettings', patch)
   },
 
   weclone: {

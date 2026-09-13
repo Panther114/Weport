@@ -13,7 +13,11 @@
   --line-strong: #3a3a4a;
   --text: #f2f2f5;
   --text-dim: #b6b6c0;
-  --text-faint: #6e6e7a;
+  /* 三级文字里最淡的一档。原来 #6e6e7a 压在面板底色（#17171d）上只有 3.6、
+     压在卡内块（#1e1e26）上 3.3 —— 而全应用最多的"提示 / 次要信息"文字都在
+     这一档，实际观感就是"灰到看不清"。提到 #8b8b98 后在各层表面上都能过 4.5。
+     （对比度审计 3.0-4.5 警告带里，这一档原本占了 800 多条中的绝大多数。） */
+  --text-faint: #8b8b98;
   --ok: #9fe8a8;
   --warn: #ffd27e;
   --danger: #e5484d;
@@ -1151,7 +1155,7 @@ button:disabled {
 .format-grid .format-chip:nth-child(8) .fmt-head svg { color: var(--accent-4, var(--text-dim)); }
 .format-grid .format-chip:nth-child(9) .fmt-head svg { color: var(--accent-2, var(--text-dim)); }
 .format-grid .format-chip:nth-child(10) .fmt-head svg { color: var(--accent-deep, var(--text-dim)); }
-.format-chip[data-active="true"] .fmt-head svg { color: #000; }
+.format-chip[data-active="true"] .fmt-head svg { color: var(--accent); }
 
 .format-chip strong {
   font-size: 13px;
@@ -1171,12 +1175,13 @@ button:disabled {
   max-width: 100%;
 }
 
+/* 选中卡的标题/说明同样不能用黑字：选中底色是强调色淡底，不是白色。 */
 .format-chip[data-active="true"] strong {
-  color: #000;
+  color: var(--text);
 }
 
 .format-chip[data-active="true"] > span:last-child {
-  color: rgba(0, 0, 0, 0.55);
+  color: var(--text-dim);
 }
 
 /* 导出页分区结构（panel-head 已有底边线，首个分区不再画线，避免双线） */
@@ -1617,10 +1622,14 @@ button:disabled {
   flex-shrink: 0;
 }
 
+/* 选中卡里的字母标（A/B/C）。
+   原来写的是"白卡上的黑字"（rgba(0,0,0,.6) + 黑色描边）—— 那是 .chip[data-active]
+   还是纯白底时代的配色。选中态改成强调色淡底之后，这行黑字压在深蓝底上只有
+   1.28 对比度（等于看不见），所以改成跟随强调色的令牌。 */
 .format-chip[data-active="true"] .layout-badge {
-  background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.25);
-  color: rgba(0, 0, 0, 0.6);
+  background: var(--accent-softer);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
 }
 
 .layout-tree {
@@ -1634,12 +1643,13 @@ button:disabled {
 }
 
 .format-chip[data-active="true"] .layout-tree {
-  color: rgba(0, 0, 0, 0.55);
+  color: var(--text-dim);
 }
 
-/* 输出路径预览：浅蓝色 */
+/* 输出路径预览：用强调色（原来是写死的浅蓝 #9bd3ff —— 浅色模式下它压在白面板上
+   只有 1.6 对比度，等于看不见，而且换强调色时它不会跟着变） */
 .exp-path {
-  color: #9bd3ff;
+  color: var(--accent);
 }
 
 /* 内容（媒体）选择行 */
@@ -2881,7 +2891,7 @@ button:disabled {
 .ai-error-bubble {
   background: rgba(229, 72, 77, 0.12);
   border: 1px solid rgba(229, 72, 77, 0.4);
-  color: #ffb3b5;
+  color: var(--danger);
   border-radius: var(--radius-sm);
   padding: 10px 14px;
   font-size: 12.5px;
