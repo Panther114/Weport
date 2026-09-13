@@ -3029,6 +3029,62 @@ function installScreenshotDemoHandlers() {
   override('ai:clearDebugLog', () => ({ success: true }))
   override('ai:send', () => ({ success: true }))
   override('ai:abort', () => ({ success: true }))
+
+  // WeBot 演示数据：任务与笔记各一份，用于验证新页面的渲染与布局。
+  // 与其余演示数据一样是脱敏、确定性的，且绝不写进真实配置
+  // （config:set 在演示模式下被吞掉，这里更是直接返回内存对象）。
+  const demoWebBotTask = {
+    id: 'task-demo-1',
+    title: '化学群作业整理',
+    description: '每天扫描 @化学 3 班，把老师布置的作业整理成笔记。',
+    schedule: { kind: 'daily' as const, hour: 8, minute: 30 },
+    catchUp: 'once' as const,
+    enabled: true,
+    references: [{ id: 'demo-room@chatroom', label: '化学 3 班', kind: 'group' as const }],
+    allowParallel: false,
+    createdAt: Date.now() - 86_400_000,
+    updatedAt: Date.now() - 3_600_000,
+    nextRunAt: Date.now() + 7_200_000,
+    lastRunAt: Date.now() - 3_600_000,
+  }
+  const demoWebBotNote = {
+    version: 1 as const,
+    id: 'note-demo-1',
+    taskId: 'task-demo-1',
+    taskTitle: '化学群作业整理',
+    runId: 'run-demo-1',
+    createdAt: Date.now() - 3_600_000,
+    title: '化学群作业整理',
+    summary:
+      '今天布置的是必修二第三章课后练习 3-5 题，另需预习有机化合物一节。\n老师提醒周三小测，范围是前两章。',
+    status: 'ok' as const,
+    references: [{ id: 'demo-room@chatroom', label: '化学 3 班', kind: 'group' as const }],
+    read: false,
+    pinned: false,
+  }
+  override('webot:listTasks', () => [demoWebBotTask])
+  override('webot:listNotes', () => [demoWebBotNote])
+  override('webot:getNote', () => demoWebBotNote)
+  override('webot:updateNote', () => demoWebBotNote)
+  override('webot:unreadCount', () => 1)
+  override('webot:clearNotes', () => 0)
+  override('webot:listRuns', () => [
+    {
+      id: 'run-demo-1',
+      taskId: 'task-demo-1',
+      taskTitle: '化学群作业整理',
+      scheduledAt: Date.now() - 3_630_000,
+      startedAt: Date.now() - 3_600_000,
+      finishedAt: Date.now() - 3_570_000,
+      status: 'ok' as const,
+      noteId: 'note-demo-1',
+      durationMs: 30_000,
+    },
+  ])
+  override('webot:createTask', () => demoWebBotTask)
+  override('webot:updateTask', () => demoWebBotTask)
+  override('webot:deleteTask', () => true)
+  override('webot:runNow', () => ({ success: true }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4687,6 +4743,16 @@ async function runScreenshotMode() {
   // 7.6) 设置（主题选择 + 启动行为）
   await captureV09('settings', 'settings.png', ['.theme-card'], async () => {
     await clickTab('设置')
+  })
+
+  // WeBot（v1.0）：任务构建器与笔记板。两者都断言到了具体的 DOM 节点，
+  // 因此「页面挂载了但内容没渲染」这种情况会直接失败而不是产出一张空图。
+  await captureV09('webot', 'webot.png', ['.webot-editor', '.webot-card', '.webot-tabs'], async () => {
+    await clickTab('WeBot')
+  })
+
+  await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {
+    await clickTab('WeBot 笔记')
   })
 
   log('[screenshot] captures done, shutting down services...')

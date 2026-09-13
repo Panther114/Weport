@@ -1,4 +1,4 @@
-﻿# Weport UI capture harness (Electron)
+# Weport UI capture harness (Electron)
 # Captures the main window + notification popup via the app's own
 # WEPORT_SCREENSHOT_POPUP mode, then asserts the popup is non-blank.
 # A blank popup (broken renderer / unwired viewport) fails the build.
@@ -108,6 +108,8 @@ $globalPng = Join-Path $OutputDir 'analytics-global.png'
 $annualPng = Join-Path $OutputDir 'annual-report.png'
 $groupPng = Join-Path $OutputDir 'analytics-group.png'
 $settingsPng = Join-Path $OutputDir 'settings.png'
+$webotPng = Join-Path $OutputDir 'webot.png'
+$webotNotesPng = Join-Path $OutputDir 'webot-notes.png'
 function Assert-Captured([string]$Path, [string]$Label) {
   if (-not (Test-Path $Path)) {
     $tail = (Get-Content $appOut -ErrorAction SilentlyContinue | Select-Object -Last 30) -join "`n"
@@ -140,6 +142,8 @@ Assert-Captured $globalPng 'analytics-global.png'
 Assert-Captured $annualPng 'annual-report.png'
 Assert-Captured $groupPng 'analytics-group.png'
 Assert-Captured $settingsPng 'settings.png'
+Assert-Captured $webotPng 'webot.png'
+Assert-Captured $webotNotesPng 'webot-notes.png'
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
@@ -153,6 +157,8 @@ Assert-ImageHasContent $globalPng 'global analytics'
 Assert-ImageHasContent $annualPng 'annual report'
 Assert-ImageHasContent $groupPng 'group analytics'
 Assert-ImageHasContent $settingsPng 'settings'
+Assert-ImageHasContent $webotPng 'WeBot tasks'
+Assert-ImageHasContent $webotNotesPng 'WeBot notes'
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {
