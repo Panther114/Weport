@@ -1737,212 +1737,219 @@ export default function App() {
 
       <div className="workspace" key={tab}>
         {tab === 'connect' && (
-          <div className="two-col">
-            <section className="panel connect-loc">
-              <div className="panel-head">
-                <h2>
-                  <FolderOpen size={15} />
+          /* 重排：原来是「左栏 = 数据位置 + 账号，右栏 = 密钥」的两列排布，读起来
+             是 1 → 3 → 2 —— 密钥排在账号前面，而它实际上必须最后做。现在改成
+             和导出页同一套编号分区，按真正的先后顺序单栏排列，每一步自带完成状态，
+             于是这一页本身也是一张进度清单。 */
+          <div className="page-stack">
+            <section className="panel">
+              <div className="exp-section">
+                <div className="exp-sec-head">
+                  <span className="exp-num">1</span>
+                  <FolderOpen size={14} />
                   微信聊天记录数据位置
-                </h2>
-                {/* 「已连接 / 未选择」不再重复：左侧栏底部常驻显示同一状态。 */}
-              </div>
-              <div className="field">
-                <label htmlFor="dbPath">微信数据文件夹</label>
-                <div className="path-row">
-                  <input
-                    id="dbPath"
-                    className="path-input"
-                    value={dbPath}
-                    placeholder={DEFAULT_DB_HINT}
-                    onChange={(e) => setDbPath(e.target.value)}
-                    onBlur={() => {
-                      if (dbPath.trim()) void persist({ dbPath: dbPath.trim() })
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && dbPath.trim()) {
-                        void persist({ dbPath: dbPath.trim() })
-                        void refreshAccounts(dbPath.trim())
-                      }
-                    }}
-                    spellCheck={false}
-                  />
-                  <button className="ghost-btn" type="button" onClick={() => void pickDbFolder()} disabled={busy}>
-                    浏览
-                  </button>
+                  <span className="exp-sec-meta">
+                    {dbReady ? <span className="badge ok">已就绪</span> : <span className="badge">待设置</span>}
+                  </span>
                 </div>
-              </div>
-              <div className="btn-row">
-                <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
-                  <RefreshCw size={14} />
-                  重新扫描
-                </button>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => void refreshAccounts(dbPath)}
-                  disabled={busy || !dbPath.trim()}
-                >
-                  <Users size={14} />
-                  刷新账号
-                </button>
-              </div>
-            </section>
-
-            <section className="panel connect-key">
-              <div className="panel-head">
-                <h2>
-                  <KeyRound size={15} />
-                  解密密钥
-                </h2>
-                {/* 这里原本还有一个「已就绪 / 待提取」状态标；左侧栏已经有全局
-                    状态点了，同一屏里出现两次只会让人怀疑哪个是最新的。 */}
-              </div>
-
-              {/* 顺序即优先级：这是一张「要你做事」的卡片，所以控件在最前，
-                  说明收进折叠区。旧版把四段编号散文放在最上面，用户必须先读完
-                  才能看见按钮在哪。 */}
-              <div className="field">
-                <label htmlFor="decryptKey">数据库密钥</label>
-                <div className="path-row">
-                  <input
-                    id="decryptKey"
-                    className="path-input"
-                    type={showKey ? 'text' : 'password'}
-                    value={decryptKey}
-                    placeholder="64 位十六进制密钥…"
-                    onChange={(e) => {
-                      const v = e.target.value.trim()
-                      setDecryptKey(v)
-                    }}
-                    spellCheck={false}
-                    autoComplete="off"
-                    disabled={busy}
-                  />
-                  <button
-                    className="ghost-btn icon-btn-sm"
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    disabled={busy}
-                    title={showKey ? '隐藏密钥' : '显示密钥'}
-                    aria-label={showKey ? '隐藏密钥' : '显示密钥'}
-                  >
-                    {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="btn-row">
-                <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
-                  <KeyRound size={14} />
-                  {busy && !progress ? '提取中…' : '提取密钥'}
-                </button>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => void confirmKeyAndConnect()}
-                  disabled={busy || !dbReady || !accountReady || !keyOk}
-                >
-                  <PlugZap size={14} />
-                  确认密钥并连接
-                </button>
-              </div>
-
-              {keyHookReady && busy && (
-                <div className="callout ready" role="status">
-                  Hook 已就绪 — 请现在登录微信，或退出账号后重新登录（可在手机上确认）。
-                </div>
-              )}
-              {keyStatus && <p className="hint">{keyStatus}</p>}
-
-              <details className="steps-details">
-                <summary>如何获取密钥？</summary>
-                <ol className="steps">
-                  <li>
-                    <span className="step-num">1</span>
-                    <span>
-                      打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
-                      然后退出当前登录（或完全退出微信）
-                    </span>
-                  </li>
-                  <li>
-                    <span className="step-num">2</span>
-                    <span>
-                      点击上方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
-                      此时 Weport 已挂接微信进程，正在等待登录
-                    </span>
-                  </li>
-                  <li>
-                    <span className="step-num">3</span>
-                    <span>
-                      用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
-                    </span>
-                  </li>
-                  <li>
-                    <span className="step-num">4</span>
-                    <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
-                  </li>
-                </ol>
-                <p className="hint">
-                  {keyOk
-                    ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
-                    : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
-                </p>
-              </details>
-            </section>
-
-            <section className="panel connect-acc">
-              <div className="panel-head">
-                <h2>
-                  <Users size={15} />
-                  微信账号
-                </h2>
-                {/* 只保留真正的信息量（找到几个账号）；「已连接 / 未选择」这类
-                    状态由左侧栏统一表达。 */}
-                {accounts.length > 0 ? <span className="card-sub">{accounts.length} 个</span> : null}
-              </div>
-              {accounts.length === 0 ? (
-                <div className="empty">选择或扫描数据目录后显示账号</div>
-              ) : (
-                <div className="account-list account-list-row" role="listbox" aria-label="微信账号">
-                  {accounts.map((account) => (
-                    <button
-                      key={account.wxid}
-                      type="button"
-                      className="account-item"
-                      data-active={account.wxid === selectedWxid}
-                      role="option"
-                      aria-selected={account.wxid === selectedWxid}
-                      onClick={() => selectAccount(account.wxid)}
-                      disabled={busy}
-                    >
-                      {account.avatarUrl ? (
-                        <img
-                          className="account-avatar"
-                          src={account.avatarUrl}
-                          alt=""
-                          loading="lazy"
-                          onError={(e) => {
-                            ;(e.target as HTMLImageElement).style.display = 'none'
-                          }}
-                        />
-                      ) : (
-                        <span className="account-avatar fallback">
-                          {(account.nickname || account.wxid).charAt(0).toUpperCase()}
-                        </span>
-                      )}
-                      <div>
-                        <strong>{account.nickname || account.wxid}</strong>
-                        <span>{account.wxid}</span>
-                      </div>
-                      {account.wxid === selectedWxid ? (
-                        <span className="badge ok">当前</span>
-                      ) : (
-                        <span className="badge">选择</span>
-                      )}
+                <div className="field">
+                  <label htmlFor="dbPath">微信数据文件夹</label>
+                  <div className="path-row">
+                    <input
+                      id="dbPath"
+                      className="path-input"
+                      value={dbPath}
+                      placeholder={DEFAULT_DB_HINT}
+                      onChange={(e) => setDbPath(e.target.value)}
+                      onBlur={() => {
+                        if (dbPath.trim()) void persist({ dbPath: dbPath.trim() })
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && dbPath.trim()) {
+                          void persist({ dbPath: dbPath.trim() })
+                          void refreshAccounts(dbPath.trim())
+                        }
+                      }}
+                      spellCheck={false}
+                    />
+                    <button className="ghost-btn" type="button" onClick={() => void pickDbFolder()} disabled={busy}>
+                      浏览
                     </button>
-                  ))}
+                  </div>
                 </div>
-              )}
+                <div className="btn-row">
+                  <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
+                    <RefreshCw size={14} />
+                    自动扫描
+                  </button>
+                  <button
+                    className="secondary-btn"
+                    type="button"
+                    onClick={() => void refreshAccounts(dbPath)}
+                    disabled={busy || !dbPath.trim()}
+                  >
+                    <Users size={14} />
+                    刷新账号
+                  </button>
+                </div>
+              </div>
+
+              <div className="exp-section">
+                <div className="exp-sec-head">
+                  <span className="exp-num">2</span>
+                  <Users size={14} />
+                  选择微信账号
+                  <span className="exp-sec-meta">
+                    {accounts.length > 0 ? <span className="card-sub">{accounts.length} 个</span> : null}
+                    {accountReady ? <span className="badge ok">已选择</span> : <span className="badge">待选择</span>}
+                  </span>
+                </div>
+                {accounts.length === 0 ? (
+                  <div className="empty">选择或扫描数据目录后显示账号</div>
+                ) : (
+                  <div className="account-list account-list-row" role="listbox" aria-label="微信账号">
+                    {accounts.map((account) => (
+                      <button
+                        key={account.wxid}
+                        type="button"
+                        className="account-item"
+                        data-active={account.wxid === selectedWxid}
+                        role="option"
+                        aria-selected={account.wxid === selectedWxid}
+                        onClick={() => selectAccount(account.wxid)}
+                        disabled={busy}
+                      >
+                        {account.avatarUrl ? (
+                          <img
+                            className="account-avatar"
+                            src={account.avatarUrl}
+                            alt=""
+                            loading="lazy"
+                            onError={(e) => {
+                              ;(e.target as HTMLImageElement).style.display = 'none'
+                            }}
+                          />
+                        ) : (
+                          <span className="account-avatar fallback">
+                            {(account.nickname || account.wxid).charAt(0).toUpperCase()}
+                          </span>
+                        )}
+                        <div>
+                          <strong>{account.nickname || account.wxid}</strong>
+                          <span>{account.wxid}</span>
+                        </div>
+                        {account.wxid === selectedWxid ? (
+                          <span className="badge ok">当前</span>
+                        ) : (
+                          <span className="badge">选择</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="exp-section">
+                <div className="exp-sec-head">
+                  <span className="exp-num">3</span>
+                  <KeyRound size={14} />
+                  解密密钥
+                  <span className="exp-sec-meta">
+                    {keyOk ? <span className="badge ok">格式正确</span> : <span className="badge">待提取</span>}
+                  </span>
+                </div>
+
+                {/* 顺序即优先级：这是一张「要你做事」的卡片，所以控件在最前，
+                    说明收进折叠区。旧版把四段编号散文放在最上面，用户必须先读完
+                    才能看见按钮在哪。 */}
+                <div className="field">
+                  <label htmlFor="decryptKey">数据库密钥</label>
+                  <div className="path-row">
+                    <input
+                      id="decryptKey"
+                      className="path-input"
+                      type={showKey ? 'text' : 'password'}
+                      value={decryptKey}
+                      placeholder="64 位十六进制密钥…"
+                      onChange={(e) => {
+                        const v = e.target.value.trim()
+                        setDecryptKey(v)
+                      }}
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={busy}
+                    />
+                    <button
+                      className="ghost-btn icon-btn-sm"
+                      type="button"
+                      onClick={() => setShowKey((v) => !v)}
+                      disabled={busy}
+                      title={showKey ? '隐藏密钥' : '显示密钥'}
+                      aria-label={showKey ? '隐藏密钥' : '显示密钥'}
+                    >
+                      {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="btn-row">
+                  <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
+                    <KeyRound size={14} />
+                    {busy && !progress ? '提取中…' : '提取密钥'}
+                  </button>
+                  <button
+                    className="secondary-btn"
+                    type="button"
+                    onClick={() => void confirmKeyAndConnect()}
+                    disabled={busy || !dbReady || !accountReady || !keyOk}
+                  >
+                    <PlugZap size={14} />
+                    确认密钥并连接
+                  </button>
+                </div>
+
+                {keyHookReady && busy && (
+                  <div className="callout ready" role="status">
+                    Hook 已就绪 — 请现在登录微信，或退出账号后重新登录（可在手机上确认）。
+                  </div>
+                )}
+                {keyStatus && <p className="hint">{keyStatus}</p>}
+
+                <details className="steps-details">
+                  <summary>如何获取密钥？</summary>
+                  <ol className="steps">
+                    <li>
+                      <span className="step-num">1</span>
+                      <span>
+                        打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
+                        然后退出当前登录（或完全退出微信）
+                      </span>
+                    </li>
+                    <li>
+                      <span className="step-num">2</span>
+                      <span>
+                        点击上方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
+                        此时 Weport 已挂接微信进程，正在等待登录
+                      </span>
+                    </li>
+                    <li>
+                      <span className="step-num">3</span>
+                      <span>
+                        用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
+                      </span>
+                    </li>
+                    <li>
+                      <span className="step-num">4</span>
+                      <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
+                    </li>
+                  </ol>
+                  <p className="hint">
+                    {keyOk
+                      ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
+                      : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
+                  </p>
+                </details>
+              </div>
             </section>
 
             {/* macOS 兼容性检查：只在 macOS 上出现。放在连接页是因为「拿不到
