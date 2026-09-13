@@ -3504,9 +3504,11 @@ const hourly: Record<number, number> = {}
   )
   return {
     groups: [
-      { username: 'family@chatroom', displayName: '一家人', memberCount: 6, avatarUrl: demoSnsAvatarUrl('家') },
-      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', memberCount: 18, avatarUrl: demoSnsAvatarUrl('项') },
-      { username: 'alumni@chatroom', displayName: '老同学', memberCount: 42, avatarUrl: demoSnsAvatarUrl('同') },
+      // messageCount 不能省：列表行渲染的是「{messageCount} 条 · {memberCount} 人」，
+      // 少了它就是屏幕上明晃晃的「undefined 条」（placeholder 扫描就是为此加的）。
+      { username: 'family@chatroom', displayName: '一家人', memberCount: 6, messageCount: 9163, avatarUrl: demoSnsAvatarUrl('家') },
+      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', memberCount: 18, messageCount: 48211, avatarUrl: demoSnsAvatarUrl('项') },
+      { username: 'alumni@chatroom', displayName: '老同学', memberCount: 42, messageCount: 15240, avatarUrl: demoSnsAvatarUrl('同') },
     ],
     members,
     ranking: members.map((m) => ({ member: m, messageCount: m.messageCount as number })),
@@ -4915,6 +4917,27 @@ async function runScreenshotMode() {
   }
 
   // 7) v0.9 页面截图（演示数据，无真实个人信息）
+  //
+  // placeholderHits：截图上「看起来有内容」但内容是 undefined / NaN / [object
+  // Object] 的页面不会被非空白断言拦住 —— 群聊分析页就带着三条「undefined 条」
+  // 通过了很久的断言。每次截图后扫一遍可见文本，命中就记下来，最后当成失败。
+  const placeholderHits: Record<string, string[]> = {}
+  const scanPlaceholders = async (label: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const hits = (await mainWindow.webContents.executeJavaScript(
+        `(() => {
+           const text = document.body ? document.body.innerText || '' : '';
+           return ['undefined', 'NaN', '[object Object]'].filter((needle) => text.includes(needle));
+         })()`,
+        true,
+      )) as string[]
+      if (Array.isArray(hits) && hits.length > 0) {
+        placeholderHits[label] = hits
+        console.warn(`[screenshot] ${label} shows placeholder text on screen: ${hits.join(', ')}`)
+      }
+    } catch { /* 扫描失败不影响截图本身 */ }
+  }
   const captureV09 = async (label: string, fileName: string, selectors: string[], pre?: () => Promise<unknown>, settleMs = 900) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
@@ -4927,6 +4950,7 @@ async function runScreenshotMode() {
       }
       await sleep(settleMs)
       await saveStable(mainWindow, fileName, 12, 30)
+      await scanPlaceholders(label)
       await dumpRects(`${fileName.replace('.png', '')}-rects.json`, selectors)
       console.log(`[screenshot] ${fileName} captured`)
     } catch (e) {
@@ -5169,6 +5193,13 @@ async function runScreenshotMode() {
       log(`[screenshot] viewport metrics = ${JSON.stringify(viewportMetrics)}`)
     } catch (e) {
       log('WARN [screenshot] could not write viewport metrics:', e)
+    }
+
+    try {
+      writeFileSync(join(outDir, 'placeholder-scan.json'), JSON.stringify(placeholderHits, null, 2), 'utf8')
+      log(`[screenshot] placeholder scan = ${JSON.stringify(placeholderHits)}`)
+    } catch (e) {
+      log('WARN [screenshot] could not write placeholder scan:', e)
     }
   }
 

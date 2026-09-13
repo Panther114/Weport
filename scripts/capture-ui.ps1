@@ -243,6 +243,24 @@ foreach ($name in @('aiNarrow', 'aiWide')) {
 if ($metrics.narrow.labelsVisible -ne $true) {
   throw "navigation labels hidden at $($metrics.narrow.viewport)px - the rail collapsed far too early. Aborting."
 }
+
+# Placeholder scan: a page can render, be non-blank, and still be showing
+# "undefined 条" / "NaN" / "[object Object]" to the user. That is not detectable
+# by stddev, and the group analytics page carried three "undefined 条" rows
+# through many green runs. Any hit is a failure.
+$placeholderScan = Join-Path $OutputDir 'placeholder-scan.json'
+Assert-Captured $placeholderScan 'placeholder-scan.json'
+$placeholders = Get-Content $placeholderScan -Raw | ConvertFrom-Json
+$offenders = @()
+foreach ($prop in $placeholders.PSObject.Properties) {
+  if ($prop.Value -and $prop.Value.Count -gt 0) {
+    $offenders += "$($prop.Name): $($prop.Value -join ', ')"
+  }
+}
+if ($offenders.Count -gt 0) {
+  throw ("placeholder text visible on screen - " + ($offenders -join ' | ') + " (see placeholder-scan.json). Aborting.")
+}
+Write-Output "  [placeholders] none visible on any captured screen"
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {
