@@ -4059,7 +4059,7 @@ const groupDetailDom = results.groupDetail as Record<string, any>
     const afterAna = await wc.executeJavaScript(`
       (() => {
         const ws = document.querySelector('.workspace');
-        const active = document.querySelector('.tab[data-active="true"]');
+        const active = document.querySelector('.tab[data-active="true"], .rail-item[data-active="true"]');
         return {
           workspaceText: ws ? (ws.textContent || '').trim().slice(0, 120) : null,
           activeTab: active ? active.textContent.trim() : null,
@@ -4093,7 +4093,43 @@ const groupDetailDom = results.groupDetail as Record<string, any>
         };
       })()
     `)
-    return { snsClick, anaClick, cardClick, sns, global }
+    // v1.0 外壳与 WeBot：断言新的左侧导航确实渲染、且没有把内容挤出横向滚动条。
+    // 横向溢出是最容易被忽略的响应式缺陷 —— 它不报错，只是把右侧内容切掉。
+    const shell = await wc.executeJavaScript(`
+      (() => {
+        const rail = document.querySelector('.rail');
+        const firstLabel = rail ? rail.querySelector('.rail-item span') : null;
+        return {
+          railW: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+          items: document.querySelectorAll('.rail-item').length,
+          statusChips: document.querySelectorAll('.rail-foot .status-chip').length,
+          labelsVisible: firstLabel ? getComputedStyle(firstLabel).display !== 'none' : null,
+          viewport: window.innerWidth,
+          docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        };
+      })()
+    `)
+    log(`shell@${width} = ${JSON.stringify(shell)}`)
+
+    const webotClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((x) => x.textContent.includes('WeBot')); b?.click(); return !!b; })()`)
+    await sleep(1200)
+    const webot = await wc.executeJavaScript(`
+      (() => {
+        const body = document.querySelector('.webot-body');
+        const cols = body ? getComputedStyle(body).gridTemplateColumns.split(' ').length : 0;
+        const editor = document.querySelector('.webot-editor');
+        return {
+          mounted: !!document.querySelector('.webot'),
+          editor: !!editor,
+          editorW: editor ? Math.round(editor.getBoundingClientRect().width) : 0,
+          cols,
+          docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        };
+      })()
+    `)
+    log(`webot@${width} = ${JSON.stringify(webot)}`)
+
+    return { snsClick, anaClick, cardClick, sns, global, shell, webotClick, webot }
   }
   const medium = await layoutProbe(1000, 680)
   log(`layout@1000 = ${JSON.stringify(medium)}`)
@@ -4107,6 +4143,26 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   if (medium.global.statCards < 3) {
     results.fail = 'layout stat cards broken'
     log('FAIL: 1000px 宽度下统计卡片塌陷')
+    app.exit(1)
+    return
+  }
+  // v1.0：新外壳必须真的渲染出来（10 个导航项、3 个全局状态点），且不得产生
+  // 横向溢出 —— 后者是最难发现的一类响应式缺陷。
+  if (!medium.shell || medium.shell.items < 10 || medium.shell.statusChips < 3) {
+    results.fail = 'rail not rendered'
+    log(`FAIL: 1000px 宽度下左侧导航未正确渲染 ${JSON.stringify(medium.shell)}`)
+    app.exit(1)
+    return
+  }
+  if (medium.shell.docOverflow > 2) {
+    results.fail = `horizontal overflow at 1000px (${medium.shell.docOverflow}px)`
+    log(`FAIL: 1000px 宽度下出现横向溢出 ${medium.shell.docOverflow}px`)
+    app.exit(1)
+    return
+  }
+  if (!medium.webot?.mounted || !medium.webot.editor) {
+    results.fail = 'webot page did not mount'
+    log(`FAIL: WeBot 页面未挂载 ${JSON.stringify(medium.webot)}`)
     app.exit(1)
     return
   }
@@ -4532,7 +4588,7 @@ async function runScreenshotMode() {
             `(() => {
               const tab = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes('WeportAI'))
               const workspace = document.querySelector('.workspace')
-              const active = document.querySelector('.tab[data-active="true"]')
+              const active = document.querySelector('.tab[data-active="true"], .rail-item[data-active="true"]')
               return JSON.stringify({
                 tabFound: !!tab,
                 tabDisabled: tab ? tab.disabled : null,
@@ -4759,6 +4815,48 @@ async function runScreenshotMode() {
   await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {
     await clickTab('WeBot 笔记')
   })
+
+  // 响应式：把窗口缩到接近最小宽度再截一次，并**记录度量**交给 PowerShell 断言。
+  //
+  // 横向溢出不会报错，只会把右侧内容静默切掉 —— 必须用度量兜住，肉眼截图看不
+  // 出来。导航标签在窄宽度下是否还显示同样要断言：那正是 v1.0 导航改版的核心
+  // 收益，被媒体查询误藏起来就等于白做。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const viewportMetrics: Record<string, unknown> = {}
+    const measure = () =>
+      mainWindow!.webContents.executeJavaScript(`
+        (() => {
+          const rail = document.querySelector('.rail');
+          const label = rail ? rail.querySelector('.rail-item span') : null;
+          return {
+            viewport: window.innerWidth,
+            railW: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+            labelsVisible: label ? getComputedStyle(label).display !== 'none' : null,
+            railItems: document.querySelectorAll('.rail-item').length,
+            statusChips: document.querySelectorAll('.rail-foot .status-chip').length,
+            docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+          };
+        })()
+      `)
+
+    mainWindow.setSize(1000, 680)
+    await sleep(1000)
+    await clickTab('WeBot')
+    await sleep(800)
+    await saveStable(mainWindow, 'webot-narrow.png')
+    viewportMetrics.narrow = await measure()
+
+    mainWindow.setSize(1440, 900)
+    await sleep(900)
+    viewportMetrics.wide = await measure()
+
+    try {
+      writeFileSync(join(outDir, 'viewport-metrics.json'), JSON.stringify(viewportMetrics, null, 2), 'utf8')
+      log(`[screenshot] viewport metrics = ${JSON.stringify(viewportMetrics)}`)
+    } catch (e) {
+      log('WARN [screenshot] could not write viewport metrics:', e)
+    }
+  }
 
   log('[screenshot] captures done, shutting down services...')
   try { messagePushService?.stop() } catch { /* noop */ }

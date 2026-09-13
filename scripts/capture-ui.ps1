@@ -110,6 +110,8 @@ $groupPng = Join-Path $OutputDir 'analytics-group.png'
 $settingsPng = Join-Path $OutputDir 'settings.png'
 $webotPng = Join-Path $OutputDir 'webot.png'
 $webotNotesPng = Join-Path $OutputDir 'webot-notes.png'
+$webotNarrowPng = Join-Path $OutputDir 'webot-narrow.png'
+$viewportMetrics = Join-Path $OutputDir 'viewport-metrics.json'
 function Assert-Captured([string]$Path, [string]$Label) {
   if (-not (Test-Path $Path)) {
     $tail = (Get-Content $appOut -ErrorAction SilentlyContinue | Select-Object -Last 30) -join "`n"
@@ -144,6 +146,8 @@ Assert-Captured $groupPng 'analytics-group.png'
 Assert-Captured $settingsPng 'settings.png'
 Assert-Captured $webotPng 'webot.png'
 Assert-Captured $webotNotesPng 'webot-notes.png'
+Assert-Captured $webotNarrowPng 'webot-narrow.png'
+Assert-Captured $viewportMetrics 'viewport-metrics.json'
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
@@ -159,6 +163,35 @@ Assert-ImageHasContent $groupPng 'group analytics'
 Assert-ImageHasContent $settingsPng 'settings'
 Assert-ImageHasContent $webotPng 'WeBot tasks'
 Assert-ImageHasContent $webotNotesPng 'WeBot notes'
+Assert-ImageHasContent $webotNarrowPng 'WeBot at narrow width'
+
+# Responsive assertions: horizontal overflow and nav-label visibility.
+#
+# Neither is detectable by "the screenshot looks fine": horizontal overflow just
+# silently clips content on the right, and labels hidden by an over-eager media
+# query would negate the whole point of the v1.0 navigation rework.
+#
+# NOTE: keep these strings ASCII-only. Windows PowerShell 5.1 reads .ps1 as ANSI
+# unless the file has a UTF-8 BOM, and an em-dash becomes a byte that it treats
+# as a closing quote.
+$metrics = Get-Content $viewportMetrics -Raw | ConvertFrom-Json
+foreach ($name in @('narrow', 'wide')) {
+  $m = $metrics.$name
+  if ($null -eq $m) { throw "viewport-metrics.json missing '$name' entry" }
+  Write-Output "  [viewport:$name] $($m.viewport)px rail=$($m.railW) labels=$($m.labelsVisible) overflow=$($m.docOverflow)"
+  if ($m.docOverflow -gt 2) {
+    throw "horizontal overflow at ${name} ($($m.viewport)px): $($m.docOverflow)px - content is being clipped. Aborting."
+  }
+  if ($m.railItems -lt 10) {
+    throw "navigation rail incomplete at ${name}: $($m.railItems) items (expected >= 10). Aborting."
+  }
+  if ($m.statusChips -lt 3) {
+    throw "global status strip incomplete at ${name}: $($m.statusChips) chips (expected >= 3). Aborting."
+  }
+}
+if ($metrics.narrow.labelsVisible -ne $true) {
+  throw "navigation labels hidden at $($metrics.narrow.viewport)px - the rail collapsed far too early. Aborting."
+}
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {
