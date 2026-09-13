@@ -108,6 +108,13 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build:mac
 
+      # Issue #18: v0.9.11 shipped unsigned (signing silently skipped) and
+      # failed `codesign --verify --deep --strict` on user machines.
+      # This gate runs on the macOS runner BEFORE publishing — any failure
+      # blocks the release. No Apple Developer account required (ad-hoc).
+      - name: Verify macOS packaging & signature (issue #18 gate)
+        run: bash scripts/verify-mac-pack.sh release
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:

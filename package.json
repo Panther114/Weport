@@ -94,6 +94,7 @@
       "icon": "resources/icons/macos/icon.icns",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
+      "identity": "-",
       "entitlements": "electron/entitlements.mac.plist",
       "entitlementsInherit": "electron/entitlements.mac.plist",
       "extraResources": [
