@@ -4064,24 +4064,7 @@ button:disabled {
   flex: none;
 }
 
-@media (max-width: 1100px) {
-  .ai-shell.ws-hidden {
-    grid-template-columns: 200px 1fr 0px;
-  }
-}
-
-/* 小屏适配 */
-@media (max-width: 1100px) {
-  .ai-shell {
-    grid-template-columns: 200px 1fr 220px;
-  }
-}
-
-@media (max-width: 940px) {
-  .ai-shell {
-    grid-template-columns: 190px 1fr;
-  }
-  .ai-workspace {
-    display: none;
-  }
-}
+/* 响应式断点已移到 styles/v1.scss（在本文件之后加载）：这里的三条 .ai-shell
+   媒体查询与 v1.scss 里的 .ai-shell 同优先级，被后者整体覆盖 —— 也就是说
+   1100px / 940px 两个断点实际上从未生效过，986px 视口下右栏仍然是 288px，
+   中间一栏只剩约 270px。断点必须和它要改的那条规则写在同一个文件里。 */

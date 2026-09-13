@@ -116,6 +116,7 @@ $settingsConnectPng = Join-Path $OutputDir 'settings-connect.png'
 $webotPng = Join-Path $OutputDir 'webot.png'
 $webotNotesPng = Join-Path $OutputDir 'webot-notes.png'
 $webotNarrowPng = Join-Path $OutputDir 'webot-narrow.png'
+$aiNarrowPng = Join-Path $OutputDir 'ai-narrow.png'
 $weclonePng = Join-Path $OutputDir 'weclone.png'
 $wecloneManagePng = Join-Path $OutputDir 'weclone-manage.png'
 $wecloneCreatePng = Join-Path $OutputDir 'weclone-create.png'
@@ -157,6 +158,7 @@ Assert-Captured $settingsConnectPng 'settings-connect.png'
 Assert-Captured $webotPng 'webot.png'
 Assert-Captured $webotNotesPng 'webot-notes.png'
 Assert-Captured $webotNarrowPng 'webot-narrow.png'
+Assert-Captured $aiNarrowPng 'ai-narrow.png'
 Assert-Captured $weclonePng 'weclone.png'
 Assert-Captured $wecloneManagePng 'weclone-manage.png'
 Assert-Captured $wecloneCreatePng 'weclone-create.png'
@@ -179,6 +181,7 @@ Assert-ImageHasContent $settingsConnectPng 'settings connections'
 Assert-ImageHasContent $webotPng 'WeBot tasks'
 Assert-ImageHasContent $webotNotesPng 'WeBot notes'
 Assert-ImageHasContent $webotNarrowPng 'WeBot at narrow width'
+Assert-ImageHasContent $aiNarrowPng 'WeportAI at narrow width'
 Assert-ImageHasContent $weclonePng 'WeClone'
 Assert-ImageHasContent $wecloneManagePng 'WeClone manage'
 Assert-ImageHasContent $wecloneCreatePng 'WeClone create'
@@ -218,6 +221,24 @@ foreach ($name in @('narrow', 'wide')) {
     throw "WeBot task card collapsed to $($m.webotCardW)px at ${name}. Aborting."
   }
   Write-Output "  [webot:$name] card=$($m.webotCardW) title=$($m.webotTitleW) listCols=$($m.webotListCols) editorGridCols=$($m.webotGridCols)"
+}
+
+# WeportAI 三栏是唯一一个两侧栏会跟中间内容抢宽度的页面，单独断言：不管窗口多
+# 窄，中间那一栏都得留下能读的宽度（曾经的 1100/940 断点被 v1.scss 覆盖，
+# 986px 视口下中间一栏只剩约 270px）。
+foreach ($name in @('aiNarrow', 'aiWide')) {
+  $m = $metrics.$name
+  if ($null -eq $m) { throw "viewport-metrics.json missing '$name' entry" }
+  Write-Output "  [ai:$name] $($m.viewport)px cols=$($m.aiCols -join '/') thread=$($m.aiThreadW) overflow=$($m.docOverflow)"
+  if ($m.aiThreadW -lt 300) {
+    throw "WeportAI middle column squeezed to $($m.aiThreadW)px at ${name} ($($m.viewport)px). Aborting."
+  }
+  if ($m.docOverflow -gt 2) {
+    throw "horizontal overflow on WeportAI at ${name} ($($m.viewport)px): $($m.docOverflow)px. Aborting."
+  }
+  if ($m.aiCols.Count -lt 2) {
+    throw "WeportAI shell collapsed at ${name}: cols=$($m.aiCols -join '/'). Aborting."
+  }
 }
 if ($metrics.narrow.labelsVisible -ne $true) {
   throw "navigation labels hidden at $($metrics.narrow.viewport)px - the rail collapsed far too early. Aborting."

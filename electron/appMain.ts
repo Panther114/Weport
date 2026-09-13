@@ -5107,6 +5107,10 @@ async function runScreenshotMode() {
           const list = document.querySelector('.webot-list');
           const card = document.querySelector('.webot-card');
           const title = document.querySelector('.webot-card-title');
+          const aiShell = document.querySelector('.ai-shell');
+          const aiCols = aiShell
+            ? getComputedStyle(aiShell).gridTemplateColumns.split(' ').map((v) => Math.round(Number.parseFloat(v) || 0))
+            : [];
           return {
             viewport: window.innerWidth,
             railW: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
@@ -5121,6 +5125,9 @@ async function runScreenshotMode() {
             webotListCols: list ? getComputedStyle(list).gridTemplateColumns.split(' ').length : 0,
             webotCardW: card ? Math.round(card.getBoundingClientRect().width) : 0,
             webotTitleW: title ? Math.round(title.getBoundingClientRect().width) : 0,
+            // WeportAI 三栏：中间一栏是真正读内容的地方，窄窗口下不能被两侧挤没。
+            aiCols,
+            aiThreadW: aiCols.length >= 3 ? aiCols[aiCols.length - 2] : 0,
           };
         })()
       `)
@@ -5139,9 +5146,23 @@ async function runScreenshotMode() {
     await saveStable(mainWindow, 'webot-narrow.png')
     viewportMetrics.narrow = await measure()
 
+    // 只改尺寸、不切标签：WeBot 面板与它展开的编辑器都还在，两档测的是同一屏。
     mainWindow.setSize(1440, 900)
     await sleep(900)
     viewportMetrics.wide = await measure()
+
+    // WeportAI 在窄窗口下也截一张：它是唯一的三栏页面，两侧栏在窄窗口下必须
+    // 主动让位，否则中间一栏会被挤到读不了（原来的 1100/940 断点从未生效）。
+    mainWindow.setSize(1000, 680)
+    await sleep(800)
+    await clickTab('WeportAI')
+    await sleep(900)
+    await saveStable(mainWindow, 'ai-narrow.png')
+    viewportMetrics.aiNarrow = await measure()
+
+    mainWindow.setSize(1440, 900)
+    await sleep(900)
+    viewportMetrics.aiWide = await measure()
 
     try {
       writeFileSync(join(outDir, 'viewport-metrics.json'), JSON.stringify(viewportMetrics, null, 2), 'utf8')

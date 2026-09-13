@@ -1079,8 +1079,47 @@
 //     但它只是一个高频的小动作。
 
 // 三栏重新配比：左栏窄一点，右栏宽一点（文件元数据需要横向空间）。
+//
+// 断点必须写在这里，而不是 styles.css：那边同样有 `.ai-shell` 的媒体查询，但
+// v1.scss 后加载、优先级相同，整条规则被这里覆盖 —— 结果是 styles.css 里
+// 1100px / 940px 两个断点从未生效过。
+//
+// 本机的 CSS 视口比窗口像素小得多（1600px 的窗口只有约 1066 CSS px），所以
+// 原来的 1100 断点几乎永远命中，而 940 又太低：两条都白写。下面的阶梯按实际
+// 量到的内容宽度分档（默认窗口 854px、窄窗口 774px、最小窗口约 690px）。
 .ai-shell {
   grid-template-columns: 220px minmax(0, 1fr) 288px;
+}
+
+// 854px 内容宽：右栏收到 250px，中间一栏从 346px 回到 396px。
+@media (max-width: 1220px) {
+  .ai-shell {
+    grid-template-columns: 208px minmax(0, 1fr) 250px;
+  }
+
+  .ai-shell.ws-hidden {
+    grid-template-columns: 208px minmax(0, 1fr) 0px;
+  }
+}
+
+// 774px 内容宽（窄窗口截图档）：两侧再各收一档，中间保住约 340px。
+@media (max-width: 1040px) {
+  .ai-shell {
+    grid-template-columns: 196px minmax(0, 1fr) 216px;
+  }
+
+  .ai-shell.ws-hidden {
+    grid-template-columns: 196px minmax(0, 1fr) 0px;
+  }
+}
+
+// 三栏在最小窗口（约 920px 窗口 / 690px 内容）下真的放不下，右栏交回给组件
+// 自己的「记忆/笔记」开关（.ws-hidden），这里只保证不留下一条空轨。
+@media (max-width: 940px) {
+  .ai-shell,
+  .ai-shell.ws-hidden {
+    grid-template-columns: 190px minmax(0, 1fr) 190px;
+  }
 }
 
 // 滚动的正文容器留出弹窗高度 —— 这才是上一轮该改的地方。
