@@ -150,6 +150,8 @@ export interface ExportProgress {
   mediaCacheFillFiles?: number
   mediaDedupReuseFiles?: number
   mediaBytesWritten?: number
+  // issue #15/#5b：因缺图片解密密钥而显示为 [图片] 占位符的消息数（同一次运行内同一图片去重）。
+  mediaImageKeyMissingFiles?: number
 }
 
 export interface MediaExportTelemetry {
@@ -159,6 +161,7 @@ export interface MediaExportTelemetry {
   cacheFillFiles: number
   dedupReuseFiles: number
   bytesWritten: number
+  imageKeyMissingFiles: number
 }
 
 export interface MediaSourceResolution {

@@ -965,11 +965,14 @@ export default function App() {
     try {
       const result = await api.export.exportSessions(exportPath.trim(), options)
       await refreshExportLog(exportPath.trim())
+      // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
+      const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
+      const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
       if (result.success) {
-        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）`, 7000)
+        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}`, imageKeyMissing > 0 ? 12000 : 7000)
         setProgress((p: any) => (p ? { ...p, current: p.total || p.current, phaseLabel: '完成', phase: 'complete' } : { current: 1, total: 1, phaseLabel: '完成', phase: 'complete' }))
       } else {
-        pushToast('err', '导出未完全成功', result.error || `成功 ${result.successCount ?? 0} / 失败 ${result.failCount ?? 0}`, 12000)
+        pushToast('err', '导出未完全成功', `${result.error || `成功 ${result.successCount ?? 0} / 失败 ${result.failCount ?? 0}`}${imageKeyWarning}`, 12000)
       }
     } catch (e) {
       pushToast('err', '导出失败', String(e), 12000)

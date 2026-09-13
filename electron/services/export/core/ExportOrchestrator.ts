@@ -46,6 +46,15 @@ export class ExportOrchestrator {
     }
 
     /**
+     * issue #15/#5b：读取本次运行的缺图片密钥计数。
+     * 必须在 clearMediaRuntimeState() 之前调用（finally 会清掉遥测）。
+     */
+    private getRunImageKeyMissingCount(): number {
+        const raw = Number(this.context.getMediaTelemetrySnapshot().mediaImageKeyMissingFiles || 0)
+        return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0
+    }
+
+    /**
      * 导出单个会话为 ChatLab 格式（并行优化版本）
      */
     async exportSessionToChatLab(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
@@ -123,6 +132,8 @@ export class ExportOrchestrator {
         failedSessionIds?: string[]
         failedSessionErrors?: Record<string, string>
         sessionOutputPaths?: Record<string, string>
+        // issue #15/#5b：因缺图片解密密钥而显示为 [图片] 占位符的消息数。
+        imageKeyMissingFiles?: number
         error?: string
         }> {
         let successCount = 0;
@@ -146,7 +157,7 @@ export class ExportOrchestrator {
         try {
           const conn = await this.context.ensureConnected()
           if (!conn.success) {
-            return { success: false, successCount: 0, failCount: sessionIds.length, error: conn.error }
+            return { success: false, successCount: 0, failCount: sessionIds.length, imageKeyMissingFiles: 0, error: conn.error }
           }
 
           this.context.resetMediaRuntimeState()
@@ -552,7 +563,8 @@ export class ExportOrchestrator {
               successSessionIds,
               failedSessionIds,
               failedSessionErrors,
-              sessionOutputPaths
+              sessionOutputPaths,
+              imageKeyMissingFiles: this.getRunImageKeyMissingCount()
             }
           }
           if (pauseRequested) {
@@ -565,7 +577,8 @@ export class ExportOrchestrator {
               successSessionIds,
               failedSessionIds,
               failedSessionErrors,
-              sessionOutputPaths
+              sessionOutputPaths,
+              imageKeyMissingFiles: this.getRunImageKeyMissingCount()
             }
           }
 
@@ -591,11 +604,12 @@ export class ExportOrchestrator {
             failedSessionIds,
             failedSessionErrors,
             sessionOutputPaths,
+            imageKeyMissingFiles: this.getRunImageKeyMissingCount(),
             error: failureSummary
           }
         } catch (e) {
           progressEmitter.flush()
-          return { success: false, successCount, failCount, error: String(e) }
+          return { success: false, successCount, failCount, imageKeyMissingFiles: this.getRunImageKeyMissingCount(), error: String(e) }
         } finally {
           this.context.clearMediaRuntimeState()
         }

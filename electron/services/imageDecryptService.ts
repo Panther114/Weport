@@ -53,7 +53,7 @@ type DecryptResult = {
   success: boolean
   localPath?: string
   error?: string
-  failureKind?: 'not_found' | 'decrypt_failed'
+  failureKind?: 'not_found' | 'decrypt_failed' | 'missing_key'
   isThumb?: boolean  // 是否是缩略图（没有高清图时返回缩略图）
 }
 
@@ -584,7 +584,7 @@ export class ImageDecryptService {
       }
       if (Number.isNaN(xorKey) || (!xorKey && xorKey !== 0)) {
         this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', '缺少解密密钥')
-        return { success: false, error: '未配置图片解密密钥', failureKind: 'not_found' }
+        return { success: false, error: '未配置图片解密密钥', failureKind: 'missing_key' }
       }
 
       const aesKeyRaw = imageKeys.aesKey
