@@ -25,6 +25,18 @@ import type { ChatSession, Message } from './chatService'
 import { getProviderAdapter, makeDefaultProfile } from './ai/providerAdapters'
 import { getProviderCatalog, getProviderCatalogEntry } from './ai/providerCatalog'
 import { ProviderProfileService } from './ai/providerProfiles'
+import {
+  CHARS_PER_TOKEN,
+  COMPACT_RETAIN_RATIO,
+  COMPACT_TRIGGER_RATIO,
+  buildPrefixFrame,
+  comparePrefixFrames,
+  compressOverflow as compressOverflowPure,
+  mergeDigest,
+  type CompressibleMessage,
+  type PrefixChange,
+  type PrefixFrame,
+} from './ai/prefixCache'
 import type { ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
 
 // ---------------------------------------------------------------------------
@@ -145,52 +157,6 @@ interface ToolDefinition {
 // ---------------------------------------------------------------------------
 
 const NOTE_DIR = 'notes'
-
-/**
- * 压缩摘要的体积上限（字符）。摘要**只有一份**，超出后从最旧的部分开始丢弃
- * 并在头部标注省略条数，因此它不会随会话长度无界增长。
- */
-const DIGEST_MAX_CHARS = 8000
-
-/**
- * 压缩触发线：上下文占用达到模型窗口的 80% 才压缩。
- *
- * 与 DSH 的 `thresholdRatio` 默认值一致（见
- * `docs/reference/dsh-cache-architecture.md` §C.1）。早期触发会把一次完整的
- * prefix miss 变成每轮一次，命中率会断崖式下跌。
- */
-const COMPACT_TRIGGER_RATIO = 0.8
-
-/** 压缩后保留的原文比例（与 DSH 的 `retainRatio` 默认值一致）。 */
-const COMPACT_RETAIN_RATIO = 0.16
-
-/**
- * 字符 → token 的保守估算系数。
- *
- * 中文一个字约 1 token、英文约 4 字符 1 token，混合内容用 2.5 偏保守（宁可
- * 早一点压缩，也不要超出窗口被 provider 拒绝）。
- */
-const CHARS_PER_TOKEN = 2.5
-
-/**
- * 在 maxChars 预算内保留**末尾**若干行（越近的信息越有用），超出时在头部
- * 标注被省略的行数。单行本身就超预算时硬截断该行，保证一定产出内容。
- */
-function tailLinesWithin(lines: string[], maxChars: number): { text: string; kept: number } {
-  if (lines.length === 0) return { text: '', kept: 0 }
-  let used = 0
-  let start = lines.length
-  while (start > 0 && used + lines[start - 1].length + 1 <= maxChars) {
-    used += lines[start - 1].length + 1
-    start -= 1
-  }
-  if (start === lines.length) {
-    const only = lines[lines.length - 1].slice(-maxChars)
-    return { text: `（更早的 ${lines.length - 1} 条已省略）\n${only}`, kept: 1 }
-  }
-  const body = lines.slice(start).join('\n')
-  return { text: start > 0 ? `（更早的 ${start} 条已省略）\n${body}` : body, kept: lines.length - start }
-}
 
 /** Canonical provider JSON: object keys and order-insensitive schema lists are stable. */
 const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
@@ -450,7 +416,7 @@ class WeportAiService {
    * 前缀稳定性探针的上一帧（见 {@link probePrefixChange}）。
    * 只在内存中保留哈希与逐条序列化结果，不落盘、不含原始正文。
    */
-  private prefixProbe = new Map<string, { systemHash: string; toolsHash: string; wire: string[] }>()
+  private prefixProbe = new Map<string, PrefixFrame>()
   private emitter: EventEmitter | null = null
   private sessionListCache: { at: number; sessions: ChatSession[] } = { at: 0, sessions: [] }
   private titleUpgrading = new Set<string>()
@@ -641,71 +607,18 @@ class WeportAiService {
     messages: AiMessage[],
     options: { maxChars: number; retainChars: number }
   ): { kept: AiMessage[]; digest: string; dropped: AiMessage[] } {
-    const messageChars = (m: AiMessage): number => {
-      // Tool results are represented by their own role=tool message. Counting
-      // call.result here as well would double-count the same provider payload.
-      return m.content.length + (m.reasoning?.length || 0) + 40
-    }
-
-    let total = 0
-    for (const m of messages) total += messageChars(m)
-    if (total <= options.maxChars) return { kept: messages, digest: '', dropped: [] }
-
-    // 从最新往回收，保留 retainChars 的原文（并至少保留 4 条，避免把最近
-    // 一轮也压掉）。
-    let retained = 0
-    let dropCount = messages.length
-    while (dropCount > 4) {
-      const size = messageChars(messages[dropCount - 1])
-      if (retained + size > options.retainChars) break
-      retained += size
-      dropCount -= 1
-    }
-
-    // 压缩边界必须落在 user 消息上：从一个孤立的 tool 结果开始会让严格
-    // provider 直接 400（role 'tool' 必须是某个 tool_calls 的响应）。
-    while (dropCount < messages.length && messages[dropCount]?.role !== 'user') {
-      dropCount += 1
-    }
-    // 一刀都不能砍、或砍完没有剩下任何东西 —— 放弃压缩（保持 append-only，
-    // 宁可超窗口也不要一次半截的改写）。
-    if (dropCount <= 0 || dropCount >= messages.length) {
-      return { kept: messages, digest: '', dropped: [] }
-    }
-
-    const trimmed = messages.slice(0, dropCount)
-    const lines = trimmed.map((m) => {
-      if (m.role === 'assistant') {
-        return `[AI ${m.toolCalls?.length ? `(工具${m.toolCalls.length}个)` : '回答'}] ${String(m.content || '').slice(0, 280)}`
-      }
-      if (m.role === 'user') return `[用户] ${String(m.content || '').slice(0, 140)}`
-      return `[工具 ${m.toolName || ''}] ${String(m.content || '').slice(0, 140)}`
-    })
-
-    // 摘要本身也要有界：保留最近的若干行（越近的信息越有用），并显式标注
-    // 被省略的条数，避免读者以为这就是全部。
-    const elided = tailLinesWithin(lines, DIGEST_MAX_CHARS)
-    const digest = [
-      '以下是更早轮次的关键内容摘要（为节省上下文，原始消息已压缩）：',
-      elided.text,
-      '（摘要结束 —— 新对话从这里继续）',
-    ].join('\n')
-
-    return { kept: messages.slice(dropCount), digest, dropped: trimmed }
+    // 纯函数实现见 ai/prefixCache.ts —— 抽出去是为了能脱离 electron 直接单测，
+    // 这些不变量（边界落在 user 消息、摘要单份且有界、不压缩时原样返回）
+    // 是命中率的根因，必须有回归测试兜着。
+    return compressOverflowPure<AiMessage & CompressibleMessage>(messages, options)
   }
 
   /**
    * 把「上一份摘要」与「本轮新摘要」合并成**唯一一份**有界摘要。
-   *
-   * 绝不链式追加：旧摘要在超出上限时从最旧的部分开始丢弃，并在头部留下
-   * 明确的省略标记。这样摘要体积有界，且每次压缩产出的文本是确定的。
+   * 实现见 ai/prefixCache.ts。
    */
-  private mergeDigest(previous: string, incoming: string, maxChars = DIGEST_MAX_CHARS): string {
-    const parts = [String(previous || '').trim(), String(incoming || '').trim()].filter(Boolean)
-    if (parts.length === 0) return ''
-    if (parts.length === 1) return parts[0].length <= maxChars ? parts[0] : tailLinesWithin(parts[0].split('\n'), maxChars).text
-    const merged = parts.join('\n')
-    return merged.length <= maxChars ? merged : tailLinesWithin(merged.split('\n'), maxChars).text
+  private mergeDigest(previous: string, incoming: string, maxChars?: number): string {
+    return mergeDigest(previous, incoming, maxChars)
   }
 
   /**
@@ -2574,23 +2487,11 @@ class WeportAiService {
     systemContent: string,
     tools: unknown,
     apiMessages: Array<Record<string, unknown>>
-  ): { change: 'first' | 'append' | 'system' | 'tools' | 'head-rewrite'; divergedAt: number; previousLength: number } {
-    const systemHash = createHash('sha256').update(systemContent).digest('hex').slice(0, 16)
-    const toolsHash = createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16)
-    const wire = apiMessages.map((message) => JSON.stringify(message))
-    const previous = this.prefixProbe.get(chatId)
-    this.prefixProbe.set(chatId, { systemHash, toolsHash, wire })
-
-    if (!previous) return { change: 'first', divergedAt: 0, previousLength: 0 }
-    if (previous.systemHash !== systemHash) return { change: 'system', divergedAt: 0, previousLength: previous.wire.length }
-    if (previous.toolsHash !== toolsHash) return { change: 'tools', divergedAt: 0, previousLength: previous.wire.length }
-
-    const limit = Math.min(previous.wire.length, wire.length)
-    for (let i = 0; i < limit; i += 1) {
-      if (previous.wire[i] !== wire[i]) return { change: 'head-rewrite', divergedAt: i, previousLength: previous.wire.length }
-    }
-    if (wire.length < previous.wire.length) return { change: 'head-rewrite', divergedAt: wire.length, previousLength: previous.wire.length }
-    return { change: 'append', divergedAt: limit, previousLength: previous.wire.length }
+  ): PrefixChange {
+    const frame = buildPrefixFrame(systemContent, tools, apiMessages)
+    const change = comparePrefixFrames(this.prefixProbe.get(chatId), frame)
+    this.prefixProbe.set(chatId, frame)
+    return change
   }
 
   private async callModel(
