@@ -1671,7 +1671,7 @@ export default function App() {
                   <FolderOpen size={15} />
                   微信聊天记录数据位置
                 </h2>
-                <span className={dbReady ? 'st-ok' : undefined}>{dbReady ? '已连接' : '未选择'}</span>
+                {/* 「已连接 / 未选择」不再重复：左侧栏底部常驻显示同一状态。 */}
               </div>
               <div className="field">
                 <label htmlFor="dbPath">微信数据文件夹</label>
@@ -1721,47 +1721,14 @@ export default function App() {
                   <KeyRound size={15} />
                   解密密钥
                 </h2>
-                <span className={keyOk ? 'st-ok' : 'st-warn'}>{keyOk ? '已就绪' : '待提取'}</span>
+                {/* 这里原本还有一个「已就绪 / 待提取」状态标；左侧栏已经有全局
+                    状态点了，同一屏里出现两次只会让人怀疑哪个是最新的。 */}
               </div>
-              <ol className="steps">
-                <li>
-                  <span className="step-num">1</span>
-                  <span>
-                    打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
-                    然后退出当前登录（或完全退出微信）
-                  </span>
-                </li>
-                <li>
-                  <span className="step-num">2</span>
-                  <span>
-                    点击下方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
-                    此时 Weport 已挂接微信进程，正在等待登录
-                  </span>
-                </li>
-                <li>
-                  <span className="step-num">3</span>
-                  <span>
-                    用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
-                  </span>
-                </li>
-                <li>
-                  <span className="step-num">4</span>
-                  <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
-                </li>
-              </ol>
 
-              {keyHookReady && busy && (
-                <div className="callout ready" role="status">
-                  Hook 已就绪 — 请现在登录微信，或退出账号后重新登录（可在手机上确认）。
-                </div>
-              )}
-              {keyStatus && (
-                <p className="hint" style={{ marginTop: 8 }}>
-                  {keyStatus}
-                </p>
-              )}
-
-              <div className="field" style={{ marginTop: 12 }}>
+              {/* 顺序即优先级：这是一张「要你做事」的卡片，所以控件在最前，
+                  说明收进折叠区。旧版把四段编号散文放在最上面，用户必须先读完
+                  才能看见按钮在哪。 */}
+              <div className="field">
                 <label htmlFor="decryptKey">数据库密钥</label>
                 <div className="path-row">
                   <input
@@ -1806,11 +1773,48 @@ export default function App() {
                   确认密钥并连接
                 </button>
               </div>
-              <p className="hint">
-                {keyOk
-                  ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
-                  : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
-              </p>
+
+              {keyHookReady && busy && (
+                <div className="callout ready" role="status">
+                  Hook 已就绪 — 请现在登录微信，或退出账号后重新登录（可在手机上确认）。
+                </div>
+              )}
+              {keyStatus && <p className="hint">{keyStatus}</p>}
+
+              <details className="steps-details">
+                <summary>如何获取密钥？</summary>
+                <ol className="steps">
+                  <li>
+                    <span className="step-num">1</span>
+                    <span>
+                      打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
+                      然后退出当前登录（或完全退出微信）
+                    </span>
+                  </li>
+                  <li>
+                    <span className="step-num">2</span>
+                    <span>
+                      点击上方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
+                      此时 Weport 已挂接微信进程，正在等待登录
+                    </span>
+                  </li>
+                  <li>
+                    <span className="step-num">3</span>
+                    <span>
+                      用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
+                    </span>
+                  </li>
+                  <li>
+                    <span className="step-num">4</span>
+                    <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
+                  </li>
+                </ol>
+                <p className="hint">
+                  {keyOk
+                    ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
+                    : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
+                </p>
+              </details>
             </section>
 
             <section className="panel connect-acc">
@@ -1819,9 +1823,9 @@ export default function App() {
                   <Users size={15} />
                   微信账号
                 </h2>
-                <span className={accounts.length ? 'st-ok' : undefined}>
-                  {accounts.length ? `${accounts.length} 个` : '未选择'}
-                </span>
+                {/* 只保留真正的信息量（找到几个账号）；「已连接 / 未选择」这类
+                    状态由左侧栏统一表达。 */}
+                {accounts.length > 0 ? <span className="card-sub">{accounts.length} 个</span> : null}
               </div>
               {accounts.length === 0 ? (
                 <div className="empty">选择或扫描数据目录后显示账号</div>
@@ -2792,7 +2796,7 @@ export default function App() {
                   <Database size={15} />
                   本地 HTTP API
                 </h2>
-                <span>只读接口 · 仅本机可访问</span>
+                {/* 灰字副标已移除：同一段说明在下面正文里已经写过一次。 */}
               </div>
               <div className="setting-row">
                 <div className="setting-label">
@@ -2875,7 +2879,6 @@ export default function App() {
                   <Info size={15} />
                   关于
                 </h2>
-                <span>版本与更新</span>
               </div>
               <div className="setting-row">
                 <div className="setting-label">

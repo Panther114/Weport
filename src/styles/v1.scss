@@ -905,6 +905,105 @@
   }
 }
 
+// =============================================================================
+// 15. 折叠式说明（连接页「如何获取密钥？」）
+// =============================================================================
+//
+// 连接页原来把四段编号说明直接摊在卡片顶部，用户必须先读完才能看到「提取密钥」
+// 按钮 —— 一张要人动手的卡片，顺序却是「说明书在前、按钮在后」。现在说明收进
+// details，默认折叠，控件在前。
+
+.steps-details {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+
+  > summary {
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    // 自绘三角：Chrome 默认标记与我们的图标体系不一致。
+    &::before {
+      content: '';
+      width: 0;
+      height: 0;
+      border-left: 5px solid currentColor;
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+      transition: rotate 0.16s ease;
+    }
+
+    &:hover {
+      color: var(--text);
+    }
+  }
+
+  &[open] > summary::before {
+    rotate: 90deg;
+  }
+
+  .steps {
+    margin-top: var(--space-3);
+  }
+}
+
+// =============================================================================
+// 16. 选中态不再用纯白
+// =============================================================================
+//
+// `.account-item[data-active]` 原本是 #fff 底 + #000 字。在一个几乎全黑的界面里
+// 它比页面上的主按钮还亮，于是「账号已选中」看起来像"这是当前最重要的操作"。
+// 加上活动页签、开关和主按钮也都在用白色，白色实际上同时表示四件事，
+// 结果没有任何一样是真正突出的。
+//
+// 选中态改用与左侧导航相同的语言：accent 淡底 + accent 细边 + 加粗。白色从
+// 此只保留给主操作（导出、提取密钥、创建任务……）。
+
+.account-item[data-active='true'] {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong));
+  color: var(--text);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.account-item[data-active='true']:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: none;
+  transform: none;
+}
+
+.account-item[data-active='true'] span {
+  color: var(--text-dim);
+}
+
+// 选中项左侧加一条 2px 强调条，与导航栏的选中标记保持一致。
+.account-item[data-active='true'] {
+  position: relative;
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    translate: 0 -50%;
+    width: 2px;
+    height: 60%;
+    border-radius: 0 1px 1px 0;
+    background: var(--accent);
+  }
+}
+
 // 引用 chip：显示名是人类可读的，id 只作为数据随请求发出。
 .ref-chips {
   display: flex;
