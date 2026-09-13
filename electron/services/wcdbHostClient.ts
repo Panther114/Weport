@@ -27,7 +27,61 @@
 import { EventEmitter } from 'events'
 import { spawn, type ChildProcess } from 'child_process'
 import { join, dirname, delimiter } from 'path'
-import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync } from 'fs'
+import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync } from 'fs'
+
+/**
+ * macOS 专用兜底：把宿主二进制按 bundle 结构摆好，再软链回真正的框架。
+ *
+ * 为什么不能只复制二进制：Electron 的可执行文件用
+ * `@executable_path/../Frameworks` 解析 `Electron Framework.framework`。
+ * 把一个孤零零的二进制复制到 `~/Library/Application Support/.../wcdb-host/`
+ * 后，`../Frameworks` 不存在，宿主进程直接起不来 —— 用户只会看到一个没有
+ * 解释的错误码。
+ *
+ * 这里重建最小可用结构：
+ *   {fallback}/Contents/MacOS/WeFlow          ← 真·二进制（文件名满足 -1006 自检）
+ *   {fallback}/Contents/Frameworks            → 软链到真实 app 的 Frameworks
+ *   {fallback}/Contents/Info.plist            ← 复制（部分 Electron 版本会读）
+ * `@executable_path` 指向 MacOS 目录，`../Frameworks` 因此能穿过软链解析成功。
+ *
+ * 只在 `process.execPath` 所在目录不可写时才会走到这里 —— 典型场景是从
+ * 已挂载的 DMG 里直接运行，或应用带 quarantine 被 App Translocation 到了只读卷。
+ */
+function createMacHostBundle(targetExe: string, exeDir: string, fallbackDir: string): string | null {
+  try {
+    const appContents = join(exeDir, '..')
+    const sourceFrameworks = join(appContents, 'Frameworks')
+    if (!existsSync(sourceFrameworks)) return null
+
+    const destContents = join(fallbackDir, 'Contents')
+    const destMacOs = join(destContents, 'MacOS')
+    mkdirSync(destMacOs, { recursive: true })
+
+    const destHost = join(destMacOs, 'WeFlow')
+    copyFileSync(targetExe, destHost)
+    chmodSync(destHost, 0o755)
+    try {
+      const t = statSync(targetExe)
+      utimesSync(destHost, t.atime, t.mtime)
+    } catch { /* mtime 尽力而为 */ }
+
+    const destFrameworks = join(destContents, 'Frameworks')
+    if (!existsSync(destFrameworks)) {
+      symlinkSync(sourceFrameworks, destFrameworks, 'dir')
+    }
+
+    const sourcePlist = join(appContents, 'Info.plist')
+    if (existsSync(sourcePlist)) {
+      try {
+        copyFileSync(sourcePlist, join(destContents, 'Info.plist'))
+      } catch { /* 尽力而为 */ }
+    }
+
+    return destHost
+  } catch {
+    return null
+  }
+}
 
 function resolveHostExe(): string {
   const override = process.env.WEPORT_WCDB_HOST_EXE
@@ -68,6 +122,14 @@ function resolveHostExe(): string {
         /* 无 electron（理论不可达），保持原错误 */
       }
       if (fallbackDir) {
+        // macOS 必须先按 bundle 结构摆放，否则复制的二进制找不到框架。
+        if (process.platform === 'darwin') {
+          const bundledHost = createMacHostBundle(target, exeDir, fallbackDir)
+          if (bundledHost) {
+            console.warn(`[wcdb-host] exe 目录不可写，宿主已按 bundle 结构部署到 ${bundledHost}`)
+            return bundledHost
+          }
+        }
         const copiedPath = join(fallbackDir, hostName)
         try {
           copyFileSync(target, copiedPath)
@@ -114,6 +176,10 @@ export class WcdbHostClient extends EventEmitter {
 
   private spawnHost() {
     const hostExe = resolveHostExe()
+    // 启动自检：把宿主解析结果写进日志。旧版这条路径完全没有输出，于是
+    // 「宿主起不来」和「数据库读不出来」在日志里长得一模一样 —— 靠这段
+    // 才能一眼区分是解析失败还是宿主自身失败。
+    console.log(`[wcdb-host] exe=${hostExe} platform=${process.platform} electron=${process.versions.electron || 'n/a'}`)
     // 纯 Node 模式：ELECTRON_RUN_AS_NODE=1 时 Electron 二进制按 node 运行，
     // 第一个非 flag 参数即脚本路径（不再需要 --wcdb-host 与 app 路径参数）
     let hostScript: string
