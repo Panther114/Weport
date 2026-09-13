@@ -1490,6 +1490,14 @@
   margin-inline: auto;
 }
 
+// 分析页（全局 / 群聊）沿用同一套状态条与卡片，因此它也要有统一的纵向节奏。
+.analytics-global,
+.group-analytics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
 .status-bar {
   display: flex;
   align-items: center;

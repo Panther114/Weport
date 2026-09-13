@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
-import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays, CloudFog } from 'lucide-react'
+import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Image as ImageIcon, Mic, Clapperboard, Smile, MoreHorizontal, MessageSquare, Send, Inbox, CalendarDays, CloudFog, LineChart, Sparkles } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
 import { CountUp } from '../../components/CountUp'
 import { AnalyticsWordCloud } from '../../components/analytics/AnalyticsWordCloud'
@@ -409,16 +409,31 @@ export const GlobalAnalytics: React.FC = () => {
 
   return (
     <div className="analytics-global">
-      <div className="v09-toolbar-sub analytics-toolbar-sub">
-        <button type="button" className="chip" onClick={() => void loadAll(true)}>
+      {/* 页面顶部改成和其他页一致的状态条：左边一句话说清「这些数字覆盖什么
+          范围」，右边一个刷新。原来是一个光秃秃的 chip 加一行灰字，既不像按钮区
+          也不像说明区。 */}
+      <div className="status-bar">
+        <LineChart size={15} />
+        <div className="status-bar-text">
+          <strong>全部私聊会话 · {formatNumber(stats.totalMessages)} 条消息</strong>
+          <span className="hint">
+            统计范围：{formatDate(stats.firstMessageTime)} 至 {formatDate(stats.lastMessageTime)} · {stats.activeDays} 个活跃日
+          </span>
+        </div>
+        <button type="button" className="secondary-btn" onClick={() => void loadAll(true)}>
           <RefreshCw size={13} />
           刷新统计
         </button>
-        <span className="v09-sub">
-          统计范围：{formatDate(stats.firstMessageTime)} 至 {formatDate(stats.lastMessageTime)} · {stats.activeDays} 个活跃日
-        </span>
       </div>
 
+      <section className="panel">
+        <div className="panel-head">
+          <h2>
+            <Sparkles size={15} />
+            概览
+          </h2>
+          <span>全部消息量与类型构成</span>
+        </div>
       {/* KPI 与消息类型：保持一条信息带，避免摘要被拆成两层 */}
       <div className="analytics-summary-strip">
         <div className="stat-card stat-card-hero">
@@ -472,6 +487,7 @@ export const GlobalAnalytics: React.FC = () => {
           })}
         </div>
       </div>
+      </section>
 
       {/* 活跃日历与词云：保留并置 seam，词云数据/组件可独立替换 */}
       <div className="chart-grid-2 analytics-insight-grid">
