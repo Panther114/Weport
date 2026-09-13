@@ -333,6 +333,19 @@ export class WcdbCore {
    * 获取库文件路径（跨平台）
    */
   private getDllPath(): string {
+    const { libName, candidates } = this.buildDllCandidates()
+    for (const path of candidates) {
+      if (existsSync(path)) return path
+    }
+
+    return candidates[0] || libName
+  }
+
+  /**
+   * 构建动态库搜索候选列表（issue #17/#5a：缺失时需完整上报，供日志自举诊断）。
+   * getDllPath 与 initialize 共用，保证日志里的候选列表与实际查找一致。
+   */
+  private buildDllCandidates(): { libName: string; candidates: string[] } {
     const isMac = process.platform === 'darwin'
     const isLinux = process.platform === 'linux'
     const isArm64 = process.arch === 'arm64'
@@ -343,7 +356,7 @@ export class WcdbCore {
 
     const envDllPath = process.env.WCDB_DLL_PATH
     if (envDllPath && envDllPath.length > 0) {
-      return envDllPath
+      return { libName, candidates: [envDllPath] }
     }
 
     // 基础路径探测
@@ -376,11 +389,7 @@ export class WcdbCore {
       candidates.push(join(root, libName))
     }
 
-    for (const path of candidates) {
-      if (existsSync(path)) return path
-    }
-
-    return candidates[0] || libName
+    return { libName, candidates }
   }
 
   private formatInitProtectionError(code: number): string {
@@ -779,6 +788,13 @@ export class WcdbCore {
       if (!existsSync(dllPath)) {
         console.error('WCDB数据服务不存在:', dllPath)
         this.writeLog(`[bootstrap] initialize failed:数据服务not found path=${dllPath}`, true)
+        // issue #17/#5a：此前该分支直接 return false 且不设置 lastDllInitError，
+        // 上层只能看到 getLastInitError() === null 并显示无意义的 -3999。
+        // 现在上报完整候选列表 + 资源路径，wcdb.log 即可自举定位缺件原因。
+        const searchedCandidates = this.buildDllCandidates().candidates
+        this.writeLog(`[bootstrap] dll search candidates (${searchedCandidates.length}): ${searchedCandidates.join(' | ')}`, true)
+        this.writeLog(`[bootstrap] dll search env: WCDB_DLL_PATH=${process.env.WCDB_DLL_PATH || ''} WCDB_RESOURCES_PATH=${process.env.WCDB_RESOURCES_PATH || ''} setPaths.resourcesPath=${this.resourcesPath || ''}`, true)
+        lastDllInitError = `动态库加载失败，请检查安装是否完整：${dllPath} (错误码: -2301)`
         return false
       }
 
