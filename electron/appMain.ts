@@ -1928,6 +1928,18 @@ function ensureWeBotService(): WeBotService {
   return weBotService
 }
 
+/**
+ * MCP stdio 桥接脚本的绝对路径。
+ *
+ * 开发期在仓库的 `scripts/` 下，打包后由 `prepare-mcp-bundle.cjs` 产出到
+ * `resources/mcp/`，再由 extraResources 映射成 `<resources>/mcp/`。设置页要
+ * 把这条路径写进用户的客户端配置，所以两边都得算对。
+ */
+function resolveMcpBridgePath(): string {
+  if (app.isPackaged) return join(process.resourcesPath, 'mcp', 'mcp-stdio-bridge.cjs')
+  return join(app.getAppPath(), 'scripts', 'mcp-stdio-bridge.mjs')
+}
+
 function registerIpcHandlers() {
   void registerNotificationHandlers()
 
@@ -2050,6 +2062,22 @@ function registerIpcHandlers() {
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
   ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
+  // 客户端配置在**主进程**里拼好再交给渲染进程：mcpToken 是 safeStorage 加密的
+  // 密钥，没必要为了渲染一段 JSON 把它送进渲染进程。
+  ipcMain.handle('mcp:getClientConfig', () => {
+    const status = mcpService.getStatus()
+    const bridge = resolveMcpBridgePath()
+    const token = String(configService?.get('mcpToken') || '')
+    return {
+      ...status,
+      bridgePath: bridge,
+      json: JSON.stringify(
+        { mcpServers: { weport: { command: bridge, args: ['--port', String(status.port), '--token', token] } } },
+        null,
+        2,
+      ),
+    }
+  })
   // macOS 能力诊断（v1.0）：把「为什么拿不到密钥」的三条独立原因逐条测出来。
   // 非 darwin 平台返回 supported:false，界面据此隐藏入口。
   ipcMain.handle('diagnostics:collectMac', () =>
@@ -4972,9 +5000,33 @@ async function runScreenshotMode() {
     ).catch(() => false)
     await sleep(500)
   }, 1600)
-  // 7.6) 设置（主题选择 + 启动行为）
-  await captureV09('settings', 'settings.png', ['.theme-card'], async () => {
+  // 7.6) 设置（默认落在「常规」分类 + 左侧分类列）
+  await captureV09('settings', 'settings.png', ['.settings-nav-item', '.settings-page'], async () => {
     await clickTab('设置')
+  })
+  // 7.7) 设置 → 外观：合并后的外观分类（背景 / 强调色 / 密度 / 主题卡片）
+  await captureV09('settings-appearance', 'settings-appearance.png', ['.theme-card', '.settings-pane'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('外观'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+  })
+  // 7.8) 设置 → 接口：只读 HTTP API 与服务端 MCP 面板（含「复制客户端配置」）
+  await captureV09('settings-connect', 'settings-connect.png', ['.mcp-panel', '.settings-pane'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('接口'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
   })
 
   // WeBot（v1.0）：任务列表与笔记板。两者都断言到了具体的 DOM 节点，

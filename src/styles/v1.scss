@@ -1300,3 +1300,123 @@
     }
   }
 }
+
+// =============================================================================
+// 20. 设置页：左侧分类 + 右侧内容
+// =============================================================================
+//
+// 旧版是六块**等权重**的面板竖着排成一条长滚动（启动 / 外观 / 备份 / HTTP API /
+// 色彩主题 / 关于）。窗口高度只有约 635 CSS px，因此一屏放不下两块面板 —— 想改
+// 「界面密度」得先滚过整个「启动与后台行为」，而且滚到哪儿了、后面还有什么，页
+// 面上没有任何线索。
+//
+// 现在分成五个分类，左侧常驻，右侧一次只渲染一个分类。分类行带一句说明，是为
+// 了让人不必逐个点开就知道每一类装着什么。
+//
+// 分类列不随窗口变窄而折叠成横向胶囊：内容区最窄也有约 600px（窗口最小宽度
+// 920px 减去 212px 侧栏与内边距），减掉 186px 分类列还剩 400px 以上，足够放
+// 标签 + 控件的两列行（`.setting-row` 在 760px 以下本来就会改单列）。
+
+.settings-page {
+  display: grid;
+  grid-template-columns: 186px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  // 分类跟着内容滚：设置面板可能很长，但"我在哪一类"始终要看得见。
+  position: sticky;
+  top: 0;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 9px var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+
+  > svg {
+    flex-shrink: 0;
+  }
+
+  > span {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  em {
+    font-style: normal;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  &:hover {
+    background: var(--elevated);
+  }
+
+  &[data-active='true'] {
+    background: var(--accent-soft);
+
+    strong,
+    > svg {
+      color: var(--accent);
+    }
+  }
+}
+
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+// 「外观 → 色彩主题」这类整行内容：标签在上、控件占满整行。放在设置行的网格里
+// 会被压成 178px 宽的控件列，两张主题卡片就变成竖条。
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: 10px var(--space-2);
+}
+
+// 设置页的行控件列收窄到 260px：这里最"宽"的控件也就是两个按钮（选择图片… /
+// 移除），而 320px 会把标签列压到 224px，中文标题和说明都得折成两行。
+.settings-pane .setting-row {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+}
+
+.setting-note {
+  margin-top: var(--space-2);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+}

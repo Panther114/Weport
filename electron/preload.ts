@@ -82,6 +82,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getStatus: () => ipcRenderer.invoke('http:getStatus')
   },
 
+  // MCP 服务（v0.9.5）。客户端配置整段由主进程拼好，token 不必进入渲染进程。
+  mcp: {
+    getStatus: () => ipcRenderer.invoke('mcp:getStatus'),
+    getClientConfig: () => ipcRenderer.invoke('mcp:getClientConfig')
+  },
+
   // Windows Hello（v0.9.4 认证能力）
   auth: {
     verifyHello: (message?: string) => ipcRenderer.invoke('auth:verifyHello', message)

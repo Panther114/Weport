@@ -50,6 +50,8 @@ import {
   CalendarClock,
   Pin,
   Fingerprint,
+  Copy,
+  Server,
   Settings2 as SettingsIcon,
 } from 'lucide-react'
 
@@ -236,7 +238,7 @@ const TABS: Array<{
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
   { id: 'weclone', label: '人格克隆', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
-  { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '备份、本地接口与外观' },
+  { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '启动、外观、数据与接口' },
 ]
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
@@ -307,6 +309,11 @@ export default function App() {
   const [httpApiEnabled, setHttpApiEnabled] = useState(false)
   const [httpApiRunning, setHttpApiRunning] = useState(false)
   const [httpApiPort, setHttpApiPort] = useState(5031)
+  // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
+  // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'data' | 'connect' | 'about'>('general')
+  const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
+  const [mcpCopied, setMcpCopied] = useState(false)
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
@@ -751,6 +758,11 @@ export default function App() {
             setHttpApiRunning(status?.running === true)
             if (status?.running) setHttpApiPort(status.port)
           }
+        } catch { /* noop */ }
+        // MCP 服务的状态一直只存在于主进程：v1.0 之前用户既看不到它是否在跑，
+        // 也拿不到那份客户端配置，只能照文档手抄。这里把它读进设置页。
+        try {
+          setMcpStatus(await api.mcp.getStatus())
         } catch { /* noop */ }
         const silent = await api.config.get('silentStartup')
         setSilentStartup(silent === true)
@@ -1231,6 +1243,25 @@ export default function App() {
       }
     } catch {
       setHttpApiRunning(false)
+    }
+  }
+
+  /**
+   * 把 MCP 客户端配置整段复制到剪贴板。
+   *
+   * 配置里含有访问令牌，所以整段 JSON 由主进程拼好返回 —— 令牌不出主进程，
+   * 渲染进程只负责写剪贴板。
+   */
+  async function copyMcpClientConfig() {
+    try {
+      const result = await api.mcp.getClientConfig()
+      await navigator.clipboard.writeText(result.json)
+      setMcpStatus({ running: result.running, port: result.port, host: result.host, tokenConfigured: result.tokenConfigured })
+      setMcpCopied(true)
+      window.setTimeout(() => setMcpCopied(false), 2000)
+      pushToast('ok', '已复制 MCP 客户端配置', '粘进 claude_desktop_config.json 后重启宿主', 6000)
+    } catch (e) {
+      pushToast('err', '复制失败', String((e as Error)?.message || e), 8000)
     }
   }
 
@@ -2581,14 +2612,49 @@ export default function App() {
         )}
 
         {tab === 'settings' && (
-          <div className="single-col">
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <SettingsIcon size={15} />
-                  启动与后台行为
-                </h2>
-              </div>
+          /* v1.0 重排：六块等权重的面板竖着排成一条长滚动，找一项要滚过另外五项。
+             改成「左侧分类 + 右侧内容」，五个分类一次点击直达，右侧每页只放
+             一个主题的内容。 */
+          <div className="settings-page">
+            <nav className="settings-nav" aria-label="设置分类">
+              {(
+                [
+                  { id: 'general', label: '常规', hint: '启动与后台', icon: Rocket },
+                  { id: 'appearance', label: '外观', hint: '背景 · 强调色 · 主题', icon: Images },
+                  { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
+                  { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
+                  { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
+                ] as const
+              ).map((item) => {
+                const Icon = item.icon
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="settings-nav-item"
+                    data-active={settingsSection === item.id}
+                    aria-current={settingsSection === item.id ? 'page' : undefined}
+                    onClick={() => setSettingsSection(item.id)}
+                  >
+                    <Icon size={15} />
+                    <span>
+                      <strong>{item.label}</strong>
+                      <em>{item.hint}</em>
+                    </span>
+                  </button>
+                )
+              })}
+            </nav>
+
+            <div className="settings-pane">
+              {settingsSection === 'general' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <SettingsIcon size={15} />
+                      启动与后台行为
+                    </h2>
+                  </div>
 
               <div className="setting-row">
                 <div className="setting-label">
@@ -2641,15 +2707,18 @@ export default function App() {
                   <span className="track" />
                 </label>
               </div>
-            </section>
+                </section>
+              )}
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Images size={15} />
-                  外观
-                </h2>
-              </div>
+              {settingsSection === 'appearance' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Images size={15} />
+                      外观
+                    </h2>
+                    <span>背景 / 强调色 / 密度 / 主题</span>
+                  </div>
 
               <div className="setting-row">
                 <div className="setting-label">
@@ -2745,15 +2814,74 @@ export default function App() {
                   ))}
                 </div>
               </div>
-            </section>
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Archive size={15} />
-                  数据备份
-                </h2>
+              {/* 主题选择原先是一块独立的「色彩主题」面板，和「外观」并列 —— 但
+                  它俩回答的是同一个问题（这软件长什么样），分成两块只是让人多滚
+                  一屏。合到外观里，作为最后一行。主题卡片占满整行宽度：塞进设置
+                  行的控件列里只有 178px 宽，两张卡片会挤成竖条。 */}
+              <div className="setting-block">
+                <div className="setting-label">
+                  <Palette size={14} />
+                  <div>
+                    <strong>色彩主题</strong>
+                    <span className="hint">应用于文字 / 图标 / 图表 / 数字</span>
+                  </div>
+                </div>
+                <div className="theme-picker">
+                  {(
+                    [
+                      {
+                        id: 'colorful',
+                        label: '浅蓝',
+                        desc: '统一浅蓝 accent 色调，现代克制',
+                        icon: Palette,
+                        swatches: ['#6ea8ff', '#7fb4ff', '#93c2ff', '#5b93ff', '#84b7ff', '#a6cfff'],
+                      },
+                      {
+                        id: 'mono',
+                        label: '黑白',
+                        desc: '经典单色灰阶，保持纯黑白风格',
+                        icon: Contrast,
+                        swatches: ['#f4f4f5', '#d4d4da', '#b8b8c0', '#9a9aa4', '#7e7e88', '#63636d'],
+                      },
+                    ] as Array<{ id: 'colorful' | 'mono'; label: string; desc: string; icon: React.ComponentType<{ size?: number | string }>; swatches: string[] }>
+                  ).map((t) => {
+                    const Icon = t.icon
+                    const active = colorMode === t.id
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className={`theme-card ${active ? 'theme-card-active' : ''}`}
+                        onClick={() => setColorMode(t.id)}
+                      >
+                        <div className="theme-card-head">
+                          <Icon size={17} />
+                          <strong>{t.label}</strong>
+                          {active && <span className="theme-card-check">当前</span>}
+                        </div>
+                        <div className="theme-swatches">
+                          {t.swatches.map((c) => (
+                            <span key={c} style={{ background: c }} />
+                          ))}
+                        </div>
+                        <span className="theme-card-desc">{t.desc}</span>
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
+                </section>
+              )}
+
+              {settingsSection === 'data' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Archive size={15} />
+                      数据备份
+                    </h2>
+                  </div>
               <div className="setting-row backup-row">
                 <div className="setting-label">
                   <HardDrive size={14} />
@@ -2800,119 +2928,111 @@ export default function App() {
                   </button>
                 </div>
               </div>
-            </section>
+                </section>
+              )}
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Database size={15} />
-                  本地 HTTP API
-                </h2>
-                {/* 灰字副标已移除：同一段说明在下面正文里已经写过一次。 */}
-              </div>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Code2 size={14} />
-                  <div>
-                    <strong>启用本地 HTTP API</strong>
-                    <span className="hint">
-                      提供 /api/sessions、/api/messages、/api/sns/timeline 等只读接口
-                      {httpApiRunning ? ` · 运行中 http://127.0.0.1:${httpApiPort}` : ' · 默认端口 5031'}
-                    </span>
+              {settingsSection === 'connect' && (
+                <>
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Database size={15} />
+                      本地 HTTP API
+                    </h2>
+                    <span>只读接口，供脚本与本地工具使用</span>
                   </div>
-                </div>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={httpApiEnabled}
-                    onChange={(e) => void toggleHttpApi(e.target.checked)}
-                  />
-                  <span className="track" />
-                </label>
-              </div>
-            </section>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <Code2 size={14} />
+                      <div>
+                        <strong>启用本地 HTTP API</strong>
+                        <span className="hint">
+                          提供 /api/sessions、/api/messages、/api/sns/timeline 等只读接口
+                          {httpApiRunning ? ` · 运行中 http://127.0.0.1:${httpApiPort}` : ' · 默认端口 5031'}
+                        </span>
+                      </div>
+                    </div>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={httpApiEnabled}
+                        onChange={(e) => void toggleHttpApi(e.target.checked)}
+                      />
+                      <span className="track" />
+                    </label>
+                  </div>
+                </section>
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Palette size={15} />
-                  色彩主题
-                </h2>
-                <span>应用于文字 / 图标 / 图表 / 数字</span>
-              </div>
-              <div className="theme-picker">
-                {(
-                  [
-                    {
-                      id: 'colorful',
-                      label: '浅蓝',
-                      desc: '统一浅蓝 accent 色调，现代克制',
-                      icon: Palette,
-                      swatches: ['#6ea8ff', '#7fb4ff', '#93c2ff', '#5b93ff', '#84b7ff', '#a6cfff'],
-                    },
-                    {
-                      id: 'mono',
-                      label: '黑白',
-                      desc: '经典单色灰阶，保持纯黑白风格',
-                      icon: Contrast,
-                      swatches: ['#f4f4f5', '#d4d4da', '#b8b8c0', '#9a9aa4', '#7e7e88', '#63636d'],
-                    },
-                  ] as Array<{ id: 'colorful' | 'mono'; label: string; desc: string; icon: React.ComponentType<{ size?: number | string }>; swatches: string[] }>
-                ).map((t) => {
-                  const Icon = t.icon
-                  const active = colorMode === t.id
-                  return (
+                {/* MCP 服务在 v0.9.5 就做完了，但一直没有界面：用户看不到它在不在跑，
+                    也拿不到那份客户端配置，只能照着文档手抄 bridge 路径和 token。 */}
+                <section className="panel mcp-panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Server size={15} />
+                      MCP 服务
+                    </h2>
+                    <span>给 Claude Desktop 等支持 MCP 的宿主调用同一批只读接口</span>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <Server size={14} />
+                      <div>
+                        <strong>{mcpStatus?.running ? '运行中' : '未运行'}</strong>
+                        <span className="hint">
+                          {mcpStatus
+                            ? `http://${mcpStatus.host}:${mcpStatus.port} · ${mcpStatus.tokenConfigured ? '已配置访问令牌' : '未配置访问令牌'}`
+                            : '正在读取服务状态…'}
+                        </span>
+                      </div>
+                    </div>
                     <button
-                      key={t.id}
+                      className="secondary-btn"
                       type="button"
-                      className={`theme-card ${active ? 'theme-card-active' : ''}`}
-                      onClick={() => setColorMode(t.id)}
+                      onClick={() => void copyMcpClientConfig()}
                     >
-                      <div className="theme-card-head">
-                        <Icon size={17} />
-                        <strong>{t.label}</strong>
-                        {active && <span className="theme-card-check">当前</span>}
-                      </div>
-                      <div className="theme-swatches">
-                        {t.swatches.map((c) => (
-                          <span key={c} style={{ background: c }} />
-                        ))}
-                      </div>
-                      <span className="theme-card-desc">{t.desc}</span>
+                      <Copy size={13} />
+                      {mcpCopied ? '已复制' : '复制客户端配置'}
                     </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Info size={15} />
-                  关于
-                </h2>
-              </div>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Info size={14} />
-                  <div>
-                    <strong>Weport v{version}</strong>
-                    <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
                   </div>
-                </div>
-                <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                  {updateBusy ? '检查中…' : '检查更新'}
-                </button>
-                <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
-                  更新日志
-                </button>
-                {updateInfo && (
-                  <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                    {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
-                  </button>
-                )}
-              </div>
-            </section>
+                  <p className="setting-note">
+                    复制得到的是 Claude Desktop 的 <code>mcpServers</code> 片段，粘进
+                    <code>claude_desktop_config.json</code> 后重启宿主即可。
+                  </p>
+                </section>
+                </>
+              )}
+
+              {settingsSection === 'about' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Info size={15} />
+                      关于
+                    </h2>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <Info size={14} />
+                      <div>
+                        <strong>Weport v{version}</strong>
+                        <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
+                      </div>
+                    </div>
+                    <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
+                      {updateBusy ? '检查中…' : '检查更新'}
+                    </button>
+                    <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
+                      更新日志
+                    </button>
+                    {updateInfo && (
+                      <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
+                        {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                      </button>
+                    )}
+                  </div>
+                </section>
+              )}
+            </div>
           </div>
         )}
       </div>
