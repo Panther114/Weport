@@ -52,6 +52,7 @@ import { getProviderCatalog } from './services/ai/providerCatalog'
 import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
 import { setWeBotService } from './services/weBotRegistry'
+import { collectMacDiagnostics } from './services/macDiagnosticsService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -2048,6 +2049,10 @@ function registerIpcHandlers() {
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
   ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
+  // macOS 能力诊断（v1.0）：把「为什么拿不到密钥」的三条独立原因逐条测出来。
+  // 非 darwin 平台返回 supported:false，界面据此隐藏入口。
+  ipcMain.handle('diagnostics:collectMac', () =>
+    collectMacDiagnostics({ appVersion: APP_VERSION, resourcesPath: process.resourcesPath }))
   ipcMain.handle('auth:verifyHello', (_e, message: string) => {
     // Windows Hello（mac 为 Touch ID 路径）：Linux 无对应生物认证后端，直接给出明确错误
     if (process.platform !== 'win32' && process.platform !== 'darwin') {

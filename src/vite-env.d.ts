@@ -365,6 +365,21 @@ interface ElectronApi {
     onNote: (callback: (note: WeBotNote) => void) => () => void
     onRunStarted: (callback: (run: WeBotRun) => void) => () => void
   }
+  /**
+   * macOS 能力诊断（v1.0）。非 darwin 平台返回 supported:false，
+   * 界面据此隐藏入口。字段与 electron/services/macDiagnosticsService.ts 对应。
+   */
+  diagnostics: {
+    collectMac: () => Promise<{
+      supported: boolean
+      collectedAt: number
+      platform: string
+      appVersion: string
+      arch: string
+      checks: Array<{ id: string; label: string; state: 'ok' | 'warn' | 'fail' | 'unknown'; detail: string; raw?: string }>
+      summary: string
+    }>
+  }
   process: {
     platform: string
     arch: string

@@ -312,6 +312,15 @@ export default function App() {
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
   const colorMode = useColorMode()
   const appearance = useAppearance()
+  /**
+   * macOS 能力诊断结果（仅 darwin 显示）。把「拿不到密钥」的三条独立原因
+   * 逐条测出来 —— 否则用户手上只有一句「失败」，既不能自查也不能反馈。
+   */
+  const [macDiag, setMacDiag] = useState<{
+    checks: Array<{ id: string; label: string; state: 'ok' | 'warn' | 'fail' | 'unknown'; detail: string }>
+    summary: string
+  } | null>(null)
+  const [macDiagBusy, setMacDiagBusy] = useState(false)
 
   useEffect(() => {
     void initColorMode()
@@ -1501,6 +1510,33 @@ export default function App() {
     }
   }
 
+  /** macOS 兼容性检查：把结果直接展示出来，并支持一键复制给维护者。 */
+  async function runMacDiagnostics(): Promise<void> {
+    setMacDiagBusy(true)
+    try {
+      const report = await api.diagnostics.collectMac()
+      if (!report.supported) {
+        pushToast('err', '当前平台不是 macOS', '这个检查只在 macOS 上有意义。', 7000)
+        return
+      }
+      setMacDiag({ checks: report.checks, summary: report.summary })
+    } catch (error) {
+      pushToast('err', '检查失败', String((error as Error)?.message || error), 9000)
+    } finally {
+      setMacDiagBusy(false)
+    }
+  }
+
+  async function copyMacDiagnostics(): Promise<void> {
+    if (!macDiag) return
+    try {
+      await navigator.clipboard.writeText(macDiag.summary)
+      pushToast('ok', '诊断信息已复制', '可以直接粘贴给维护者；内容不含聊天记录与密钥。', 6000)
+    } catch (error) {
+      pushToast('err', '复制失败', String((error as Error)?.message || error), 9000)
+    }
+  }
+
   return (
     <div className="shell">
       <aside className="rail" aria-label="主导航">
@@ -1825,6 +1861,46 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            {/* macOS 兼容性检查：只在 macOS 上出现。放在连接页是因为「拿不到
+                密钥」正是用户停在这一页的原因。 */}
+            {api.process.platform === 'darwin' && (
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>
+                    <ShieldCheck size={15} />
+                    macOS 兼容性检查
+                  </h2>
+                </div>
+                <p className="hint" style={{ marginBottom: 10 }}>
+                  逐项检查微信进程、签名权限、完全磁盘访问权限与随包助手状态，说明为什么自动获取密钥可能失败。
+                </p>
+                <div className="diag-actions">
+                  <button className="primary-btn" type="button" disabled={macDiagBusy} onClick={() => void runMacDiagnostics()}>
+                    {macDiagBusy ? '检查中…' : '开始检查'}
+                  </button>
+                  {macDiag ? (
+                    <button className="secondary-btn" type="button" onClick={() => void copyMacDiagnostics()}>
+                      复制诊断信息
+                    </button>
+                  ) : null}
+                </div>
+
+                {macDiag ? (
+                  <ul className="diag-list">
+                    {macDiag.checks.map((check) => (
+                      <li key={check.id} className="diag-item" data-state={check.state}>
+                        <span className="diag-dot" aria-hidden />
+                        <div>
+                          <strong>{check.label}</strong>
+                          <span className="hint">{check.detail}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+            )}
           </div>
         )}
 

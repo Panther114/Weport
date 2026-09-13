@@ -752,6 +752,74 @@
   padding-bottom: 104px;
 }
 
+// -----------------------------------------------------------------------------
+// 13. macOS 兼容性检查
+// -----------------------------------------------------------------------------
+//
+// 检查结果用「圆点 + 文字」表达，而不是只靠颜色：状态词本身写在小标题里，
+// 色觉障碍用户与黑白截图都不会丢信息。
+
+.diag-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.diag-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+
+  strong {
+    display: block;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .hint {
+    display: block;
+    margin-top: 2px;
+    line-height: 1.7;
+  }
+}
+
+.diag-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.diag-item[data-state='ok'] .diag-dot {
+  background: var(--ok);
+}
+
+.diag-item[data-state='warn'] .diag-dot {
+  background: var(--warn);
+}
+
+.diag-item[data-state='fail'] .diag-dot {
+  background: var(--danger);
+}
+
+.diag-item[data-state='fail'] {
+  border-color: rgba(229, 72, 77, 0.35);
+}
+
 // 引用 chip：显示名是人类可读的，id 只作为数据随请求发出。
 .ref-chips {
   display: flex;

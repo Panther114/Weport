@@ -278,6 +278,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onRunStarted: (callback: (run: any) => void) => subscribe('webot:runStarted', callback)
   },
 
+  // macOS 能力诊断（v1.0）：仅在 darwin 上返回真实结果
+  diagnostics: {
+    collectMac: () => ipcRenderer.invoke('diagnostics:collectMac')
+  },
+
   process: {
     platform: process.platform,
     arch: process.arch
