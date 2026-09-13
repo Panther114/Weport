@@ -56,7 +56,21 @@ import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPicker
 import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
+import {
+  ACCENT_OPTIONS,
+  DENSITY_OPTIONS,
+  initAppearance,
+  probeBackground,
+  setAccent,
+  setBackgroundDim,
+  setBackgroundPath,
+  setDensity,
+  useAppearance,
+} from './utils/appearance'
 import './styles/v09.scss'
+// v1.0 外壳（左侧导航 + 全局状态 + 设计令牌）。必须在 v09.scss 之后加载：
+// 同优先级下它负责覆盖 .shell / .topbar 的旧规则。
+import './styles/v1.scss'
 
 type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
@@ -183,15 +197,35 @@ const EXPORT_DEFAULTS = {
   concurrency: 3,
 }
 
-const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
-  { id: 'connect', label: '连接微信', icon: PlugZap },
-  { id: 'export', label: '导出数据', icon: Download },
-  { id: 'sns', label: '朋友圈', icon: Images },
-  { id: 'analytics', label: '分析', icon: LineChart },
-  { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
-  { id: 'notifications', label: '消息通知', icon: Bell },
-  { id: 'ai', label: 'WeportAI', icon: Sparkles },
-  { id: 'settings', label: '设置', icon: SettingsIcon },
+/**
+ * 左侧导航分组。
+ *
+ * 旧版是 8 个平级页签挤在顶栏里：没有层级、没有分组，再加 WeBot / 笔记 /
+ * 模型设置就必然溢出。按「我连上了什么 → 我用它做什么 → 我调整什么」分成三组，
+ * 顺序即使用顺序：先连接，再使用，最后才是系统设置。
+ */
+const NAV_GROUPS: Array<{ id: string; label: string }> = [
+  { id: 'wechat', label: '微信' },
+  { id: 'intelligence', label: '智能' },
+  { id: 'system', label: '系统' },
+]
+
+const TABS: Array<{
+  id: Tab
+  label: string
+  icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }>
+  group: string
+  /** 页面标题下方的一句话说明——替代原先每个卡片头里重复标题的灰字。 */
+  hint: string
+}> = [
+  { id: 'connect', label: '连接微信', icon: PlugZap, group: 'wechat', hint: '数据目录、账号与解密密钥' },
+  { id: 'export', label: '导出数据', icon: Download, group: 'wechat', hint: '选择会话与格式，导出到本地' },
+  { id: 'sns', label: '朋友圈', icon: Images, group: 'wechat', hint: '浏览与导出朋友圈动态' },
+  { id: 'analytics', label: '分析', icon: LineChart, group: 'wechat', hint: '全局与群聊统计图表' },
+  { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
+  { id: 'notifications', label: '消息通知', icon: Bell, group: 'wechat', hint: '新消息与撤回弹窗提醒' },
+  { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
+  { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '备份、本地接口与外观' },
 ]
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
@@ -200,6 +234,21 @@ function MarkIcon() {
   // 顶栏品牌图标：真实应用图标（唯一来源 assets/branding/weport-icon.jpg
   // → assets/icons/icon.png → public/icon.png）
   return <img className="mark-img" src="icon.png" alt="Weport" draggable={false} />
+}
+
+/**
+ * 导航底部的全局状态点。
+ *
+ * 颜色只表示状态，不表示品牌：ok=绿 / 未就绪=琥珀。文字始终存在，所以颜色
+ * 不是唯一的信息通道（色盲用户与截图都能读懂）。
+ */
+function StatusChip({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className="status-chip" data-state={ok ? 'ok' : 'warn'}>
+      <span className="status-chip-dot" aria-hidden />
+      {label}
+    </span>
+  )
 }
 
 export default function App() {
@@ -257,9 +306,16 @@ export default function App() {
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
   const colorMode = useColorMode()
+  const appearance = useAppearance()
 
   useEffect(() => {
     void initColorMode()
+  }, [])
+
+  useEffect(() => {
+    // 背景图是用户上传的任意图片，配置里只存绝对路径 —— 用户可能已经把原图
+    // 移走或删掉。加载失败时自动清空并回退到纯色，避免留下一块破图。
+    void initAppearance().then(() => probeBackground(() => pushToast('err', '背景图片已失效', '找不到原来选择的图片，已恢复纯色背景。', 9000)))
   }, [])
 
   // 导出选项（WeFlow 对齐）
@@ -781,6 +837,7 @@ export default function App() {
   const dbReady = dbPath.trim().length > 0
   const accountReady = selectedWxid.length > 0
   const allReady = dbReady && accountReady && keyOk
+  const activeTab = TABS.find((t) => t.id === tab) ?? TABS[0]
 
   useEffect(() => {
     if (tab !== 'export' || !keyOk || exportSessionsLoaded || exportSessionsLoading) return
@@ -1419,11 +1476,31 @@ export default function App() {
     pushToast('ok', '会话过滤已保存', summary)
   }
 
+  /**
+   * 选择背景图片。
+   *
+   * 只保存绝对路径、不复制文件：渲染层用既有的 `weport-media://` 协议按绝对
+   * 路径读取本地图片（见 utils/appearance.ts 的说明）。这样不新增 IPC、不把
+   * 图片塞进配置文件。
+   */
+  async function pickBackgroundImage(): Promise<void> {
+    try {
+      const selected = await api.dialog.openFile({
+        title: '选择背景图片',
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+      })
+      if (!selected) return
+      setBackgroundPath(selected)
+    } catch (error) {
+      pushToast('err', '选择背景图片失败', String((error as Error)?.message || error), 9000)
+    }
+  }
+
   return (
     <div className="shell">
-      <header className="topbar">
+      <aside className="rail" aria-label="主导航">
         <div
-          className="brand"
+          className="rail-brand"
           role="button"
           tabIndex={0}
           title="关于与更新"
@@ -1438,45 +1515,71 @@ export default function App() {
           <div className="mark" aria-hidden>
             <MarkIcon />
           </div>
-          <div className="brand-text">
+          <div className="rail-brand-text">
             <h1>Weport</h1>
-            <p title={busy && tab === 'export' ? `v${version}` : `微信工具箱 · v${version}${busyLabel ? ` · ${busyLabel}` : ''}`}>
-              微信工具箱 · v{version}
-              {busy && tab === 'export' ? '' : busyLabel ? ` · ${busyLabel}` : ''}
-            </p>
+            <p>v{version}</p>
           </div>
         </div>
-        <nav className="tabs" role="tablist" aria-label="功能">
-          {TABS.map((t) => {
-            const Icon = t.icon
-            // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
-            const locked = t.id !== 'connect' && !allReady
-            const button = (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === t.id}
-                className="tab"
-                data-active={tab === t.id}
-                disabled={locked}
-                onClick={() => switchTab(t.id)}
-              >
-                <Icon size={15} strokeWidth={1.8} />
-                <span>{t.label}</span>
-              </button>
-            )
-            // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
-            return locked ? (
-              <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
-                {button}
-              </span>
-            ) : (
-              button
-            )
-          })}
+
+        <nav className="rail-nav" role="tablist" aria-label="功能">
+          {NAV_GROUPS.map((group) => (
+            <div className="rail-group" key={group.id}>
+              <div className="rail-group-label">{group.label}</div>
+              {TABS.filter((t) => t.group === group.id).map((t) => {
+                const Icon = t.icon
+                // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
+                const locked = t.id !== 'connect' && !allReady
+                const button = (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === t.id}
+                    className="rail-item"
+                    data-active={tab === t.id}
+                    disabled={locked}
+                    onClick={() => switchTab(t.id)}
+                  >
+                    {/* 描边跟着文字重量走：选中态文字更重，图标也加粗一档 */}
+                    <Icon size={16} strokeWidth={tab === t.id ? 2 : 1.6} />
+                    <span>{t.label}</span>
+                  </button>
+                )
+                // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
+                return locked ? (
+                  <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+                    {button}
+                  </span>
+                ) : (
+                  button
+                )
+              })}
+            </div>
+          ))}
         </nav>
-        <div className="top-actions" />
+
+        {/* 全局状态：旧版把「已连接 / 已就绪 / 1 个」分别写在连接页、通知页和
+            导出页里，用户永远不确定哪一个才是当前真实状态。这里合并成唯一
+            一处真源，各页面里的重复状态随之删掉。 */}
+        <div className="rail-foot" aria-label="连接状态">
+          <StatusChip ok={dbReady} label={dbReady ? '数据目录' : '未连接目录'} />
+          <StatusChip ok={accountReady} label={accountReady ? '账号已选' : '未选账号'} />
+          <StatusChip ok={keyOk} label={keyOk ? '密钥就绪' : '缺少密钥'} />
+        </div>
+      </aside>
+
+      <header className="topbar">
+        <div className="topbar-title">
+          <h2>{activeTab.label}</h2>
+          <p>{activeTab.hint}</p>
+        </div>
+        <div className="top-actions">
+          {busy && busyLabel ? (
+            <span className="status-busy" role="status">
+              {busyLabel}
+            </span>
+          ) : null}
+        </div>
       </header>
 
       {updateInfo && (
@@ -1723,10 +1826,8 @@ export default function App() {
         {tab === 'export' && (
           <section className="panel panel-fill">
             <div className="panel-head">
-              <h2>
-                <Download size={15} />
-                导出数据
-              </h2>
+              {/* 标题已经在顶栏；这里只保留操作与该操作的范围说明，不再重复
+                  一遍「导出数据」。 */}
               <div className="panel-head-actions">
                 <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
                 <button
@@ -2398,9 +2499,8 @@ export default function App() {
               <div className="panel-head">
                 <h2>
                   <SettingsIcon size={15} />
-                  设置
+                  启动与后台行为
                 </h2>
-                <span>启动与后台行为 · 外观主题</span>
               </div>
 
               <div className="setting-row">
@@ -2459,10 +2559,107 @@ export default function App() {
             <section className="panel">
               <div className="panel-head">
                 <h2>
+                  <Images size={15} />
+                  外观
+                </h2>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Images size={14} />
+                  <div>
+                    <strong>背景图片</strong>
+                    <span className="hint">
+                      {appearance.backgroundPath
+                        ? '已启用自定义背景；面板会自动转为半透明以保证文字可读'
+                        : '上传一张图片作为窗口背景（默认纯色）'}
+                    </span>
+                  </div>
+                </div>
+                <div className="appearance-actions">
+                  <button className="secondary-btn" type="button" onClick={() => void pickBackgroundImage()}>
+                    {appearance.backgroundPath ? '更换…' : '选择图片…'}
+                  </button>
+                  {appearance.backgroundPath ? (
+                    <button className="secondary-btn" type="button" onClick={() => setBackgroundPath('')}>
+                      移除
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              {appearance.backgroundPath ? (
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <strong>背景遮罩</strong>
+                    <span className="hint">数值越高文字越清晰、背景越淡（推荐 60-80）</span>
+                  </div>
+                  <div className="appearance-slider">
+                    <input
+                      type="range"
+                      min={0}
+                      max={95}
+                      value={appearance.backgroundDim}
+                      onChange={(e) => setBackgroundDim(Number(e.target.value))}
+                      aria-label="背景遮罩强度"
+                    />
+                    <span className="appearance-slider-value">{appearance.backgroundDim}%</span>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <strong>强调色</strong>
+                  <span className="hint">用于选中项与主操作；黑白主题下不生效</span>
+                </div>
+                <div className="appearance-swatches" role="radiogroup" aria-label="强调色">
+                  {ACCENT_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={appearance.accent === option.id}
+                      aria-label={option.label}
+                      title={option.label}
+                      className="appearance-swatch"
+                      data-active={appearance.accent === option.id}
+                      style={{ background: option.swatch }}
+                      onClick={() => setAccent(option.id)}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <strong>界面密度</strong>
+                  <span className="hint">紧凑模式收紧间距，字号保持不变</span>
+                </div>
+                <div className="segmented" role="radiogroup" aria-label="界面密度">
+                  {DENSITY_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={appearance.density === option.id}
+                      className="segmented-item"
+                      data-active={appearance.density === option.id}
+                      onClick={() => setDensity(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
                   <Archive size={15} />
                   数据备份
                 </h2>
-                <span>本地聊天数据库快照 · 可恢复</span>
               </div>
               <div className="setting-row backup-row">
                 <div className="setting-label">

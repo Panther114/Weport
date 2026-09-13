@@ -1,0 +1,567 @@
+// =============================================================================
+// v1.0 shell — 左侧导航栏 + 全局状态 + 设计令牌
+// =============================================================================
+//
+// 为什么单独一个文件而不是改 styles.css：
+//   styles.css(81KB) + v09.scss(78KB) 已经没有任何分层，任何改动都要在一堆
+//   互相覆盖的规则里猜优先级。新表面从这里开始，按「令牌 → 外壳 → 组件」
+//   自下而上写，不再往旧文件里叠。旧规则仍然生效（本文件在其后加载，
+//   同优先级下后者胜出），因此不需要一次性重写。
+//
+// 本文件只负责外壳与令牌，不碰任何页面内部布局。
+
+// -----------------------------------------------------------------------------
+// 1. 设计令牌
+// -----------------------------------------------------------------------------
+
+:root {
+  // 间距刻度：4 的倍数。旧样式里到处是 6/7/9/11/13/14 这种一次性数值，
+  // 这是"看着还行但就是不舒服"的主要来源之一。
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  // 圆角：同心圆角（outer = inner + padding）需要两档以上，旧样式只有一档 10px。
+  --radius-lg: 14px;
+  --radius: 10px;
+  --radius-sm: 7px;
+
+  // 高度刻度：交互控件只有三种高度，别再无级变化。
+  --control-h: 34px;
+  --control-h-lg: 40px;
+
+  // 排版刻度
+  --fs-page-title: 15px;
+  --fs-page-hint: 12px;
+  --fs-nav: 13px;
+  --fs-nav-label: 10.5px;
+
+  --rail-w: 212px;
+
+  // 分层阴影（用透明阴影表达高度，而不是用边框假装）
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --elev-2: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+// -----------------------------------------------------------------------------
+// 2. 外壳：顶栏 → 左侧栏
+// -----------------------------------------------------------------------------
+//
+// 用 grid 而不是再包一层 flex 容器：页面 JSX 是三兄弟（topbar / 更新横幅 /
+// workspace），用显式 grid-area 归位就不必改动它们的嵌套关系，弹窗本身是
+// position:fixed 也不受影响。
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100vh;
+}
+
+.rail {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-3);
+  background: var(--bg-raised);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  user-select: none;
+}
+
+.topbar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.update-banner {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.workspace {
+  grid-column: 2;
+  grid-row: 3;
+  min-height: 0;
+}
+
+// -----------------------------------------------------------------------------
+// 3. 品牌区
+// -----------------------------------------------------------------------------
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--elevated);
+  }
+}
+
+.rail-brand-text {
+  min-width: 0;
+
+  h1 {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    line-height: 1.2;
+  }
+
+  // 版本号从「微信工具箱 · v0.9.11 · 正在导出…」这种句子里拆出来：
+  // 运行状态属于顶栏，不属于品牌区。
+  p {
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 4. 导航
+// -----------------------------------------------------------------------------
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1;
+}
+
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail-group-label {
+  padding: 0 var(--space-2) var(--space-1);
+  font-size: var(--fs-nav-label);
+  font-weight: 600;
+  letter-spacing: 0.9px;
+  color: var(--text-faint);
+}
+
+.rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: var(--fs-nav);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+
+  svg {
+    flex-shrink: 0;
+  }
+
+  // 图标跟着文字颜色走（一个 currentColor 图标应付所有状态，不做多份资源）
+  &:hover:not(:disabled) {
+    background: var(--elevated);
+    color: var(--text);
+  }
+
+  // 选中态：不是"又一个白色药丸"。旧版里白色同时表示活动页签、选中账号行和
+  // 主按钮，于是没有任何东西是真正的主操作。这里选中态用 accent 的柔和底
+  // + 左侧 2px 强调条，白色留给主按钮。
+  &[data-active='true'] {
+    background: var(--accent-soft);
+    color: var(--text);
+    font-weight: 600;
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 50%;
+      translate: 0 -50%;
+      width: 2px;
+      height: 16px;
+      border-radius: 1px;
+      background: var(--accent);
+    }
+
+    svg {
+      color: var(--accent-2);
+    }
+  }
+
+  &:active:not(:disabled) {
+    scale: 0.98;
+  }
+
+  &:disabled {
+    color: var(--text-faint);
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 5. 全局状态
+// -----------------------------------------------------------------------------
+
+.rail-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  border-top: 1px solid var(--line);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+
+  &[data-state='warn'] {
+    color: var(--warn);
+  }
+}
+
+.status-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+
+  .status-chip[data-state='warn'] & {
+    background: var(--warn);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6. 顶栏（页面标题 + 运行状态）
+// -----------------------------------------------------------------------------
+//
+// 旧版每个页面里都要自己写一遍 H1，标题和页签文字完全重复；卡片头里还要再
+// 用灰字复述一次标题。标题现在只在顶栏出现一次，页面内部不再重复。
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  height: 56px;
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+.topbar-title {
+  min-width: 0;
+
+  h2 {
+    font-size: var(--fs-page-title);
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  p {
+    font-size: var(--fs-page-hint);
+    color: var(--text-faint);
+    line-height: 1.4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.status-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-dim);
+
+  &::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: weport-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes weport-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+// 窄窗口：把左侧栏压成纯图标，避免把内容挤没。
+//
+// 阈值取 900 而不是常见的 1180：Windows 的显示缩放会让 CSS 视口远小于截图
+// 像素（例如 150% 缩放下 1600px 的窗口只有约 1066 CSS px），阈值定高了会在
+// 正常窗口宽度下就把标签藏起来 —— 那等于把这个导航最大的改进（看得懂）
+// 白白扔掉。
+@media (max-width: 900px) {
+  :root {
+    --rail-w: 64px;
+  }
+
+  .rail-group-label,
+  .rail-item span,
+  .rail-brand-text,
+  .rail-foot {
+    display: none;
+  }
+
+  .rail-item {
+    justify-content: center;
+    padding: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-item,
+  .rail-brand,
+  .status-busy::before {
+    transition: none;
+    animation: none;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 7. 用户背景图
+// -----------------------------------------------------------------------------
+//
+// 背景图是**用户上传的任意图片**，所以必须有对比度保护：一层可调的遮罩压在
+// 图片上，面板底色随之变半透明并加背景模糊。任何图片下正文都要保持可读，
+// 这是这个功能能不能用的前提，不是可选项。
+
+.shell {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(6, 6, 8, var(--app-bg-dim, 0)), rgba(6, 6, 8, var(--app-bg-dim, 0))),
+    var(--app-bg-url, none),
+    radial-gradient(900px 520px at 18% -10%, rgba(91, 142, 255, 0.07), transparent 58%),
+    radial-gradient(700px 460px at 86% 0%, rgba(91, 142, 255, 0.045), transparent 62%);
+  background-size: cover, cover, auto, auto;
+  background-position: center, center, center, center;
+  background-repeat: no-repeat;
+}
+
+// 有背景图时把面板变成半透明玻璃，否则不透明的面板会把背景完全盖住，
+// 用户上传的图等于白传。
+:root[data-has-bg='true'] {
+  --bg-raised: rgba(17, 17, 22, 0.74);
+  --panel: rgba(23, 23, 29, 0.66);
+  --elevated: rgba(30, 30, 38, 0.7);
+
+  .rail,
+  .topbar {
+    backdrop-filter: blur(14px);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 8. 强调色
+// -----------------------------------------------------------------------------
+//
+// `data-accent` 只提供色相，不改明度关系：每一档都保持同一套
+// (accent / accent-2 / accent-soft / accent-glow) 结构，页面里已有的
+// 用法不需要为某个色相单独适配。
+//
+// 黑白主题（`data-theme="mono"`）优先：用户显式选了黑白，色相就不该再插手。
+
+:root[data-accent='violet']:not([data-theme='mono']) {
+  --accent: #9b7bff;
+  --accent-2: #b39dff;
+  --accent-3: #c7b7ff;
+  --accent-4: #6f4bff;
+  --accent-5: #a98bff;
+  --accent-6: #cdbcff;
+  --accent-strong: #9b7bff;
+  --accent-deep: #6f4bff;
+  --accent-soft: rgba(155, 123, 255, 0.16);
+  --accent-softer: rgba(155, 123, 255, 0.09);
+  --accent-glow: rgba(155, 123, 255, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(155, 123, 255, 0.24), rgba(155, 123, 255, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(155, 123, 255, 0.36), rgba(111, 75, 255, 0.12));
+}
+
+:root[data-accent='teal']:not([data-theme='mono']) {
+  --accent: #3fbfae;
+  --accent-2: #5fd3c3;
+  --accent-3: #85e0d3;
+  --accent-4: #1c8f81;
+  --accent-5: #59cbba;
+  --accent-6: #9ae7dc;
+  --accent-strong: #3fbfae;
+  --accent-deep: #1c8f81;
+  --accent-soft: rgba(63, 191, 174, 0.16);
+  --accent-softer: rgba(63, 191, 174, 0.09);
+  --accent-glow: rgba(63, 191, 174, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(63, 191, 174, 0.24), rgba(63, 191, 174, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(63, 191, 174, 0.36), rgba(28, 143, 129, 0.12));
+}
+
+:root[data-accent='rose']:not([data-theme='mono']) {
+  --accent: #f2678f;
+  --accent-2: #f78aa8;
+  --accent-3: #fbacc2;
+  --accent-4: #c93a63;
+  --accent-5: #f4839f;
+  --accent-6: #fdb6c8;
+  --accent-strong: #f2678f;
+  --accent-deep: #c93a63;
+  --accent-soft: rgba(242, 103, 143, 0.16);
+  --accent-softer: rgba(242, 103, 143, 0.09);
+  --accent-glow: rgba(242, 103, 143, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(242, 103, 143, 0.24), rgba(242, 103, 143, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(242, 103, 143, 0.36), rgba(201, 58, 99, 0.12));
+}
+
+// -----------------------------------------------------------------------------
+// 9. 密度
+// -----------------------------------------------------------------------------
+//
+// 只收紧外壳与常用控件的度量，**不动字号**：缩小字号会连带影响中文可读性，
+// 那是"紧"而不是"密"，用户要的是后者。
+
+:root[data-density='compact'] {
+  --control-h: 30px;
+  --control-h-lg: 36px;
+  --space-5: 18px;
+  --space-6: 22px;
+
+  .rail {
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .rail-nav {
+    gap: var(--space-3);
+  }
+
+  .topbar {
+    height: 48px;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 10. 外观设置控件
+// -----------------------------------------------------------------------------
+
+.appearance-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.appearance-slider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+
+  input[type='range'] {
+    width: 180px;
+    accent-color: var(--accent);
+  }
+}
+
+.appearance-slider-value {
+  min-width: 38px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.appearance-swatches {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.appearance-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  transition: scale 0.14s ease, box-shadow 0.14s ease;
+
+  // 选中用外圈而不是内勾：色块本身已经是"颜色证据"，再加一个图标会糊掉。
+  &[data-active='true'] {
+    box-shadow: 0 0 0 2px var(--bg-raised), 0 0 0 4px currentColor;
+  }
+
+  &:hover {
+    scale: 1.06;
+  }
+
+  &:active {
+    scale: 0.96;
+  }
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.segmented-item {
+  height: calc(var(--control-h) - 8px);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+
+  &:hover:not([data-active='true']) {
+    color: var(--text);
+  }
+
+  &[data-active='true'] {
+    background: var(--accent-soft);
+    color: var(--text);
+    font-weight: 600;
+  }
+}

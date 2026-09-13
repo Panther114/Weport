@@ -3568,7 +3568,7 @@ async function runV09DumpMode() {
   const clickTab = async (label: string) => {
     const r = await wc.executeJavaScript(`
       (() => {
-        const buttons = Array.from(document.querySelectorAll('.tab'));
+        const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
         const b = buttons.find((x) => x.textContent.includes(${JSON.stringify(label)}));
         if (!b) return { ok: false, tabs: buttons.map((x) => x.textContent.trim()) };
         b.click();
@@ -3901,7 +3901,7 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   const layoutProbe = async (width: number, height: number) => {
     mainWindow?.setSize(width, height)
     await sleep(700)
-    const snsClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab')).find((x) => x.textContent.includes('朋友圈')); b?.click(); return !!b; })()`)
+    const snsClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((x) => x.textContent.includes('朋友圈')); b?.click(); return !!b; })()`)
     await sleep(1200)
     const sns = await wc.executeJavaScript(`
       (() => {
@@ -3912,7 +3912,7 @@ const groupDetailDom = results.groupDetail as Record<string, any>
         return { cols, feedW: feed ? Math.round(feed.getBoundingClientRect().width) : 0, sidebarW: sidebar ? Math.round(sidebar.getBoundingClientRect().width) : 0, viewport: window.innerWidth };
       })()
     `)
-    const anaClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab')).find((x) => x.textContent.trim() === '分析'); b?.click(); return !!b; })()`)
+    const anaClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((x) => x.textContent.trim() === '分析'); b?.click(); return !!b; })()`)
     await sleep(1500)
     const afterAna = await wc.executeJavaScript(`
       (() => {
@@ -4191,7 +4191,7 @@ async function runScreenshotMode() {
   const clickTab = (label: string) =>
     (mainWindow?.webContents
       .executeJavaScript(
-        `(() => { const b = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
+        `(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
         true,
       )
       .catch(() => false) ?? Promise.resolve(false))
@@ -4241,7 +4241,7 @@ async function runScreenshotMode() {
     try {
       await saveStable(mainWindow, 'main.png')
       await dumpRects('main-rects.json', [
-        '.tab', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
+        '.tab', '.rail-item', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
       ])
     } catch (e) {
       log('WARN [screenshot] main capture failed:', e)
@@ -4388,7 +4388,7 @@ async function runScreenshotMode() {
         const aiState = await mainWindow?.webContents
           .executeJavaScript(
             `(() => {
-              const tab = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes('WeportAI'))
+              const tab = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes('WeportAI'))
               const workspace = document.querySelector('.workspace')
               const active = document.querySelector('.tab[data-active="true"]')
               return JSON.stringify({
@@ -4889,7 +4889,7 @@ async function runUiDumpMode() {
   // 1) 切换到 WeportAI 页签
   const tabClick = await wc.executeJavaScript(`
     (() => {
-      const buttons = Array.from(document.querySelectorAll('.tab'));
+      const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
       const ai = buttons.find((b) => b.textContent.includes('WeportAI'));
       if (!ai) return { ok: false, tabs: buttons.map((b) => b.textContent.trim()) };
       ai.click();
@@ -5468,6 +5468,10 @@ function startApp() {
 
     registerIpcHandlers()
     setupNotificationPipeline()
+
+    // 模型元数据（models.dev）后台刷新：只在 TTL 过期时发一次条件 GET，304
+    // 是 0 字节；失败只降级到磁盘缓存 + 内置快照，不影响任何 UI 路径。
+    void refreshModelRegistry()
 
     // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
     weportAiService.setEventEmitter((event) => {
