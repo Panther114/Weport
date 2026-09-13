@@ -189,6 +189,80 @@
 }
 
 // -----------------------------------------------------------------------------
+// 表面层级（借用 DSH Web GUI 的令牌结构）
+// -----------------------------------------------------------------------------
+//
+// DSH 把颜色分三层：static 色板 → alias 语义（bg-base / bg-layer-1..3 /
+// bg-overlay / bg-mask-* / border-l1..l4）→ 组件级。组件只读别名，明暗两套只是
+// **同一批别名换值**。Weport 之前是 --bg / --panel / --elevated 三个名字被各页面
+// 各写一套半透明 rgba，所以卡片一多就"不成体系"。
+//
+// 这里补上缺失的层级与遮罩，并给弹层一张 layer-3。旧名字保留（大量规则在用），
+// 只是从现在起有明确含义：base = 窗口底，layer-1 = 栏/卡片，layer-2 = 卡内块。
+
+:root {
+  --layer-base: var(--bg);
+  --layer-1: var(--panel);
+  --layer-2: var(--elevated);
+  --layer-3: #22222b;
+  --overlay: rgba(4, 4, 6, 0.62);
+  --mask-1: rgba(0, 0, 0, 0.24);
+  --mask-2: rgba(0, 0, 0, 0.12);
+  --mask-3: rgba(0, 0, 0, 0.48);
+
+  // 抬升用"发丝线 + 两层极淡柔影"，而不是 1px 实边框：边框会在每张卡片上画出
+  // 一圈等权重的灰线，卡片一多就变成一叠框。DSH 的抬升表面 border: 0。
+  --hairline: 0.5px;
+  --stroke-l1: rgba(255, 255, 255, 0.07);
+  --stroke-l2: rgba(255, 255, 255, 0.1);
+  --elev-soft: 0 1px 2px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.14);
+  --elev-panel: 0 1px 2px rgba(0, 0, 0, 0.24), 0 8px 24px rgba(0, 0, 0, 0.28);
+  --elev-prominent: 0 2px 6px rgba(0, 0, 0, 0.3), 0 18px 48px rgba(0, 0, 0, 0.42);
+
+  // 玻璃只用在小面积浮层上。14px 那种全屏模糊在视频背景上每帧都要重算。
+  --glass-blur: 6px;
+}
+
+:root[data-mode='light'] {
+  --layer-3: #ffffff;
+  --overlay: rgba(24, 28, 48, 0.34);
+  --mask-1: rgba(24, 28, 48, 0.08);
+  --mask-2: rgba(24, 28, 48, 0.04);
+  --mask-3: rgba(24, 28, 48, 0.18);
+  --stroke-l1: rgba(24, 28, 48, 0.08);
+  --stroke-l2: rgba(24, 28, 48, 0.12);
+  --elev-soft: 0 1px 2px rgba(24, 28, 48, 0.06), 0 2px 8px rgba(24, 28, 48, 0.06);
+  --elev-panel: 0 1px 2px rgba(24, 28, 48, 0.08), 0 8px 24px rgba(24, 28, 48, 0.1);
+  --elev-prominent: 0 2px 6px rgba(24, 28, 48, 0.1), 0 18px 48px rgba(24, 28, 48, 0.16);
+}
+
+// 苹果风格 squircle 圆角：支持的引擎上把圆角从"圆弧"变成超椭圆，视觉上更顺。
+// `border-radius: 50%` 的圆形与胶囊必须显式退回 `round`，否则会被压变形。
+@supports (corner-shape: superellipse(1.5)) {
+  .panel,
+  .ai-composer,
+  .ai-side,
+  .ai-workspace,
+  .ai-actions-menu,
+  .modal,
+  .toast,
+  .theme-card,
+  .v09-panel,
+  .status-bar {
+    corner-shape: superellipse(1.5);
+  }
+
+  .account-avatar,
+  .account-avatar.fallback,
+  .ai-empty-mark,
+  .status-dot,
+  .exp-num,
+  .rail-item {
+    corner-shape: round;
+  }
+}
+
+// -----------------------------------------------------------------------------
 // 视频背景的性能取舍
 // -----------------------------------------------------------------------------
 //

@@ -1480,6 +1480,33 @@
   }
 }
 
+// 连接页：第 1、2 步并排。两者各自只有一个输入框/一个短列表，铺满整宽时中间
+// 全是空白；第 3 步（密钥 + 折叠说明）仍独占一行。
+.connect-steps {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-5);
+
+  // 两栏之间给一条发丝分隔线，而不是让它们看起来是同一段内容。
+  > .exp-section + .exp-section {
+    border-top: 0;
+    padding-left: var(--space-5);
+    border-left: var(--hairline) solid var(--stroke-l1);
+  }
+}
+
+@media (max-width: 900px) {
+  .connect-steps {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+
+    > .exp-section + .exp-section {
+      padding-left: 0;
+      border-top: 1px solid var(--line);
+    }
+  }
+}
+
 // =============================================================================
 // 21. 页面级状态条与面板动作行
 // =============================================================================
@@ -1797,3 +1824,266 @@
   white-space: nowrap;
 }
 
+// -----------------------------------------------------------------------------
+// 25. 自定义强调色
+// -----------------------------------------------------------------------------
+
+.accent-custom {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: var(--hairline) solid var(--stroke-l1);
+}
+
+.accent-custom-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.accent-color-input {
+  width: 40px;
+  height: 28px;
+  padding: 0;
+  border: var(--hairline) solid var(--stroke-l2);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+
+  &::-webkit-color-swatch-wrapper {
+    padding: 2px;
+  }
+
+  &::-webkit-color-swatch {
+    border: 0;
+    border-radius: 6px;
+  }
+}
+
+.accent-hex-input {
+  width: 84px;
+  padding: 5px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-transform: lowercase;
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+}
+
+.accent-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.accent-swatch-mini {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+
+  &:hover {
+    transform: translateY(-1px) scale(1.06);
+  }
+
+  &[data-active='true'] {
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px currentColor;
+    color: inherit;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 25. 防撤回会话行的类型图标
+// -----------------------------------------------------------------------------
+
+.ar-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: var(--accent-softer);
+  color: var(--accent-3);
+
+  svg {
+    // 图标尺寸档位收敛到 12 / 14 / 16，别再出现 11/13 这种一次性数值。
+    width: 12px;
+    height: 12px;
+  }
+}
+
+
+// =============================================================================
+// 24. WeportAI 页面重做（借用 DSH Web GUI 的表面与抬升模型）
+// =============================================================================
+//
+// 参考：docs/superpowers/specs/2026-09-13-ai-page-redesign.md
+//
+// 三件事：
+//  1. **表面分三层**（base / layer-1 / layer-2），栏与卡片只在需要时抬升，
+//     不再每张卡片画一圈 1px 灰边。
+//  2. **抬升用发丝线 + 双层柔影**，卡片 border: 0 —— 这是"卡片一多就成一叠框"
+//     的直接解法。
+//  3. **玻璃只留在输入条**，6px，不再是 14px 全屏模糊。
+
+.ai-side {
+  background: var(--layer-1);
+  border: 0;
+  border-right: var(--hairline) solid var(--stroke-l1);
+}
+
+.ai-main {
+  background: var(--layer-base);
+  min-width: 0;
+}
+
+.ai-workspace {
+  background: var(--layer-1);
+  border: 0;
+  border-left: var(--hairline) solid var(--stroke-l1);
+}
+
+// 中栏顶部工具栏：会话标题在左，模型与用量在右。原来主栏没有头，
+// 模型名塞在左栏底部，用户看不出"我现在用的是哪个模型"。
+.ai-topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px var(--space-5);
+  border-bottom: var(--hairline) solid var(--stroke-l1);
+  background: var(--layer-base);
+
+  h1 {
+    // flex: 1 1 auto 而不是默认的 0 1 auto，并且让 meta 用固定的 margin-left：
+    // 默认 flex 下标题按内容取宽，再叠加 `margin-left: auto` 的 meta，会让标题
+    // 在还有空间时就先被压窄（实测截成「和家人…」）。
+    flex: 1 1 auto;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.ai-topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+// 用量胶囊：标签 + 数值，等宽数字。比原来右栏那张三行统计卡更容易扫。
+.ai-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--layer-2);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+
+  b {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  &[data-tone='ok'] b {
+    color: var(--ok);
+  }
+
+  &[data-tone='warn'] b {
+    color: var(--warn);
+  }
+}
+
+// 消息：助手消息不加边框，靠留白分隔；用户气泡是唯一的强调块。
+.ai-msg.assistant {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.ai-msg.user .ai-msg-bubble {
+  border: 0;
+  background: var(--accent-soft);
+  box-shadow: none;
+  border-radius: 14px;
+}
+
+// 工具调用块：抬升的 layer-2 卡片（发丝线，无实边框）。
+.ai-step {
+  background: var(--layer-2);
+  border: 0;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l1);
+  border-radius: var(--radius);
+}
+
+// 输入条：整页唯一用玻璃的地方，且只 6px。
+.ai-composer {
+  align-items: flex-end;
+  gap: var(--space-2);
+  margin: 0 var(--space-5) var(--space-4);
+  padding: var(--space-2);
+  background: color-mix(in srgb, var(--layer-2) 82%, transparent);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 0;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2), var(--elev-panel);
+  border-radius: 16px;
+}
+
+.ai-input {
+  background: transparent;
+  border: 0;
+  padding: 8px 10px;
+  max-height: 220px;
+
+  &:focus {
+    border: 0;
+    outline: none;
+  }
+}
+
+// 右侧文件行：一行式（名字 + 大小/时间右对齐），不再折行。
+.ai-ws-note {
+  border: 0;
+  border-radius: var(--radius-sm);
+
+  &:hover {
+    background: var(--layer-2);
+  }
+}
+
+// 弹层用 layer-3 + 抬升柔影。
+.ai-actions-menu {
+  background: var(--layer-3);
+  border: 0;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2), var(--elev-prominent);
+}

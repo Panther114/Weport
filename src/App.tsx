@@ -23,6 +23,7 @@ import {
   FolderOpen,
   KeyRound,
   Users,
+  UserRound,
   RefreshCw,
   Trash2,
   RotateCcw,
@@ -69,14 +70,17 @@ import {
   ACCENT_OPTIONS,
   DENSITY_OPTIONS,
   MODE_OPTIONS,
+  PRESET_ACCENTS,
   backgroundKindOf,
   backgroundProtocolUrl,
   initAppearance,
+  normalizeHexColor,
   probeBackground,
   setAccent,
   setBackgroundBlur,
   setBackgroundDim,
   setBackgroundPath,
+  setCustomAccent,
   setDensity,
   setMode,
   useAppearance,
@@ -328,6 +332,8 @@ export default function App() {
   const [muteReportBusy, setMuteReportBusy] = useState(false)
   /** 三个功能面各自指向哪个 AI 服务（设置 → AI 服务）。 */
   const [aiAssignments, setAiAssignments] = useState<Awaited<ReturnType<typeof window.electronAPI.ai.getConsumerAssignments>> | null>(null)
+  // 自定义强调色的输入框草稿：允许用户先打出半截十六进制。
+  const [customAccentDraft, setCustomAccentDraft] = useState('')
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
@@ -1847,6 +1853,10 @@ export default function App() {
              于是这一页本身也是一张进度清单。 */
           <div className="page-stack">
             <section className="panel">
+              {/* 第 1、2 步并排：它们各自只有「一个输入框 + 两个按钮」和「一个账号
+                  列表」，单栏铺满 1040px 时中间全是空白；密钥那一步有输入框和
+                  折叠说明，独占一行。 */}
+              <div className="connect-steps">
               <div className="exp-section">
                 <div className="exp-sec-head">
                   <span className="exp-num">1</span>
@@ -1952,6 +1962,7 @@ export default function App() {
                   </div>
                 )}
               </div>
+              </div>
 
               <div className="exp-section">
                 <div className="exp-sec-head">
@@ -2019,7 +2030,7 @@ export default function App() {
                 )}
                 {keyStatus && <p className="hint">{keyStatus}</p>}
 
-                <details className="steps-details">
+                <details className="steps-details" open>
                   <summary>如何获取密钥？</summary>
                   <ol className="steps">
                     <li>
@@ -2534,7 +2545,7 @@ export default function App() {
                 </strong>
                 <span className="hint">触发器装在微信侧，装好后不必保持 Weport 运行</span>
               </div>
-              <details className="status-bar-details">
+              <details className="status-bar-details" open>
                 <summary>说明</summary>
                 <p>
                   对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
@@ -2612,6 +2623,11 @@ export default function App() {
                     const installed = antiRevokeInstalled[s.username] === true
                     return (
                       <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
+                        {/* 群/私聊一眼可分：列表里大多是群，混着几个联系人时
+                            光看名字判断不出这是群还是个人。 */}
+                        <span className="ar-kind" title={s.username.endsWith('@chatroom') ? '群聊' : '联系人'}>
+                          {s.username.endsWith('@chatroom') ? <Users size={12} /> : <UserRound size={12} />}
+                        </span>
                         <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
                         <span className="ar-id" title={s.username}>{s.username}</span>
                         <button
@@ -2953,60 +2969,105 @@ export default function App() {
                     <span>明暗 · 强调色 · 背景 · 密度</span>
                   </div>
 
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Contrast size={14} />
-                  <div>
-                    <strong>明暗模式</strong>
-                    <span className="hint">深色省眼，浅色在强光下更清晰；整套界面（含图表）跟随切换</span>
-                  </div>
-                </div>
-                <div className="segmented" role="radiogroup" aria-label="明暗模式">
-                  {MODE_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={appearance.mode === option.id}
-                      title={option.hint}
-                      className="segmented-item"
-                      data-active={appearance.mode === option.id}
-                      onClick={() => setMode(option.id)}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 强调色与旧的「色彩主题」合成一件事：强调色列表里就包含「石墨」，
-                  也就是原来的黑白主题。之前是两套系统，其中一个（色块）连样式
-                  都没有，点了没反应。 */}
-              <div className="setting-row">
+              {/* 主题一览提到最前面，取代原来的「明暗模式 + 强调色」两行：
+                  它们描述的是同一件事（这套界面长什么样），分成两处分头设置时
+                  用户得自己在脑子里组合。12 套预设 + 一个自定义色。<br/> */}
+              <div className="setting-block">
                 <div className="setting-label">
                   <Palette size={14} />
                   <div>
-                    <strong>强调色</strong>
+                    <strong>主题</strong>
                     <span className="hint">
-                      选中项、主操作、图表与数字都用它；「石墨」即原来的黑白主题
+                      当前：{MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} ·{' '}
+                      {appearance.accent === 'custom' ? '自定义' : ACCENT_OPTIONS.find((a) => a.id === appearance.accent)?.label}
                     </span>
                   </div>
                 </div>
-                <div className="appearance-swatches" role="radiogroup" aria-label="强调色">
-                  {ACCENT_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={appearance.accent === option.id}
-                      aria-label={option.label}
-                      title={option.label}
-                      className="appearance-swatch"
-                      data-active={appearance.accent === option.id}
-                      style={{ background: option.swatch }}
-                      onClick={() => setAccent(option.id)}
-                    />
-                  ))}
+                <div className="theme-picker">
+                  {MODE_OPTIONS.flatMap((mode) => PRESET_ACCENTS.map((accent) => ({ mode, accent }))).map(({ mode, accent }) => {
+                    const active = appearance.mode === mode.id && appearance.accent === accent.id
+                    const dark = mode.id === 'dark'
+                    const surface = dark ? '#17171d' : '#ffffff'
+                    const ink = dark ? '#f2f2f5' : '#16171d'
+                    return (
+                      <button
+                        key={`${mode.id}-${accent.id}`}
+                        type="button"
+                        className={`theme-card ${active ? 'theme-card-active' : ''}`}
+                        title={`${mode.label} · ${accent.label}`}
+                        onClick={() => {
+                          setMode(mode.id)
+                          setAccent(accent.id)
+                        }}
+                      >
+                        <div className="theme-card-head">
+                          <span
+                            className="theme-card-preview"
+                            style={{ background: surface, color: ink, borderColor: accent.swatch }}
+                          >
+                            <i style={{ background: accent.swatch }} />
+                            <i style={{ background: ink, opacity: 0.35 }} />
+                          </span>
+                          <strong>{mode.label} · {accent.label}</strong>
+                          {active && <span className="theme-card-check">当前</span>}
+                        </div>
+                        <div className="theme-swatches">
+                          {[0.95, 0.8, 0.65, 0.5, 0.35, 0.2].map((t) => (
+                            <span key={t} style={{ background: accent.swatch, opacity: t }} />
+                          ))}
+                          <span style={{ background: surface, border: `1px solid ${ink}22` }} />
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {/* 自定义强调色：和预设走同一条推导链路（theme.scss 从 --accent-raw
+                    用 color-mix 生成整条色阶），因此不会出现"只有选中态变色"。
+                    色板里放一组常用的，避免用户每次都开系统取色器。 */}
+                <div className="accent-custom">
+                  <span className="accent-custom-label">
+                    <Palette size={13} /> 自定义强调色
+                  </span>
+                  <input
+                    type="color"
+                    className="accent-color-input"
+                    value={normalizeHexColor(appearance.customAccent) || '#5b8eff'}
+                    aria-label="自定义强调色"
+                    onChange={(e) => setCustomAccent(e.target.value)}
+                  />
+                  <input
+                    className="accent-hex-input"
+                    value={customAccentDraft || appearance.customAccent}
+                    maxLength={7}
+                    spellCheck={false}
+                    aria-label="自定义强调色十六进制值"
+                    onChange={(e) => {
+                      // 边打字边校验：合法的十六进制立刻生效，半成品（#5b8e）留在
+                      // 输入框里不提交，否则用户打一半就被强制纠正，光标乱跳。
+                      setCustomAccentDraft(e.target.value)
+                      if (normalizeHexColor(e.target.value)) setCustomAccent(e.target.value)
+                    }}
+                    onBlur={() => setCustomAccentDraft('')}
+                  />
+                  <div className="accent-swatches" role="group" aria-label="常用颜色">
+                    {[
+                      '#5b8eff', '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef',
+                      '#ec4899', '#f43f5e', '#ef4444', '#f97316', '#f59e0b', '#eab308',
+                      '#84cc16', '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9',
+                    ].map((hex) => (
+                      <button
+                        key={hex}
+                        type="button"
+                        className="accent-swatch-mini"
+                        title={hex}
+                        aria-label={hex}
+                        data-active={appearance.accent === 'custom' && appearance.customAccent === hex}
+                        style={{ background: hex }}
+                        onClick={() => setCustomAccent(hex)}
+                      />
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -3100,60 +3161,6 @@ export default function App() {
                       {option.label}
                     </button>
                   ))}
-                </div>
-              </div>
-
-              {/* 主题一览：6 种强调色 × 明暗两档 = 12 套。卡片直接画出每套的
-                  真实色阶，点一下就同时设定明暗与强调色。 */}
-              <div className="setting-block">
-                <div className="setting-label">
-                  <Palette size={14} />
-                  <div>
-                    <strong>主题一览</strong>
-                    <span className="hint">
-                      当前：{MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} ·{' '}
-                      {ACCENT_OPTIONS.find((a) => a.id === appearance.accent)?.label}
-                    </span>
-                  </div>
-                </div>
-                <div className="theme-picker">
-                  {MODE_OPTIONS.flatMap((mode) =>
-                    ACCENT_OPTIONS.map((accent) => ({ mode, accent })),
-                  ).map(({ mode, accent }) => {
-                    const active = appearance.mode === mode.id && appearance.accent === accent.id
-                    const dark = mode.id === 'dark'
-                    const surface = dark ? '#17171d' : '#ffffff'
-                    const ink = dark ? '#f2f2f5' : '#16171d'
-                    return (
-                      <button
-                        key={`${mode.id}-${accent.id}`}
-                        type="button"
-                        className={`theme-card ${active ? 'theme-card-active' : ''}`}
-                        onClick={() => {
-                          setMode(mode.id)
-                          setAccent(accent.id)
-                        }}
-                      >
-                        <div className="theme-card-head">
-                          <span
-                            className="theme-card-preview"
-                            style={{ background: surface, color: ink, borderColor: accent.swatch }}
-                          >
-                            <i style={{ background: accent.swatch }} />
-                            <i style={{ background: ink, opacity: 0.35 }} />
-                          </span>
-                          <strong>{mode.label} · {accent.label}</strong>
-                          {active && <span className="theme-card-check">当前</span>}
-                        </div>
-                        <div className="theme-swatches">
-                          {[0.95, 0.8, 0.65, 0.5, 0.35, 0.2].map((t) => (
-                            <span key={t} style={{ background: accent.swatch, opacity: t }} />
-                          ))}
-                          <span style={{ background: surface, border: `1px solid ${ink}22` }} />
-                        </div>
-                      </button>
-                    )
-                  })}
                 </div>
               </div>
                 </section>

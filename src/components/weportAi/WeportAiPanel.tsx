@@ -906,6 +906,29 @@ export default function WeportAiPanel() {
 
       {/* 中栏：对话 */}
       <main className="ai-main">
+        {/* 顶栏：会话标题 + 模型 + 上下文/缓存读数。原来主栏没有头，模型名塞在
+            左栏底部，用户回答不出"我现在用的是哪个模型、上下文用了多少"。 */}
+        <div className="ai-topbar">
+          <h1>{chats.find((c) => c.id === activeId)?.title || 'WeportAI'}</h1>
+          <div className="ai-topbar-meta">
+            {setup?.model ? <span className="ai-meter" title="当前 AI 服务与模型">{setup.model}</span> : null}
+            {ctxStats && ctxStats.contextWindow > 0 ? (
+              <span
+                className="ai-meter"
+                data-tone={ctxStats.promptTokens / ctxStats.contextWindow > 0.75 ? 'warn' : undefined}
+                title="最近一次请求的上下文占用"
+              >
+                上下文 <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
+              </span>
+            ) : null}
+            {usage ? (
+              <span className="ai-meter" data-tone="ok" title="最近一次请求的缓存命中率">
+                缓存 <b>{usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0}%</b>
+              </span>
+            ) : null}
+          </div>
+        </div>
+
         {setup && !setup.hasApiKey && (
           <div className="ai-warn-banner warn">
             当前服务尚未配置 API key — 打开左下角「设置」完成提供商配置后才能使用。
