@@ -258,6 +258,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onEvent: (callback: (event: any) => void) => subscribe('ai:event', callback)
   },
 
+  // WeBot（v1.0 定时任务与笔记板）
+  weBot: {
+    listTasks: () => ipcRenderer.invoke('webot:listTasks'),
+    createTask: (input: any) => ipcRenderer.invoke('webot:createTask', input),
+    updateTask: (id: string, patch: any) => ipcRenderer.invoke('webot:updateTask', id, patch),
+    deleteTask: (id: string) => ipcRenderer.invoke('webot:deleteTask', id),
+    runNow: (id: string) => ipcRenderer.invoke('webot:runNow', id),
+    listRuns: (taskId?: string) => ipcRenderer.invoke('webot:listRuns', taskId),
+    listNotes: (options?: { taskId?: string; unreadOnly?: boolean; limit?: number }) =>
+      ipcRenderer.invoke('webot:listNotes', options),
+    getNote: (id: string) => ipcRenderer.invoke('webot:getNote', id),
+    updateNote: (id: string, patch: { read?: boolean; pinned?: boolean }) =>
+      ipcRenderer.invoke('webot:updateNote', id, patch),
+    unreadCount: () => ipcRenderer.invoke('webot:unreadCount'),
+    clearNotes: () => ipcRenderer.invoke('webot:clearNotes'),
+    /** 任务完成/失败时的通知（主进程弹出右上角卡片后也会广播到这里）。 */
+    onNote: (callback: (note: any) => void) => subscribe('webot:note', callback),
+    onRunStarted: (callback: (run: any) => void) => subscribe('webot:runStarted', callback)
+  },
+
   process: {
     platform: process.platform,
     arch: process.arch

@@ -46,10 +46,13 @@ import {
   Contrast,
   MapPin,
   Timer,
+  CalendarClock,
+  Pin,
   Settings2 as SettingsIcon,
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
+import WeBotModule from './pages/WeBotModule'
 import AiMarkdown from './components/weportAi/AiMarkdown'
 import { Avatar } from './components/Avatar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
@@ -72,7 +75,7 @@ import './styles/v09.scss'
 // 同优先级下它负责覆盖 .shell / .topbar 的旧规则。
 import './styles/v1.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
+type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -225,6 +228,8 @@ const TABS: Array<{
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
   { id: 'notifications', label: '消息通知', icon: Bell, group: 'wechat', hint: '新消息与撤回弹窗提醒' },
   { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
+  { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
+  { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
   { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '备份、本地接口与外观' },
 ]
 
@@ -2228,6 +2233,12 @@ export default function App() {
         )}
 
         {tab === 'ai' && <WeportAiPanel />}
+        {(tab === 'webot' || tab === 'webot-notes') && (
+          <WeBotModule
+            section={tab === 'webot-notes' ? 'notes' : 'tasks'}
+            onSectionChange={(next) => switchTab(next === 'notes' ? 'webot-notes' : 'webot')}
+          />
+        )}
         {tab === 'sns' && <SnsPage />}
         {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
 

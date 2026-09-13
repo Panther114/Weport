@@ -1,5 +1,73 @@
 /// <reference types="vite/client" />
 
+// ---------------------------------------------------------------------------
+// WeBot（v1.0 定时任务与笔记板）
+//
+// 这些形状与主进程的 electron/services/weBotSchedule.ts 和 weBotService.ts
+// 一一对应。渲染层不能直接 import electron/ 下的模块（两个 tsconfig 分开），
+// 因此这里复制一份声明；改主进程时务必同步改这里。
+// ---------------------------------------------------------------------------
+
+type WeBotSchedule =
+  | { kind: 'daily'; hour: number; minute: number }
+  | { kind: 'weekly'; weekday: number; hour: number; minute: number }
+  | { kind: 'monthly'; day: number; hour: number; minute: number }
+  | { kind: 'interval'; everyMinutes: number; anchorMs: number }
+
+/** 错过执行时间时的补偿策略：跳过 / 只补最近一次 / 全部补齐（有上限）。 */
+type WeBotCatchUp = 'skip' | 'once' | 'all'
+
+interface WeBotReference {
+  id: string
+  label: string
+  kind: 'group' | 'private' | 'official'
+}
+
+interface WeBotTask {
+  id: string
+  title: string
+  description: string
+  schedule: WeBotSchedule
+  catchUp: WeBotCatchUp
+  enabled: boolean
+  references: WeBotReference[]
+  allowParallel: boolean
+  createdAt: number
+  updatedAt: number
+  nextRunAt: number | null
+  lastRunAt: number | null
+}
+
+type WeBotRunStatus = 'running' | 'ok' | 'error' | 'skipped'
+
+interface WeBotRun {
+  id: string
+  taskId: string
+  taskTitle: string
+  scheduledAt: number
+  startedAt: number
+  finishedAt?: number
+  status: WeBotRunStatus
+  error?: string
+  noteId?: string
+  durationMs?: number
+}
+
+interface WeBotNote {
+  version: 1
+  id: string
+  taskId: string
+  taskTitle: string
+  runId: string
+  createdAt: number
+  title: string
+  summary: string
+  status: 'ok' | 'error'
+  references: WeBotReference[]
+  read: boolean
+  pinned: boolean
+}
+
 interface ExportRequest {
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
@@ -141,6 +209,21 @@ interface ElectronApi {
         apiKeyHint: string
         updatedAt: number
         discovery?: { models: string[]; fetchedAt: number; error?: string }
+        /** Per-model metadata resolved by the provider layer (models.dev + live /models). */
+        modelContextWindow?: number
+        modelMaxOutputTokens?: number
+        modelProtocol?: string
+        /** USD per million tokens. Absent means unknown — render `N/A`, never `$0.00`. */
+        modelCost?: { input?: number; output?: number; reasoning?: number; cacheRead?: number; cacheWrite?: number }
+        modelCapabilities?: {
+          attachment: boolean
+          reasoning: boolean
+          toolCall: boolean
+          chatCapable: boolean
+          modalities: { input: string[]; output: string[] }
+        }
+        modelReasoningOptions?: Array<{ type: string; values?: string[]; min?: number; max?: number }>
+        modelMetadataSource?: string
       }>
       catalog: Array<{
         id: string
@@ -153,6 +236,8 @@ interface ElectronApi {
         allowCustomBaseUrl?: boolean
         protocolOptions?: string[]
         apiKeyOptional?: boolean
+        /** models.dev provider id used for per-model protocol / cost / limits lookup. */
+        registryProviderId?: string
       }>
     }>
     setSetup: (patch: any) => Promise<{ success: boolean }>
@@ -258,6 +343,27 @@ interface ElectronApi {
   dualReport: {
     generateReport: (friendUsername: string, year: number) => Promise<{ success: boolean; data?: any; error?: string }>
     onProgress: (callback: (payload: any) => void) => () => void
+  }
+  /**
+   * WeBot（v1.0 定时任务与笔记板）。
+   *
+   * 字段与主进程 electron/services/weBotService.ts 的 WeBotTask / WeBotRun /
+   * WeBotNote 保持一致（该文件是唯一真源）。
+   */
+  weBot: {
+    listTasks: () => Promise<WeBotTask[]>
+    createTask: (input: Partial<WeBotTask> & { title: string; schedule: WeBotSchedule }) => Promise<WeBotTask>
+    updateTask: (id: string, patch: Partial<WeBotTask>) => Promise<WeBotTask | null>
+    deleteTask: (id: string) => Promise<boolean>
+    runNow: (id: string) => Promise<{ success: boolean; error?: string }>
+    listRuns: (taskId?: string) => Promise<WeBotRun[]>
+    listNotes: (options?: { taskId?: string; unreadOnly?: boolean; limit?: number }) => Promise<WeBotNote[]>
+    getNote: (id: string) => Promise<WeBotNote | null>
+    updateNote: (id: string, patch: { read?: boolean; pinned?: boolean }) => Promise<WeBotNote | null>
+    unreadCount: () => Promise<number>
+    clearNotes: () => Promise<number>
+    onNote: (callback: (note: WeBotNote) => void) => () => void
+    onRunStarted: (callback: (run: WeBotRun) => void) => () => void
   }
   process: {
     platform: string

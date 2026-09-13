@@ -49,6 +49,8 @@ import { KeyServiceLinux } from './services/keyServiceLinux'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 import { getProviderCatalog } from './services/ai/providerCatalog'
+import { refreshModelRegistry } from './services/ai/registryRuntime'
+import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -1854,6 +1856,75 @@ async function runRealDataDump() {
 // ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
+/**
+ * WeBot 定时任务（v1.0）。
+ *
+ * 派发直接走 `weportAiService.runChat` —— 与用户在 WeportAI 页面手动提问是
+ * **同一条路径**。任务因此同样受工具白名单、只读约束与缓存策略管辖，不存在
+ * 一条绕过用户可见配置的「特权」通道。
+ */
+let weBotService: WeBotService | null = null
+
+async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSignal): Promise<WeBotDispatchResult> {
+  if (signal.aborted) throw new Error('已中止')
+
+  const chat = weportAiService.createChat(request.task.title)
+  const sections: string[] = []
+  if (request.task.description.trim()) sections.push(request.task.description.trim())
+
+  if (request.task.references.length > 0) {
+    const lines = request.task.references
+      .map((reference) => {
+        const kind = reference.kind === 'group' ? '群聊' : reference.kind === 'official' ? '公众号' : '私聊'
+        return `- ${reference.label}（${kind}）`
+      })
+      .join('\n')
+    sections.push(`本任务限定的会话：\n${lines}\n请聚焦这些会话（可用 list_sessions 找到对应 id 后读取消息）。`)
+  }
+
+  sections.push(
+    `这是 WeBot 定时任务的自动执行（${new Date().toLocaleString('zh-CN')}）。` +
+      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。'
+  )
+
+  const result = await weportAiService.runChat(chat.id, sections.join('\n\n'))
+  if (!result.success) throw new Error(result.error || '任务执行失败')
+
+  const finished = weportAiService.getChat(chat.id)
+  const answer = [...(finished?.messages || [])]
+    .reverse()
+    .find((message) => message.role === 'assistant' && String(message.content || '').trim())
+  return { title: request.task.title, summary: String(answer?.content || '').trim() || '（本次运行没有产出内容）' }
+}
+
+function ensureWeBotService(): WeBotService {
+  if (weBotService) return weBotService
+  weBotService = new WeBotService({
+    dataDir: join(app.getPath('userData'), 'webot'),
+    dispatch: dispatchWeBotTask,
+    notify: (note) => {
+      // 复用聊天通知的那套独立置顶窗口（notificationWindow.ts），不另起一套
+      // 通知系统 —— 用户已经熟悉它出现的位置与交互。
+      try {
+        ensureWeChatRequestHeaderInterceptor()
+        void showNotification({
+          sessionId: `webot:${note.taskId}`,
+          channel: 'webot',
+          title: note.status === 'error' ? `WeBot 任务失败 · ${note.taskTitle}` : `WeBot 任务完成 · ${note.taskTitle}`,
+          content: note.summary.slice(0, 160),
+          timestamp: note.createdAt,
+        })
+      } catch (e) {
+        console.warn('[WeBot] 通知发送失败:', e)
+      }
+      try {
+        mainWindow?.webContents.send('webot:note', note)
+      } catch { /* 窗口可能尚未创建 */ }
+    },
+  })
+  return weBotService
+}
+
 function registerIpcHandlers() {
   void registerNotificationHandlers()
 
@@ -2793,6 +2864,15 @@ function demoAiSetup() {
     model: 'deepseek-v4-flash',
     hasApiKey: true,
     apiKeyHint: 'sk•••demo',
+    // Demo model metadata so screenshot mode exercises the capability chips and
+    // the real pricing line (never real user data — these are published rates).
+    modelContextWindow: 1000000,
+    modelMaxOutputTokens: 384000,
+    modelProtocol: 'openai-compatible',
+    modelCost: { input: 0.15, output: 0.6, reasoning: 0.6, cacheRead: 0.003 },
+    modelCapabilities: { attachment: false, reasoning: true, toolCall: true, chatCapable: true, modalities: { input: ['text'], output: ['text'] } },
+    modelReasoningOptions: [{ type: 'toggle' }, { type: 'effort', values: ['low', 'high', 'max'] }],
+    modelMetadataSource: 'bundled',
     createdAt: Date.now() - 86400000,
     updatedAt: Date.now(),
     discovery: { models: ['deepseek-v4-flash', 'deepseek-v4-pro'], fetchedAt: Date.now() },
@@ -5473,6 +5553,10 @@ function startApp() {
     // 是 0 字节；失败只降级到磁盘缓存 + 内置快照，不影响任何 UI 路径。
     void refreshModelRegistry()
 
+    // WeBot 调度器：启动时立刻 tick 一次，把应用未运行期间错过的任务按各自
+    // 的补偿策略补上（见 services/weBotSchedule.ts）。
+    ensureWeBotService().start()
+
     // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
     weportAiService.setEventEmitter((event) => {
       try {
@@ -5646,6 +5730,8 @@ try { tray?.destroy() } catch { /* noop */ }
     destroyNotificationWindow()
     try { await httpService.stop() } catch { /* noop */ }
     try { await mcpService.stop() } catch { /* noop */ }
+    // WeBot：先停调度再中止对话，避免退出过程中又派发新任务。
+    try { weBotService?.stop() } catch { /* noop */ }
     messagePushService?.stop()
     for (const chatId of weportAiService.listChats().map((c) => c.id)) {
       weportAiService.abort(chatId)

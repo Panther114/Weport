@@ -1,0 +1,475 @@
+// =============================================================================
+// WeBot — 定时任务与笔记板
+// =============================================================================
+//
+// 依赖 src/styles/v1.scss 的令牌（--space-*、--radius-*、--control-h、accent 家族），
+// 因此必须在它之后加载。这里只写本模块自己的布局，不重复定义颜色。
+
+.webot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: 100%;
+  min-height: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  overflow-y: auto;
+}
+
+.webot-loading {
+  padding: var(--space-6);
+  color: var(--text-dim);
+}
+
+// -----------------------------------------------------------------------------
+// 视图切换
+// -----------------------------------------------------------------------------
+
+.webot-tabs {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--control-h);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-raised);
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+
+    &:hover {
+      color: var(--text);
+    }
+
+    &[data-active='true'] {
+      background: var(--accent-soft);
+      border-color: var(--accent-soft);
+      color: var(--text);
+      font-weight: 600;
+    }
+  }
+}
+
+.webot-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.webot-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+  font-size: 12.5px;
+  color: var(--text);
+  flex-shrink: 0;
+
+  button {
+    border: 0;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 任务列表 + 编辑器（两栏；窄窗口下堆叠）
+// -----------------------------------------------------------------------------
+
+.webot-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  gap: var(--space-4);
+  align-items: start;
+  min-height: 0;
+}
+
+@media (max-width: 1100px) {
+  .webot-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.webot-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.webot-empty {
+  padding: var(--space-5);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--text-faint);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.webot-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+
+  &[data-active='true'] {
+    border-color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+}
+
+.webot-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.webot-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.webot-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font-size: 12px;
+  color: var(--text-dim);
+
+  span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+}
+
+.webot-card-error {
+  font-size: 12px;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.webot-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.webot-chip-kind {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.webot-danger {
+  color: var(--danger) !important;
+}
+
+.webot-switch {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+
+  input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  span {
+    width: 34px;
+    height: 20px;
+    border-radius: 999px;
+    background: var(--line-strong);
+    position: relative;
+    transition: background 0.16s ease;
+
+    &::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--text-faint);
+      transition: translate 0.16s ease, background 0.16s ease;
+    }
+  }
+
+  input:checked + span {
+    background: var(--accent-soft);
+
+    &::after {
+      translate: 14px 0;
+      background: var(--accent);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 编辑器
+// -----------------------------------------------------------------------------
+
+.webot-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  min-width: 0;
+}
+
+.webot-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  h3 {
+    font-size: 13.5px;
+    font-weight: 700;
+  }
+}
+
+.webot-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+
+  > span {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  input[type='text'],
+  input:not([type]),
+  textarea,
+  select {
+    width: 100%;
+    padding: 8px var(--space-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+    resize: vertical;
+
+    &:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    &::placeholder {
+      color: var(--text-faint);
+    }
+  }
+}
+
+.webot-picker-anchor {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+}
+
+.webot-schedule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+
+  label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+
+  input {
+    width: 68px;
+    padding: 6px var(--space-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    text-align: center;
+
+    &:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+  }
+
+  select {
+    padding: 6px var(--space-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12.5px;
+  }
+}
+
+.webot-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.webot-radio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.webot-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  cursor: pointer;
+
+  span {
+    display: flex;
+    flex-direction: column;
+  }
+
+  strong {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  em {
+    font-style: normal;
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+}
+
+.webot-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.webot-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+// -----------------------------------------------------------------------------
+// 笔记板
+// -----------------------------------------------------------------------------
+
+.webot-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.webot-notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.webot-note-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--space-3);
+}
+
+.webot-note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+
+  // 未读用左侧强调条 + 淡色底：既不是"整块高亮"（那样一堆未读会很吵），
+  // 也不只靠颜色（点在有边框的一侧，灰度下也能看出来）。
+  &[data-unread='true'] {
+    border-left: 2px solid var(--accent);
+    background: var(--elevated);
+  }
+
+  &[data-status='error'] {
+    border-left-color: var(--danger);
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+
+    h4 {
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+  }
+
+  p {
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  footer {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: auto;
+  }
+}
+
+.webot-note-time,
+.webot-note-task {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.webot-note-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
