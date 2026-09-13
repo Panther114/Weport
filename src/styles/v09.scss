@@ -1447,11 +1447,13 @@
   gap: 12px;
 }
 
-/* 入口选择（两个大按钮） */
+/* 入口选择（大按钮网格） */
 .analytics-hub {
   align-items: center;
-  justify-content: center;
-  padding-top: 4vh;
+  /* v1.0：hero 去掉后不再需要垂直居中 —— 居中会把整块内容推到中间，
+     上方留出一大片空白，反而更像"没加载完"。 */
+  justify-content: flex-start;
+  padding-top: 0;
   gap: 0;
 }
 .analytics-hub-hero {
@@ -2564,6 +2566,61 @@
 .annual-fun-grid {
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
 }
+/* 朋友圈页面级工具条：左侧统计、右侧动作。
+   这些原来都挤在筛选侧栏顶部（侧栏因此近三分之一高度不是筛选器），而页面头
+   已经重复过一次标题，于是「朋友圈」在同一屏里出现两次。 */
+.sns-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #1c1c21);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.sns-topbar-stats {
+  display: flex;
+  gap: 6px;
+}
+.sns-topbar-stats .v09-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.sns-topbar-stats .v09-stat b {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+}
+.sns-topbar-stats .v09-stat span {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.sns-topbar-actions {
+  display: flex;
+  gap: 6px;
+}
+.sns-topbar-actions .chip {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 侧栏三段之间加分隔线：搜索 / 日期 / 发布者原本只是靠间距分开，
+   连在一起看像一大坨输入框。 */
+.sns-sidebar > * + * {
+  border-top: 1px solid var(--line, #17171b);
+}
+.sns-sidebar-search,
+.sns-sidebar-date {
+  padding: 10px var(--space-3);
+}
+
 .sns-main {
   grid-template-columns: minmax(230px, 250px) 1fr;
 }

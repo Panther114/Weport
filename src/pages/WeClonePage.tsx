@@ -279,15 +279,8 @@ export default function WeClonePage() {
   if (section === 'hub') {
     return (
       <div className="v09-page analytics-hub weclone-hub">
-        <div className="analytics-hub-hero">
-          <div className="analytics-hub-icon">
-            <Fingerprint size={26} strokeWidth={1.8} />
-          </div>
-          <h2>人格克隆</h2>
-          <p>
-            基于本地聊天记录的 AI 人格档案 · 不上传明文 — 设置 API Key 一键生成，生成后选择公开或链接分享
-          </p>
-        </div>
+        {/* hero 与页面头重复，去掉后两张卡片能在不滚动的情况下全部可见
+            （与「分析」入口同样的处理）。 */}
         <div className="analytics-hub-cards">
           <button type="button" className="analytics-big-card" onClick={() => setSection('manage')}>
             <div className="analytics-big-icon">

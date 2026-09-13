@@ -807,59 +807,58 @@ export default function SnsPage() {
         </div>
       )}
 
-      <div className="sns-main">
-        {/* 筛选侧栏（含页面头部：标题 / 统计 / 操作，紧凑布局） */}
-        <aside className="sns-sidebar">
-          <div className="sns-sidebar-hero">
-            <div className="sns-sidebar-title">
-              <Images size={15} />
-              <span>朋友圈</span>
-              <span className="v09-sub">本地归档</span>
-            </div>
-            <div className="sns-sidebar-stats">
-              <div className="v09-stat">
-                <b>
-                  <CountUp value={overview?.totalPosts ?? 0} />
-                </b>
-                <span>总动态</span>
-              </div>
-              <div className="v09-stat">
-                <b>
-                  <CountUp value={overview?.totalFriends ?? 0} />
-                </b>
-                <span>好友</span>
-              </div>
-              {overview?.myPosts !== null && (
-                <div className="v09-stat">
-                  <b>
-                    <CountUp value={overview?.myPosts ?? 0} />
-                  </b>
-                  <span>我的动态</span>
-                </div>
-              )}
-            </div>
-            <div className="sns-sidebar-actions">
-              <button
-                type="button"
-                className={`chip ${antiDelete === 'installed' ? 'chip-active' : ''}`}
-                disabled={antiDeleteBusy || antiDelete === 'unknown'}
-                onClick={() => void toggleAntiDelete()}
-                title="安装朋友圈删除拦截触发器（防删除）"
-              >
-                {antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
-                {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : '防删除'}
-              </button>
-              <button type="button" className="chip" onClick={() => setExportOpen(true)}>
-                <Download size={13} />
-                导出
-              </button>
-              <button type="button" className="chip" onClick={() => void handleRefresh()} title="刷新动态流与统计">
-                <RefreshCw size={13} className={refreshSpin ? 'spin' : ''} />
-                刷新
-              </button>
-            </div>
+      {/* 页面级信息与动作放在页面级：统计是「整个归档」的数字，导出/刷新也是整页
+          的动作，原来它们挤在筛选侧栏顶部，占了侧栏近三分之一高度，而侧栏真正
+          的职责只有一个 —— 筛选。标题也不在这里重复（页面头已经写着「朋友圈」）。 */}
+      <div className="sns-topbar">
+        <div className="sns-topbar-stats">
+          <div className="v09-stat">
+            <b>
+              <CountUp value={overview?.totalPosts ?? 0} />
+            </b>
+            <span>总动态</span>
           </div>
+          <div className="v09-stat">
+            <b>
+              <CountUp value={overview?.totalFriends ?? 0} />
+            </b>
+            <span>好友</span>
+          </div>
+          {overview?.myPosts !== null && (
+            <div className="v09-stat">
+              <b>
+                <CountUp value={overview?.myPosts ?? 0} />
+              </b>
+              <span>我的动态</span>
+            </div>
+          )}
+        </div>
+        <div className="sns-topbar-actions">
+          <button
+            type="button"
+            className={`chip ${antiDelete === 'installed' ? 'chip-active' : ''}`}
+            disabled={antiDeleteBusy || antiDelete === 'unknown'}
+            onClick={() => void toggleAntiDelete()}
+            title="安装朋友圈删除拦截触发器（防删除）"
+          >
+            {antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
+            {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : '防删除'}
+          </button>
+          <button type="button" className="chip" onClick={() => setExportOpen(true)}>
+            <Download size={13} />
+            导出
+          </button>
+          <button type="button" className="chip" onClick={() => void handleRefresh()} title="刷新动态流与统计">
+            <RefreshCw size={13} className={refreshSpin ? 'spin' : ''} />
+            刷新
+          </button>
+        </div>
+      </div>
 
+      <div className="sns-main">
+        {/* 筛选侧栏：搜索 / 日期 / 发布者 三段，用分隔线断开 —— 之前三段连着排，
+            看起来像一坨输入框。 */}
+        <aside className="sns-sidebar">
           <div className="sns-sidebar-search">
             <Search size={14} />
             <input

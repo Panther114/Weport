@@ -15,13 +15,10 @@ export default function AnalyticsModule({ section, onSectionChange }: AnalyticsM
   if (section === 'hub') {
     return (
       <div className="v09-page analytics-hub">
-        <div className="analytics-hub-hero">
-          <div className="analytics-hub-icon">
-            <LineChart size={26} strokeWidth={1.8} />
-          </div>
-          <h2>微信数据分析</h2>
-          <p>基于本地聊天记录的全量统计 · 不上传任何数据</p>
-        </div>
+        {/* 这里原本有一块 hero：大图标 + 「微信数据分析」+ 一句说明。但页面头
+            已经写着「分析」，四张卡片各自写着「全局分析 / 群聊分析 / …」——
+            同一件事说了三遍，代价是 200px 高度。窗口内容区只有约 570px 高，
+            去掉 hero 之后四个入口才第一次能在不滚动的情况下全部看到。 */}
         <div className="analytics-hub-cards">
           <button type="button" className="analytics-big-card" onClick={() => onSectionChange('global')}>
             <div className="analytics-big-icon">
