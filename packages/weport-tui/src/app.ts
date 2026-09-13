@@ -59,17 +59,32 @@ export interface TuiOptions {
   dumpSession?: string
 }
 
-/** Locate the Weport executable: explicit flag → packaged layout → development repo. */
+/**
+ * Locate the Weport executable.
+ *
+ * The TUI ships on its own (npm) while the engine is the desktop app, so the search
+ * has to cover both the repository layout and every place an install can land. The
+ * order is "most specific first": an explicit flag, then an env override, then the
+ * packaged side-by-side layout, then a development checkout, then the per-platform
+ * install locations. A miss is reported rather than guessed at, because spawning the
+ * wrong Electron binary produces a confusing failure deep inside the WCDB host.
+ */
 export function resolveEngineExe(options: TuiOptions): string | null {
+  const win = process.platform === 'win32'
+  const localAppData = process.env.LOCALAPPDATA || ''
   const candidates = [
     options.exe,
     process.env.WEPORT_ENGINE,
-    // Packaged: resources/cli/weport.exe (see scripts/build-tui-package.mjs)
-    join(dirname(process.execPath), '..', 'cli', process.platform === 'win32' ? 'weport.exe' : 'weport'),
-    // Development checkout: release/win-unpacked/Weport.exe, then the installed app
-    join(process.cwd(), 'release', 'win-unpacked', process.platform === 'win32' ? 'Weport.exe' : 'Weport'),
-    process.platform === 'win32' ? join(process.env.LOCALAPPDATA || '', 'Programs', 'Weport', 'Weport.exe') : null,
-    process.platform === 'darwin' ? '/Applications/Weport.app/Contents/MacOS/Weport' : null,
+    // Packaged next to the TUI (a bundled distribution can ship both).
+    join(dirname(process.execPath), '..', 'cli', win ? 'weport.exe' : 'weport'),
+    // Development checkout: release/win-unpacked/Weport.exe.
+    join(process.cwd(), 'release', win ? 'win-unpacked/Weport.exe' : 'mac-arm64/Weport.app/Contents/MacOS/Weport'),
+    win ? join(localAppData, 'Programs', 'Weport', 'Weport.exe') : null,
+    win ? join(process.env.ProgramFiles || 'C:\\Program Files', 'Weport', 'Weport.exe') : null,
+    '/Applications/Weport.app/Contents/MacOS/Weport',
+    '/usr/lib/weport/weport',
+    '/opt/Weport/weport',
+    '/usr/local/bin/weport-app',
   ].filter(Boolean) as string[]
   for (const candidate of candidates) if (existsSync(candidate)) return candidate
   return null

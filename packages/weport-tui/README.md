@@ -9,6 +9,24 @@ weport sessions.list limit=20 # 单条命令，输出 JSON
 weport --help
 ```
 
+## 安装
+
+```sh
+npm install -g weport          # 需要 Node 20+
+```
+
+引擎是 Weport 桌面版：装了桌面版就自动找得到（Windows
+`%LOCALAPPDATA%\Programs\Weport`，macOS `/Applications/Weport.app`，Linux
+`/opt/Weport`）。装在别处、或者想指向开发版时：
+
+```sh
+weport --exe "D:\path\to\Weport.exe"      # 一次性
+setx WEPORT_ENGINE "D:\path\to\Weport.exe" # 或长期指定
+```
+
+找不到引擎时不会瞎猜——直接报错并告诉你用 `--exe` 指定路径，因为拉错一个 Electron
+二进制会在 WCDB 宿主里失败得莫名其妙。
+
 ## 架构
 
 TUI 不是把界面代码搬进终端，而是**复用主进程的服务层**：
@@ -34,8 +52,8 @@ weport (包)  ──spawn──▶  Weport.exe --cli  ──▶  electron/servic
 | --- | --- |
 | 会话 | `sessions.list` `messages.list` `contacts.info` `groups.members` |
 | 内容 | `sns.timeline` `analytics.overview` `analytics.rankings` `analytics.group` |
-| 连接器 | `connectors.list` `connectors.targets` `connectors.addTask` |
-| AI | `ai.status` `ai.chats` `ai.ask` |
+| 连接器 | `connectors.list` `connectors.targets` `connectors.addTask` `connectors.connect` |
+| AI | `ai.status` `ai.chats` `ai.ask` `ai.setup` `ai.probe` |
 | 配置 | `config.get` `config.set` |
 | 诊断 | `cli.ping` `cli.commands` |
 

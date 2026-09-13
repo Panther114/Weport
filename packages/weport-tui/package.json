@@ -1,7 +1,6 @@
 {
-  "name": "@weport/tui",
+  "name": "weport",
   "version": "1.0.0",
-  "private": true,
   "description": "Weport 的终端界面：在终端里执行 Weport 的全部功能（浏览朋友圈除外）。",
   "type": "module",
   "bin": {
@@ -10,7 +9,20 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "weport",
+    "wechat",
+    "tui",
+    "cli",
+    "chat-history"
+  ],
+  "license": "CC-BY-NC-SA-4.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Panther114/Weport"
   },
   "engines": {
     "node": ">=20"
