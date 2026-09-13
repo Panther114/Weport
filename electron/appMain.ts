@@ -5055,6 +5055,41 @@ async function runScreenshotMode() {
     await clickTab('人格克隆')
   })
 
+  // WeClone 的 manage / create 两段此前从未被渲染过（hub 是唯一有截图的界面），
+  // 各自补一张：没有截图的界面就等于没有验证过。
+  await captureV09('weclone-manage', 'weclone-manage.png', ['.weclone-grid', '.weclone-empty-cta'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('管理分身'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
+  })
+
+  await captureV09('weclone-create', 'weclone-create.png', ['.weclone-generate-main'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const back = Array.from(document.querySelectorAll('.v09-actions .chip')).find((x) => x.textContent.includes('返回'));
+         back?.click();
+         return !!back;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('新建分身'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
+  })
+
   // 响应式：把窗口缩到接近最小宽度再截一次，并**记录度量**交给 PowerShell 断言。
   //
   // 横向溢出不会报错，只会把右侧内容静默切掉 —— 必须用度量兜住，肉眼截图看不

@@ -128,7 +128,10 @@
 /* ---------- 元信息带 ---------- */
 .weclone-meta {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  // 第一格是「知识截止」日期（2026-08-31），比另外三格的数字长得多。四格等宽时
+  // 它在 390px 宽的卡片里刚好放不下，被 ellipsis 截成「2026-08-⋯」——看起来
+  // 像数据坏了。给它多一点宽度。
+  grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr));
   border: 1px solid var(--line, #1c1c21);
   border-radius: calc(var(--radius, 10px) - 4px);
   overflow: hidden;
