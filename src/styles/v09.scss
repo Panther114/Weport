@@ -2621,6 +2621,14 @@
   padding: 10px var(--space-3);
 }
 
+/* 侧栏不再被拉到和动态流一样高：只有 5 个发布者时会留下一大片空白卡片，
+   看起来像还没加载完。让它按内容收缩，超出时自己滚。 */
+.sns-sidebar,
+.group-list-panel {
+  align-self: start;
+  max-height: 100%;
+}
+
 .sns-main {
   grid-template-columns: minmax(230px, 250px) 1fr;
 }
