@@ -117,21 +117,10 @@ export class DbPathService {
       const home = homedir()
 
       if (process.platform === 'darwin') {
-        // macOS 微信 4.0.5+ 新路径（优先检测）
-        const appSupportBase = join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Library', 'Application Support', 'com.tencent.xinWeChat')
-        if (existsSync(appSupportBase)) {
-          try {
-            const entries = readdirSync(appSupportBase)
-            for (const entry of entries) {
-              // 匹配形如 2.0b4.0.9 的版本目录
-              if (/^\d+\.\d+b\d+\.\d+/.test(entry) || /^\d+\.\d+\.\d+/.test(entry)) {
-                possiblePaths.push(join(appSupportBase, entry))
-              }
-            }
-          } catch { }
-        }
-        // macOS 旧路径兜底
-        possiblePaths.push(join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files'))
+        // 4.x 数据根优先；Application Support 下的版本目录排在后面，且必须
+        // 通过 isAccountDir / findAccountDirs 的 4.x 校验才会被采用 ——
+        // 升级过的机器会保留 3.x 的 `2.0b4.0.9` 回滚副本，它不含 db_storage。
+        possiblePaths.push(...this.getDarwinCandidatePaths(home))
       } else if (process.platform === 'linux') {
         possiblePaths.push(...this.getLinuxCandidatePaths(home))
       } else {
@@ -292,11 +281,21 @@ export class DbPathService {
   }
 
   private isAccountDir(entryPath: string): boolean {
-    return (
-      existsSync(join(entryPath, 'db_storage')) ||
-      existsSync(join(entryPath, 'FileStorage', 'Image')) ||
-      existsSync(join(entryPath, 'FileStorage', 'Image2'))
-    )
+    // WeChat 4.x account directories ALWAYS contain db_storage — it is the only
+    // reliable 4.x marker.
+    //
+    // `FileStorage/Image[2]` used to be accepted here as well, but that is a
+    // **WeChat 3.x** marker. Because `findAccountDirs` treats every candidate
+    // account dir uniformly, accepting it meant a 3.x account directory inside
+    // the legacy `2.0b4.0.9` rollback tree an upgraded macOS machine keeps
+    // around passed validation — so both `autoDetect()` and `getDefaultPath()`
+    // could select a 3.x tree as the 4.x database root, and the user then only
+    // ever saw `-3001 未找到数据库目录`.
+    //
+    // Weport's engine (WCDB + `db_storage/…`) cannot read a 3.x layout anyway,
+    // so accepting one can never be useful: it only converts a clear
+    // "not found" into a confusing "found but empty".
+    return existsSync(join(entryPath, 'db_storage'))
   }
 
   private isPotentialAccountName(name: string): boolean {
@@ -448,25 +447,56 @@ export class DbPathService {
   }
 
   /**
-   * 获取默认数据库路径
+   * macOS 候选数据根目录，按可信度从高到低。
+   *
+   * 1. `…/Data/Documents/xwechat_files` —— 微信 4.x 真正的数据根（沙盒容器内）。
+   * 2. `…/Library/Application Support/com.tencent.xinWeChat/<版本号>` ——
+   *    升级过的机器会在这里保留 3.x 的回滚副本 `2.0b4.0.9`，因此**必须校验**，
+   *    不能"第一个匹配版本号就采纳"。
+   * 3. `~/Documents/xwechat_files` —— 非沙盒 / MAS 变体，以及用户手工迁移的目录。
+   */
+  private getDarwinCandidatePaths(home: string): string[] {
+    const paths: string[] = []
+    const containerData = join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data')
+
+    paths.push(join(containerData, 'Documents', 'xwechat_files'))
+
+    const appSupportBase = join(containerData, 'Library', 'Application Support', 'com.tencent.xinWeChat')
+    if (existsSync(appSupportBase)) {
+      try {
+        for (const entry of readdirSync(appSupportBase)) {
+          if (/^\d+\.\d+b\d+\.\d+/.test(entry) || /^\d+\.\d+\.\d+/.test(entry)) {
+            paths.push(join(appSupportBase, entry))
+          }
+        }
+      } catch { }
+    }
+
+    paths.push(join(home, 'Documents', 'xwechat_files'))
+
+    return Array.from(new Set(paths))
+  }
+
+  /**
+   * 获取默认数据库路径。
+   *
+   * macOS 注意：这里必须**校验**候选目录。旧实现遍历
+   * `…/Application Support/com.tencent.xinWeChat/` 并返回第一个匹配
+   * `/^\d+\.\d+b\d+\.\d+/` 的目录，且不做任何账号目录校验。微信 3.x 升级到
+   * 4.x 后，那个目录下仍保留着 3.x 的回滚副本 `2.0b4.0.9`，于是欢迎页会预填
+   * 一个根本没有 `db_storage` 的目录，用户随后只看到 `-3001 未找到数据库目录`
+   * —— 这正是"Mac 的数据目录和 Windows 不一样"的主要来源。
    */
   getDefaultPath(): string {
     const home = homedir()
     if (process.platform === 'darwin') {
-      // 优先返回 4.0.5+ 新路径
-      const appSupportBase = join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Library', 'Application Support', 'com.tencent.xinWeChat')
-      if (existsSync(appSupportBase)) {
-        try {
-          const entries = readdirSync(appSupportBase)
-          for (const entry of entries) {
-            if (/^\d+\.\d+b\d+\.\d+/.test(entry) || /^\d+\.\d+\.\d+/.test(entry)) {
-              const candidate = join(appSupportBase, entry)
-              if (existsSync(candidate)) return candidate
-            }
-          }
-        } catch { }
-      }
-      // 旧版本路径兜底
+      const candidates = this.getDarwinCandidatePaths(home)
+      const valid = candidates.find((candidate) => existsSync(candidate) && (
+        this.findAccountDirs(candidate).length > 0 || this.isAccountDir(candidate)
+      ))
+      if (valid) return valid
+      // 即使当前不存在，也返回规范的 4.x 根目录，让用户看到正确的预期路径，
+      // 而不是一个 3.x 遗留目录。
       return join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files')
     }
     if (process.platform === 'linux') {
