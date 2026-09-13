@@ -381,6 +381,10 @@ export default function WeportAiPanel() {
         void api.ai.deleteChat(prev).then(() => void refreshChats())
       }
       setActiveId(id)
+      // 同步更新 ref，别等下面那个 effect：`getChat` 的响应可能在 React 提交
+      // 这次 setActiveId 之前就回来，那样第 391 行的守卫会把响应当成"过期"丢弃，
+      // 页面就永远停在空态（真机上表现为「打开 WeportAI 看不到上次的对话」）。
+      activeIdRef.current = id
       setMessages([])
       setLive(null)
       setError('')
