@@ -217,6 +217,8 @@ export default function App() {
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [imageKeysOk, setImageKeysOk] = useState(false)
   const loadKeySeqRef = useRef(0)
+  /** 缺图片密钥时"再点一次继续"的一次性确认（见 startExport 中的守卫） */
+  const imageKeyAckRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
   const [progress, setProgress] = useState<any | null>(null)
@@ -925,10 +927,25 @@ export default function App() {
       return
     }
     // issue #15：微信 4.x 在 Windows/macOS/Linux 均可能使用加密 .dat 图片，
-    // 缺失图片密钥时导出只会得到 [图片] 占位符。提前拦截并指引获取密钥。
+    // 缺失图片密钥时导出只会得到 [图片] 占位符。
+    //
+    // 但**不能直接拒绝导出**：在 macOS 上图片密钥经常拿不到（WeChat 是
+    // 加固签名 + 沙盒进程，task_for_pid 会被系统拒绝），硬拦截会把用户彻底
+    // 卡死 —— 连文字记录都导不出去，比导出占位符糟糕得多。
+    // 因此改为「先警告、再确认」：第一次点击只说明后果，第二次点击照常导出；
+    // 缺密钥的图片会以 [图片] 占位，并在完成提示里给出具体数量。
     if (exportMedia.images && imageKeyRequired && !imageKeysOk) {
-      pushToast('err', '尚未配置图片密钥', '请先点击「获取图片密钥」，否则导出的图片将全部失败', 10000)
-      return
+      if (!imageKeyAckRef.current) {
+        imageKeyAckRef.current = true
+        pushToast(
+          'err',
+          '尚未配置图片密钥',
+          '导出的图片将全部显示为 [图片] 占位符。再次点击「开始导出」仍会继续；建议先点击「获取图片密钥」。',
+          12000
+        )
+        return
+      }
+      imageKeyAckRef.current = false
     }
 
     setBusy(true)
