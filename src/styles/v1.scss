@@ -1004,6 +1004,157 @@
   }
 }
 
+// =============================================================================
+// 17. 导出页：主操作常驻可见
+// =============================================================================
+//
+// 「导出」是这一页存在的唯一理由，但它原本位于约 400 行内容的最底部。
+//
+// 第一版用底部悬浮条解决，结果它**盖住**了内容：sticky 元素在到达自身正常位置
+// 之前会一直浮在视口底部，而它上方仍有内容在滚动 —— 无论加渐变还是加 padding，
+// 用户看到的都是「按钮压住了勾选框」。
+//
+// 改成吸顶页头：主按钮放在页头右端，页头吸顶。动作**始终可见**，而且它在正常
+// 流里的位置就在顶部，永远不会和下方内容争位置。
+
+.panel:has(.export-actions) > .panel-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: var(--panel);
+  margin-inline: calc(var(--space-4) * -1);
+  padding-inline: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+// 页头里的操作排成一行，主操作在最右
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+// 导出过程中的取消按钮：只在有进度时出现，空的时候不占位。
+.export-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.export-actions:empty {
+  display: none;
+}
+
+// 数字序号在配置段里代表"第几步"，字号要比正文大一点才读得出次序。
+.exp-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+// =============================================================================
+// 18. 密度与行内一致性（重排的核心）
+// =============================================================================
+//
+// 截图暴露的两个问题：
+//
+//  1. **行太高**。设置行约 110px，而内容只有一行标题 + 一行说明（≈36px）。
+//     多出来的都是内边距叠加：.panel 16px + .setting-row 12px + 旧规则 12px。
+//     结果是「三个开关」占掉 390px —— 面板看起来松散、不紧凑。
+//  2. **标签排版不一致**。有的行是 <div><strong/><span/></div>（上下两行），
+//     有的是 <strong/><span/> 直接并列（挤在同一行）。同一张卡片里两种排法，
+//     这正是"奇怪"的来源。这里统一按上下两行处理，并顺带修 JSX
+//     （外观卡片的行改成同样的嵌套结构）。
+
+.panel {
+  padding: var(--space-4);
+
+  // 卡片标题更紧凑：标题与第一条内容之间不需要三段留白。
+  > .panel-head {
+    margin-bottom: var(--space-2);
+    padding-bottom: var(--space-2);
+  }
+}
+
+.setting-row {
+  padding: 10px var(--space-2);
+  gap: var(--space-4);
+}
+
+.setting-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+
+  // 内层文本块：标题与说明上下两行，行高收紧。
+  > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .hint {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-faint);
+  }
+}
+
+// 开关本身也偏大（34x20 的轨道配 16px 圆点），在紧凑行里显得笨重。
+.switch .track,
+.webot-switch span {
+  scale: 0.92;
+  transform-origin: right center;
+}
+
+// 导出页：目录结构与格式选项原本是大盒子（A/B/C 每格 ≈120px 高，只放两行字，
+// 十个格式选项再占两行），因此「配置怎么导」这一件事就吃掉一整屏。收紧到内容
+// 真正需要的尺寸，让「配置 → 选范围 → 导出」能在一屏里读完。
+.layout-row,
+.format-grid {
+  gap: var(--space-2);
+}
+
+.layout-chip,
+.format-chip {
+  padding: 9px var(--space-3);
+  min-height: 0;
+  gap: 2px;
+
+  strong {
+    font-size: 12.5px;
+  }
+
+  .layout-tree,
+  span {
+    font-size: 11px;
+    line-height: 1.45;
+  }
+}
+
+.layout-tree {
+  margin-top: 2px;
+}
+
 // 引用 chip：显示名是人类可读的，id 只作为数据随请求发出。
 .ref-chips {
   display: flex;

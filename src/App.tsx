@@ -1917,8 +1917,9 @@ export default function App() {
         {tab === 'export' && (
           <section className="panel panel-fill">
             <div className="panel-head">
-              {/* 标题已经在顶栏；这里只保留操作与该操作的范围说明，不再重复
-                  一遍「导出数据」。 */}
+              {/* 主操作放在页头并让页头吸顶：导出按钮从此**始终可见**，而且
+                  不会像底部悬浮条那样盖住内容。页头右侧依次是「范围状态 →
+                  恢复默认 → 清空导出库 → 开始导出」，破坏性操作离主操作最远。 */}
               <div className="panel-head-actions">
                 <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
                 <button
@@ -1940,31 +1941,21 @@ export default function App() {
                   <Trash2 size={13} />
                   清空导出库
                 </button>
+                <button className="primary-btn" type="button" disabled={busy} onClick={() => void runExport()}>
+                  <Download size={14} />
+                  {busy && progress
+                    ? '导出中…'
+                    : exportSelectionMode === 'all'
+                      ? '开始导出'
+                      : `导出已选（${selectedExportSessionIds.size}）`}
+                </button>
               </div>
             </div>
-
-            <ExportSessionPicker
-              sessions={filteredExportSessions}
-              totalSessions={exportSessions.length}
-              selectedIds={selectedExportSessionIds}
-              selectionMode={exportSelectionMode}
-              search={exportSessionSearch}
-              type={exportSessionType}
-              loading={exportSessionsLoading}
-              onSearchChange={setExportSessionSearch}
-              onTypeChange={setExportSessionType}
-              onSelectionModeChange={setExportSelectionMode}
-              onToggle={toggleExportSession}
-              onToggleVisible={toggleVisibleExportSessions}
-              onRefresh={() => void loadExportSessions()}
-              allVisibleSelected={allVisibleExportSessionsSelected}
-              disabled={busy}
-            />
 
             {/* 1. 输出设置 */}
             <div className="exp-section">
               <div className="exp-sec-head">
-                <span className="exp-num">2</span>
+                <span className="exp-num">1</span>
                 <FolderOpen size={14} />
                 输出设置
               </div>
@@ -2038,7 +2029,7 @@ export default function App() {
             {/* 2. 导出格式 */}
             <div className="exp-section">
               <div className="exp-sec-head">
-                <span className="exp-num">3</span>
+                <span className="exp-num">2</span>
                 <FileType size={14} />
                 导出格式
               </div>
@@ -2073,7 +2064,7 @@ export default function App() {
             {/* 3. 内容 */}
             <div className="exp-section">
               <div className="exp-sec-head">
-                <span className="exp-num">4</span>
+                <span className="exp-num">3</span>
                 <Paperclip size={14} />
                 内容（媒体与附件）
               </div>
@@ -2149,7 +2140,7 @@ export default function App() {
                 onClick={() => setShowAdvanced((v) => !v)}
                 aria-expanded={showAdvanced}
               >
-                <span className="exp-num">5</span>
+                <span className="exp-num">4</span>
                 <SettingsIcon size={14} />
                 高级选项
                 <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
@@ -2297,23 +2288,43 @@ export default function App() {
               </div>
             )}
 
+            {/* 5. 选择会话 —— 放在配置之后。
+                旧顺序是「235 行会话列表 → 四组配置 → 导出按钮」：列表先把全部
+                配置挤到折叠线以下，而主按钮在整段最底部。现在的顺序对应真实的
+                心智顺序：先决定怎么导 → 再决定导哪些 → 最后按下去。 */}
+            <div className="exp-section">
+              <div className="exp-sec-head">
+                <span className="exp-num">5</span>
+                <Users size={14} />
+                选择会话
+              </div>
+              <ExportSessionPicker
+                sessions={filteredExportSessions}
+                totalSessions={exportSessions.length}
+                selectedIds={selectedExportSessionIds}
+                selectionMode={exportSelectionMode}
+                search={exportSessionSearch}
+                type={exportSessionType}
+                loading={exportSessionsLoading}
+                onSearchChange={setExportSessionSearch}
+                onTypeChange={setExportSessionType}
+                onSelectionModeChange={setExportSelectionMode}
+                onToggle={toggleExportSession}
+                onToggleVisible={toggleVisibleExportSessions}
+                onRefresh={() => void loadExportSessions()}
+                allVisibleSelected={allVisibleExportSessionsSelected}
+                disabled={busy}
+              />
+            </div>
+
             <div className="export-actions">
-              <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
-                <Download size={16} />
-                {busy && progress
-                  ? '导出中…'
-                  : exportSelectionMode === 'all'
-                    ? '导出全部聊天记录'
-                    : `导出已选聊天记录${selectedExportSessionIds.size ? `（${selectedExportSessionIds.size}）` : ''}`}
-              </button>
+              {/* 主按钮已移到吸顶页头（始终可见且不遮挡内容）。这里只保留
+                  导出**过程中**才出现的进度与取消。 */}
               {busy && progress && progress.phase !== 'complete' && (
                 <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
                   取消导出
                 </button>
               )}
-              <p className="hint">
-                清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
-              </p>
             </div>
           </section>
         )}
@@ -2672,8 +2683,10 @@ export default function App() {
               {appearance.backgroundPath ? (
                 <div className="setting-row">
                   <div className="setting-label">
-                    <strong>背景遮罩</strong>
-                    <span className="hint">数值越高文字越清晰、背景越淡（推荐 60-80）</span>
+                    <div>
+                      <strong>背景遮罩</strong>
+                      <span className="hint">数值越高文字越清晰、背景越淡（推荐 60-80）</span>
+                    </div>
                   </div>
                   <div className="appearance-slider">
                     <input
@@ -2691,8 +2704,10 @@ export default function App() {
 
               <div className="setting-row">
                 <div className="setting-label">
-                  <strong>强调色</strong>
-                  <span className="hint">用于选中项与主操作；黑白主题下不生效</span>
+                  <div>
+                    <strong>强调色</strong>
+                    <span className="hint">用于选中项与主操作；黑白主题下不生效</span>
+                  </div>
                 </div>
                 <div className="appearance-swatches" role="radiogroup" aria-label="强调色">
                   {ACCENT_OPTIONS.map((option) => (
@@ -2714,8 +2729,10 @@ export default function App() {
 
               <div className="setting-row">
                 <div className="setting-label">
-                  <strong>界面密度</strong>
-                  <span className="hint">紧凑模式收紧间距，字号保持不变</span>
+                  <div>
+                    <strong>界面密度</strong>
+                    <span className="hint">紧凑模式收紧间距，字号保持不变</span>
+                  </div>
                 </div>
                 <div className="segmented" role="radiogroup" aria-label="界面密度">
                   {DENSITY_OPTIONS.map((option) => (
