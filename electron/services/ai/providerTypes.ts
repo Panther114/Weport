@@ -142,9 +142,21 @@ export interface ProviderProfileSummary {
   }
 }
 
+/** 使用 AI 服务的三个功能面。 */
+export type ProviderConsumer = 'chat' | 'weclone' | 'webot'
+
 export interface ProviderProfileStore {
   version: 1
   activeProfileId: string
+  /**
+   * 每个功能面各自指定的服务（profile id）；缺省表示「跟随默认服务」。
+   *
+   * v1.0.1 之前只有一个全局 activeProfileId，而 WeClone 的强制 provider 会直接
+   * `activate()` 一个自己新建的 profile —— 于是打开一次「人格克隆 · 新建」就把
+   * WeportAI 的服务静默换成了 WeClone 的。三个功能面共用一个开关，谁都不能单独
+   * 指向别的服务。现在默认仍跟随 active，但每个面可以各自覆盖。
+   */
+  consumerProfiles?: Partial<Record<ProviderConsumer, string>>
   profiles: ProviderProfile[]
 }
 

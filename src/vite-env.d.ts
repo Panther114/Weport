@@ -292,6 +292,20 @@ interface ElectronApi {
     saveProfile: (input: any) => Promise<{ success: boolean; profile?: any; error?: string }>
     activateProfile: (id: string) => Promise<{ success: boolean; error?: string }>
     deleteProfile: (id: string) => Promise<{ success: boolean; error?: string }>
+    getConsumerAssignments: () => Promise<{
+      success: boolean
+      consumers: Array<{
+        consumer: 'chat' | 'weclone' | 'webot'
+        profileId: string
+        profileName: string
+        followsDefault: boolean
+        providerId: string
+        model: string
+      }>
+      profiles: Array<{ id: string; name: string; providerId: string; model: string; hasApiKey: boolean; apiKeyHint?: string }>
+      activeProfileId: string
+    }>
+    assignConsumer: (consumer: string, profileId: string) => Promise<{ success: boolean; error?: string }>
     testProfile: (input: { providerId: string; protocol?: string; baseUrl?: string; apiKey?: string }) => Promise<{ success: boolean; models?: string[]; status?: number; error?: string }>
     listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number }> }>
     createChat: (title?: string) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number } }>

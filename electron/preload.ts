@@ -244,6 +244,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveProfile: (input: any) => ipcRenderer.invoke('ai:saveProfile', input),
     activateProfile: (id: string) => ipcRenderer.invoke('ai:activateProfile', id),
     deleteProfile: (id: string) => ipcRenderer.invoke('ai:deleteProfile', id),
+    getConsumerAssignments: () => ipcRenderer.invoke('ai:getConsumerAssignments'),
+    assignConsumer: (consumer: string, profileId: string) => ipcRenderer.invoke('ai:assignConsumer', consumer, profileId),
     testProfile: (input: any) => ipcRenderer.invoke('ai:testProfile', input),
     setSetup: (patch: any) => ipcRenderer.invoke('ai:setSetup', patch),
     listChats: () => ipcRenderer.invoke('ai:listChats'),

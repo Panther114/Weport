@@ -577,7 +577,10 @@ export class WeCloneService {
   // -------------------------------------------------------------------------
 
   private getActiveProfile(): ProviderProfile | null {
-    return this.providerProfiles.getActive()
+    // WeClone 有自己的服务指向（默认跟随「默认服务」）。v1.0.1 之前它读的是全局
+    // active —— 而它自己又会 activate 一个强制 profile，于是"打开一次人格克隆"
+    // 就把 WeportAI 的服务换掉了。
+    return this.providerProfiles.getForConsumer('weclone')
   }
 
   // -------------------------------------------------------------------------
@@ -625,14 +628,16 @@ export class WeCloneService {
     })
     const saved = this.providerProfiles.save({
       id: existing?.id || skeleton.id,
-      name: `${catalog?.name || 'OpenCode Go'} · WeClone`,
+      name: `${catalog?.name || 'OpenCode Go'} · 人格克隆`,
       providerId: skeleton.providerId,
       protocol: skeleton.protocol,
       baseUrl: skeleton.baseUrl,
       model: skeleton.model,
       apiKey,
     })
-    this.providerProfiles.activate(saved.id)
+    // 只把**人格克隆**指向这个 profile，不再抢占全局默认服务：默认服务是
+    // WeportAI 与 WeBot 共用的，改它等于替用户改了另外两处。
+    this.providerProfiles.assign('weclone', saved.id)
     console.log(
       `[WeClone] 已锁定强制 provider ${WECLONE_FORCED_PROVIDER_ID}/${WECLONE_FORCED_MODEL} ` +
       `(profile=${saved.id}, ${existing ? 'updated' : 'created'})`

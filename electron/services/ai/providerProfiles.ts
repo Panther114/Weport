@@ -3,7 +3,7 @@ import { ConfigService } from '../config'
 import { getProviderCatalogEntry, isProviderProtocol, normalizeProviderId } from './providerCatalog'
 import { isWireProtocol } from './modelRegistry'
 import { makeDefaultProfile } from './providerAdapters'
-import type { ProviderModelMetadata, ProviderProfile, ProviderProfileInput, ProviderProfileStore, ProviderProfileSummary } from './providerTypes'
+import type { ProviderConsumer, ProviderModelMetadata, ProviderProfile, ProviderProfileInput, ProviderProfileStore, ProviderProfileSummary } from './providerTypes'
 
 const EMPTY_STORE: ProviderProfileStore = { version: 1, activeProfileId: '', profiles: [] }
 
@@ -50,6 +50,7 @@ function cloneStore(store: ProviderProfileStore): ProviderProfileStore {
   return {
     version: 1,
     activeProfileId: store.activeProfileId,
+    consumerProfiles: store.consumerProfiles ? { ...store.consumerProfiles } : undefined,
     profiles: store.profiles.map((profile) => ({
       ...profile,
       modelCost: profile.modelCost ? { ...profile.modelCost } : undefined,
@@ -109,6 +110,9 @@ export class ProviderProfileService {
           store = {
             version: 1,
             activeProfileId: String(parsed.activeProfileId || ''),
+            consumerProfiles: parsed.consumerProfiles && typeof parsed.consumerProfiles === 'object'
+              ? { ...parsed.consumerProfiles }
+              : undefined,
             profiles: parsed.profiles.map((profile) => this.normalizeStoredProfile(profile as ProviderProfile)).filter(Boolean) as ProviderProfile[],
           }
         }
@@ -188,6 +192,54 @@ export class ProviderProfileService {
   getActive(): ProviderProfile | null {
     const store = this.read()
     return store.profiles.find((profile) => profile.id === store.activeProfileId) || store.profiles[0] || null
+  }
+
+  /**
+   * 某个功能面该用哪个服务。
+   *
+   * 没有单独指定时回落到默认服务 —— 因此绝大多数用户看到的仍然是"一个服务，
+   * 三处都用"。指定过的那一面才走自己的，互不干扰。
+   */
+  getForConsumer(consumer: ProviderConsumer): ProviderProfile | null {
+    const store = this.read()
+    const assignedId = store.consumerProfiles?.[consumer]
+    if (assignedId) {
+      const assigned = store.profiles.find((profile) => profile.id === assignedId)
+      if (assigned) return assigned
+    }
+    return store.profiles.find((profile) => profile.id === store.activeProfileId) || store.profiles[0] || null
+  }
+
+  /** 指定某个功能面使用哪个服务；`profileId` 为空表示恢复「跟随默认」。 */
+  assign(consumer: ProviderConsumer, profileId: string): boolean {
+    const store = this.read()
+    const id = String(profileId || '').trim()
+    if (id && !store.profiles.some((profile) => profile.id === id)) return false
+    const next = { ...(store.consumerProfiles || {}) }
+    if (id) next[consumer] = id
+    else delete next[consumer]
+    store.consumerProfiles = next
+    this.write(store)
+    return true
+  }
+
+  /** 三个功能面当前各自指向哪个服务（含"跟随默认"的解析结果）。 */
+  consumerAssignments(): Array<{ consumer: ProviderConsumer; profileId: string; profileName: string; followsDefault: boolean; providerId: string; model: string }> {
+    const store = this.read()
+    const consumers: ProviderConsumer[] = ['chat', 'weclone', 'webot']
+    return consumers.map((consumer) => {
+      const assignedId = String(store.consumerProfiles?.[consumer] || '')
+      const assigned = assignedId ? store.profiles.find((profile) => profile.id === assignedId) : undefined
+      const resolved = assigned || store.profiles.find((profile) => profile.id === store.activeProfileId) || store.profiles[0] || null
+      return {
+        consumer,
+        profileId: resolved?.id || '',
+        profileName: resolved?.name || '',
+        followsDefault: !assigned,
+        providerId: resolved?.providerId || '',
+        model: resolved?.model || '',
+      }
+    })
   }
 
   getById(id: string): ProviderProfile | null {
@@ -270,6 +322,15 @@ export class ProviderProfileService {
     if (next.length === store.profiles.length) return false
     store.profiles = next
     if (store.activeProfileId === id) store.activeProfileId = next[0]?.id || ''
+    // 指向已删除服务的功能面要一起清掉：留着悬空 id 会让它悄悄回落到默认服务，
+    // 而设置页仍显示"已单独指定"。
+    if (store.consumerProfiles) {
+      const remaining: Partial<Record<ProviderConsumer, string>> = {}
+      for (const [consumer, profileId] of Object.entries(store.consumerProfiles) as Array<[ProviderConsumer, string]>) {
+        if (profileId && profileId !== id) remaining[consumer] = profileId
+      }
+      store.consumerProfiles = remaining
+    }
     this.write(store)
     return true
   }

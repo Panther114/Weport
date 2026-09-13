@@ -41,7 +41,7 @@ import {
   type PrefixChange,
   type PrefixFrame,
 } from './ai/prefixCache'
-import type { ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
+import type { ProviderConsumer, ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -647,8 +647,8 @@ class WeportAiService {
    * 也会显示成「用了 4%」，而且永远不会触发压缩。provider 层带回 per-model
    * 元数据后优先使用它，config 只作为未知时的兜底。
    */
-  private resolveContextWindow(): number {
-    const profile = this.providerProfiles.getActive()
+  private resolveContextWindow(consumer: ProviderConsumer = 'chat'): number {
+    const profile = this.providerProfiles.getForConsumer(consumer)
     const perModel = Number(profile?.modelContextWindow)
     if (Number.isFinite(perModel) && perModel > 0) return perModel
     const configured = Number(this.configService.get('weportAiContextWindow'))
@@ -1151,6 +1151,31 @@ class WeportAiService {
     return this.providerProfiles.activate(String(id || '').trim())
       ? { success: true }
       : { success: false, error: '找不到要启用的 AI 配置' }
+  }
+
+  /** 「设置 → AI 服务」用：三个功能面各自指向哪个服务。 */
+  getConsumerAssignments() {
+    return this.providerProfiles.consumerAssignments()
+  }
+
+  /** 已配置的服务清单（带已解析的模型元数据），设置页直接渲染它。 */
+  listProviderProfiles() {
+    return this.providerProfiles.list().map((item) =>
+      item.model
+        ? { ...item, ...resolvedProfileCache(this.resolveProfileModel({ id: item.id, providerId: item.providerId, protocol: item.protocol, model: item.model })) }
+        : item
+    )
+  }
+
+  getActiveProfileId(): string {
+    return this.providerProfiles.getActive()?.id || ''
+  }
+
+  assignConsumerProfile(consumer: string, profileId: string): { success: boolean; error?: string } {
+    const allowed: ProviderConsumer[] = ['chat', 'weclone', 'webot']
+    if (!allowed.includes(consumer as ProviderConsumer)) return { success: false, error: `未知的功能面: ${consumer}` }
+    const ok = this.providerProfiles.assign(consumer as ProviderConsumer, profileId)
+    return ok ? { success: true } : { success: false, error: '指定的服务不存在' }
   }
 
   deleteProviderProfile(id: string): { success: boolean; error?: string } {
@@ -2178,15 +2203,16 @@ class WeportAiService {
   }
 
   /** 触发一次完整的 agent run（异步，事件流经 emitter 派发） */
-  async runChat(chatId: string, text: string): Promise<{ success: boolean; error?: string }> {
+  async runChat(chatId: string, text: string, options?: { consumer?: ProviderConsumer }): Promise<{ success: boolean; error?: string }> {
     if (this.running.has(chatId)) return { success: false, error: '该对话正在执行中' }
     const chat = this.loadChats().find((c) => c.id === chatId)
     if (!chat) return { success: false, error: '对话不存在' }
     const userText = String(text || '').trim()
     if (!userText) return { success: false, error: '消息为空' }
 
-    const activeProfile = this.providerProfiles.getActive()
-    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
+    const consumer = options?.consumer || 'chat'
+    const activeProfile = this.providerProfiles.getForConsumer(consumer)
+    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在「设置 → AI 服务」中添加服务配置' }
 
     const ctrl = new AbortController()
     this.running.set(chatId, ctrl)

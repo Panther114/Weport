@@ -247,7 +247,7 @@ const TABS: Array<{
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
   { id: 'weclone', label: '人格克隆', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
-  { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '启动、外观、数据与接口' },
+  { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '启动、外观、AI 服务、数据与接口' },
 ]
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
@@ -320,12 +320,14 @@ export default function App() {
   const [httpApiPort, setHttpApiPort] = useState(5031)
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
-  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'data' | 'connect' | 'about'>('general')
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'data' | 'connect' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
   const [muteReport, setMuteReport] = useState<Awaited<ReturnType<typeof window.electronAPI.notification.getMuteReport>> | null>(null)
   const [muteReportBusy, setMuteReportBusy] = useState(false)
+  /** 三个功能面各自指向哪个 AI 服务（设置 → AI 服务）。 */
+  const [aiAssignments, setAiAssignments] = useState<Awaited<ReturnType<typeof window.electronAPI.ai.getConsumerAssignments>> | null>(null)
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
@@ -375,6 +377,7 @@ export default function App() {
     // 背景是用户上传的任意文件，配置里只存绝对路径 —— 用户可能已经把原文件
     // 移走或删掉。加载失败时自动清空并回退到纯色，避免留下一块破图。
     void initAppearance().then(() => probeBackground(() => pushToast('err', '背景已失效', '找不到原来选择的文件，已恢复纯色背景。', 9000)))
+    void refreshAiAssignments()
   }, [])
 
   // 导出选项（WeFlow 对齐）
@@ -1313,6 +1316,33 @@ export default function App() {
     } finally {
       setMuteReportBusy(false)
     }
+  }
+
+  /** 读取「设置 → AI 服务」的分配情况。 */
+  async function refreshAiAssignments() {
+    try {
+      setAiAssignments(await api.ai.getConsumerAssignments())
+    } catch {
+      setAiAssignments({ success: false, consumers: [], profiles: [], activeProfileId: '' })
+    }
+  }
+
+  async function assignAiConsumer(consumer: 'chat' | 'weclone' | 'webot', profileId: string) {
+    const result = await api.ai.assignConsumer(consumer, profileId)
+    if (!result.success) {
+      pushToast('err', '设置失败', result.error || '', 8000)
+      return
+    }
+    await refreshAiAssignments()
+  }
+
+  async function activateAiProfile(profileId: string) {
+    const result = await api.ai.activateProfile(profileId)
+    if (!result.success) {
+      pushToast('err', '设置默认服务失败', result.error || '', 8000)
+      return
+    }
+    await refreshAiAssignments()
   }
 
   async function toggleNotifications(on: boolean) {
@@ -2823,6 +2853,7 @@ export default function App() {
                 [
                   { id: 'general', label: '常规', hint: '启动与后台', icon: Rocket },
                   { id: 'appearance', label: '外观', hint: '背景 · 强调色 · 主题', icon: Images },
+                  { id: 'ai', label: 'AI 服务', hint: '提供商 · 模型 · 分配', icon: Sparkles },
                   { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
                   { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
                   { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
@@ -3125,6 +3156,115 @@ export default function App() {
                   })}
                 </div>
               </div>
+                </section>
+              )}
+
+              {settingsSection === 'ai' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Sparkles size={15} />
+                      AI 服务
+                    </h2>
+                    <span>WeportAI · WeBot · 人格克隆 共用这里的服务</span>
+                  </div>
+
+                  {aiAssignments === null ? (
+                    <div className="wp-loading">正在读取 AI 服务配置…</div>
+                  ) : aiAssignments.profiles.length === 0 ? (
+                    <div className="empty">
+                      还没有配置任何 AI 服务。到「WeportAI」页添加一个提供商与模型，这里就会出现。
+                    </div>
+                  ) : (
+                    <>
+                      {/* 三个功能面各一行。它们默认都跟随「默认服务」，所以绝大多数
+                          用户只需要配一次；想给定时任务单独用一个便宜模型时才分开设。 */}
+                      {(
+                        [
+                          { id: 'chat', label: 'WeportAI', hint: '手动对话与工具调用' },
+                          { id: 'webot', label: 'WeBot', hint: '定时任务的后台执行' },
+                          { id: 'weclone', label: '人格克隆', hint: '生成人格档案' },
+                        ] as const
+                      ).map((row) => {
+                        const current = aiAssignments.consumers.find((item) => item.consumer === row.id)
+                        return (
+                          <div className="setting-row" key={row.id}>
+                            <div className="setting-label">
+                              <div>
+                                <strong>{row.label}</strong>
+                                <span className="hint">
+                                  {current?.followsDefault
+                                    ? `跟随默认服务 · ${current?.model || '未配置'}`
+                                    : `${row.hint} · ${current?.model || '未配置'}`}
+                                </span>
+                              </div>
+                            </div>
+                            <select
+                              className="notification-select"
+                              value={current?.followsDefault ? '' : current?.profileId || ''}
+                              aria-label={`${row.label} 使用的 AI 服务`}
+                              onChange={(e) => void assignAiConsumer(row.id, e.target.value)}
+                            >
+                              <option value="">跟随默认服务</option>
+                              {aiAssignments.profiles.map((profile) => (
+                                <option key={profile.id} value={profile.id}>
+                                  {profile.name} · {profile.model}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )
+                      })}
+
+                      <div className="setting-row">
+                        <div className="setting-label">
+                          <div>
+                            <strong>默认服务</strong>
+                            <span className="hint">未单独指定时，三个功能面都用它</span>
+                          </div>
+                        </div>
+                        <select
+                          className="notification-select"
+                          value={aiAssignments.activeProfileId}
+                          aria-label="默认 AI 服务"
+                          onChange={(e) => void activateAiProfile(e.target.value)}
+                        >
+                          {aiAssignments.profiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.name} · {profile.model}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="setting-block">
+                        <div className="setting-label">
+                          <div>
+                            <strong>已配置的服务</strong>
+                            <span className="hint">添加、修改或删除服务在 WeportAI 页面完成（那里有完整的模型发现与测试）</span>
+                          </div>
+                        </div>
+                        <div className="ai-profile-list">
+                          {aiAssignments.profiles.map((profile) => (
+                            <div className="ai-profile-row" key={profile.id} data-active={profile.id === aiAssignments.activeProfileId}>
+                              <strong>{profile.name}</strong>
+                              <span className="ai-profile-model">{profile.providerId} · {profile.model}</span>
+                              {profile.hasApiKey ? (
+                                <span className="badge ok">{profile.apiKeyHint || '已配置密钥'}</span>
+                              ) : (
+                                <span className="badge">未配置密钥</span>
+                              )}
+                              {profile.id === aiAssignments.activeProfileId && <span className="badge ok">默认</span>}
+                            </div>
+                          ))}
+                        </div>
+                        <button className="secondary-btn" type="button" onClick={() => switchTab('ai')}>
+                          <Sparkles size={13} />
+                          打开 WeportAI 管理服务
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </section>
               )}
 

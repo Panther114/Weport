@@ -1897,7 +1897,9 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
       '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。'
   )
 
-  const result = await weportAiService.runChat(chat.id, sections.join('\n\n'))
+  // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
+  // 任务可以独立指向一个便宜/快的模型，而不影响 WeportAI 的手动对话。
+  const result = await weportAiService.runChat(chat.id, sections.join('\n\n'), { consumer: 'webot' })
   if (!result.success) throw new Error(result.error || '任务执行失败')
 
   const finished = weportAiService.getChat(chat.id)
@@ -2802,6 +2804,16 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   }))
   ipcMain.handle('ai:saveProfile', (_e, input: any) => weportAiService.saveProviderProfile(input || {}))
   ipcMain.handle('ai:activateProfile', (_e, id: string) => weportAiService.activateProviderProfile(String(id || '')))
+  // 「设置 → AI 服务」：三个功能面各自指向哪个服务。以前只有一个全局默认 +
+  // WeClone 私自 activate，见 providerProfiles 里的说明。
+  ipcMain.handle('ai:getConsumerAssignments', () => ({
+    success: true,
+    consumers: weportAiService.getConsumerAssignments(),
+    profiles: weportAiService.listProviderProfiles(),
+    activeProfileId: weportAiService.getActiveProfileId(),
+  }))
+  ipcMain.handle('ai:assignConsumer', (_e, consumer: string, profileId: string) =>
+    weportAiService.assignConsumerProfile(String(consumer || ''), String(profileId || '')))
   ipcMain.handle('ai:deleteProfile', (_e, id: string) => weportAiService.deleteProviderProfile(String(id || '')))
   ipcMain.handle('ai:testProfile', (_e, input: any) => weportAiService.fetchProviderModels(input || {}))
   ipcMain.handle('ai:setSetup', (_e, patch: any) => {
@@ -5425,6 +5437,19 @@ async function runScreenshotMode() {
     ).catch(() => false)
     await sleep(400)
   })
+  // 7.7) 设置 → AI 服务：三个功能面各自指向哪个服务
+  await captureV09('settings-ai', 'settings-ai.png', ['.ai-profile-list'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('AI 服务'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+  })
+
   // 7.8) 设置 → 接口：只读 HTTP API 与服务端 MCP 面板（含「复制客户端配置」）
   await captureV09('settings-connect', 'settings-connect.png', ['.mcp-panel', '.settings-pane'], async () => {
     await mainWindow!.webContents.executeJavaScript(
