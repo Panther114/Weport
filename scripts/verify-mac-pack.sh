@@ -118,19 +118,37 @@ else
   pass "no nested *.framework under Contents/Resources"
 fi
 
-# --- 6. signing was not silently skipped ---------------------------------------
+# --- 6. the bundle is actually SEALED (not just linker-signed) ------------------
 # electron-builder logs "skipped macOS application code signing" and continues
-# when no identity is configured (the v0.9.11 failure mode). An unsigned bundle
-# must fail this gate even if --verify above were ever loosened.
+# when no identity is configured. That is the v0.9.11 failure mode (issue #18).
+#
+# IMPORTANT: grepping for `Signature=adhoc` is NOT a sufficient gate. On a
+# skipped build the inner Electron binaries keep their *linker* ad-hoc
+# signature, so `codesign -dvv` still prints
+#   Signature=adhoc, flags=0x20002(adhoc,linker-signed), Sealed Resources=none
+# while the bundle itself has no seal at all — and it then fails
+# `codesign --verify --deep --strict` with "code has no resources but signature
+# indicates they must be present". Assert the BUNDLE SEAL instead.
 echo "--- codesign -dvv $APP_PATH ---"
 SIGN_INFO="$(codesign -dvv "$APP_PATH" 2>&1 || true)"
 echo "$SIGN_INFO"
 if echo "$SIGN_INFO" | grep -q 'code object is not signed at all'; then
   fail "app is NOT signed at all (signing was skipped — issue #18 root cause)"
-elif echo "$SIGN_INFO" | grep -qE 'Authority=|Signature=adhoc'; then
-  pass "app carries a signature (Authority or ad-hoc)"
+fi
+if echo "$SIGN_INFO" | grep -q 'Format=bundle with'; then
+  pass "signed as a bundle (not a bare Mach-O)"
 else
-  fail "could not confirm any signature on app; codesign output above"
+  fail "not signed as a bundle — 'code has no resources but signature indicates they must be present' will follow (issue #18)"
+fi
+if [ -s "$APP_PATH/Contents/_CodeSignature/CodeResources" ]; then
+  pass "bundle seal present (Contents/_CodeSignature/CodeResources)"
+else
+  fail "missing or empty Contents/_CodeSignature/CodeResources — the bundle has no seal (issue #18)"
+fi
+if echo "$SIGN_INFO" | grep -qE 'Sealed Resources version=2.*files=[1-9]'; then
+  pass "sealed resources recorded"
+else
+  fail "codesign reports no sealed resources — the bundle seal is incomplete (issue #18)"
 fi
 
 echo "=== verify-mac-pack: $FAILURES failure(s) ==="

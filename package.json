@@ -111,15 +111,6 @@
           "to": "resources/wedecrypt/macos/${arch}"
         },
         {
-          "from": "resources/welive/macos/${arch}",
-          "to": "resources/welive/macos/${arch}",
-          "filter": [
-            "**/*",
-            "!**/*.framework",
-            "!**/*.framework/**/*"
-          ]
-        },
-        {
           "from": "electron/assets/wasm/",
           "to": "assets/wasm/"
         },

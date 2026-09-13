@@ -2,9 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- com.apple.security.get-task-allow is deliberately ABSENT.
+         It makes *this* app attachable by other processes (the wrong direction
+         for what it looks like it is for: attaching to WeChat requires the
+         TARGET to carry get-task-allow, not us), and Apple rejects notarization
+         outright when it is present:
+         "The executable requests the com.apple.security.get-task-allow
+          entitlement."  See docs/macos-troubleshooting.md.
+
+         The three keys below are inert while mac.hardenedRuntime is false; they
+         are kept because they are required the moment hardened runtime is
+         enabled for a Developer ID / notarized build. -->
     <key>com.apple.security.cs.debugger</key>
-    <true/>
-    <key>com.apple.security.get-task-allow</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
