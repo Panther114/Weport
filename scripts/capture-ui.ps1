@@ -111,6 +111,7 @@ $settingsPng = Join-Path $OutputDir 'settings.png'
 $webotPng = Join-Path $OutputDir 'webot.png'
 $webotNotesPng = Join-Path $OutputDir 'webot-notes.png'
 $webotNarrowPng = Join-Path $OutputDir 'webot-narrow.png'
+$weclonePng = Join-Path $OutputDir 'weclone.png'
 $viewportMetrics = Join-Path $OutputDir 'viewport-metrics.json'
 function Assert-Captured([string]$Path, [string]$Label) {
   if (-not (Test-Path $Path)) {
@@ -147,6 +148,7 @@ Assert-Captured $settingsPng 'settings.png'
 Assert-Captured $webotPng 'webot.png'
 Assert-Captured $webotNotesPng 'webot-notes.png'
 Assert-Captured $webotNarrowPng 'webot-narrow.png'
+Assert-Captured $weclonePng 'weclone.png'
 Assert-Captured $viewportMetrics 'viewport-metrics.json'
 
 Assert-ImageHasContent $mainPng 'main window'
@@ -164,6 +166,7 @@ Assert-ImageHasContent $settingsPng 'settings'
 Assert-ImageHasContent $webotPng 'WeBot tasks'
 Assert-ImageHasContent $webotNotesPng 'WeBot notes'
 Assert-ImageHasContent $webotNarrowPng 'WeBot at narrow width'
+Assert-ImageHasContent $weclonePng 'WeClone'
 
 # Responsive assertions: horizontal overflow and nav-label visibility.
 #

@@ -3165,6 +3165,37 @@ function installScreenshotDemoHandlers() {
   override('webot:updateTask', () => demoWebBotTask)
   override('webot:deleteTask', () => true)
   override('webot:runNow', () => ({ success: true }))
+
+  // WeClone 演示数据：让「人格克隆」页在截图/转储模式下有内容可渲染。
+  // 与其余演示数据一样脱敏且确定。
+  const demoClone = {
+    id: 'clone-demo-1',
+    wxid: 'wxid_demo',
+    displayName: '演示分身',
+    knowledgeCutoff: '2026-08-31',
+    messageCount: 48_210,
+    sessionCount: 37,
+    chunkCount: 1284,
+    generatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+    visibility: 'private' as const,
+    uploaded: false,
+    uploadStatus: 'local_only' as const,
+    piiHits: 3,
+  }
+  override('weclone:list', () => ({ success: true, clones: [{ ...demoClone, source: 'local' as const }] }))
+  override('weclone:get', () => ({ success: true, clone: demoClone, mds: { profile: '# 演示画像\n\n这是脱敏的演示内容。' } }))
+  override('weclone:getServerStatus', () => ({ configured: false, enabled: true, baseUrl: '', hasToken: false }))
+  override('weclone:getForcedProviderStatus', () => ({
+    providerId: 'opencode-go',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    model: 'muse-spark-1.2-contributor',
+    hasApiKey: false,
+    isForced: false,
+  }))
+  override('weclone:cancel', () => ({ success: true }))
+  override('weclone:delete', () => ({ success: true }))
+  override('weclone:setVisibility', () => ({ success: true }))
+  override('weclone:generate', () => ({ success: false, error: '演示模式不执行克隆生成' }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4889,6 +4920,13 @@ async function runScreenshotMode() {
 
   await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {
     await clickTab('WeBot 笔记')
+  })
+
+  // WeClone（人格克隆）：进入时停在 hub（入口选择），因此断言 hub 的节点。
+  // 注意 .weclone-server-chip 只在 manage 段渲染，用它会在 hub 上误判为
+  // "did not render" —— 断言必须对应当前实际渲染的那一段。
+  await captureV09('weclone', 'weclone.png', ['.weclone-hub', '.analytics-hub-cards'], async () => {
+    await clickTab('人格克隆')
   })
 
   // 响应式：把窗口缩到接近最小宽度再截一次，并**记录度量**交给 PowerShell 断言。
