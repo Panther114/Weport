@@ -1096,7 +1096,7 @@ export default function WeportAiPanel() {
             ref={inputRef}
             className="ai-input"
             value={input}
-            placeholder={running ? '正在执行…' : '分析你的聊天记录…（Enter 发送，Shift+Enter 换行）'}
+            placeholder={running ? '正在执行…' : '分析你的聊天记录…'}
             rows={1}
             onChange={(e) => {
               handleInputChange(e.target.value)

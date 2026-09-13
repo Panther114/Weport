@@ -1064,7 +1064,116 @@
 }
 
 // =============================================================================
-// 18. 密度与行内一致性（重排的核心）
+// 18. WeportAI 三栏重排
+// =============================================================================
+//
+// 截图暴露的问题：
+//
+//  1. **右栏太窄（250px）**。文件卡里「名字 + 大小 + 日期」被迫折成两行，
+//     看起来拥挤且难以扫读；而右栏本该是最容易一眼看完的一列。
+//  2. **统计卡被裁掉**。我上一轮为了避开右下角弹窗，把 padding-bottom 加在了
+//     `.ai-workspace`（一个 overflow:hidden 的横向 flex 容器）上 —— 那只会
+//     压缩整个栏的内容区，而不是给弹窗让位。正确的落点是栏内**可滚动**的
+//     正文容器。
+//  3. **左栏「新建对话」是一个占满整行的大方块**，视觉重量和主操作相当，
+//     但它只是一个高频的小动作。
+
+// 三栏重新配比：左栏窄一点，右栏宽一点（文件元数据需要横向空间）。
+.ai-shell {
+  grid-template-columns: 220px minmax(0, 1fr) 288px;
+}
+
+// 滚动的正文容器留出弹窗高度 —— 这才是上一轮该改的地方。
+.ai-ws-body {
+  padding-bottom: 108px;
+}
+
+// 去掉上一轮加错的 padding（它裁掉了统计卡）。
+.ai-workspace {
+  padding-bottom: 0;
+}
+
+// 左栏：新建对话改为紧凑按钮，不再与主操作争视觉重量。
+.ai-new-chat {
+  margin: var(--space-3) var(--space-3) var(--space-2);
+  padding: 8px var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  background: transparent;
+  justify-content: flex-start;
+  gap: 8px;
+
+  &:hover {
+    background: var(--elevated);
+    border-color: var(--accent);
+  }
+}
+
+// 文件卡：原来「名字」与「大小 · 日期」是上下两行，在 250px 的窄栏里经常
+// 折成三行。改成一行 —— 名字靠左并省略，元数据靠右且不折行。右栏本来就该是
+// 一眼扫完的一列。
+.ai-ws-note-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1;
+
+  > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-width: 0;
+    flex: 1;
+  }
+
+  strong {
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  span {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+}
+
+// 右栏里那行被截断的原始工作区路径：它是给用户看的噪音，收成一行小字并
+// 允许悬停查看完整路径（title 属性已在 JSX 里）。
+.ai-ws-path {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// 统计卡的三个读数：标签左、数值右，数字用等宽字体对齐比较。
+.ai-ws-stats {
+  .ai-stat-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: 11.5px;
+
+    strong {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text);
+    }
+  }
+}
+// =============================================================================
+// 19. 密度与行内一致性（重排的核心）
 // =============================================================================
 //
 // 截图暴露的两个问题：
