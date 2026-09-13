@@ -3606,8 +3606,76 @@ commonEmojis: [
   }
 }
 
-function demoAnnualReport(year: number): Record<string, unknown> {
-  const heatmap: number[][] = Array.from({ length: 7 }, () =>
+/**
+ * 双人报告的演示数据（脱敏、确定）。
+ *
+ * 形状必须和 `dualReportWorker` 的产物一致 —— 缺一个字段，页面上就是一块空白
+ * 或者一个 0，而截图断言只会告诉你"非空白"。
+ */
+function demoDualReport(friendUsername: string, year: number): Record<string, unknown> {
+  const heatmap = Array.from({ length: 7 }, (_, day) =>
+    Array.from({ length: 24 }, (_, hour) => {
+      const base = Math.round(40 * Math.exp(-((hour - 21) ** 2) / 30))
+      return base * (day >= 1 && day <= 5 ? 0.7 : 1)
+    }),
+  )
+  const monthly: Record<string, number> = {}
+  for (let m = 1; m <= 12; m += 1) monthly[String(m)] = 180 + Math.round(120 * Math.sin(m / 2))
+  return {
+    year,
+    selfName: '我',
+    friendUsername,
+    friendName: '李娜',
+    firstChat: {
+      createTime: Date.now() - 400 * 86_400_000,
+      createTimeStr: '2023-08-12',
+      content: '在吗？想问下上次那个文档你还有吗',
+      isSentByMe: false,
+    },
+    yearFirstChat: {
+      createTime: Date.now() - 250 * 86_400_000,
+      createTimeStr: '2024-01-01 09:12',
+      content: '新年快乐！今年也要一起加油',
+      isSentByMe: true,
+      friendName: '李娜',
+      firstThreeMessages: [
+        { content: '新年快乐！今年也要一起加油', isSentByMe: true, createTime: 0, createTimeStr: '09:12' },
+        { content: '新年快乐～ 你也是！', isSentByMe: false, createTime: 0, createTimeStr: '09:15' },
+        { content: '改天一起吃个饭', isSentByMe: true, createTime: 0, createTimeStr: '09:16' },
+      ],
+    },
+    stats: {
+      totalMessages: 12846,
+      totalWords: 96234,
+      imageCount: 412,
+      voiceCount: 168,
+      emojiCount: 934,
+    },
+    topPhrases: [
+      { phrase: '好的', count: 412 },
+      { phrase: '哈哈哈', count: 356 },
+      { phrase: '收到', count: 288 },
+      { phrase: '明天见', count: 164 },
+      { phrase: '辛苦啦', count: 142 },
+      { phrase: '晚安', count: 121 },
+    ],
+    myExclusivePhrases: [
+      { phrase: '我来订票', count: 18 },
+      { phrase: '路上小心', count: 14 },
+    ],
+    friendExclusivePhrases: [
+      { phrase: '你吃了没', count: 21 },
+      { phrase: '记得带伞', count: 12 },
+    ],
+    heatmap,
+    initiative: { initiated: 6120, received: 6726 },
+    response: { avg: 214, fastest: 12, count: 1842 },
+    monthly,
+    streak: { days: 67, startDate: '2024-03-04', endDate: '2024-05-09' },
+  }
+}
+
+function demoAnnualReport(year: number): Record<string, unknown> {  const heatmap: number[][] = Array.from({ length: 7 }, () =>
     Array.from({ length: 24 }, () => (Math.random() < 0.55 ? Math.round(Math.random() * 40) : 0)),
   )
   return {
@@ -3814,6 +3882,13 @@ override('groupAnalytics:getGroupActiveHours', () => ({ success: true, data: gro
     return { success: true, taskId: 'years_demo', reused: false, snapshot: { years: [2024, 2025], done: true, statusText: '年份数据加载完成' } }
   })
   override('annualReport:cancelAvailableYearsLoad', () => ({ success: true }))
+  // 双人报告：没有演示数据时它跑的是真实 worker，而演示配置指向不存在的目录，
+  // 于是整页渲染成一片 0 —— 「渲染成功但一个字都没验证到」。这里给一份脱敏的
+  // 演示报告，截图才真的能证明布局是活的。
+  override('dualReport:generateReport', async (_event, payload: { friendUsername?: string; year?: number }) => {
+    await new Promise((r) => setTimeout(r, 400))
+    return { success: true, data: demoDualReport(String(payload?.friendUsername || 'wxid_lina'), Number(payload?.year) || 0) }
+  })
   override('annualReport:generateReport', async (event, year: number) => {
     for (let i = 1; i <= 4; i += 1) {
       await new Promise((r) => setTimeout(r, 150))
@@ -5024,6 +5099,31 @@ async function runScreenshotMode() {
     ).catch(() => false)
     await sleep(500)
   }, 1600)
+  // 7.5.1) 双人报告：四个分析入口里唯一没有截图的一个，等于没验证过。
+  await captureV09('dual', 'dual-report.png', ['.dual-report-result', '.dual-report-hero', '.dual-report-friend'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const back = Array.from(document.querySelectorAll('.v09-actions .chip, .v09-toolbar .chip')).find((x) => x.textContent.includes('返回选择'));
+         back?.click();
+         return !!back;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+    await waitForDom('.analytics-big-card', isRealScreenshotMode ? 120 : 40)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[3]?.click(); return !!cards[3]; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(700)
+    // 报告默认停在好友选择页，先挑第一个好友生成报告再截图。
+    await waitForDom('.dual-report-friend', isRealScreenshotMode ? 120 : 40)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const f = document.querySelector('.dual-report-friend'); f?.click(); return !!f; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(1500)
+  }, 1800)
   // 7.6) 设置（默认落在「常规」分类 + 左侧分类列）
   await captureV09('settings', 'settings.png', ['.settings-nav-item', '.settings-page'], async () => {
     await clickTab('设置')

@@ -359,7 +359,14 @@ export const DualReportView: React.FC<{ onBack: () => void; defaultYear: number 
         <h2>{report.selfName} <span className="dual-report-hero-times">×</span> {report.friendName}</h2>
         <p className="v09-sub">
           {yearLabel === '全部时间' ? '你们从相识至今的对话' : `${yearLabel}里你们的对话`}
-          {report.streak && <> · 最长连续 <b style={{ color: 'var(--text)' }}>{report.streak.days} 天</b>（{report.streak.startDate} 至 {report.streak.endDate}）</>}
+          {/* 只有真的有连续天数才写这一句：原来只判断 streak 对象存在，于是没有
+              记录时会渲染成「最长连续 0 天（ 至 ）」—— 一对空括号。 */}
+          {report.streak && report.streak.days > 0 && (
+            <>
+              {' '}· 最长连续 <b style={{ color: 'var(--text)' }}>{report.streak.days} 天</b>
+              {report.streak.startDate && report.streak.endDate ? `（${report.streak.startDate} 至 ${report.streak.endDate}）` : ''}
+            </>
+          )}
         </p>
 
         <div className="dual-report-stat-grid">
