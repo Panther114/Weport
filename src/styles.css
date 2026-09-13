@@ -23,38 +23,13 @@
   --font-mono: Consolas, "Cascadia Mono", "JetBrains Mono", monospace;
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
-
-  /* 彩色主题（默认）：提升饱和度与对比度的浅蓝家族，克制但更通透 */
-  --accent: #5b8eff;
-  --accent-2: #6ea8ff;
-  --accent-3: #8ab4ff;
-  --accent-4: #3d5bff;
-  --accent-5: #7ec0ff;
-  --accent-6: #a6cfff;
-  --accent-strong: #5b8eff;
-  --accent-deep: #3658ff;
-  --accent-soft: rgba(91, 142, 255, 0.16);
-  --accent-softer: rgba(91, 142, 255, 0.09);
-  --accent-glow: rgba(91, 142, 255, 0.28);
-  --accent-grad: linear-gradient(165deg, rgba(91, 142, 255, 0.24), rgba(91, 142, 255, 0.04));
-  --accent-grad-strong: linear-gradient(165deg, rgba(91, 142, 255, 0.36), rgba(54, 88, 255, 0.12));
 }
 
-/* 黑白主题：全部 accent 退化为中性灰阶（背景保持不变） */
-:root[data-theme="mono"] {
-  --accent: #f4f4f5;
-  --accent-2: #d4d4da;
-  --accent-3: #b8b8c0;
-  --accent-4: #9a9aa4;
-  --accent-5: #7e7e88;
-  --accent-6: #63636d;
-  --accent-strong: #f4f4f5;
-  --accent-deep: #d4d4da;
-  --accent-soft: rgba(244, 244, 245, 0.1);
-  --accent-softer: rgba(244, 244, 245, 0.05);
-  --accent-grad: linear-gradient(160deg, rgba(244, 244, 245, 0.12), rgba(244, 244, 245, 0.03));
-  --accent-grad-strong: linear-gradient(160deg, rgba(244, 244, 245, 0.2), rgba(160, 160, 170, 0.08));
-}
+/* 强调色家族与明暗两档 moved to styles/theme.scss（在本文件之后加载）：
+   这里原来写死了浅蓝的 --accent 家族和 `[data-theme="mono"]` 灰阶覆盖，而
+   设置页的「强调色」色块写的是 data-accent —— 没有任何规则读它。现在两种
+   控制合成一个模型（data-mode × data-accent），令牌全部由 theme.scss 从
+   --accent-raw 推导。 */
 
 * {
   box-sizing: border-box;

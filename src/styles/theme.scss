@@ -1,0 +1,228 @@
+// =============================================================================
+// v1.0 主题系统
+// =============================================================================
+//
+// 为什么需要这个文件
+// ----------------
+// v1.0 之前「主题」是两个互不相干的系统：
+//
+//   1. `colorMode`（设置页的「色彩主题」卡片）：colorful / mono，写成
+//      `:root[data-theme="mono"]`，覆盖 --accent 家族为灰阶。
+//   2. `appearance.accent`（设置页的「强调色」色块）：把 `data-accent="blue"`
+//      写在 <html> 上 —— 但**没有任何 CSS 读取这个属性**。四个色块点下去
+//      什么都不会发生。用户看到的"强调色和色彩主题不是一个东西"是准确的：
+//      一个真的改颜色，另一个只是个装饰。
+//
+// 现在合成一个模型：
+//
+//   data-mode   = dark | light          （明暗）
+//   data-accent = blue | violet | teal | rose | amber | graphite（强调色）
+//
+// 6 种强调色 × 明暗两档 = 12 套主题，都由同一组令牌驱动，页面组件只使用令牌，
+// 因此不需要逐个页面适配。旧的 `graphite` 就是原来的「黑白」。
+//
+// 令牌用 color-mix 从 --accent-raw 推导，而不是逐色写死十来个变量：写死的话
+// 每加一种强调色就要复制一整块，必然会漏掉某一个（原来的 --accent-6 就只在
+// 少数几处用到，很容易被忘掉）。明暗两档只需要换混色的方向。
+
+// -----------------------------------------------------------------------------
+// 强调色（6 种）
+// -----------------------------------------------------------------------------
+
+:root,
+:root[data-accent='blue'] {
+  --accent-raw: #5b8eff;
+}
+
+:root[data-accent='violet'] {
+  --accent-raw: #9b7bff;
+}
+
+:root[data-accent='teal'] {
+  --accent-raw: #2fb8a6;
+}
+
+:root[data-accent='rose'] {
+  --accent-raw: #f2678f;
+}
+
+:root[data-accent='amber'] {
+  --accent-raw: #e0a03c;
+}
+
+// graphite = 原来的「黑白」主题：强调色退化为中性灰阶。
+:root[data-accent='graphite'] {
+  --accent-raw: #9a9aa4;
+}
+
+// -----------------------------------------------------------------------------
+// 派生令牌
+// -----------------------------------------------------------------------------
+//
+// `--mix-light` / `--mix-dark` 是混色方向：深色主题下"更亮"的一档要向白混，
+// 浅色主题下必须向黑混，否则浅底上的浅色强调色会直接看不见。
+
+:root {
+  --mix-light: #ffffff;
+  --mix-dark: #000000;
+
+  --accent: var(--accent-raw);
+  --accent-strong: var(--accent-raw);
+  --accent-2: color-mix(in srgb, var(--accent-raw) 84%, var(--mix-light));
+  --accent-3: color-mix(in srgb, var(--accent-raw) 68%, var(--mix-light));
+  --accent-5: color-mix(in srgb, var(--accent-raw) 62%, var(--mix-light));
+  --accent-6: color-mix(in srgb, var(--accent-raw) 46%, var(--mix-light));
+  --accent-4: color-mix(in srgb, var(--accent-raw) 74%, var(--mix-dark));
+  --accent-deep: color-mix(in srgb, var(--accent-raw) 62%, var(--mix-dark));
+
+  --accent-soft: color-mix(in srgb, var(--accent-raw) 16%, transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) 9%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent-raw) 30%, transparent);
+  --accent-grad: linear-gradient(165deg, color-mix(in srgb, var(--accent-raw) 24%, transparent), color-mix(in srgb, var(--accent-raw) 4%, transparent));
+  --accent-grad-strong: linear-gradient(165deg, color-mix(in srgb, var(--accent-raw) 36%, transparent), color-mix(in srgb, var(--accent-raw) 12%, transparent));
+}
+
+// graphite 是灰阶：软色底和渐变要更淡，否则一行行灰块看起来像禁用态。
+:root[data-accent='graphite'] {
+  --accent-soft: color-mix(in srgb, var(--accent-raw) 12%, transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) 6%, transparent);
+}
+
+// -----------------------------------------------------------------------------
+// 浅色模式
+// -----------------------------------------------------------------------------
+
+:root[data-mode='light'] {
+  --mix-light: #000000;
+  --mix-dark: #ffffff;
+
+  // 强调色当**文字**用在浅底上时，原始色相太亮：浅蓝 #5b8eff 在 #f4f5f9 上只有
+  // 2.85 对比度（设置页分类名、双人报告里的名字都栽在这里，是对比度审计抓出来
+  // 的）。浅色模式下把基准色压深一档，于是所有直接使用 var(--accent) 的文字
+  // 一起变可读；--accent-soft/-softer 仍是半透明色底，不受影响。
+  --accent: color-mix(in srgb, var(--accent-raw) 72%, #000000);
+  --accent-strong: color-mix(in srgb, var(--accent-raw) 72%, #000000);
+
+  --bg: #f4f5f9;
+  --bg-raised: #ffffff;
+  --panel: #ffffff;
+  --elevated: #eef0f6;
+  --line: #e3e5ee;
+  --line-strong: #c8ccda;
+
+  --text: #16171d;
+  --text-dim: #4c4e5b;
+  --text-faint: #7c7f8d;
+
+  // 语义色在浅底上要压深，原来的 #9fe8a8 在白色上几乎看不清。
+  --ok: #17803d;
+  --warn: #9a6400;
+  --danger: #cf2f36;
+
+  --shadow-pop: 0 8px 28px rgba(24, 28, 48, 0.16);
+  --shadow-modal: 0 24px 64px rgba(24, 28, 48, 0.22);
+  --elev-1: 0 1px 2px rgba(24, 28, 48, 0.08);
+  --elev-2: 0 4px 14px rgba(24, 28, 48, 0.12);
+
+  color-scheme: light;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+// 外壳的径向光晕在浅色下会变成一层脏灰，直接去掉。
+:root[data-mode='light'] .shell {
+  background: var(--bg);
+}
+
+// 浅色下"选中态"用的纯白 chip（黑白主题里的白底黑字）会消失在白色卡片上。
+// 统一改成强调色底 + 强调色文字。
+:root[data-mode='light'] .chip.chip-active {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  border-color: color-mix(in srgb, var(--accent-raw) 42%, transparent);
+}
+
+// -----------------------------------------------------------------------------
+// 视频背景
+// -----------------------------------------------------------------------------
+//
+// 图片背景是 .shell 上的 background-image（见 v1.scss），视频必须是真实的
+// <video> 元素。因此视频模式要把 .shell 自己的底色让开，否则视频被压在下面
+// 根本看不见。层级用 z-index: -1：它必须落在面板之下，而面板本身是普通流内容。
+
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.app-bg video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  // 模糊量由设置页控制；0 时浏览器不会为 0px 建立滤镜层，开销可忽略。
+  filter: blur(var(--app-bg-blur, 0px));
+  transform: scale(1.04); // 模糊会在边缘露出底色，放大一点点补掉
+}
+
+.app-bg-dim {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: var(--app-bg-dim, 0);
+}
+
+// 视频模式下把 .shell 的纯色底和径向光晕去掉，让它露出下面的视频。
+:root[data-bg-kind='video'] .shell {
+  background-color: transparent;
+  background-image: none;
+}
+
+// -----------------------------------------------------------------------------
+// 主题一览卡片
+// -----------------------------------------------------------------------------
+
+.theme-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+// 小预览块：左边一条强调色，右边两条"文字行"，直接画出这套主题的观感。
+.theme-card-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 30px;
+  height: 22px;
+  padding: 3px 4px;
+  border: 1px solid;
+  border-radius: 5px;
+  flex-shrink: 0;
+
+  i {
+    display: block;
+    height: 3px;
+    border-radius: 2px;
+
+    &:first-child {
+      width: 60%;
+    }
+
+    &:last-child {
+      width: 100%;
+    }
+  }
+}
+
+.theme-card-check {
+  margin-left: auto;
+}
+

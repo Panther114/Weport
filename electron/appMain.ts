@@ -2937,6 +2937,12 @@ function demoConfigValue(key: string): unknown {
       return { [DEMO_WXID]: { decryptKey: DEMO_DECRYPT_KEY, updatedAt: 0 } }
     case 'lastTab':
       return 'connect'
+    // v1.0.1 主题模型：明暗 × 强调色。截图模式据此可以整套切到浅色
+    // （capture-ui.ps1 -LightMode），用来验证浅色模式不是只改了背景色。
+    case 'appearanceMode':
+      return process.env.WEPORT_THEME_MODE === 'light' ? 'light' : 'dark'
+    case 'appearanceAccent':
+      return process.env.WEPORT_THEME_ACCENT || 'blue'
     case 'colorMode':
       return 'colorful'
     case 'messagePushEnabled':
@@ -4997,6 +5003,100 @@ async function runScreenshotMode() {
   // Object] 的页面不会被非空白断言拦住 —— 群聊分析页就带着三条「undefined 条」
   // 通过了很久的断言。每次截图后扫一遍可见文本，命中就记下来，最后当成失败。
   const placeholderHits: Record<string, string[]> = {}
+  const contrastHits: Record<string, Array<{ text: string; ratio: number; color: string; bg: string }>> = {}
+  /**
+   * 对比度审计：浅色模式最容易出的问题不是"看不出来"，而是**部分文字变成白底
+   * 白字 / 浅底浅字** —— 截图本身仍然是"非空白"，任何现有断言都拦不住。
+   *
+   * 做法：遍历有文字的元素，沿祖先链找到第一个不透明的背景色，按 WCAG 算对比度。
+   * 低于 3.0 即记录（正文阈值 4.5，但界面里大量是 11-12px 的次要文字与图标，
+   * 用 3.0 作为"硬失败"线，4.5 作为提示）。
+   */
+  const auditContrast = async (label: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const rows = (await mainWindow.webContents.executeJavaScript(
+        `(() => {
+           const parse = (value) => {
+             const m = /rgba?\\(([^)]+)\\)/.exec(value || '')
+             if (!m) return null
+             const parts = m[1].split(',').map((v) => Number.parseFloat(v.trim()))
+             if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null
+             return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 }
+           }
+           const lum = (c) => {
+             const f = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4) }
+             return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+           }
+           const ratio = (a, b) => {
+             const l1 = lum(a); const l2 = lum(b)
+             const hi = Math.max(l1, l2); const lo = Math.min(l1, l2)
+             return (hi + 0.05) / (lo + 0.05)
+           }
+           const blend = (fg, bg) => ({
+             r: fg.r * fg.a + bg.r * (1 - fg.a),
+             g: fg.g * fg.a + bg.g * (1 - fg.a),
+             b: fg.b * fg.a + bg.b * (1 - fg.a),
+             a: 1,
+           })
+           const effectiveBg = (el) => {
+             let bg = { r: 0, g: 0, b: 0, a: 0 }
+             let node = el
+             const layers = []
+             while (node && node.nodeType === 1) {
+               const c = parse(getComputedStyle(node).backgroundColor)
+               if (c && c.a > 0) layers.push(c)
+               if (c && c.a >= 0.99) break
+               node = node.parentElement
+             }
+             const root = parse(getComputedStyle(document.body).backgroundColor) || { r: 0, g: 0, b: 0, a: 1 }
+             bg = root.a >= 0.99 ? root : { r: 255, g: 255, b: 255, a: 1 }
+             for (let i = layers.length - 1; i >= 0; i -= 1) bg = blend(layers[i], bg)
+             return bg
+           }
+           const out = []
+           const nodes = document.querySelectorAll('body *')
+           for (const el of nodes) {
+             if (el.closest('[aria-hidden="true"], .app-bg, script, style')) continue
+             const style = getComputedStyle(el)
+             if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) < 0.35) continue
+             const rect = el.getBoundingClientRect()
+             if (rect.width < 8 || rect.height < 6) continue
+             // 只看直接包含文字的元素，避免每个包裹层都算一遍
+             const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3 && n.textContent.trim().length > 0)
+             if (own.length === 0) continue
+             const fgRaw = parse(style.color)
+             if (!fgRaw) continue
+             const bg = effectiveBg(el)
+             const fg = fgRaw.a >= 0.99 ? fgRaw : blend(fgRaw, bg)
+             const r = ratio(fg, bg)
+             if (r < 4.5) {
+               out.push({
+                 text: (el.textContent || '').trim().slice(0, 40),
+                 ratio: Math.round(r * 100) / 100,
+                 color: style.color,
+                 bg: 'rgb(' + Math.round(bg.r) + ',' + Math.round(bg.g) + ',' + Math.round(bg.b) + ')',
+                 size: Number.parseFloat(style.fontSize) || 12,
+               })
+             }
+           }
+           return out.slice(0, 40)
+         })()`,
+        true,
+      )) as Array<{ text: string; ratio: number; color: string; bg: string; size: number }>
+      // 大号加粗文字按 WCAG 只需 3.0，不记；其余低于 3.0 视为硬失败。
+      const bad = (Array.isArray(rows) ? rows : []).filter((row) => row.ratio < 3)
+      if (bad.length > 0) {
+        contrastHits[label] = bad
+        console.warn(`[screenshot] ${label} contrast: ${bad.length} element(s) below 3.0, worst=${bad[0].ratio}`)
+        for (const row of bad.slice(0, 4)) {
+          console.warn(`   "${row.text}" ratio=${row.ratio} color=${row.color} on ${row.bg} size=${row.size}`)
+        }
+      }
+    } catch { /* 审计失败不影响截图 */ }
+  }
+
+  const placeholderHitsExport = placeholderHits
   const scanPlaceholders = async (label: string) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
@@ -5026,6 +5126,7 @@ async function runScreenshotMode() {
       await sleep(settleMs)
       await saveStable(mainWindow, fileName, 12, 30)
       await scanPlaceholders(label)
+      await auditContrast(label)
       await dumpRects(`${fileName.replace('.png', '')}-rects.json`, selectors)
       console.log(`[screenshot] ${fileName} captured`)
     } catch (e) {
@@ -5296,10 +5397,17 @@ async function runScreenshotMode() {
     }
 
     try {
-      writeFileSync(join(outDir, 'placeholder-scan.json'), JSON.stringify(placeholderHits, null, 2), 'utf8')
-      log(`[screenshot] placeholder scan = ${JSON.stringify(placeholderHits)}`)
+      writeFileSync(join(outDir, 'placeholder-scan.json'), JSON.stringify(placeholderHitsExport, null, 2), 'utf8')
+      log(`[screenshot] placeholder scan = ${JSON.stringify(placeholderHitsExport)}`)
     } catch (e) {
       log('WARN [screenshot] could not write placeholder scan:', e)
+    }
+
+    try {
+      writeFileSync(join(outDir, 'contrast-audit.json'), JSON.stringify(contrastHits, null, 2), 'utf8')
+      log(`[screenshot] contrast audit = ${JSON.stringify(Object.keys(contrastHits))} (failing screens)`)
+    } catch (e) {
+      log('WARN [screenshot] could not write contrast audit:', e)
     }
   }
 

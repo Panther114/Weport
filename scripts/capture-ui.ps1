@@ -10,6 +10,11 @@ param(
   # 17 张截图 + 一次响应式窗口重排。120s 是 12 张时代的预算，机器一忙就会在
   # 中途（WeportAI 那一步）超时，看起来像"截图失败"，其实是预算不够。
   [int]$TimeoutSeconds = 300,
+  # 浅色模式整套跑一遍：捕获 + 对比度审计。浅色最容易出的问题（白底白字）
+  # 用"截图非空白"是抓不到的。
+  [switch]$LightMode,
+  # 覆盖强调色（blue / violet / teal / rose / amber / graphite），用于逐套抽查。
+  [string]$Accent = '',
   [switch]$PublishToDocs
 )
 
@@ -62,6 +67,8 @@ function Assert-ImageHasContent([string]$Path, [string]$Label) {
 
 $env:WEPORT_SCREENSHOT_POPUP = '1'
 $env:WEPORT_SCREENSHOT_OUT = $OutputDir
+if ($LightMode) { $env:WEPORT_THEME_MODE = 'light' } else { Remove-Item Env:WEPORT_THEME_MODE -ErrorAction SilentlyContinue }
+if ($Accent) { $env:WEPORT_THEME_ACCENT = $Accent } else { Remove-Item Env:WEPORT_THEME_ACCENT -ErrorAction SilentlyContinue }
 Remove-Item Env:ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue
 
 Write-Output "Launching $Executable (screenshot mode)..."
@@ -264,6 +271,25 @@ if ($offenders.Count -gt 0) {
   throw ("placeholder text visible on screen - " + ($offenders -join ' | ') + " (see placeholder-scan.json). Aborting.")
 }
 Write-Output "  [placeholders] none visible on any captured screen"
+
+# Contrast audit: in light mode the classic failure is not "blank" but white text
+# on white - invisible to a stddev check. The app walks every element with its own
+# text, resolves the effective background and computes the WCAG ratio; anything
+# under 3.0 lands here.
+$contrastScan = Join-Path $OutputDir 'contrast-audit.json'
+Assert-Captured $contrastScan 'contrast-audit.json'
+$contrast = Get-Content $contrastScan -Raw | ConvertFrom-Json
+$contrastOffenders = @()
+foreach ($prop in $contrast.PSObject.Properties) {
+  if ($prop.Value -and $prop.Value.Count -gt 0) {
+    $worst = ($prop.Value | Sort-Object { [double]$_.ratio } | Select-Object -First 1)
+    $contrastOffenders += "$($prop.Name) ($($prop.Value.Count) el, worst $($worst.ratio): ""$($worst.text)"" $($worst.color) on $($worst.bg))"
+  }
+}
+if ($contrastOffenders.Count -gt 0) {
+  throw ("contrast below 3.0 - " + ($contrastOffenders -join ' | ') + " (see contrast-audit.json). Aborting.")
+}
+Write-Output "  [contrast] no text below 3.0 on any captured screen"
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {

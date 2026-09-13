@@ -1062,7 +1062,9 @@
   justify-content: center;
   gap: 6px;
   background: rgba(0, 0, 0, 0.62);
-  color: var(--text-dim);
+  // 这一层永远压**媒体内容**上，与页面明暗无关；文字色必须写死为浅色。跟着
+  // --text-dim 走的话，浅色模式下会变成"深灰字压灰底"（1.33 对比度）。
+  color: rgba(255, 255, 255, 0.92);
   font-size: 11.5px;
 }
 .media-badge {
@@ -2049,7 +2051,9 @@
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-faint);
+  // --text-faint 在选中行（浅一档的底色）上只有 2.98 对比度，低于 3.0 —— 截图
+  // 对比度审计抓到的唯一一处。11px 的小字本来就不该用最淡的那一档。
+  color: var(--text-dim);
   margin-top: 1px;
 }
 .group-detail {
@@ -2142,8 +2146,10 @@
   white-space: nowrap;
 }
 .member-badge.owner {
-  color: #ffd166;
-  border-color: rgba(255, 209, 102, 0.4);
+  // 原来写死 #ffd166（浅色金）：浅色模式下是白底上的浅黄，1.44 对比度，等于
+  // 看不见。改用语义色 --warn，浅色模式下它会自动压深。
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
 }
 .member-bar {
   flex: 1;
@@ -2352,7 +2358,9 @@
   margin: 0 auto;
 }
 .annual-hero {
-  background: linear-gradient(160deg, #191920 0%, #0d0d10 100%);
+  // 写死的深色渐变 + 跟随主题的文字色：浅色模式下就是「深字压深底」，
+  // 对比度 1.09（截图对比度审计抓到的）。改用强调色渐变，明暗两档都成立。
+  background: var(--accent-grad), var(--panel);
   border: 1px solid var(--line-strong, #2c2c33);
   border-radius: 16px;
   padding: 36px 34px;
@@ -2552,9 +2560,10 @@
   color: var(--accent, #f4f4f5);
 }
 
-/* 年度报告 hero 渐变 */
+/* 年度报告 hero 渐变：底色必须是 --panel（跟随明暗），原来第二层写死 #0d0d10，
+   于是浅色模式下整块 hero 仍是深色，而标题文字已经变成深色 → 1.09 对比度。 */
 .annual-hero {
-  background: var(--accent-grad, linear-gradient(160deg, #191920 0%, #0d0d10 100%)), #0d0d10;
+  background: var(--accent-grad, linear-gradient(160deg, #191920 0%, #0d0d10 100%)), var(--panel);
   border-color: var(--accent, var(--line-strong));
 }
 

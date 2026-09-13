@@ -63,16 +63,20 @@ import { Avatar } from './components/Avatar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
-import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
 import {
   ACCENT_OPTIONS,
   DENSITY_OPTIONS,
+  MODE_OPTIONS,
+  backgroundKindOf,
+  backgroundProtocolUrl,
   initAppearance,
   probeBackground,
   setAccent,
+  setBackgroundBlur,
   setBackgroundDim,
   setBackgroundPath,
   setDensity,
+  setMode,
   useAppearance,
 } from './utils/appearance'
 import './styles/v09.scss'
@@ -81,6 +85,9 @@ import './styles/weclone.scss'
 // v1.0 外壳（左侧导航 + 全局状态 + 设计令牌）。必须在 v09.scss 之后加载：
 // 同优先级下它负责覆盖 .shell / .topbar 的旧规则。
 import './styles/v1.scss'
+// 主题令牌（强调色 × 明暗）。必须最后加载：它要在 styles.css 写死的浅蓝家族
+// 和 v1.scss 之后生效。
+import './styles/theme.scss'
 
 type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
@@ -325,8 +332,28 @@ export default function App() {
   const [antiRevokeFilter, setAntiRevokeFilter] = useState<'all' | 'installed' | 'pending'>('all')
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
-  const colorMode = useColorMode()
   const appearance = useAppearance()
+  const backgroundVideoRef = useRef<HTMLVideoElement | null>(null)
+
+  // 视频背景只在窗口处于前台时播放：后台窗口没人看，继续解码只是白烧 GPU。
+  // 焦点事件挂在 window 上（Electron 窗口失焦会同步触发 blur/focus）。
+  useEffect(() => {
+    const sync = () => {
+      const video = backgroundVideoRef.current
+      if (!video) return
+      if (document.hasFocus()) void video.play().catch(() => undefined)
+      else video.pause()
+    }
+    sync()
+    window.addEventListener('focus', sync)
+    window.addEventListener('blur', sync)
+    document.addEventListener('visibilitychange', sync)
+    return () => {
+      window.removeEventListener('focus', sync)
+      window.removeEventListener('blur', sync)
+      document.removeEventListener('visibilitychange', sync)
+    }
+  }, [appearance.backgroundPath])
   /**
    * macOS 能力诊断结果（仅 darwin 显示）。把「拿不到密钥」的三条独立原因
    * 逐条测出来 —— 否则用户手上只有一句「失败」，既不能自查也不能反馈。
@@ -338,13 +365,11 @@ export default function App() {
   const [macDiagBusy, setMacDiagBusy] = useState(false)
 
   useEffect(() => {
-    void initColorMode()
-  }, [])
-
-  useEffect(() => {
-    // 背景图是用户上传的任意图片，配置里只存绝对路径 —— 用户可能已经把原图
+    // 主题（强调色 × 明暗）与背景都在 initAppearance 里恢复 —— v1.0 之前
+    // 「色彩主题」是另一个独立的 initColorMode，两个系统各管各的。
+    // 背景是用户上传的任意文件，配置里只存绝对路径 —— 用户可能已经把原文件
     // 移走或删掉。加载失败时自动清空并回退到纯色，避免留下一块破图。
-    void initAppearance().then(() => probeBackground(() => pushToast('err', '背景图片已失效', '找不到原来选择的图片，已恢复纯色背景。', 9000)))
+    void initAppearance().then(() => probeBackground(() => pushToast('err', '背景已失效', '找不到原来选择的文件，已恢复纯色背景。', 9000)))
   }, [])
 
   // 导出选项（WeFlow 对齐）
@@ -1616,8 +1641,28 @@ export default function App() {
     }
   }
 
+  const backgroundKind = backgroundKindOf(appearance.backgroundPath)
+
   return (
     <div className="shell">
+      {/* 视频背景：图片背景是 .shell 上的 background-image，视频必须是真实的
+          <video> 元素（而且要 muted + playsInline 才允许自动播放）。窗口在前台
+          时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃 GPU 和电，
+          而后台窗口没有人看。 */}
+      {backgroundKind === 'video' ? (
+        <div className="app-bg" aria-hidden="true">
+          <video
+            ref={backgroundVideoRef}
+            src={backgroundProtocolUrl(appearance.backgroundPath)}
+            autoPlay
+            loop
+            muted
+            playsInline
+            preload="auto"
+          />
+          <div className="app-bg-dim" />
+        </div>
+      ) : null}
       <aside className="rail" aria-label="主导航">
         <div
           className="rail-brand"
@@ -2839,60 +2884,46 @@ export default function App() {
                       <Images size={15} />
                       外观
                     </h2>
-                    <span>背景 / 强调色 / 密度 / 主题</span>
+                    <span>明暗 · 强调色 · 背景 · 密度</span>
                   </div>
 
               <div className="setting-row">
                 <div className="setting-label">
-                  <Images size={14} />
+                  <Contrast size={14} />
                   <div>
-                    <strong>背景图片</strong>
-                    <span className="hint">
-                      {appearance.backgroundPath
-                        ? '已启用自定义背景；面板会自动转为半透明以保证文字可读'
-                        : '上传一张图片作为窗口背景（默认纯色）'}
-                    </span>
+                    <strong>明暗模式</strong>
+                    <span className="hint">深色省眼，浅色在强光下更清晰；整套界面（含图表）跟随切换</span>
                   </div>
                 </div>
-                <div className="appearance-actions">
-                  <button className="secondary-btn" type="button" onClick={() => void pickBackgroundImage()}>
-                    {appearance.backgroundPath ? '更换…' : '选择图片…'}
-                  </button>
-                  {appearance.backgroundPath ? (
-                    <button className="secondary-btn" type="button" onClick={() => setBackgroundPath('')}>
-                      移除
+                <div className="segmented" role="radiogroup" aria-label="明暗模式">
+                  {MODE_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={appearance.mode === option.id}
+                      title={option.hint}
+                      className="segmented-item"
+                      data-active={appearance.mode === option.id}
+                      onClick={() => setMode(option.id)}
+                    >
+                      {option.label}
                     </button>
-                  ) : null}
+                  ))}
                 </div>
               </div>
 
-              {appearance.backgroundPath ? (
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <div>
-                      <strong>背景遮罩</strong>
-                      <span className="hint">数值越高文字越清晰、背景越淡（推荐 60-80）</span>
-                    </div>
-                  </div>
-                  <div className="appearance-slider">
-                    <input
-                      type="range"
-                      min={0}
-                      max={95}
-                      value={appearance.backgroundDim}
-                      onChange={(e) => setBackgroundDim(Number(e.target.value))}
-                      aria-label="背景遮罩强度"
-                    />
-                    <span className="appearance-slider-value">{appearance.backgroundDim}%</span>
-                  </div>
-                </div>
-              ) : null}
-
+              {/* 强调色与旧的「色彩主题」合成一件事：强调色列表里就包含「石墨」，
+                  也就是原来的黑白主题。之前是两套系统，其中一个（色块）连样式
+                  都没有，点了没反应。 */}
               <div className="setting-row">
                 <div className="setting-label">
+                  <Palette size={14} />
                   <div>
                     <strong>强调色</strong>
-                    <span className="hint">用于选中项与主操作；黑白主题下不生效</span>
+                    <span className="hint">
+                      选中项、主操作、图表与数字都用它；「石墨」即原来的黑白主题
+                    </span>
                   </div>
                 </div>
                 <div className="appearance-swatches" role="radiogroup" aria-label="强调色">
@@ -2912,6 +2943,75 @@ export default function App() {
                   ))}
                 </div>
               </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Images size={14} />
+                  <div>
+                    <strong>背景</strong>
+                    <span className="hint">
+                      {appearance.backgroundPath
+                        ? backgroundKindOf(appearance.backgroundPath) === 'video'
+                          ? '视频背景：窗口在前台时循环播放，切到后台自动暂停省电'
+                          : '图片背景：面板自动转为半透明以保证文字可读'
+                        : '支持图片与视频（mp4 / webm）；默认纯色'}
+                    </span>
+                  </div>
+                </div>
+                <div className="appearance-actions">
+                  <button className="secondary-btn" type="button" onClick={() => void pickBackgroundImage()}>
+                    {appearance.backgroundPath ? '更换…' : '选择文件…'}
+                  </button>
+                  {appearance.backgroundPath ? (
+                    <button className="secondary-btn" type="button" onClick={() => setBackgroundPath('')}>
+                      移除
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              {appearance.backgroundPath ? (
+                <>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <div>
+                        <strong>背景遮罩</strong>
+                        <span className="hint">数值越高文字越清晰、背景越淡（推荐 60-80）</span>
+                      </div>
+                    </div>
+                    <div className="appearance-slider">
+                      <input
+                        type="range"
+                        min={0}
+                        max={95}
+                        value={appearance.backgroundDim}
+                        onChange={(e) => setBackgroundDim(Number(e.target.value))}
+                        aria-label="背景遮罩强度"
+                      />
+                      <span className="appearance-slider-value">{appearance.backgroundDim}%</span>
+                    </div>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <div>
+                        <strong>背景模糊</strong>
+                        <span className="hint">让背景退到后景，界面文字更干净（0 为不模糊）</span>
+                      </div>
+                    </div>
+                    <div className="appearance-slider">
+                      <input
+                        type="range"
+                        min={0}
+                        max={40}
+                        value={appearance.backgroundBlur}
+                        onChange={(e) => setBackgroundBlur(Number(e.target.value))}
+                        aria-label="背景模糊半径"
+                      />
+                      <span className="appearance-slider-value">{appearance.backgroundBlur}px</span>
+                    </div>
+                  </div>
+                </>
+              ) : null}
 
               <div className="setting-row">
                 <div className="setting-label">
@@ -2937,57 +3037,54 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 主题选择原先是一块独立的「色彩主题」面板，和「外观」并列 —— 但
-                  它俩回答的是同一个问题（这软件长什么样），分成两块只是让人多滚
-                  一屏。合到外观里，作为最后一行。主题卡片占满整行宽度：塞进设置
-                  行的控件列里只有 178px 宽，两张卡片会挤成竖条。 */}
+              {/* 主题一览：6 种强调色 × 明暗两档 = 12 套。卡片直接画出每套的
+                  真实色阶，点一下就同时设定明暗与强调色。 */}
               <div className="setting-block">
                 <div className="setting-label">
                   <Palette size={14} />
                   <div>
-                    <strong>色彩主题</strong>
-                    <span className="hint">应用于文字 / 图标 / 图表 / 数字</span>
+                    <strong>主题一览</strong>
+                    <span className="hint">
+                      当前：{MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} ·{' '}
+                      {ACCENT_OPTIONS.find((a) => a.id === appearance.accent)?.label}
+                    </span>
                   </div>
                 </div>
                 <div className="theme-picker">
-                  {(
-                    [
-                      {
-                        id: 'colorful',
-                        label: '浅蓝',
-                        desc: '统一浅蓝 accent 色调，现代克制',
-                        icon: Palette,
-                        swatches: ['#6ea8ff', '#7fb4ff', '#93c2ff', '#5b93ff', '#84b7ff', '#a6cfff'],
-                      },
-                      {
-                        id: 'mono',
-                        label: '黑白',
-                        desc: '经典单色灰阶，保持纯黑白风格',
-                        icon: Contrast,
-                        swatches: ['#f4f4f5', '#d4d4da', '#b8b8c0', '#9a9aa4', '#7e7e88', '#63636d'],
-                      },
-                    ] as Array<{ id: 'colorful' | 'mono'; label: string; desc: string; icon: React.ComponentType<{ size?: number | string }>; swatches: string[] }>
-                  ).map((t) => {
-                    const Icon = t.icon
-                    const active = colorMode === t.id
+                  {MODE_OPTIONS.flatMap((mode) =>
+                    ACCENT_OPTIONS.map((accent) => ({ mode, accent })),
+                  ).map(({ mode, accent }) => {
+                    const active = appearance.mode === mode.id && appearance.accent === accent.id
+                    const dark = mode.id === 'dark'
+                    const surface = dark ? '#17171d' : '#ffffff'
+                    const ink = dark ? '#f2f2f5' : '#16171d'
                     return (
                       <button
-                        key={t.id}
+                        key={`${mode.id}-${accent.id}`}
                         type="button"
                         className={`theme-card ${active ? 'theme-card-active' : ''}`}
-                        onClick={() => setColorMode(t.id)}
+                        onClick={() => {
+                          setMode(mode.id)
+                          setAccent(accent.id)
+                        }}
                       >
                         <div className="theme-card-head">
-                          <Icon size={17} />
-                          <strong>{t.label}</strong>
+                          <span
+                            className="theme-card-preview"
+                            style={{ background: surface, color: ink, borderColor: accent.swatch }}
+                          >
+                            <i style={{ background: accent.swatch }} />
+                            <i style={{ background: ink, opacity: 0.35 }} />
+                          </span>
+                          <strong>{mode.label} · {accent.label}</strong>
                           {active && <span className="theme-card-check">当前</span>}
                         </div>
                         <div className="theme-swatches">
-                          {t.swatches.map((c) => (
-                            <span key={c} style={{ background: c }} />
+                          {[0.95, 0.8, 0.65, 0.5, 0.35, 0.2].map((t) => (
+                            <span key={t} style={{ background: accent.swatch, opacity: t }} />
                           ))}
+                          <span style={{ background: surface, border: `1px solid ${ink}22` }} />
                         </div>
-                        <span className="theme-card-desc">{t.desc}</span>
                       </button>
                     )
                   })}

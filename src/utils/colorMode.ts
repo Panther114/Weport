@@ -1,62 +1,28 @@
 import { useEffect, useState } from 'react'
+import { getAppearance, subscribeAppearance, useAppearance } from './appearance'
 
+/**
+ * 图表主题口径（兼容层）。
+ *
+ * v1.0 之前这里是一个独立系统：`colorMode` = colorful / mono，自己的 config
+ * key、自己的订阅、自己的 DOM 属性（`data-theme`）。而设置页上还有另一个
+ * 「强调色」，写的是 `data-accent` —— 没有任何 CSS 读它，两边各管各的。
+ *
+ * 现在主题只有一套（见 `styles/theme.scss`）：`data-mode`（明暗）×
+ * `data-accent`（6 种强调色）。这个模块只保留一个**派生**口径，让已有的
+ * ECharts 组件不必改写：
+ *
+ *   graphite 强调色  → 'mono'（灰阶图表）
+ *   其余强调色        → 'colorful'
+ */
 export type ColorMode = 'colorful' | 'mono'
 
-const CONFIG_KEY = 'colorMode'
+export const getColorMode = (): ColorMode => (getAppearance().accent === 'graphite' ? 'mono' : 'colorful')
 
-let currentMode: ColorMode = 'colorful'
-const listeners = new Set<() => void>()
-
-const applyDom = (mode: ColorMode) => {
-  document.documentElement.dataset.theme = mode
-}
-
-export const getColorMode = (): ColorMode => currentMode
-
-export const setColorMode = (mode: ColorMode): void => {
-  const normalized: ColorMode = mode === 'mono' ? 'mono' : 'colorful'
-  if (normalized === currentMode) return
-  currentMode = normalized
-  applyDom(normalized)
-  void window.electronAPI.config.set(CONFIG_KEY, normalized)
-  listeners.forEach((l) => l())
-}
-
-export const subscribeColorMode = (listener: () => void): (() => void) => {
-  listeners.add(listener)
-  return () => listeners.delete(listener)
-}
-
-/** 应用启动时从配置恢复主题（App 挂载时调用一次） */
-export const initColorMode = async (): Promise<ColorMode> => {
-  let savedMode: ColorMode | undefined
-  try {
-    const saved = await window.electronAPI.config.get(CONFIG_KEY)
-    if (saved === 'mono' || saved === 'colorful') {
-      savedMode = saved
-    }
-  } catch {
-    /* noop */
-  }
-
-  const changed = savedMode !== undefined && savedMode !== currentMode
-  if (savedMode !== undefined) {
-    currentMode = savedMode
-  }
-  applyDom(currentMode)
-  // config.get is asynchronous. Notify subscribers after it resolves so the
-  // first render cannot leave the settings card stuck on the default theme.
-  // Without this, clicking the already-persisted mode is a no-op because the
-  // module state has changed while the React hook still holds "colorful".
-  if (changed) {
-    listeners.forEach((listener) => listener())
-  }
-  return currentMode
-}
-
-/** React hook：主题变化时触发重渲染（ECharts 选项需重建） */
+/** React hook：主题变化时触发重渲染（ECharts 选项需重建）。 */
 export const useColorMode = (): ColorMode => {
-  const [mode, setMode] = useState<ColorMode>(currentMode)
-  useEffect(() => subscribeColorMode(() => setMode(currentMode)), [])
-  return mode
+  const appearance = useAppearance()
+  const [mode, setMode] = useState<ColorMode>(() => (getAppearance().accent === 'graphite' ? 'mono' : 'colorful'))
+  useEffect(() => subscribeAppearance(() => setMode(getAppearance().accent === 'graphite' ? 'mono' : 'colorful')), [])
+  return appearance.accent === 'graphite' ? 'mono' : mode
 }
