@@ -222,6 +222,12 @@
   transform: rotate(180deg);
 }
 
+/* 删除推到最右边，和「查看档案」隔开 —— 两者原来紧挨着，而删除是不可恢复的
+   （本地档案和服务器上的克隆一起删）。 */
+.weclone-card-delete {
+  margin-left: auto;
+}
+
 /* ---------- 分享链接行 ---------- */
 .weclone-share-row {
   display: flex;

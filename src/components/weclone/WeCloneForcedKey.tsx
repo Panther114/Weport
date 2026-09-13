@@ -70,11 +70,13 @@ export default function WeCloneForcedKey({ notify }: WeCloneForcedKeyProps) {
     }
   }
 
+  // 状态胶囊用中文：整页其它文案都是中文，唯独这里写 LOCKED / KEY / NO KEY，
+  // 看起来像没翻译完的调试信息。英文缩写保留在 title 里。
   const forcedPill = forcedStatus?.isForced
-    ? `LOCKED · ${forcedStatus.activeProfileSummary?.apiKeyHint || 'KEY SET'}`
+    ? `已锁定 · ${forcedStatus.activeProfileSummary?.apiKeyHint || '已设置'}`
     : forcedStatus?.hasApiKey
-      ? `KEY · ${forcedStatus.activeProfileSummary?.apiKeyHint || 'SET'}`
-      : 'NO KEY'
+      ? `已设置 · ${forcedStatus.activeProfileSummary?.apiKeyHint || ''}`.trim()
+      : '未设置'
 
   return (
     <div className="exp-section weclone-exp">

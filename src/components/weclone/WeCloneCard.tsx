@@ -16,16 +16,17 @@ import type { WeCloneListItem, WeCloneMdsPreview, WeCloneVisibility } from '../.
 import { copyTextToClipboard } from '../../utils/clipboard'
 import WeCloneVisibilityToggle from './WeCloneVisibilityToggle'
 
-const VISIBILITY_LABEL: Record<WeCloneVisibility, string> = {
-  private: 'PRIVATE',
-  public: 'PUBLIC',
-  link: 'LINK',
+// 徽标也用中文，并保留英文缩写作为 title —— 见 WeCloneVisibilityToggle 里的说明。
+const VISIBILITY_LABEL: Record<WeCloneVisibility, { text: string; title: string }> = {
+  private: { text: '私密', title: '可见性：私密 (PRIVATE)' },
+  public: { text: '公开', title: '可见性：公开 (PUBLIC)' },
+  link: { text: '链接分享', title: '可见性：链接可见 (LINK)' },
 }
 
-const SOURCE_LABEL: Record<WeCloneListItem['source'], string> = {
-  local: 'LOCAL',
-  remote: 'REMOTE ONLY',
-  both: 'LOCAL+REMOTE',
+const SOURCE_LABEL: Record<WeCloneListItem['source'], { text: string; title: string }> = {
+  local: { text: '本机档案', title: '档案位置：本机 (LOCAL)' },
+  remote: { text: '仅服务器', title: '档案位置：仅服务器 (REMOTE ONLY)' },
+  both: { text: '本机 + 服务器', title: '档案位置：本机与服务器 (LOCAL+REMOTE)' },
 }
 
 const MD_SECTIONS: Array<{ key: keyof WeCloneMdsPreview; label: string }> = [
@@ -112,17 +113,17 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
           <span className="weclone-card-id" title={clone.id}>{clone.id}</span>
         </div>
         <div className="weclone-badges">
-          <span className={`badge weclone-badge-${clone.visibility}`} title={`可见性：${VISIBILITY_LABEL[clone.visibility]}`}>
-            {VISIBILITY_LABEL[clone.visibility]}
+          <span className={`badge weclone-badge-${clone.visibility}`} title={VISIBILITY_LABEL[clone.visibility].title}>
+            {VISIBILITY_LABEL[clone.visibility].text}
           </span>
-          <span className="badge" title={`档案位置：${SOURCE_LABEL[clone.source]}`}>
-            {SOURCE_LABEL[clone.source]}
+          <span className="badge" title={SOURCE_LABEL[clone.source].title}>
+            {SOURCE_LABEL[clone.source].text}
           </span>
           {clone.uploadStatus === 'failed' && (
-            <span className="badge weclone-badge-failed" title="上传失败">UPLOAD FAILED</span>
+            <span className="badge weclone-badge-failed" title="上传失败">上传失败</span>
           )}
           {!remoteOnly && clone.uploadStatus === 'local_only' && serverBaseUrl && (
-            <span className="badge weclone-badge-muted" title="未上传到服务器">NOT UPLOADED</span>
+            <span className="badge weclone-badge-muted" title="未上传到服务器">未上传</span>
           )}
         </div>
       </div>
@@ -166,7 +167,7 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
               <ChevronDown size={12} className={mdOpen ? 'chevron open' : 'chevron'} />
             </button>
             <button
-              className="ghost-btn compact"
+              className="ghost-btn compact weclone-card-delete"
               type="button"
               disabled={busy}
               title="删除本地档案，并同步删除服务器上的克隆"
