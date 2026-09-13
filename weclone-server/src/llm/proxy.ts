@@ -131,7 +131,21 @@ export async function* streamChatWithLLM(opts: StreamChatOptions): AsyncGenerato
           if (!data) continue
           if (data === '[DONE]') return
           try {
-            const json = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> }
+            const json = JSON.parse(data) as {
+              choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown } }>
+              usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number }
+            }
+            // The gateway reports usage on the final frame. Logging it is what makes the
+            // cache measurable from the outside: without these numbers, "the clone is
+            // fast" and "the prefix is cached" are indistinguishable claims.
+            if (json.usage) {
+              const promptTokens = Number(json.usage.prompt_tokens) || 0
+              const hit = Number(json.usage.prompt_cache_hit_tokens) || 0
+              const rate = promptTokens > 0 ? Math.round((hit / promptTokens) * 1000) / 10 : null
+              console.log(
+                `[llm/proxy] usage prompt=${promptTokens} cacheHit=${hit} rate=${rate === null ? 'n/a' : `${rate}%`} completion=${Number(json.usage.completion_tokens) || 0}`,
+              )
+            }
             const delta = json.choices?.[0]?.delta?.content
             if (typeof delta === 'string' && delta.length > 0) yield delta
           } catch {
@@ -151,6 +165,30 @@ export async function collectStream(gen: AsyncGenerator<string, void, undefined>
   let out = ''
   for await (const delta of gen) out += delta
   return out
+}
+
+/**
+ * 一次性拿到完整回复，空回复重试。
+ *
+ * 为什么需要重试：RAG 提示词偏长时，模型偶尔只产出 `reasoning_content` 而
+ * `choices[0].delta.content` 始终为空（实测 4 轮对话里出现过 1 次）。对用户来说
+ * 那是一条**空消息**——比慢一点、比花多几个 token 都糟，因为看起来像坏掉了。
+ * 只重试一次，并把重试次数记进日志，避免悄悄变成无限重试。
+ */
+export async function collectStreamWithRetry(
+  makeStream: () => AsyncGenerator<string, void, undefined>,
+  attempts = 2,
+): Promise<string> {
+  let last = ''
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await collectStream(makeStream())
+    if (last.trim()) {
+      if (attempt > 1) console.warn(`[llm/proxy] empty reply on attempt ${attempt - 1}, retry produced ${last.length} chars`)
+      return last
+    }
+  }
+  console.warn('[llm/proxy] all attempts returned an empty reply')
+  return last
 }
 
 // ---------------------------------------------------------------------------

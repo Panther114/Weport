@@ -22,7 +22,7 @@
  *   node scripts/verify-weclone.mjs --id wc_... [--server http://127.0.0.1:8099]
  *   node scripts/verify-weclone.mjs --id wc_... --pairs 20 --json
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -136,10 +136,33 @@ function buildPairs() {
 const built = buildPairs()
 const allPairs = built.pairs
 if (allPairs.length < 5) fail(`not enough stimulus/response pairs in the corpus (${allPairs.length})`)
-// Spread the sample across the whole timeline instead of the first N conversations.
-const step = Math.max(1, Math.floor(allPairs.length / Math.max(1, pairsWanted)))
-const pairs = allPairs.filter((_, index) => index % step === 0).slice(0, pairsWanted)
-log(`evaluation set: ${pairs.length} held-out turns out of ${allPairs.length} candidates (from ${built.source})`)
+
+/**
+ * Pin the evaluation set.
+ *
+ * A strided sample of "however many pairs I asked for" moves every time the sample size
+ * changes, which silently makes two runs incomparable — the first measurement here read
+ * 0.287 and a re-run 0.042 purely because the stride changed. So the chosen pairs are
+ * written to `eval-<n>.json` once, and later runs with `--eval <file>` score exactly the
+ * same turns. That is what turns the number into a regression test instead of a readout.
+ */
+const evalFile = flag('eval', '')
+const saveEval = flag('save-eval', '')
+let selected
+if (evalFile && existsSync(evalFile)) {
+  const saved = JSON.parse(readFileSync(evalFile, 'utf8'))
+  selected = saved.pairs || []
+  log(`evaluation set: ${selected.length} pinned turns from ${evalFile}`)
+} else {
+  const step = Math.max(1, Math.floor(allPairs.length / Math.max(1, pairsWanted)))
+  selected = allPairs.filter((_, index) => index % step === 0).slice(0, pairsWanted)
+  log(`evaluation set: ${selected.length} held-out turns out of ${allPairs.length} candidates (from ${built.source})`)
+  if (saveEval) {
+    writeFileSync(saveEval, JSON.stringify({ source: built.source, createdAt: new Date().toISOString(), pairs: selected }, null, 2), 'utf8')
+    log(`pinned to ${saveEval}`)
+  }
+}
+const pairs = selected
 
 /**
  * The server refuses an upload whose severe-PII count exceeds its threshold (5), and

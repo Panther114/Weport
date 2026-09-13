@@ -67,6 +67,8 @@ weclone-server/.server-pid.txt
 weclone-server/data-test/
 # 运行期数据：上传的克隆语料 = 真实聊天记录，绝不提交（服务端可重建）
 weclone-server/data/
+# 固定评测集：里面是真实对话摘录
+weclone-server/data/eval-set-*.json
 weclone-server/node_modules/
 weclone-server/*.log
 

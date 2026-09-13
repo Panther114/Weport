@@ -434,6 +434,99 @@ export function registerCliCommands(): void {
       },
     },
 
+    // ------------------------------------------------------------------ WeClone
+    {
+      name: 'weclone.clones',
+      summary: 'List the personality clones the configured server knows about.',
+      mutating: false,
+      run: async () => {
+        const server = String(config.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
+        const token = String(config.get('weCloneServerToken') || '').trim()
+        if (!server) return { success: false, error: '未配置 weCloneServerUrl（设置 → 人格克隆）' }
+        const response = await fetch(`${server}/api/weclone/list`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          signal: AbortSignal.timeout(30000),
+        })
+        const payload = (await response.json().catch(() => null)) as { clones?: unknown[]; error?: string } | null
+        if (!response.ok) return { success: false, error: payload?.error || `HTTP ${response.status}` }
+        const clones = Array.isArray(payload?.clones) ? payload.clones : []
+        return { success: true, data: clones, text: `${clones.length} 个克隆` }
+      },
+    },
+    {
+      name: 'weclone.chat',
+      summary: 'Talk to a clone (the server holds its knowledge base; Weport is just the client).',
+      mutating: true,
+      args: [
+        { name: 'message', type: 'string', required: true },
+        { name: 'id', type: 'string', description: '克隆 id；留空则用最近生成的那个' },
+        { name: 'name', type: 'string', description: '按名字片段选克隆（如「语音」），避免误聊到旧的' },
+        { name: 'history', type: 'string', description: 'JSON 数组，形如 [{"role":"user","content":"…"}]' },
+      ],
+      run: async (args) => {
+        const server = String(config.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
+        const token = String(config.get('weCloneServerToken') || '').trim()
+        if (!server) return { success: false, error: '未配置 weCloneServerUrl（设置 → 人格克隆）' }
+        const message = String(args.message || '').trim()
+        if (!message) return { success: false, error: '缺少 message 参数' }
+        const auth = token ? { Authorization: `Bearer ${token}` } : {}
+
+        let cloneId = String(args.id || '').trim()
+        if (!cloneId) {
+          const listResponse = await fetch(`${server}/api/weclone/list`, { headers: auth, signal: AbortSignal.timeout(30000) })
+          const list = (await listResponse.json().catch(() => null)) as { clones?: Array<{ id?: string; displayName?: string; createdAt?: string }> } | null
+          let clones = Array.isArray(list?.clones) ? list.clones : []
+          // Selecting by name matters once a server holds more than one clone: the newest
+          // rows here were test uploads of the same corpus, and "newest wins" silently
+          // picked a legacy clone built from a different corpus entirely.
+          const wanted = String(args.name || '').trim().toLowerCase()
+          if (wanted) clones = clones.filter((clone) => String(clone.displayName || '').toLowerCase().includes(wanted))
+          if (clones.length === 0) {
+            return {
+              success: false,
+              error: wanted
+                ? `没有名字包含「${args.name}」的克隆：先在「人格克隆」里生成并上传一个`
+                : '服务器上没有这个 token 的克隆：先在「人格克隆」里生成并上传一个',
+            }
+          }
+          clones.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+          cloneId = String(clones[0]?.id || '')
+        }
+
+        let history: unknown[] = []
+        if (args.history) {
+          try {
+            const parsed = JSON.parse(String(args.history))
+            if (Array.isArray(parsed)) history = parsed
+          } catch {
+            return { success: false, error: 'history 必须是 JSON 数组' }
+          }
+        }
+
+        const started = Date.now()
+        const response = await fetch(`${server}/api/weclone/${encodeURIComponent(cloneId)}/chat`, {
+          method: 'POST',
+          headers: { ...auth, 'Content-Type': 'application/json' },
+          // Streamed replies arrive as SSE with the whole text in deltas; the non-stream
+          // form returns one JSON body, which is what a terminal caller wants.
+          body: JSON.stringify({ message, history, stream: false }),
+          signal: AbortSignal.timeout(180000),
+        })
+        const text = await response.text()
+        let payload: { reply?: string; error?: string } | null = null
+        try { payload = JSON.parse(text) as { reply?: string; error?: string } } catch { /* html error page */ }
+        if (!response.ok || !payload) {
+          return { success: false, error: payload?.error || text.slice(0, 200) || `HTTP ${response.status}` }
+        }
+        const reply = String(payload.reply || '').trim()
+        return {
+          success: true,
+          data: { cloneId, reply, elapsedMs: Date.now() - started },
+          text: reply,
+        }
+      },
+    },
+
     // ------------------------------------------------------------------ 配置
     {
       name: 'config.get',

@@ -17,7 +17,7 @@ import { getBearerToken, safeEqual, sha256Hex } from '../utils/auth'
 import {
   buildWeCloneChatSystemPrompt, detectSensitiveAsk, type WeCloneMdKey,
 } from '../prompts'
-import { collectStream, streamChatWithLLM, type LlmMessage } from '../llm/proxy'
+import { collectStreamWithRetry, streamChatWithLLM, type LlmMessage } from '../llm/proxy'
 
 const MAX_HISTORY_MESSAGES = 20
 const MAX_MESSAGE_CHARS = 4_000
@@ -143,7 +143,7 @@ export function registerChatRoute(app: FastifyInstance): void {
 
       if (!wantStream) {
         try {
-          const text = await collectStream(streamChatWithLLM({ messages: llmMessages }))
+          const text = await collectStreamWithRetry(() => streamChatWithLLM({ messages: llmMessages }))
           return { success: true, reply: text }
         } catch (err) {
           request.log.warn(`chat upstream failed: ${(err as Error).message}`)
