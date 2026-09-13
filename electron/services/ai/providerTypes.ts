@@ -28,6 +28,13 @@ export interface ProviderProfile {
   model: string
   apiKey: string
   headers?: Record<string, string>
+  /**
+   * Resolved context window (tokens) for `model`. Populated from the provider
+   * layer once model metadata is known; absent means "unknown — fall back to
+   * config". Consumed by the compaction trigger and the context meter so a
+   * 128k model is never reported against a hard-coded 1M window.
+   */
+  modelContextWindow?: number
   createdAt: number
   updatedAt: number
   discovery?: {

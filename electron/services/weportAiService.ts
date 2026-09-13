@@ -146,6 +146,52 @@ interface ToolDefinition {
 
 const NOTE_DIR = 'notes'
 
+/**
+ * 压缩摘要的体积上限（字符）。摘要**只有一份**，超出后从最旧的部分开始丢弃
+ * 并在头部标注省略条数，因此它不会随会话长度无界增长。
+ */
+const DIGEST_MAX_CHARS = 8000
+
+/**
+ * 压缩触发线：上下文占用达到模型窗口的 80% 才压缩。
+ *
+ * 与 DSH 的 `thresholdRatio` 默认值一致（见
+ * `docs/reference/dsh-cache-architecture.md` §C.1）。早期触发会把一次完整的
+ * prefix miss 变成每轮一次，命中率会断崖式下跌。
+ */
+const COMPACT_TRIGGER_RATIO = 0.8
+
+/** 压缩后保留的原文比例（与 DSH 的 `retainRatio` 默认值一致）。 */
+const COMPACT_RETAIN_RATIO = 0.16
+
+/**
+ * 字符 → token 的保守估算系数。
+ *
+ * 中文一个字约 1 token、英文约 4 字符 1 token，混合内容用 2.5 偏保守（宁可
+ * 早一点压缩，也不要超出窗口被 provider 拒绝）。
+ */
+const CHARS_PER_TOKEN = 2.5
+
+/**
+ * 在 maxChars 预算内保留**末尾**若干行（越近的信息越有用），超出时在头部
+ * 标注被省略的行数。单行本身就超预算时硬截断该行，保证一定产出内容。
+ */
+function tailLinesWithin(lines: string[], maxChars: number): { text: string; kept: number } {
+  if (lines.length === 0) return { text: '', kept: 0 }
+  let used = 0
+  let start = lines.length
+  while (start > 0 && used + lines[start - 1].length + 1 <= maxChars) {
+    used += lines[start - 1].length + 1
+    start -= 1
+  }
+  if (start === lines.length) {
+    const only = lines[lines.length - 1].slice(-maxChars)
+    return { text: `（更早的 ${lines.length - 1} 条已省略）\n${only}`, kept: 1 }
+  }
+  const body = lines.slice(start).join('\n')
+  return { text: start > 0 ? `（更早的 ${start} 条已省略）\n${body}` : body, kept: lines.length - start }
+}
+
 /** Canonical provider JSON: object keys and order-insensitive schema lists are stable. */
 const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
   if (Array.isArray(value)) {
@@ -164,7 +210,7 @@ const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
   return out
 }
 
-const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Weport", capital A, "AI" — never "WreportAI", "WepoortAI", "Weport Ai" or any other variant), a meticulous WeChat chat-history analyst agent running inside the Weport harness on this Windows machine. Always refer to yourself and to this product exactly as "WeportAI"; if you ever encounter a misspelled variant of the name — in the conversation, in notes, or in memory — silently correct it to "WeportAI" and never repeat the variant. The user gives you analysis tasks about their own WeChat history; you explore it with the provided tools, reason objectively, and deliver rigorous, evidence-grounded Markdown answers. Reply in the language the user used (Chinese by default).
+const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Weport", capital A, "AI" — never "WreportAI", "WepoortAI", "Weport Ai" or any other variant), a meticulous WeChat chat-history analyst agent running inside the Weport harness. Always refer to yourself and to this product exactly as "WeportAI"; if you ever encounter a misspelled variant of the name — in the conversation, in notes, or in memory — silently correct it to "WeportAI" and never repeat the variant. The user gives you analysis tasks about their own WeChat history; you explore it with the provided tools, reason objectively, and deliver rigorous, evidence-grounded Markdown answers. Reply in the language the user used (Chinese by default).
 
 ## Working principles
 1. GROUND EVERY CLAIM IN TOOL RESULTS. Never invent message content, names, dates, or events. If a tool fails or returns nothing, say so explicitly. Mark inferences with "推断" and keep them clearly separate from facts.
@@ -400,6 +446,11 @@ class WeportAiService {
    * used to diagnose prefix stability without writing message contents to disk.
    */
   private previousApiInput = new Map<string, string>()
+  /**
+   * 前缀稳定性探针的上一帧（见 {@link probePrefixChange}）。
+   * 只在内存中保留哈希与逐条序列化结果，不落盘、不含原始正文。
+   */
+  private prefixProbe = new Map<string, { systemHash: string; toolsHash: string; wire: string[] }>()
   private emitter: EventEmitter | null = null
   private sessionListCache: { at: number; sessions: ChatSession[] } = { at: 0, sessions: [] }
   private titleUpgrading = new Set<string>()
@@ -568,39 +619,59 @@ class WeportAiService {
   }
 
   /**
-   * 上下文压缩（Reasonix 式「cache-aware context maintenance」）：
-   * 当历史消息数量超过窗口上限、或估算体积过大时，把最旧的溢出部分压缩为摘要。
+   * 上下文压缩（DSH 式「append-only projection」；架构依据见
+   * `docs/reference/dsh-cache-architecture.md`）。
    *
-   * Compression runs only at a user-turn boundary. During an agent loop the
-   * request history must remain append-only: dropping its head changes token 0
-   * of the conversation and destroys the provider's prefix-cache match.
+   * 三条不变量：
+   *
+   * 1. **只在用户回合边界压缩**。agent loop 内部严格 append-only —— 丢掉历史
+   *    头部会改变 token 0，直接摧毁提供商的 prefix-cache 匹配。
+   * 2. **触发必须罕见且大**。按真实上下文窗口的 token 压力触发（默认 0.8），
+   *    而不是「消息条数 > 40」。后者几乎每一轮都触发，等于每一轮都把整段前缀
+   *    缓存清零 —— 这是命中率被钉在 95% 附近的主要原因。
+   * 3. **摘要只有一份，永不链式增长**。调用方必须用 {@link mergeDigest} 把它
+   *    合并进旧摘要，而不是追加。旧实现是
+   *    `compressed = compressed + '\n\n' + digest`，既让摘要无限膨胀，又让每轮
+   *    都改写前缀头部。
+   *
+   * 代价是明知的、有界的：一次压缩 = 一次完整的 prefix miss。把它做得罕见且
+   * 足够大，这一次 miss 就会被之后几十轮的高命中摊薄。
    */
   private compressOverflow(
     messages: AiMessage[],
-    limit: number,
-    maxChars = 120000
+    options: { maxChars: number; retainChars: number }
   ): { kept: AiMessage[]; digest: string; dropped: AiMessage[] } {
     const messageChars = (m: AiMessage): number => {
       // Tool results are represented by their own role=tool message. Counting
       // call.result here as well would double-count the same provider payload.
       return m.content.length + (m.reasoning?.length || 0) + 40
     }
-    const estimateChars = (list: AiMessage[]): number => {
-      let total = 0
-      for (const m of list) total += messageChars(m)
-      return total
+
+    let total = 0
+    for (const m of messages) total += messageChars(m)
+    if (total <= options.maxChars) return { kept: messages, digest: '', dropped: [] }
+
+    // 从最新往回收，保留 retainChars 的原文（并至少保留 4 条，避免把最近
+    // 一轮也压掉）。
+    let retained = 0
+    let dropCount = messages.length
+    while (dropCount > 4) {
+      const size = messageChars(messages[dropCount - 1])
+      if (retained + size > options.retainChars) break
+      retained += size
+      dropCount -= 1
     }
 
-    let dropCount = Math.max(0, messages.length - limit)
-    let est = estimateChars(messages)
-    while (est > maxChars && messages.length - dropCount > 10) {
-      // 从最旧的消息开始丢弃（messages[0]、messages[1]…）
-      const dropped = messages[dropCount]
-      if (!dropped) break
-      est -= messageChars(dropped)
+    // 压缩边界必须落在 user 消息上：从一个孤立的 tool 结果开始会让严格
+    // provider 直接 400（role 'tool' 必须是某个 tool_calls 的响应）。
+    while (dropCount < messages.length && messages[dropCount]?.role !== 'user') {
       dropCount += 1
     }
-    if (dropCount <= 0) return { kept: messages, digest: '', dropped: [] }
+    // 一刀都不能砍、或砍完没有剩下任何东西 —— 放弃压缩（保持 append-only，
+    // 宁可超窗口也不要一次半截的改写）。
+    if (dropCount <= 0 || dropCount >= messages.length) {
+      return { kept: messages, digest: '', dropped: [] }
+    }
 
     const trimmed = messages.slice(0, dropCount)
     const lines = trimmed.map((m) => {
@@ -610,12 +681,47 @@ class WeportAiService {
       if (m.role === 'user') return `[用户] ${String(m.content || '').slice(0, 140)}`
       return `[工具 ${m.toolName || ''}] ${String(m.content || '').slice(0, 140)}`
     })
+
+    // 摘要本身也要有界：保留最近的若干行（越近的信息越有用），并显式标注
+    // 被省略的条数，避免读者以为这就是全部。
+    const elided = tailLinesWithin(lines, DIGEST_MAX_CHARS)
     const digest = [
       '以下是更早轮次的关键内容摘要（为节省上下文，原始消息已压缩）：',
-      ...lines,
+      elided.text,
       '（摘要结束 —— 新对话从这里继续）',
     ].join('\n')
+
     return { kept: messages.slice(dropCount), digest, dropped: trimmed }
+  }
+
+  /**
+   * 把「上一份摘要」与「本轮新摘要」合并成**唯一一份**有界摘要。
+   *
+   * 绝不链式追加：旧摘要在超出上限时从最旧的部分开始丢弃，并在头部留下
+   * 明确的省略标记。这样摘要体积有界，且每次压缩产出的文本是确定的。
+   */
+  private mergeDigest(previous: string, incoming: string, maxChars = DIGEST_MAX_CHARS): string {
+    const parts = [String(previous || '').trim(), String(incoming || '').trim()].filter(Boolean)
+    if (parts.length === 0) return ''
+    if (parts.length === 1) return parts[0].length <= maxChars ? parts[0] : tailLinesWithin(parts[0].split('\n'), maxChars).text
+    const merged = parts.join('\n')
+    return merged.length <= maxChars ? merged : tailLinesWithin(merged.split('\n'), maxChars).text
+  }
+
+  /**
+   * 当前模型真实的上下文窗口（token）。
+   *
+   * 这是压缩触发线与「上下文占用」指示器的**唯一真源**。旧实现直接在两个
+   * 调用点写死 `weportAiContextWindow`（默认 100 万），于是 128k/200k 的模型
+   * 也会显示成「用了 4%」，而且永远不会触发压缩。provider 层带回 per-model
+   * 元数据后优先使用它，config 只作为未知时的兜底。
+   */
+  private resolveContextWindow(): number {
+    const profile = this.providerProfiles.getActive()
+    const perModel = Number(profile?.modelContextWindow)
+    if (Number.isFinite(perModel) && perModel > 0) return perModel
+    const configured = Number(this.configService.get('weportAiContextWindow'))
+    return Number.isFinite(configured) && configured > 0 ? configured : 1000000
   }
 
   private getWorkspaceRoot(): string {
@@ -2002,13 +2108,25 @@ class WeportAiService {
       })
     }
 
-    // 上下文压缩：历史超出窗口时把最旧部分压缩为摘要（对话要点不丢失）
-    const convoLimit = Number(this.configService.get('weportAiConversationLimit')) || 60
-    const { kept, digest, dropped } = this.compressOverflow(messages, convoLimit)
+    // 上下文压缩：只在用户回合边界，且只在真正接近窗口上限时触发。
+    //
+    // 触发条件由「条数 > weportAiConversationLimit」改为「体积 > 0.8 × 模型
+    // 窗口」。条数触发几乎每轮都会命中，等于每轮都把整段前缀缓存清零 —— 这是
+    // 命中率被钉在 95% 的直接原因。压缩做得罕见且足够大，这一次 prefix miss
+    // 才能被之后几十轮的高命中摊薄。
+    const contextWindow = this.resolveContextWindow()
+    const compactBudget = {
+      maxChars: Math.floor(contextWindow * CHARS_PER_TOKEN * COMPACT_TRIGGER_RATIO),
+      retainChars: Math.floor(contextWindow * CHARS_PER_TOKEN * COMPACT_RETAIN_RATIO),
+    }
+    const { kept, digest, dropped } = this.compressOverflow(messages, compactBudget)
     if (digest) {
       this.archiveMessages(chatId, dropped)
       messages = kept
-      compressed = compressed ? `${compressed}\n\n${digest}` : digest
+      // 唯一一份摘要：合并而不是追加。旧实现是
+      // `compressed = compressed + '\n\n' + digest`，既让摘要无界增长，
+      // 又让每一轮都改写前缀头部。
+      compressed = this.mergeDigest(compressed, digest)
       this.persistMessages(chatId, messages, compressed)
     }
 
@@ -2089,7 +2207,7 @@ class WeportAiService {
             cacheHitTokens: usage.promptCacheHitTokens,
             lastRequestTokens,
             recentRate: Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10,
-            contextWindow: Number(this.configService.get('weportAiContextWindow')) || 1000000,
+            contextWindow: this.resolveContextWindow(),
           })
         }
 
@@ -2118,18 +2236,15 @@ class WeportAiService {
 
         // 执行工具调用
         const configuredToolBudget = Number(this.configService.get('weportAiMaxToolChars')) || 12000
-        // A stable prefix alone is insufficient: the next request misses on the
-        // assistant reasoning plus every newly appended tool result. Keep that
-        // fresh suffix near <= 1/21 of the reusable conversation (~95.5% target),
-        // while retaining a small evidence floor for early investigation steps.
-        const reusableChars = this.previousApiInput.get(chatId)?.length || 0
-        const assistantTailChars =
-          assistant.content.length +
-          (assistant.reasoning?.length || 0) +
-          toolCalls.reduce((sum, call) => sum + call.name.length + JSON.stringify(call.args || {}).length + 80, 0) +
-          240
-        const cacheAwareAllowance = Math.max(3200, Math.floor(reusableChars / 21) - assistantTailChars)
-        const stepToolBudget = Math.max(1000, Math.min(configuredToolBudget, 6000, cacheAwareAllowance))
+        // 旧实现在这里把工具预算压到「新鲜后缀 ≤ 会话的 1/21」，注释里写明目标
+        // 就是 ~95.5% —— 这正是 UI 上显示 95% 的原因。
+        //
+        // 命中率 = Σ 新增 token / Σ 请求 token。压制后缀只是把分子变小，代价却是
+        // 强迫 agent 用更多步数拿到同样的证据，而**每一步都要重发整段前缀**；
+        // 工具被饿到拿不到东西时，agent 还会反复检索同一批证据。真正让命中率上升
+        // 的是「步数变多、每一步新增变少」，也就是 DSH 的形态（443 步 → 99%）。
+        // 因此这里直接用配置预算，不再做 1/21 截断。
+        const stepToolBudget = Math.max(1000, configuredToolBudget)
         let remainingToolBudget = stepToolBudget
         let stepToolChars = 0
         for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
@@ -2197,9 +2312,6 @@ class WeportAiService {
           calls: toolCalls.length,
           configuredBudgetChars: configuredToolBudget,
           budgetChars: stepToolBudget,
-          reusableChars,
-          assistantTailChars,
-          cacheAwareAllowance,
           actualChars: stepToolChars,
           remainingChars: remainingToolBudget,
           tools: toolCalls.map((call) => call.name),
@@ -2237,7 +2349,7 @@ class WeportAiService {
         recentRate: recentRates.length
           ? Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10
           : 0,
-        contextWindow: Number(this.configService.get('weportAiContextWindow')) || 1000000,
+        contextWindow: this.resolveContextWindow(),
       }
       // 每次运行结束都记录本会话的用量/命中统计（切换会话后仍显示各自的数据）
       this.persistMessages(chatId, messages, compressed, {
@@ -2438,6 +2550,49 @@ class WeportAiService {
     }
   }
 
+  /**
+   * 前缀稳定性探针（逐字节）。
+   *
+   * 每次请求都把「系统提示 + 工具定义 + 完整请求数组」与前一次请求逐条对比，
+   * 并给出**为什么**前缀变了：
+   *
+   * - `first`        本会话的第一条请求；
+   * - `append`       上一次请求是本次请求的逐字节前缀 —— 唯一健康的形态；
+   * - `system`       系统提示变了 —— 整段前缀失效；
+   * - `tools`        工具定义变了 —— 整段前缀失效；
+   * - `head-rewrite` 历史中段被改写（压缩，或丢弃了历史头部）—— 从分歧点起失效。
+   *
+   * 这是把「命中率莫名掉到 95%」变成可定位问题的关键工具。DSH 正是靠
+   * 442/442 全为 `append` 来证明其设计成立
+   * （见 docs/reference/dsh-cache-architecture.md §D.3）。
+   *
+   * 期望的健康形态：一整轮里全是 `append`；一次压缩对应**恰好一次**
+   * `head-rewrite`，位置就等于保留窗口的起点。
+   */
+  private probePrefixChange(
+    chatId: string,
+    systemContent: string,
+    tools: unknown,
+    apiMessages: Array<Record<string, unknown>>
+  ): { change: 'first' | 'append' | 'system' | 'tools' | 'head-rewrite'; divergedAt: number; previousLength: number } {
+    const systemHash = createHash('sha256').update(systemContent).digest('hex').slice(0, 16)
+    const toolsHash = createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16)
+    const wire = apiMessages.map((message) => JSON.stringify(message))
+    const previous = this.prefixProbe.get(chatId)
+    this.prefixProbe.set(chatId, { systemHash, toolsHash, wire })
+
+    if (!previous) return { change: 'first', divergedAt: 0, previousLength: 0 }
+    if (previous.systemHash !== systemHash) return { change: 'system', divergedAt: 0, previousLength: previous.wire.length }
+    if (previous.toolsHash !== toolsHash) return { change: 'tools', divergedAt: 0, previousLength: previous.wire.length }
+
+    const limit = Math.min(previous.wire.length, wire.length)
+    for (let i = 0; i < limit; i += 1) {
+      if (previous.wire[i] !== wire[i]) return { change: 'head-rewrite', divergedAt: i, previousLength: previous.wire.length }
+    }
+    if (wire.length < previous.wire.length) return { change: 'head-rewrite', divergedAt: wire.length, previousLength: previous.wire.length }
+    return { change: 'append', divergedAt: limit, previousLength: previous.wire.length }
+  }
+
   private async callModel(
     chatId: string,
     history: AiMessage[],
@@ -2457,6 +2612,18 @@ class WeportAiService {
     if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
     if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在 WeportAI 设置中完善服务配置' }
     const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: profile.providerId === 'deepseek' })
+    // 逐字节前缀稳定性探针：把「为什么这次请求没命中缓存」变成可查的日志事实，
+    // 而不是靠猜。健康状态是一整轮全为 append，一次压缩只有一次 head-rewrite。
+    const prefixChange = this.probePrefixChange(chatId, requestShape.systemContent, requestShape.tools, apiMessages)
+    this.appendDebugLog({
+      kind: 'prefix',
+      chatId,
+      change: prefixChange.change,
+      divergedAt: prefixChange.divergedAt,
+      previousLength: prefixChange.previousLength,
+      messages: apiMessages.length,
+      prefixHash: requestShape.hash,
+    })
     const startedAt = Date.now()
     try {
       const result: ProviderStreamResult = await getProviderAdapter(profile).stream({
