@@ -3,12 +3,25 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { createDecipheriv } from 'crypto'
 import { expandHomePath } from '../utils/pathUtils'
+import { annotateAccounts } from './weChatLoginOracle'
 
 export interface WxidInfo {
   wxid: string
   modifiedTime: number
   nickname?: string
   avatarUrl?: string
+  /**
+   * 去掉微信改号后缀后的 canonical wxid（见 weChatLoginOracle.ts）。
+   * 目录名可能是 `wxid_X_64b5`，而真正的 wxid 是 `wxid_X`。
+   */
+  canonicalWxid?: string
+  /**
+   * 该账号是否在本机登录过（依据 `all_users/login/<wxid>` 名单）。
+   *
+   * 用来把「真实账号」与「升级/改号留下的空目录」区分开 —— 旧实现只能靠
+   * 「有没有 session.db + 谁更新」猜。
+   */
+  loggedIn?: boolean
 }
 
 export class DbPathService {
@@ -478,6 +491,21 @@ export class DbPathService {
         }
       }
     }
+
+    // 登录档案：`all_users/login/<wxid>` 是微信自己维护的「本机登录过哪些账号」
+    // 名单，目录名就是不带改号后缀的 canonical wxid。用它来 (a) 归一卷号后缀、
+    // (b) 把真实账号与遗留空目录区分开，(c) 把登录过的排到最前面 —— 用户要找的
+    // 永远是那一个。整段失败不影响账号发现本身，因此整体吞异常。
+    try {
+      const annotated = annotateAccounts(resolvedRootPath, sorted.map((w) => w.wxid))
+      annotated.forEach((entry, index) => {
+        sorted[index].canonicalWxid = entry.canonicalWxid
+        sorted[index].loggedIn = entry.loggedIn
+      })
+      // 稳定排序：登录过的在前，其余保持原有时间序
+      sorted.sort((a, b) => Number(b.loggedIn === true) - Number(a.loggedIn === true))
+    } catch { /* 辅助信息，失败即忽略 */ }
+
     return sorted;
   }
 
