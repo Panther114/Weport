@@ -532,9 +532,30 @@ class ChatService {
     return Number.isFinite(parsed) ? parsed : null
   }
 
-  private toCodeOnlyMessage(rawMessage?: string | null, fallbackCode = -3999): string {
+  /**
+   * 构造「初始化失败」的用户可见文案。
+   *
+   * 旧实现只返回 `错误码: -3999`：当 `getLastInitError()` 里没有可解析的
+   * 错误码时，用户拿到的就是一个既不属于 WCDB 也不属于微信的哨兵值 ——
+   * 它既不能自查，也不能反馈（issue #17 的标题就是「错误码: -3999 什么意思？」）。
+   *
+   * -3999 / -3998 都是**客户端**哨兵，不是任何一方的错误码：
+   *   -3999 = open() 失败但没能解析出具体错误码
+   *   -3998 = 连接过程中抛出未预期异常
+   * 既然哨兵本身没有信息量，就一定要把原始原因一起带上。
+   */
+  private describeInitFailure(rawMessage?: string | null, fallbackCode = -3999): string {
     const code = this.extractErrorCode(rawMessage) ?? fallbackCode
-    return `错误码: ${code}`
+    const detail = String(rawMessage || '').replace(/\s+/g, ' ').trim().slice(0, 400)
+    const sentinel =
+      code === -3999
+        ? '（微信数据服务初始化失败，且未能解析出具体错误码）'
+        : code === -3998
+          ? '（连接过程中出现未预期异常）'
+          : ''
+    // 原始原因本身就是「错误码: -1234」时不重复拼接；否则附在破折号后面。
+    const hasExtraDetail = detail.length > 0 && !/^错误码\s*[:：]\s*-?\d+$/.test(detail)
+    return hasExtraDetail ? `错误码: ${code}${sentinel} — ${detail}` : `错误码: ${code}${sentinel}`
   }
 
   private async maybeShowInitFailureDialog(errorMessage: string): Promise<void> {
@@ -603,7 +624,7 @@ class ChatService {
 
       const openOk = await wcdbService.open(accountDir, decryptKey)
       if (!openOk) {
-        const detailedError = this.toCodeOnlyMessage(await wcdbService.getLastInitError())
+        const detailedError = this.describeInitFailure(await wcdbService.getLastInitError())
         await this.maybeShowInitFailureDialog(detailedError)
         return { success: false, error: detailedError }
       }
@@ -619,7 +640,7 @@ class ChatService {
       return { success: true }
     } catch (e) {
       console.error('ChatService: 连接数据库失败:', e)
-      return { success: false, error: this.toCodeOnlyMessage(String(e), -3998) }
+      return { success: false, error: this.describeInitFailure(String(e), -3998) }
     }
   }
 
