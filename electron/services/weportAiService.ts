@@ -23,8 +23,12 @@ import { chatService } from './chatService'
 import { wcdbService } from './wcdbService'
 import type { ChatSession, Message } from './chatService'
 import { getProviderAdapter, makeDefaultProfile } from './ai/providerAdapters'
-import { getProviderCatalog, getProviderCatalogEntry } from './ai/providerCatalog'
+import { getProviderCatalog, getProviderCatalogEntry, invalidateCatalogOverride, normalizeProviderId } from './ai/providerCatalog'
 import { ProviderProfileService } from './ai/providerProfiles'
+import { getModelRegistry, resolvedProfileCache } from './ai/registryRuntime'
+import { extractModelIds, isChatCapable, normalizeModelRecord, resolveModelMetadata } from './ai/modelRegistry'
+import type { ModelRecord, ResolvedModel } from './ai/modelRegistry'
+import type { ProviderProfile } from './ai/providerTypes'
 import {
   CHARS_PER_TOKEN,
   COMPACT_RETAIN_RATIO,
@@ -157,6 +161,20 @@ interface ToolDefinition {
 // ---------------------------------------------------------------------------
 
 const NOTE_DIR = 'notes'
+
+/**
+ * Model-discovery budget.
+ *
+ * 30 s + one retry because `opencode.ai/zen/v1/models` is intermittently slow:
+ * live probes timed out at 20 s and 60 s, then answered in 0.8 s on the next
+ * attempt. The previous fixed 15 s with no retry reported a working endpoint as
+ * a permissions problem.
+ */
+const MODEL_DISCOVERY_TIMEOUT_MS = 30000
+const MODEL_DISCOVERY_ATTEMPTS = 2
+
+/** Gateway profiles that get the identification header and the empty-list retry. */
+const OPENCODE_GATEWAYS = new Set(['opencode-zen', 'opencode-go'])
 
 /** Canonical provider JSON: object keys and order-insensitive schema lists are stable. */
 const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
@@ -863,6 +881,165 @@ class WeportAiService {
     return Array.isArray(actions) ? actions : []
   }
 
+  // -------------------------------------------------------------------------
+  // 模型元数据（provider 层）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 从一次 `GET {base}/models` 的真实返回里解析出**模型记录**。
+   *
+   * 这一步是 per-model 协议的唯一真源：网关按模型挑协议，而 /models 是唯一
+   * 能告诉我们「这个模型存在」的本地证据。registry（models.dev）随后补上协议、
+   * 上下文窗口和价格。
+   */
+  private liveModelRecords(providerId: string, envelope: unknown): ModelRecord[] {
+    const registryEntry = getModelRegistry().getProviderEntry(this.registryProviderIdFor(providerId))
+    const npmDefault = registryEntry?.npmDefault
+    const objects = Array.isArray(envelope)
+      ? envelope
+      : envelope && typeof envelope === 'object'
+        ? ['data', 'models', 'result']
+            .map((key) => (envelope as Record<string, unknown>)[key])
+            .find((value) => Array.isArray(value)) || []
+        : []
+
+    // The provider id stamped onto each record is the REGISTRY id (opencode-go,
+    // not opencode-go's app alias) so provenance and lookups stay comparable.
+    const registryProviderId = registryEntry?.providerId || normalizeProviderId(providerId)
+    const records: ModelRecord[] = []
+    for (const item of objects as unknown[]) {
+      // The bare-array providers (Together AI, Mistral) return plain strings.
+      const raw = typeof item === 'string' ? { id: item } : item
+      const record = normalizeModelRecord(registryProviderId, raw, npmDefault, 'live')
+      if (record) records.push(record)
+    }
+
+    // Some gateways answer `{data:{...}}` instead of `{data:[...]}`: fall back to
+    // the tolerant id extraction so those still reach the picker.
+    if (records.length === 0) {
+      for (const id of extractModelIds(envelope)) {
+        const record = normalizeModelRecord(registryProviderId, { id }, npmDefault, 'live')
+        if (record) records.push(record)
+      }
+    }
+    return records
+  }
+
+  /** 解析 profile 的 provider 在 models.dev 里的键；catalog 没声明就按同 id 尝试。 */
+  private registryProviderIdFor(providerId: string): string {
+    const entry = getProviderCatalogEntry(providerId)
+    return entry?.registryProviderId || normalizeProviderId(providerId)
+  }
+
+  /**
+   * 把「本地已知的元数据」合并成这条 profile 的解析结果（纯本地，不发请求）。
+   *
+   * 参数只取解析真正需要的四个字段，这样 `getSetup()` 能直接用
+   * `ProviderProfileSummary` 调它，不必为了拿完整 profile 再读一次配置。
+   */
+  private resolveProfileModel(
+    profile: { id: string; providerId: string; protocol: ProviderProfile['protocol']; model: string },
+    live?: ModelRecord
+  ): ResolvedModel {
+    return resolveModelMetadata({
+      registry: getModelRegistry(),
+      registryProviderId: this.registryProviderIdFor(profile.providerId),
+      defaultProtocol: getProviderCatalogEntry(profile.providerId)?.protocol,
+      profile,
+      modelId: profile.model,
+      live,
+    })
+  }
+
+  /**
+   * 把解析出的元数据写回 profile。
+   *
+   * 只在**真的变了**时写：这个方法会在主调用路径上被调用，而每次调用都写一遍
+   * 配置（disk + safeStorage）是不必要的写放大。
+   */
+  private persistResolvedModelMetadata(profile: ProviderProfile, resolved: ResolvedModel): void {
+    const next = resolvedProfileCache(resolved)
+    const changed =
+      profile.modelContextWindow !== next.modelContextWindow ||
+      profile.modelMaxOutputTokens !== next.modelMaxOutputTokens ||
+      profile.modelProtocol !== next.modelProtocol ||
+      JSON.stringify(profile.modelCost ?? null) !== JSON.stringify(next.modelCost ?? null) ||
+      profile.modelMetadataSource !== next.modelMetadataSource
+    if (!changed) return
+    this.providerProfiles.setModelMetadata(profile.id, {
+      contextWindow: next.modelContextWindow,
+      maxOutputTokens: next.modelMaxOutputTokens,
+      protocol: next.modelProtocol,
+      cost: next.modelCost,
+      capabilities: next.modelCapabilities,
+      reasoningOptions: next.modelReasoningOptions,
+      source: next.modelMetadataSource,
+    })
+    profile.modelContextWindow = next.modelContextWindow
+    profile.modelMaxOutputTokens = next.modelMaxOutputTokens
+    profile.modelProtocol = next.modelProtocol
+    profile.modelCost = next.modelCost
+    profile.modelCapabilities = next.modelCapabilities
+    profile.modelReasoningOptions = next.modelReasoningOptions
+    profile.modelMetadataSource = next.modelMetadataSource
+    profile.modelMetadataUpdatedAt = next.modelMetadataUpdatedAt
+  }
+
+  /** 把 registry 的解析结果刷新到 profile 上（纯本地）。返回解析结果，供调用链复用。 */
+  private refreshModelMetadata(profileId: string, live?: ModelRecord): ResolvedModel | null {
+    const profile = this.providerProfiles.getById(profileId)
+    if (!profile || !profile.model) return null
+    const resolved = this.resolveProfileModel(profile, live)
+    this.persistResolvedModelMetadata(profile, resolved)
+    return resolved
+  }
+
+  /**
+   * OpenCode 网关要求的标识头。
+   *
+   * 只在这两个网关上加，别家不给陌生 header 面子；用户自定义的同名 header 优先
+   * （合并顺序在 `authHeaders` 里保证）。
+   */
+  private withGatewayHeaders(profile: ProviderProfile): ProviderProfile {
+    if (!OPENCODE_GATEWAYS.has(profile.providerId)) return profile
+    return { ...profile, headers: { 'x-opencode-session': profile.id, ...(profile.headers || {}) } }
+  }
+
+  /**
+   * 模型发现：30s 超时 + 1 次重试。
+   *
+   * opencode.ai 的 `/models` 间歇性变慢（实测两次分别在 20s 与 60s 超时，随后
+   * 0.8s 成功），固定 15s 无重试会把一次可用请求报成失败，并让 UI 反过来指责
+   * 用户「服务商、地址或权限」有问题。
+   *
+   * 只有这两个网关在**空列表**时也重试：别家返回空列表通常是真的没有模型
+   * （或没权限），重试只是让失败慢 30 秒。
+   */
+  private async listModelsWithRetry(profile: ProviderProfile): Promise<string[]> {
+    const effective = this.withGatewayHeaders(profile)
+    const retryOnEmpty = OPENCODE_GATEWAYS.has(profile.providerId)
+    const attempts = retryOnEmpty ? MODEL_DISCOVERY_ATTEMPTS : 1
+    let lastError: unknown
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const envelope = await getProviderAdapter(effective).listModelsWithEnvelope(effective, AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS))
+        const live = this.liveModelRecords(profile.providerId, envelope)
+        const ids = live.filter(isChatCapable).map((record) => record.id)
+        if (ids.length > 0) {
+          // 合并进 catalog override（不是整体替换）：一次会话里可能有多条 profile
+          // 各自发现过模型，覆盖整张表会把别人的列表抹掉。
+          invalidateCatalogOverride(profile.providerId, ids)
+          return ids
+        }
+        lastError = new Error('EMPTY_MODEL_LIST')
+      } catch (error) {
+        lastError = error
+      }
+    }
+    if (String((lastError as Error)?.message || lastError) === 'EMPTY_MODEL_LIST') return []
+    throw lastError
+  }
+
   saveActions(actions: Array<{ id: string; name: string; prompt: string }>): boolean {
     if (!Array.isArray(actions)) return false
     const cleaned = actions
@@ -879,7 +1056,14 @@ class WeportAiService {
 
   getSetup(): AiSetupInfo {
     const active = this.providerProfiles.getActive()
-    const profiles = this.providerProfiles.list()
+    // 本地（无网络）解析一次元数据，让「上下文窗口 / 能力 / 价格」面板在首屏就
+    // 有真值：registry 磁盘缓存 + bundled snapshot 已经足够，不必等一次发现请求。
+    // 这里刻意不再每条 getById()——那是 N 次「读配置 + 解析 JSON」。
+    const profiles = this.providerProfiles.list().map((item) =>
+      item.model
+        ? { ...item, ...resolvedProfileCache(this.resolveProfileModel({ id: item.id, providerId: item.providerId, protocol: item.protocol, model: item.model })) }
+        : item
+    )
     return {
       hasApiKey: Boolean(active?.apiKey) || Boolean(active && getProviderCatalogEntry(active.providerId)?.apiKeyOptional),
       baseUrl: String(active?.baseUrl || this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim(),
@@ -918,9 +1102,21 @@ class WeportAiService {
     })
     if (!profile.baseUrl) return { success: false, error: '请先填写接口地址' }
     if (!profile.apiKey && !catalog?.apiKeyOptional) return { success: false, error: '请先填写 API key' }
+    // 模型列表与 registry 元数据一起刷新：协议是按模型决定的，缺了 registry 就
+    // 只能猜；这里顺手把刷新挂上，失败也只是降级到缓存。
+    void getModelRegistry().refresh().catch(() => undefined)
     try {
-      const models = await getProviderAdapter(profile).listModels(profile, AbortSignal.timeout(15000))
-      if (models.length === 0) return { success: false, models: [], error: '接口未返回可用模型，请检查服务商、地址或权限' }
+      const models = await this.listModelsWithRetry(profile)
+      if (models.length === 0) {
+        // 不再把「空列表」一律算成用户的配置错误：Together/Mistral 这类裸数组
+        // 服务商以前会被解析成空列表并收到同一句指责；现在解析已修好，剩下来的
+        // 空列表就如实说明，并指出手填模型 id 这条永久可用的退路。
+        return {
+          success: false,
+          models: [],
+          error: '接口未返回可用对话模型。若该服务商的模型列表接口不可用，请直接在 Model 输入框手动填写模型 id',
+        }
+      }
       return { success: true, models }
     } catch (error) {
       const status = Number((error as { status?: number })?.status) || undefined
@@ -940,7 +1136,12 @@ class WeportAiService {
 
   saveProviderProfile(input: ProviderProfileInput): { success: boolean; profile?: ProviderProfileSummary; error?: string } {
     try {
-      return { success: true, profile: this.providerProfiles.save(input) }
+      const saved = this.providerProfiles.save(input)
+      // 保存后立刻用本地 registry 解析一次协议 / 窗口 / 价格，这样新 profile 从
+      // 第一次调用起就带正确的 maxOutputTokens 和上下文窗口。
+      this.refreshModelMetadata(saved.id)
+      const enriched = this.providerProfiles.list().find((item) => item.id === saved.id) || saved
+      return { success: true, profile: enriched }
     } catch (error) {
       return { success: false, error: String((error as Error)?.message || error) }
     }
@@ -999,13 +1200,16 @@ class WeportAiService {
     const profile = this.providerProfiles.getById(profileId)
     if (!profile) return
     try {
-      const models = await getProviderAdapter(profile).listModels(profile, AbortSignal.timeout(15000))
+      const models = await this.listModelsWithRetry(profile)
       this.providerProfiles.recordDiscovery(profileId, models)
     } catch (error) {
       const status = Number((error as { status?: number })?.status)
       const detail = String((error as Error)?.message || error).trim()
       this.providerProfiles.recordDiscovery(profileId, [], `${status ? `HTTP ${status}：` : ''}${detail || '模型发现失败'}`)
     }
+    // 发现完之后无论成败都刷新一次本地元数据：即使 /models 失败，registry 里
+    // 往往也已经知道这个模型的协议和上下文窗口。
+    this.refreshModelMetadata(profileId)
   }
 
   // -------------------------------------------------------------------------
@@ -2526,17 +2730,27 @@ class WeportAiService {
       prefixHash: requestShape.hash,
     })
     const startedAt = Date.now()
+    // 按模型解析协议 / 输出上限（纯本地：registry 缓存 + bundled snapshot）。
+    // 网关是按模型挑协议的，用 profile.protocol 一个值兜所有模型会把
+    // `grok-4.6` 这类模型发到错误的端点。
+    const resolved = this.resolveProfileModel(profile)
+    this.persistResolvedModelMetadata(profile, resolved)
+    const callProfile: ProviderProfile = { ...this.withGatewayHeaders(profile), modelProtocol: resolved.protocol }
     try {
-      const result: ProviderStreamResult = await getProviderAdapter(profile).stream({
-        profile,
+      const result: ProviderStreamResult = await getProviderAdapter(callProfile).stream({
+        profile: callProfile,
         messages: apiMessages,
         tools: requestShape.tools,
+        // Main path: send the model's own output limit. Before this it was
+        // declared on `ProviderStreamInput` but never set here, so the Anthropic
+        // adapter fell back to its hard-coded 32768 regardless of the model.
+        maxOutputTokens: profile.modelMaxOutputTokens,
         reasoningEffort: String(this.configService.get('weportAiReasoningEffort') || 'high'),
         signal,
         onReasoning: (delta) => this.emit({ type: 'reasoning_delta', chatId, delta }),
         onText: (delta) => this.emit({ type: 'text_delta', chatId, delta }),
       })
-      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: profile.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt })
+      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: resolved.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt })
       return {
         ok: true,
         content: result.content,
@@ -2548,7 +2762,7 @@ class WeportAiService {
       if (signal.aborted) return { ok: false, error: '已中止' }
       const status = Number((error as { status?: number })?.status)
       const detail = String((error as Error)?.message || error).trim()
-      this.appendDebugLog({ kind: 'error', chatId, provider: profile.providerId, protocol: profile.protocol, httpStatus: status || undefined, error: detail, durationMs: Date.now() - startedAt })
+      this.appendDebugLog({ kind: 'error', chatId, provider: profile.providerId, protocol: resolved.protocol, httpStatus: status || undefined, error: detail, durationMs: Date.now() - startedAt })
       return { ok: false, error: detail || '模型调用失败', httpStatus: status || undefined }
     }
   }

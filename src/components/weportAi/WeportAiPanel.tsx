@@ -83,6 +83,27 @@ type ProviderCatalogEntry = {
   protocolOptions?: ProviderProtocol[]
   apiKeyOptional?: boolean
 }
+/** Per-model metadata resolved by the provider layer (models.dev + live discovery). */
+type ProviderModelMetadata = {
+  contextWindow?: number
+  maxOutputTokens?: number
+  protocol?: string
+  /** USD per million tokens. Absent means "unknown" and MUST render as `N/A`. */
+  cost?: { input?: number; output?: number; reasoning?: number; cacheRead?: number; cacheWrite?: number }
+  capabilities?: {
+    attachment: boolean
+    reasoning: boolean
+    toolCall: boolean
+    chatCapable: boolean
+    modalities: { input: string[]; output: string[] }
+  }
+  reasoningOptions?: Array<
+    | { type: 'toggle' }
+    | { type: 'effort'; values: string[] }
+    | { type: 'budget_tokens'; min?: number; max?: number }
+  >
+  source?: string
+}
 type ProviderProfileSummary = {
   id: string
   name: string
@@ -95,7 +116,7 @@ type ProviderProfileSummary = {
   apiKeyHint: string
   updatedAt: number
   discovery?: { models: string[]; fetchedAt: number; error?: string }
-}
+} & ProviderModelMetadata
 
 type AiAction = { id: string; name: string; prompt: string }
 type AiNote = { path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }
@@ -149,27 +170,71 @@ function fmtTime(ms: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-/** 把大数字格式化为 1.0M / 64K / 1024 */
-function fmtTokens(n: number): string {
+/** 把大数字格式化为 1.0M / 64K / 1024。未知（undefined/0）渲染为 `—`。 */
+function fmtTokens(n: number | undefined): string {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return '—'
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
   if (n >= 1000) return `${Math.round(n / 1000)}K`
   return String(n)
 }
 
-// deepseek-v4-flash 官方价格（USD / 1M tokens，2026-08 官网定价）
-const DEEPSEEK_PRICES = {
-  inputCacheHit: 0.0028,
-  inputCacheMiss: 0.14,
-  output: 0.28,
+/**
+ * Cost of one run, priced from the model's OWN published rates.
+ *
+ * models.dev prices are USD per million tokens. The previous implementation
+ * hard-coded DeepSeek's rates in the renderer and applied them to every
+ * provider, which was wrong by 3–6× on DeepSeek itself (real V4 Pro is
+ * 0.435 / 0.87, not 0.14 / 0.28) and meaningless everywhere else.
+ *
+ * Returns `null` — rendered as `N/A`, never `$0.00` — whenever the metadata has
+ * no usable input or output price, because an unpriced model and a free model
+ * are different things.
+ */
+function estimateRunCost(
+  cost: ProviderModelMetadata['cost'] | undefined,
+  usage: { promptTokens: number; cacheHitTokens: number; completionTokens: number },
+): number | null {
+  if (!cost || cost.input === undefined || cost.output === undefined) return null
+  const prompt = Math.max(0, usage.promptTokens)
+  const cacheHit = Math.min(prompt, Math.max(0, usage.cacheHitTokens))
+  const completion = Math.max(0, usage.completionTokens)
+  const cacheRead = cost.cacheRead ?? cost.input
+  return ((prompt - cacheHit) * cost.input + cacheHit * cacheRead + completion * cost.output) / 1_000_000
 }
 
-function estimateCost(promptTokens: number, cacheHitTokens: number, completionTokens: number): number {
-  const miss = Math.max(0, promptTokens - cacheHitTokens)
+/** `$0.0123`, or the literal `N/A` when the model has no published price. */
+function fmtCost(value: number | null): string {
+  return value === null ? 'N/A' : `$${value.toFixed(4)}`
+}
+
+/**
+ * Capability chips + the real context window for the active model.
+ *
+ * Every chip is driven by resolved metadata, and a missing field simply produces
+ * no chip — the panel never claims a capability it cannot back up. There is
+ * deliberately no fallback to the global `weportAiContextWindow` here: that value
+ * is the *config* default, so showing it as the model's window would recreate the
+ * exact "128k model reported against 1M" bug this workstream removed.
+ *
+ * The protocol chip matters because a multi-protocol gateway may route this
+ * model on a different wire format than the profile's own default.
+ */
+function ModelMetaLine({ meta }: { meta: ProviderModelMetadata | null }) {
+  if (!meta) return null
+  const capabilities = meta.capabilities
+  const chips: string[] = []
+  if (meta.contextWindow && meta.contextWindow > 0) chips.push(`${fmtTokens(meta.contextWindow)} 上下文`)
+  if (capabilities?.reasoning) chips.push('思考')
+  if (capabilities?.toolCall) chips.push('工具调用')
+  if (capabilities?.attachment) chips.push('图片/文件')
+  if (meta.reasoningOptions?.some((option) => option.type === 'effort')) chips.push('推理档位')
+  if (meta.protocol) chips.push(meta.protocol)
+  if (chips.length === 0) return null
   return (
-    (miss * DEEPSEEK_PRICES.inputCacheMiss +
-      cacheHitTokens * DEEPSEEK_PRICES.inputCacheHit +
-      completionTokens * DEEPSEEK_PRICES.output) /
-    1_000_000
+    <span className="ai-bar-sub">
+      {chips.join(' · ')}
+      {meta.source && meta.source !== 'bundled' ? ` · 元数据 ${meta.source}` : ''}
+    </span>
   )
 }
 
@@ -332,7 +397,10 @@ export default function WeportAiPanel() {
               cacheHitTokens: last.context.cacheHitTokens || 0,
               lastRequestTokens: last.context.lastRequestTokens || 0,
               recentRate: last.context.recentRate || 0,
-              contextWindow: last.context.contextWindow || 1000000,
+              // A missing window means "unknown" and must render as `—`. The old
+              // `|| 1000000` fallback is what made a 128k model look like it was
+              // using 4% of its window.
+              contextWindow: last.context.contextWindow || 0,
             })
           } else {
             setCtxStats(null)
@@ -601,6 +669,29 @@ export default function WeportAiPanel() {
 
   const chat = useMemo(() => chats.find((c) => c.id === activeId) || null, [chats, activeId])
   const showEmptyHint = messages.length === 0 && !live
+
+  /**
+   * Metadata for the profile the run will actually use. This is what drives the
+   * capability chips and the pricing line: the panel must describe the model
+   * that is about to be called, not a hard-coded assumption.
+   */
+  const activeModelMeta = useMemo<ProviderModelMetadata | null>(() => {
+    if (!setup) return null
+    const profile = setup.profiles.find((p) => p.id === setup.activeProfileId) || setup.profiles[0]
+    return profile || null
+  }, [setup])
+
+  const runCost = useMemo(
+    () =>
+      usage
+        ? estimateRunCost(activeModelMeta?.cost, {
+            promptTokens: usage.promptTokens,
+            cacheHitTokens: usage.cacheHitTokens,
+            completionTokens: usage.completionTokens,
+          })
+        : null,
+    [usage, activeModelMeta],
+  )
 
   const memoryNotes = notes.filter((n) => n.scope === 'memory')
   const chatNotes = notes.filter((n) => n.scope === 'notes')
@@ -1024,23 +1115,30 @@ export default function WeportAiPanel() {
               <div className="ai-bar-label">
                 <span>上下文（最近一次请求）</span>
                 <em>
-                  {ctxStats ? `${Math.round((ctxStats.lastRequestTokens / Math.max(1, ctxStats.contextWindow)) * 100)}%` : '—'}
+                  {/* No window ⇒ no honest percentage. Render `—` rather than a
+                      number computed against a guessed 1M denominator. */}
+                  {ctxStats && ctxStats.contextWindow > 0
+                    ? `${Math.round((ctxStats.lastRequestTokens / ctxStats.contextWindow) * 100)}%`
+                    : '—'}
                 </em>
               </div>
               <div className="ai-bar">
                 <div
                   className="ai-bar-fill ctx"
                   style={{
-                    width: ctxStats
-                      ? `${Math.min(100, (ctxStats.lastRequestTokens / Math.max(1, ctxStats.contextWindow)) * 100)}%`
-                      : '0%',
+                    width:
+                      ctxStats && ctxStats.contextWindow > 0
+                        ? `${Math.min(100, (ctxStats.lastRequestTokens / ctxStats.contextWindow) * 100)}%`
+                        : '0%',
                   }}
                 />
               </div>
               <span className="ai-bar-sub">
-                {ctxStats
+                {ctxStats && ctxStats.contextWindow > 0
                   ? `${ctxStats.lastRequestTokens.toLocaleString()} / ${fmtTokens(ctxStats.contextWindow)}`
-                  : '—'}
+                  : ctxStats
+                    ? `${ctxStats.lastRequestTokens.toLocaleString()} / 未知窗口`
+                    : '—'}
               </span>
             </div>
             <div className="ai-bar-row">
@@ -1069,15 +1167,11 @@ export default function WeportAiPanel() {
             {usage && (
               <span className="ai-bar-total">
                 本次共 {usage.totalTokens.toLocaleString()} tokens
-                {usage.reasoningTokens > 0 ? `（思考 ${usage.reasoningTokens.toLocaleString()}）` : ''} · 约 $
-                {estimateCost(
-                  usage.promptTokens,
-                  usage.cacheHitTokens,
-                  usage.completionTokens,
-                ).toFixed(4)}
-                （官方价估算）
+                {usage.reasoningTokens > 0 ? `（思考 ${usage.reasoningTokens.toLocaleString()}）` : ''} · 约 {fmtCost(runCost)}
+                {runCost === null ? '（模型未公布价格）' : '（按模型官方价估算）'}
               </span>
             )}
+            <ModelMetaLine meta={activeModelMeta} />
           </div>
         </div>
       </aside>

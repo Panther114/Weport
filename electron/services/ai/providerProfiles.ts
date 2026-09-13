@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto'
 import { ConfigService } from '../config'
 import { getProviderCatalogEntry, isProviderProtocol, normalizeProviderId } from './providerCatalog'
+import { isWireProtocol } from './modelRegistry'
 import { makeDefaultProfile } from './providerAdapters'
-import type { ProviderProfile, ProviderProfileInput, ProviderProfileStore, ProviderProfileSummary } from './providerTypes'
+import type { ProviderModelMetadata, ProviderProfile, ProviderProfileInput, ProviderProfileStore, ProviderProfileSummary } from './providerTypes'
 
 const EMPTY_STORE: ProviderProfileStore = { version: 1, activeProfileId: '', profiles: [] }
 
@@ -13,12 +14,49 @@ function maskApiKey(value: string): string {
   return `${key.slice(0, 4)}•••${key.slice(-4)}`
 }
 
+/** Positive finite token counts only; anything else is "unknown" and must not be stored as 0. */
+function optionalTokenCount(value: unknown): number | undefined {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined
+}
+
+/**
+ * Normalize resolved model metadata for storage.
+ *
+ * `cost` and `capabilities` are copied wholesale: they describe the model, never
+ * the credential, so they are safe to keep in the same blob as the API key (the
+ * blob itself is safeStorage-encrypted — see `ENCRYPTED_STRING_KEYS`) and to
+ * expose through `ProviderProfileSummary`.
+ */
+function normalizeModelMetadata(profile: ProviderProfile): Pick<
+  ProviderProfile,
+  'modelContextWindow' | 'modelMaxOutputTokens' | 'modelProtocol' | 'modelCost' | 'modelCapabilities' | 'modelReasoningOptions' | 'modelMetadataSource' | 'modelMetadataUpdatedAt'
+> {
+  return {
+    modelContextWindow: optionalTokenCount(profile.modelContextWindow),
+    modelMaxOutputTokens: optionalTokenCount(profile.modelMaxOutputTokens),
+    modelProtocol: isWireProtocol(profile.modelProtocol) ? profile.modelProtocol : undefined,
+    modelCost: profile.modelCost && typeof profile.modelCost === 'object' ? { ...profile.modelCost } : undefined,
+    modelCapabilities: profile.modelCapabilities && typeof profile.modelCapabilities === 'object'
+      ? { ...profile.modelCapabilities, modalities: { input: [...(profile.modelCapabilities.modalities?.input || [])], output: [...(profile.modelCapabilities.modalities?.output || [])] } }
+      : undefined,
+    modelReasoningOptions: Array.isArray(profile.modelReasoningOptions) ? profile.modelReasoningOptions.map((option) => ({ ...option })) : undefined,
+    modelMetadataSource: profile.modelMetadataSource ? String(profile.modelMetadataSource).slice(0, 40) : undefined,
+    modelMetadataUpdatedAt: Number(profile.modelMetadataUpdatedAt) || undefined,
+  }
+}
+
 function cloneStore(store: ProviderProfileStore): ProviderProfileStore {
   return {
     version: 1,
     activeProfileId: store.activeProfileId,
     profiles: store.profiles.map((profile) => ({
       ...profile,
+      modelCost: profile.modelCost ? { ...profile.modelCost } : undefined,
+      modelCapabilities: profile.modelCapabilities
+        ? { ...profile.modelCapabilities, modalities: { input: [...profile.modelCapabilities.modalities.input], output: [...profile.modelCapabilities.modalities.output] } }
+        : undefined,
+      modelReasoningOptions: profile.modelReasoningOptions ? profile.modelReasoningOptions.map((option) => ({ ...option })) : undefined,
       headers: profile.headers ? { ...profile.headers } : undefined,
       discovery: profile.discovery ? { ...profile.discovery, models: [...profile.discovery.models] } : undefined,
     })),
@@ -36,6 +74,16 @@ function summary(profile: ProviderProfile): ProviderProfileSummary {
     model: profile.model,
     hasApiKey: Boolean(profile.apiKey),
     apiKeyHint: maskApiKey(profile.apiKey),
+    modelContextWindow: profile.modelContextWindow,
+    modelMaxOutputTokens: profile.modelMaxOutputTokens,
+    modelProtocol: profile.modelProtocol,
+    modelCost: profile.modelCost ? { ...profile.modelCost } : undefined,
+    modelCapabilities: profile.modelCapabilities
+      ? { ...profile.modelCapabilities, modalities: { input: [...profile.modelCapabilities.modalities.input], output: [...profile.modelCapabilities.modalities.output] } }
+      : undefined,
+    modelReasoningOptions: profile.modelReasoningOptions ? profile.modelReasoningOptions.map((option) => ({ ...option })) : undefined,
+    modelMetadataSource: profile.modelMetadataSource,
+    modelMetadataUpdatedAt: profile.modelMetadataUpdatedAt,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     discovery: profile.discovery ? { ...profile.discovery, models: [...profile.discovery.models] } : undefined,
@@ -100,6 +148,10 @@ export class ProviderProfileService {
       baseUrl: String(profile.baseUrl || catalog?.baseUrl || '').trim().replace(/\/+$/, ''),
       model: String(profile.model).trim().slice(0, 200),
       apiKey: String(profile.apiKey || ''),
+      // Resolved model metadata survives a reload: re-deriving it needs network
+      // access, and the cached values are what the context meter and the cost
+      // panel read on the first paint after a restart.
+      ...normalizeModelMetadata(profile),
       headers: profile.headers && typeof profile.headers === 'object' ? Object.fromEntries(Object.entries(profile.headers).map(([key, value]) => [String(key).slice(0, 80), String(value).slice(0, 500)])) : undefined,
       createdAt: Number(profile.createdAt) || Date.now(),
       updatedAt: Number(profile.updatedAt) || Date.now(),
@@ -168,11 +220,40 @@ export class ProviderProfileService {
     const host = parsed.hostname.toLowerCase()
     const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
     if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && local)) throw new Error('服务地址必须使用 HTTPS（仅 localhost 可使用 HTTP）')
+    // A different model invalidates the resolved metadata. Keeping the previous
+    // model's context window would make the context meter (and the compaction
+    // trigger) describe a model the profile no longer uses.
+    const sameTarget = Boolean(existing) && existing!.model === profile.model && existing!.baseUrl === profile.baseUrl && existing!.providerId === profile.providerId
+    if (sameTarget && existing) Object.assign(profile, normalizeModelMetadata(existing))
     if (existing) store.profiles = store.profiles.map((item) => item.id === existing.id ? profile : item)
     else store.profiles.push(profile)
     if (!store.activeProfileId) store.activeProfileId = profile.id
     this.write(store)
     return summary(profile)
+  }
+
+  /**
+   * Persist metadata resolved for the profile's current model.
+   *
+   * Called after discovery/registry resolution. Only the fields in
+   * `ProviderModelMetadata` are touched, so a concurrent settings save cannot be
+   * clobbered by a stale in-memory copy of the profile.
+   */
+  setModelMetadata(id: string, metadata: Partial<ProviderModelMetadata>): boolean {
+    const store = this.read()
+    const profile = store.profiles.find((item) => item.id === id)
+    if (!profile) return false
+    profile.modelContextWindow = metadata.contextWindow
+    profile.modelMaxOutputTokens = metadata.maxOutputTokens
+    profile.modelProtocol = isWireProtocol(metadata.protocol) ? metadata.protocol : undefined
+    profile.modelCost = metadata.cost
+    profile.modelCapabilities = metadata.capabilities
+    profile.modelReasoningOptions = metadata.reasoningOptions
+    profile.modelMetadataSource = metadata.source
+    profile.modelMetadataUpdatedAt = Date.now()
+    profile.updatedAt = Date.now()
+    this.write(store)
+    return true
   }
 
   activate(id: string): boolean {
