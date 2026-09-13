@@ -278,5 +278,11 @@ if ($PublishToDocs) {
   Copy-Item $annualPng (Join-Path $docsDir "annual-report.png") -Force
   Copy-Item $groupPng (Join-Path $docsDir "analytics-group.png") -Force
   Copy-Item $settingsPng (Join-Path $docsDir "settings.png") -Force
+  # v1.0 新增界面：README 的截图清单必须覆盖新功能，否则新东西在 README 里根本
+  # 不存在。设置页第二张是「外观」分类（背景图 / 强调色 / 密度 / 主题）。
+  Copy-Item $settingsAppearancePng (Join-Path $docsDir "settings-appearance.png") -Force
+  Copy-Item $webotPng (Join-Path $docsDir "webot.png") -Force
+  Copy-Item $webotNotesPng (Join-Path $docsDir "webot-notes.png") -Force
+  Copy-Item $weclonePng (Join-Path $docsDir "weclone.png") -Force
   Write-Output "Published screenshots to $docsDir"
 }

@@ -2,7 +2,7 @@
 
 ## 📸 截图
 
-**连接微信** —— 选择数据目录、扫描账号、一键提取解密密钥：
+**连接微信** —— 三步走：数据目录 → 选择账号 → 解密密钥，每一步都带完成状态：
 
 ![连接微信页](docs/screenshots/connect.png)
 
@@ -14,7 +14,7 @@
 
 ![朋友圈](docs/screenshots/sns.png)
 
-**分析入口** —— 全局分析与群聊分析，两块入口并排选择：
+**分析** —— 全局分析、群聊分析、年度报告、双人报告四个入口：
 
 ![分析入口](docs/screenshots/analytics-hub.png)
 
@@ -22,7 +22,7 @@
 
 ![全局分析](docs/screenshots/analytics-global.png)
 
-**群聊分析** —— 成员列表、消息排行、活跃时段与媒体构成：
+**群聊分析** —— 成员列表、消息排行、活跃热力图、活跃时段与媒体构成：
 
 ![群聊分析](docs/screenshots/analytics-group.png)
 
@@ -30,13 +30,35 @@
 
 ![年度报告](docs/screenshots/annual-report.png)
 
-**WeportAI** —— 对聊天记录提问：工具调用、思考过程与 Markdown 结论，右侧为长期记忆与笔记：
+**WeportAI** —— 对聊天记录提问：工具调用、思考过程与 Markdown 结论，右侧为长期记忆、笔记与缓存命中率：
 
 ![WeportAI 分析助手](docs/screenshots/ai.png)
 
-**设置** —— 开机自启、启动行为与色彩主题（浅蓝 / 黑白）：
+**WeBot** —— 定时任务：自然语言描述要做什么、`@` 引用群聊或联系人、按天/周/月/间隔排期：
+
+![WeBot 定时任务](docs/screenshots/webot.png)
+
+**WeBot 笔记** —— 任务产出的简短结论存档，可标未读、置顶，也可通过 HTTP API / MCP 读取：
+
+![WeBot 笔记](docs/screenshots/webot-notes.png)
+
+**消息通知** —— 状态条说明当前是否在监听，下面是弹窗外观与接收范围：
+
+![消息通知](docs/screenshots/notifications.png)
+
+**防撤回** —— 安装状态、可搜索的会话列表与批量操作：
+
+![防撤回](docs/screenshots/antirecall.png)
+
+**人格克隆** —— 从聊天记录提炼人格档案，可公开或链接分享：
+
+![人格克隆](docs/screenshots/weclone.png)
+
+**设置** —— 常规 / 外观 / 数据 / 接口 / 关于五个分类；外观支持自定义背景图、强调色与密度：
 
 ![设置](docs/screenshots/settings.png)
+
+![设置 · 外观](docs/screenshots/settings-appearance.png)
 
 **通知弹窗** —— 液态玻璃风格，置顶显示、不抢焦点：
 
@@ -150,7 +172,14 @@ chmod +x resources/key/macos/universal/xkey_helper \
   resources/welive/macos/arm64/welive
 ```
 
-`capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截取「连接 / 导出 / 防撤回 / 消息通知 / WeportAI / 朋友圈 / 分析入口 / 全局分析 / 群聊分析 / 年度报告 / 设置 / 通知弹窗」共 12 个画面并逐一断言非空。该模式**全部使用脱敏演示数据**（假路径、假密钥、演示账号），不会把真实个人信息截进 README；`-PublishToDocs` 会把截图发布到 `docs/screenshots/`。
+`capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截取 22 个画面（连接 / 导出 / 防撤回 / 消息通知 / WeportAI / 朋友圈 / 分析入口 / 全局分析 / 群聊分析 / 年度报告 / 设置 ×2 / WeBot / WeBot 编辑器 / WeBot 笔记 / 人格克隆 ×3 / 通知弹窗 / 窄窗口 ×2）并逐一断言非空，另外断言：
+
+- 横向不溢出、左侧栏标签不被媒体查询藏起来（986px 与 1426px 两档视口）；
+- WeBot 任务卡片与编辑器的实测宽度/列数（防止「列表被挤成 300px、标题每行一两个字」这类回归）；
+- WeportAI 三栏在窄窗口下中间一栏不低于 300px；
+- **屏幕上不出现 `undefined` / `NaN` / `[object Object]`** —— 页面渲染成功、非空白，却把 `undefined` 写给用户看，是断言抓不到的一类缺陷。
+
+该模式**全部使用脱敏演示数据**（假路径、假密钥、演示账号），不会把真实个人信息截进 README；`-PublishToDocs` 会把截图发布到 `docs/screenshots/`。调试 AI 页面时可用 `WEPORT_TRACE_AI=1` 把渲染进程实际发出的 `ai:*` 调用打到 stdout。
 
 v0.9 的端到端 QA 使用 `WEPORT_V09_DUMP=1` 模式：以脱敏演示数据驱动真实页面渲染（朋友圈 / 分析入口 / 全局分析 / 年度报告 / 群聊分析 / 成员画像），逐页断言关键 DOM 节点与渲染进程 console 错误数，结果写入 `WEPORT_V09_DUMP_OUT` 目录（JSON + 日志），失败退出码非 0：
 
