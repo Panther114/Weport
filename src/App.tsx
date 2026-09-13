@@ -48,11 +48,13 @@ import {
   Timer,
   CalendarClock,
   Pin,
+  Fingerprint,
   Settings2 as SettingsIcon,
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
 import WeBotModule from './pages/WeBotModule'
+import WeClonePage from './pages/WeClonePage'
 import AiMarkdown from './components/weportAi/AiMarkdown'
 import { Avatar } from './components/Avatar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
@@ -71,11 +73,13 @@ import {
   useAppearance,
 } from './utils/appearance'
 import './styles/v09.scss'
+// WeClone（人格克隆）自带样式表 —— 从 9669dcb 恢复，勿删。
+import './styles/weclone.scss'
 // v1.0 外壳（左侧导航 + 全局状态 + 设计令牌）。必须在 v09.scss 之后加载：
 // 同优先级下它负责覆盖 .shell / .topbar 的旧规则。
 import './styles/v1.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'sns' | 'analytics' | 'settings'
+type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -230,6 +234,7 @@ const TABS: Array<{
   { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
+  { id: 'weclone', label: '人格克隆', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
   { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '备份、本地接口与外观' },
 ]
 
@@ -2309,6 +2314,7 @@ export default function App() {
         )}
 
         {tab === 'ai' && <WeportAiPanel />}
+        {tab === 'weclone' && <WeClonePage />}
         {(tab === 'webot' || tab === 'webot-notes') && (
           <WeBotModule
             section={tab === 'webot-notes' ? 'notes' : 'tasks'}

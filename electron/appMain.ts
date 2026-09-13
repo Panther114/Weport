@@ -52,6 +52,7 @@ import { getProviderCatalog } from './services/ai/providerCatalog'
 import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
 import { setWeBotService } from './services/weBotRegistry'
+import { weCloneService } from './services/weCloneService'
 import { collectMacDiagnostics } from './services/macDiagnosticsService'
 import {
   registerNotificationHandlers,
@@ -2799,6 +2800,80 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('ai:abort', (_e, chatId: string) => {
     weportAiService.abort(String(chatId || ''))
     return { success: true }
+  })
+
+  // -------------------------------------------------------------------------
+  // WeBot（v1.0）：定时任务、运行历史与笔记板
+  //
+  // 注意：这些**不是**可选的。截图/演示模式会用 override() 覆盖同名通道，因此
+  // 少了这段代码时演示截图依然全绿，而真实应用里 WeBot 页面会全部报
+  // "No handler registered"。渲染层的 demo 覆盖掩盖了缺失的真实实现。
+  // -------------------------------------------------------------------------
+  ipcMain.handle('webot:listTasks', () => ensureWeBotService().listTasks())
+  ipcMain.handle('webot:createTask', (_e, input: any) => ensureWeBotService().createTask(input || {}))
+  ipcMain.handle('webot:updateTask', (_e, id: string, patch: any) => ensureWeBotService().updateTask(String(id || ''), patch || {}))
+  ipcMain.handle('webot:deleteTask', (_e, id: string) => ensureWeBotService().deleteTask(String(id || '')))
+  ipcMain.handle('webot:runNow', (_e, id: string) => ensureWeBotService().runNow(String(id || '')))
+  ipcMain.handle('webot:listRuns', (_e, taskId?: string) => ensureWeBotService().listRuns(taskId ? String(taskId) : undefined))
+  ipcMain.handle('webot:listNotes', (_e, options?: any) => ensureWeBotService().listNotes(options || {}))
+  ipcMain.handle('webot:getNote', (_e, id: string) => ensureWeBotService().getNote(String(id || '')))
+  ipcMain.handle('webot:updateNote', (_e, id: string, patch: any) => ensureWeBotService().updateNote(String(id || ''), patch || {}))
+  ipcMain.handle('webot:unreadCount', () => ensureWeBotService().unreadNoteCount())
+  ipcMain.handle('webot:clearNotes', () => ensureWeBotService().clearNotes())
+
+  // -------------------------------------------------------------------------
+  // WeClone（人格克隆）
+  //
+  // 从 9669dcb 恢复并前移。服务层 weCloneService.ts（1144 行）无需改写即兼容
+  // 当前的 provider 层 —— 它用的是 ProviderProfileService / getProviderAdapter
+  // 这几个我保留并扩展过的接口。此处只补齐 IPC。
+  // -------------------------------------------------------------------------
+  const wecloneControllers = new Map<string, AbortController>()
+  ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
+    const taskId = 'generate'
+    if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
+    const ctrl = new AbortController()
+    wecloneControllers.set(taskId, ctrl)
+    try {
+      return await weCloneService.generateClone(
+        (progress) => mainWindow?.webContents.send('weclone:progress', progress),
+        ctrl.signal,
+        opts && typeof opts === 'object' ? opts : {}
+      )
+    } finally {
+      wecloneControllers.delete(taskId)
+    }
+  })
+  ipcMain.handle('weclone:list', () => weCloneService.getClones())
+  ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
+  ipcMain.handle('weclone:delete', (_e, id: string, remote?: boolean) =>
+    weCloneService.deleteClone(String(id || ''), remote !== false))
+  ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
+    weCloneService.setVisibility(String(id || ''), String(visibility || '')))
+  ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
+  ipcMain.handle('weclone:cancel', () => {
+    wecloneControllers.get('generate')?.abort()
+    weCloneService.cancel()
+    return { success: true }
+  })
+  ipcMain.handle('weclone:getForcedProviderStatus', () => weCloneService.getForcedProviderStatus())
+  ipcMain.handle('weclone:ensureProvider', async (_e, payload?: { apiKey?: string }) => {
+    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
+    try {
+      await weCloneService.ensureForcedProvider(apiKey || undefined)
+      return { success: true, status: weCloneService.getForcedProviderStatus() }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
+    }
+  })
+  ipcMain.handle('weclone:setForcedApiKey', async (_e, payload?: { apiKey?: string }) => {
+    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
+    try {
+      await weCloneService.ensureForcedProvider(apiKey || undefined)
+      return { success: true, status: weCloneService.getForcedProviderStatus() }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
+    }
   })
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
@@ -5904,6 +5979,8 @@ try { tray?.destroy() } catch { /* noop */ }
     try { await mcpService.stop() } catch { /* noop */ }
     // WeBot：先停调度再中止对话，避免退出过程中又派发新任务。
     try { weBotService?.stop() } catch { /* noop */ }
+    // WeClone：中止正在进行的克隆生成
+    try { weCloneService.cancel() } catch { /* noop */ }
     messagePushService?.stop()
     for (const chatId of weportAiService.listChats().map((c) => c.id)) {
       weportAiService.abort(chatId)

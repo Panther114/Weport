@@ -283,6 +283,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     collectMac: () => ipcRenderer.invoke('diagnostics:collectMac')
   },
 
+  weclone: {
+    generate: (opts?: { localOnly?: boolean }) => ipcRenderer.invoke('weclone:generate', opts),
+    list: () => ipcRenderer.invoke('weclone:list'),
+    get: (id: string) => ipcRenderer.invoke('weclone:get', id),
+    delete: (id: string, remote?: boolean) => ipcRenderer.invoke('weclone:delete', id, remote),
+    setVisibility: (id: string, visibility: string) => ipcRenderer.invoke('weclone:setVisibility', id, visibility),
+    getServerStatus: () => ipcRenderer.invoke('weclone:getServerStatus'),
+    cancel: () => ipcRenderer.invoke('weclone:cancel'),
+    getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
+    ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),
+    setForcedApiKey: (payload: { apiKey: string }) => ipcRenderer.invoke('weclone:setForcedApiKey', payload),
+    onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
+  },
+
   process: {
     platform: process.platform,
     arch: process.arch
