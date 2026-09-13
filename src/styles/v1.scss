@@ -820,6 +820,91 @@
   border-color: rgba(229, 72, 77, 0.35);
 }
 
+// =============================================================================
+// 14. 页面布局统一（v1.0 页面重排）
+// =============================================================================
+//
+// 旧的页面布局有三个具体问题，全部来自「没有统一的页面容器」：
+//
+//  1. **只给设置页限了宽**（.single-col 860px）。其余页面在 1600px 窗口下被
+//     拉满，标签在左、控件在右，中间近千像素空档 —— 视线要跑完全屏才能配对，
+//     这是"乱"最直观的来源。
+//  2. `.setting-row` 用 flex + space-between，控件位置取决于标签文字长度，
+//     于是每一行的开关都在不同的横坐标上跳动。
+//  3. 每个卡片头都复述一次页面标题，再配一句等于没说的灰字。
+//
+// 这里不改页面 JSX 就能修好前两条：统一容器宽度 + 把设置行改成固定控件列的
+// 网格。第三条必须改 JSX（见各页面）。
+
+// 统一内容宽度。刻意同时覆盖三种容器，因为它们在不同页面里各自扮演"页面根"。
+.workspace > .panel,
+.workspace > .single-col,
+.workspace > .two-col,
+.workspace > .page {
+  width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
+}
+
+// 设置行：标签左、控件右，**控件列固定**，因此所有开关/输入框垂直对齐。
+// minmax 下限保证窄窗口下控件不会被压扁，上限防止超宽屏上控件离标签太远。
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 320px);
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+
+  > :last-child {
+    justify-self: end;
+  }
+
+  // 标签里的图标与文字要对齐到同一基线；旧版图标 margin-top:2px 在单行标签
+  // 上会显得偏上，多行时又刚好 —— 这里统一按第一行居中。
+  .setting-label {
+    align-items: center;
+
+    > svg {
+      margin-top: 0;
+    }
+  }
+}
+
+// 卡片补充说明（旧版每个卡片头右侧都有一句复述标题的灰字）现在统一收敛到
+// 小节标题下方，字号更小、位置固定，不再各自飘在卡片右上角。
+.card-sub {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+// 面板头：标题与操作对齐方式统一为 center（旧版用 baseline，与右侧按钮
+// 高度不一致时会产生几像素的错位）。
+.panel-head {
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+
+.panel {
+  padding: var(--space-4);
+}
+
+// 窄窗口：控件列收窄并允许换行，避免标签被挤成一列一个字。
+@media (max-width: 760px) {
+  .setting-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+
+    > :last-child {
+      justify-self: start;
+    }
+  }
+}
+
 // 引用 chip：显示名是人类可读的，id 只作为数据随请求发出。
 .ref-chips {
   display: flex;

@@ -4625,7 +4625,10 @@ async function runScreenshotMode() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await clickTab('消息通知')
-      if (await waitForDom('.checklist')) {
+      // 等待条件改成「通知设置行已渲染」。v1.0 移除了重复页面标题的卡片头和
+      // 复述左侧栏状态的 .checklist 面板（同一事实在一屏里出现两次没有价值），
+      // 因此旧选择器不再存在。
+      if (await waitForDom('.notification-settings .setting-row, .setting-row')) {
         mainWindow.webContents.executeJavaScript(
           `(() => { const s = document.querySelector('.switch-label input'); if (s && !s.checked) { s.click(); return true } return false })()`,
           true,
@@ -4643,7 +4646,7 @@ async function runScreenshotMode() {
         console.log(`[screenshot] notifications scrollTop=${notifScroll}`)
         await saveStable(mainWindow, 'notifications.png')
         await dumpRects('notifications-rects.json', [
-          '.switch-label', '.status-dot', '.check-row', '.checklist', '.setting-row',
+          '.switch-label', '.status-dot', '.setting-row', '.btn-row',
         ])
       } else {
         log('WARN [screenshot] notifications tab did not render')

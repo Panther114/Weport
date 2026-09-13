@@ -28,7 +28,8 @@ import {
   RotateCcw,
   Paperclip,
   FileType,
-  ListChecks,
+  // ListChecks 已不再导入：v1.0 移除了通知页的「前置条件」清单，
+  // 它与左侧栏的全局状态栏重复表达同一件事。
   Filter,
   BellRing,
   ShieldPlus,
@@ -2327,16 +2328,10 @@ export default function App() {
         {tab === 'antirecall' && (
           <div className="single-col">
             <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <ShieldCheck size={15} />
-                  防撤回
-                </h2>
-                <span>会话级 WCDB 触发器（安装后无需保持 Weport 运行）</span>
-              </div>
               <p className="hint">
                 对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
-                安装/卸载针对具体会话，微信升级后一般无需重装。
+                安装/卸载针对具体会话，微信升级后一般无需重装；触发器安装在微信侧，
+                之后无需保持 Weport 运行。
               </p>
               <div className="btn-row" style={{ alignItems: 'center' }}>
                 <label className="switch-label">
@@ -2415,13 +2410,6 @@ export default function App() {
         {tab === 'notifications' && (
           <div className="single-col">
             <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Bell size={15} />
-                  消息通知
-                </h2>
-                <span>独立置顶弹窗 · 不抢占焦点</span>
-              </div>
               <div className="btn-row" style={{ alignItems: 'center' }}>
                 <label className="switch-label">
                   <input
@@ -2526,23 +2514,19 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="checklist">
-                <div className="checklist-title">
-                  <ListChecks size={14} />
-                  提醒的前置条件
-                </div>
-                {[
-                  ['微信数据目录', dbReady, dbReady ? '已连接' : '未选择'],
-                  ['微信账号', accountReady, accountReady ? '已选择' : '未选择'],
-                  ['解密密钥', keyOk, keyOk ? '已就绪' : '待提取'],
-                ].map(([label, ok, detail]) => (
-                  <div className="check-row" key={label as string}>
-                    <span className={ok ? 'check ok' : 'check'}>{ok ? '✓' : '—'}</span>
-                    <span>{label as string}</span>
-                    <span className={ok ? 'detail ok' : 'detail'}>{detail as string}</span>
-                  </div>
-                ))}
-              </div>
+              {/* 「提醒的前置条件」原本是一个嵌套面板，逐条重复左侧栏已经常驻
+                  显示的连接状态。同一个事实在一屏里出现两次只会让人怀疑哪个
+                  才是最新的；这里保留它真正提供的信息 —— 不满足时给出原因。 */}
+              {!allReady ? (
+                <p className="hint" style={{ marginBottom: 10 }}>
+                  提醒尚未生效：{[
+                    ['微信数据目录', dbReady],
+                    ['微信账号', accountReady],
+                    ['解密密钥', keyOk],
+                  ].filter(([, ok]) => !ok).map(([label]) => label as string).join('、')}
+                  {' '}尚未就绪，请先到「连接微信」完成配置。
+                </p>
+              ) : null}
 
               <div className="btn-row" style={{ alignItems: 'center', marginTop: 12 }}>
                 {!allReady ? (
