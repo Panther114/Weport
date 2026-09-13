@@ -143,10 +143,45 @@ export class DbPathService {
         }
       }
 
+      // 走到这里说明所有候选目录都不合格。但在把结论定成「没找到」之前，
+      // 先区分一种完全不同、而且用户无法从「没找到」里推断出来的情况：
+      // **目录存在、但读不进去**（macOS 14+ 的完全磁盘访问权限，或权限位问题）。
+      //
+      // 旧实现把两者都归成一句「未能自动检测到微信数据库目录」，于是用户去
+      // 反复检查路径 —— 而真正要做的是授权。这是 mac 上最常见的误诊之一。
+      const blocked = this.findUnreadableCandidate(possiblePaths)
+      if (blocked) {
+        return {
+          success: false,
+          error:
+            `检测到微信数据目录（${blocked}）但没有读取权限。` +
+            '请授予 Weport「完全磁盘访问权限」（系统设置 → 隐私与安全性 → 完全磁盘访问权限），然后重启 Weport。',
+        }
+      }
+
       return { success: false, error: '未能自动检测到微信数据库目录' }
     } catch (e) {
       return { success: false, error: String(e) }
     }
+  }
+
+  /**
+   * 返回第一个「存在但读不进去」的候选目录，没有则返回 null。
+   *
+   * 只探测单层 readdir：足够触发并区分 EPERM/EACCES，又不会在权限正常的机器上
+   * 白扫一遍账号目录。
+   */
+  private findUnreadableCandidate(paths: string[]): string | null {
+    for (const path of paths) {
+      if (!existsSync(path)) continue
+      try {
+        readdirSync(path)
+      } catch (error) {
+        const code = String((error as { code?: string })?.code || '')
+        if (code === 'EPERM' || code === 'EACCES') return path
+      }
+    }
+    return null
   }
 
   /**
