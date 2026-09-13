@@ -714,6 +714,44 @@
   color: var(--text-faint);
 }
 
+// WeportAI 输入框上方的引用区：chips 紧贴输入框，选择器向上弹出（输入框在
+// 页面底部，向下弹出会被视口裁掉）。
+.ai-ref-chips {
+  padding: 0 var(--space-3) var(--space-2);
+}
+
+.ai-ref-kind {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.ai-ref-picker {
+  position: relative;
+  padding: 0 var(--space-3) var(--space-2);
+
+  .ref-picker {
+    position: absolute;
+    bottom: 0;
+    left: var(--space-3);
+    z-index: 60;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 12. 弹窗层与右下角内容的碰撞
+// -----------------------------------------------------------------------------
+//
+// .toast-stack 是固定在右下角的（right/bottom 16px）。而 WeportAI 的右栏在
+// 同一位置放着一张**常驻**卡片（上下文/缓存/费用），于是每次弹窗都会盖住它，
+// 而且会反复发生（截图里就能看到）。
+//
+// 不去改弹窗的位置或层级（那是全局的东西，动它会影响所有界面），而是让 AI
+// 右栏在底部留出弹窗的高度：常驻内容让位给瞬时层，代价只是一点空白。
+
+.ai-workspace {
+  padding-bottom: 104px;
+}
+
 // 引用 chip：显示名是人类可读的，id 只作为数据随请求发出。
 .ref-chips {
   display: flex;

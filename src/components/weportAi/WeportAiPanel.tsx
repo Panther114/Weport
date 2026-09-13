@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { X } from 'lucide-react'
+import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../reference/ReferencePicker'
+import { applyMention, findActiveMention, referenceKindLabel, type ChatReference } from '../../utils/mentionTrigger'
 import {
   Sparkles,
   Plus,
@@ -302,6 +305,13 @@ export default function WeportAiPanel() {
   const [running, setRunning] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
   const [input, setInput] = useState('')
+  // `@` 引用：在输入框里打 `@` 会弹出会话选择器，与 WeBot 任务描述共用同一个
+  // 组件和同一套纯逻辑（utils/mentionTrigger.ts）。
+  const [mention, setMention] = useState<{ start: number; query: string; caret: number } | null>(null)
+  const [references, setReferences] = useState<ChatReference[]>([])
+  const [referenceCandidates, setReferenceCandidates] = useState<ReferenceCandidate[]>([])
+  const pickerRef = useRef<ReferencePickerHandle>(null)
+  const candidatesLoaded = useRef(false)
   const [error, setError] = useState('')
   const [usage, setUsage] = useState<{
     totalTokens: number
@@ -579,17 +589,78 @@ export default function WeportAiPanel() {
     if (el) el.style.height = 'auto'
   }
 
+  /**
+   * 懒加载会话候选：只有用户第一次打出 `@` 时才去读会话列表。
+   * 打开 AI 页面本身不该触发一次全量会话查询。
+   */
+  async function ensureReferenceCandidates(): Promise<void> {
+    if (candidatesLoaded.current) return
+    candidatesLoaded.current = true
+    try {
+      const raw = (await api.chat.getSessions()) as { data?: unknown[] } | unknown[]
+      const list = (Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : []) as Array<Record<string, unknown>>
+      const mapped: ReferenceCandidate[] = []
+      for (const session of list) {
+        const id = String(session.username || '').trim()
+        if (!id) continue
+        const kind: ReferenceCandidate['kind'] = id.endsWith('@chatroom')
+          ? 'group'
+          : id.startsWith('gh_')
+            ? 'official'
+            : 'private'
+        const label = String(session.displayName || session.remark || session.nickName || id)
+        mapped.push({ id, label, kind, avatarUrl: session.avatarUrl as string | undefined })
+      }
+      setReferenceCandidates(
+        mapped.sort((a, b) => {
+          if (a.kind !== b.kind) return a.kind === 'group' ? -1 : b.kind === 'group' ? 1 : 0
+          return a.label.localeCompare(b.label)
+        })
+      )
+    } catch {
+      setReferenceCandidates([])
+    }
+  }
+
+  function syncMention(value: string, caret: number): void {
+    const active = findActiveMention(value, caret)
+    if (active) void ensureReferenceCandidates()
+    setMention(active ? { ...active, caret } : null)
+  }
+
+  function pickReference(reference: ChatReference): void {
+    if (!mention) return
+    const node = inputRef.current
+    const caret = node?.selectionStart ?? mention.caret
+    const { value, caret: nextCaret } = applyMention(input, { start: mention.start, query: mention.query }, caret, reference.label)
+    handleInputChange(value)
+    setReferences((prev) => (prev.some((item) => item.id === reference.id) ? prev : [...prev, reference]))
+    setMention(null)
+    requestAnimationFrame(() => {
+      node?.focus()
+      node?.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
+
   async function handleSend(textOverride?: string) {
     const text = (textOverride ?? input).trim()
     if (!text || !activeId || running) return
     setInput('')
+    setReferences([])
     resetInputHeight()
     stickToBottom.current = true
     setError('')
     setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', content: text, createdAt: Date.now() }])
     setLive({ reasoning: '', text: '', tools: [] })
     try {
-      const res = await api.ai.send(activeId, text)
+      // 引用以**追加**的一小段提示随这条用户消息一起发出，而不是改写系统提示
+      // 或历史 —— 前者会摧毁前缀缓存，而这段提示本身就是本次新增的输入。
+      const payload = references.length > 0
+        ? `${text}\n\n（本次聚焦以下会话，请优先分析它们：${references
+            .map((reference) => `${reference.label} = ${reference.id}`)
+            .join('；')}）`
+        : text
+      const res = await api.ai.send(activeId, payload)
       if (!res.success && res.error && !running) {
         setError(res.error)
         setLive(null)
@@ -952,6 +1023,39 @@ export default function WeportAiPanel() {
           )}
         </div>
 
+        {/* 引用 chip 与选择器都放在 composer 之外：composer 是横向 flex，
+            把弹层塞进去会被裁切。 */}
+        {references.length > 0 && (
+          <div className="ref-chips ai-ref-chips">
+            {references.map((reference) => (
+              <span className="ref-chip" key={reference.id}>
+                @{reference.label}
+                <span className="ai-ref-kind">{referenceKindLabel(reference.kind)}</span>
+                <button
+                  type="button"
+                  onClick={() => setReferences((prev) => prev.filter((item) => item.id !== reference.id))}
+                  aria-label={`移除引用 ${reference.label}`}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {mention && (
+          <div className="ai-ref-picker">
+            <ReferencePicker
+              ref={pickerRef}
+              query={mention.query}
+              candidates={referenceCandidates}
+              onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
+              onPick={pickReference}
+              onClose={() => setMention(null)}
+            />
+          </div>
+        )}
+
         <div className="ai-composer">
           <div className="ai-actions-wrap" ref={actionsRef}>
             <button
@@ -994,14 +1098,25 @@ export default function WeportAiPanel() {
             value={input}
             placeholder={running ? '正在执行…' : '分析你的聊天记录…（Enter 发送，Shift+Enter 换行）'}
             rows={1}
-            onChange={(e) => handleInputChange(e.target.value)}
+            onChange={(e) => {
+              handleInputChange(e.target.value)
+              syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length)
+            }}
             onKeyDown={(e) => {
+              // 选择器优先消费按键（上下/回车/Tab/Esc）；没被消费才走发送逻辑，
+              // 否则用户没法在引用选择器打开时正常打字。
+              if (mention && pickerRef.current?.handleKeyDown(e as unknown as { key: string; preventDefault: () => void })) {
+                e.preventDefault()
+                return
+              }
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
                 void handleSend()
               } else if (e.key === 'Enter' && e.shiftKey) {
                 // Shift+Enter：插入换行，输入框自动向上扩展
                 window.requestAnimationFrame(() => handleInputChange(e.currentTarget.value))
+              } else if (mention && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
+                setMention(null)
               }
             }}
             spellCheck={false}
