@@ -51,6 +51,7 @@ import { weportAiService } from './services/weportAiService'
 import { getProviderCatalog } from './services/ai/providerCatalog'
 import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
+import { setWeBotService } from './services/weBotRegistry'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -5556,6 +5557,8 @@ function startApp() {
     // WeBot 调度器：启动时立刻 tick 一次，把应用未运行期间错过的任务按各自
     // 的补偿策略补上（见 services/weBotSchedule.ts）。
     ensureWeBotService().start()
+    // 注册到只读 registry，供 HTTP API 与 MCP 对外暴露笔记/任务（单向依赖）。
+    setWeBotService(ensureWeBotService())
 
     // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
     weportAiService.setEventEmitter((event) => {
