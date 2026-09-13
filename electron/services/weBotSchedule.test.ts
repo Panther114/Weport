@@ -107,14 +107,24 @@ describe('nextRunAfter — interval', () => {
 })
 
 describe('collectDueRuns — 休眠/错过后的补偿', () => {
-  it('从未运行过的任务不会在创建瞬间补跑一段虚构的过去', () => {
+  it('没有调度起点（新任务）不会在创建瞬间补跑一段虚构的过去', () => {
     expect(collectDueRuns(daily(8, 30), { nowMs: at(2026, 3, 10, 12, 0) })).toEqual([])
+  })
+
+  it('nextDueMs 本身就是到期的执行点 —— 不能被当成"已经跑过"而跳过', () => {
+    // 这是最容易写错的一条：把 nextRunAt 当成"上次执行时间"会让扫描从下一个
+    // 周期开始，任务表现为「创建后再也不执行」。
+    const runs = collectDueRuns(daily(8, 30), {
+      nowMs: at(2026, 3, 10, 8, 30, 1),
+      nextDueMs: at(2026, 3, 10, 8, 30),
+    })
+    expect(runs).toEqual([at(2026, 3, 10, 8, 30)])
   })
 
   it('skip：完全忽略积压，不补跑', () => {
     const runs = collectDueRuns(daily(8, 30), {
       nowMs: at(2026, 3, 10, 12, 0),
-      lastScheduledMs: at(2026, 3, 1, 8, 30),
+      nextDueMs: at(2026, 3, 2, 8, 30),
       catchUp: 'skip',
     })
     expect(runs).toEqual([])
@@ -125,7 +135,7 @@ describe('collectDueRuns — 休眠/错过后的补偿', () => {
     // 用户要的是「现在把今天这次补上」。
     const runs = collectDueRuns(daily(8, 30), {
       nowMs: at(2026, 3, 10, 12, 0),
-      lastScheduledMs: at(2026, 3, 1, 8, 30),
+      nextDueMs: at(2026, 3, 2, 8, 30),
     })
     expect(runs).toEqual([at(2026, 3, 10, 8, 30)])
   })
@@ -133,7 +143,7 @@ describe('collectDueRuns — 休眠/错过后的补偿', () => {
   it('all：补齐所有错过的时间点，但有上限', () => {
     const runs = collectDueRuns(daily(8, 30), {
       nowMs: at(2026, 3, 10, 12, 0),
-      lastScheduledMs: at(2026, 3, 1, 8, 30),
+      nextDueMs: at(2026, 3, 2, 8, 30),
       catchUp: 'all',
       maxRuns: 5,
     })
@@ -143,14 +153,14 @@ describe('collectDueRuns — 休眠/错过后的补偿', () => {
 
   it('还没到时间就不返回任何执行点', () => {
     expect(
-      collectDueRuns(daily(8, 30), { nowMs: at(2026, 3, 10, 7, 0), lastScheduledMs: at(2026, 3, 9, 8, 30) })
+      collectDueRuns(daily(8, 30), { nowMs: at(2026, 3, 10, 7, 0), nextDueMs: at(2026, 3, 10, 8, 30) })
     ).toEqual([])
   })
 
   it('执行点严格递增 —— 保证调度器一定会推进 nextRunAt', () => {
     const runs = collectDueRuns(daily(8, 30), {
       nowMs: at(2026, 3, 10, 12, 0),
-      lastScheduledMs: at(2026, 3, 5, 8, 30),
+      nextDueMs: at(2026, 3, 5, 8, 30),
       catchUp: 'all',
       maxRuns: 10,
     })

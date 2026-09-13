@@ -80,54 +80,53 @@ export function nextRunAfter(schedule: WeBotSchedule, afterMs: number): number |
 /**
  * 计算「现在应该执行哪些到期的计划时间点」。
  *
- * - `lastScheduledMs` 是上一次**计划**时间（不是实际执行时间），用来避免
- *   把同一时刻重复算两次。
- * - `catchUp` 决定机器休眠/应用未运行期间错过的任务怎么补：
- *   `skip` 只补最近一次、`once` 也只补一次（默认，避免开机时并发打爆模型）、
- *   `all` 全部补（上限 maxRuns，防止休眠一周后一次性发起上百个任务）。
+ * `nextDueMs` 是**下一次应当执行的时间点**（持久化在任务上的 `nextRunAt`），
+ * 不是一个「已经跑过的时间」—— 这个区别很关键：把它当成已跑过的时间会让
+ * 扫描从它的下一个周期开始，于是到期的这一次永远被跳过，任务表现为
+ * 「创建后再也不执行」。没有它则视为新任务，不补跑一段并不存在的过去。
  *
- * 无论哪种策略都必须**至少推进到 nextRunAfter(now)**，否则同一个时间点会被
- * 反复触发。
+ * `catchUp` 决定机器休眠/应用未运行期间错过的任务怎么补：
+ * `skip` 忽略积压、`once` 只补最近一次（默认，避免开机瞬间并发打爆模型）、
+ * `all` 全部补（受 maxRuns 限制，防止休眠一周后一次性发起上百个任务）。
  */
 export function collectDueRuns(
   schedule: WeBotSchedule,
-  options: { nowMs: number; lastScheduledMs?: number; catchUp?: WeBotCatchUp; maxRuns?: number }
+  options: { nowMs: number; nextDueMs?: number; catchUp?: WeBotCatchUp; maxRuns?: number }
 ): number[] {
   const now = Number(options.nowMs)
   const catchUp: WeBotCatchUp = options.catchUp || 'once'
   const maxRuns = Math.max(1, Math.min(20, options.maxRuns ?? 5))
 
-  // 没有历史时，只判断「此刻是否正好到期」：新任务不应该在创建瞬间就补跑
-  // 一段并不存在的过去。
-  const startFrom = Number.isFinite(options.lastScheduledMs) && (options.lastScheduledMs as number) > 0
-    ? (options.lastScheduledMs as number)
-    : now
-
-  // `skip`：完全忽略积压。调用方仍会把 nextRunAt 推进到现在之后，只是不补跑。
-  if (catchUp === 'skip') return []
+  const firstDue = Number.isFinite(options.nextDueMs) && (options.nextDueMs as number) > 0
+    ? (options.nextDueMs as number)
+    : null
+  // 没有调度起点 → 不判断任何执行点（新任务不应该在创建瞬间补跑）。
+  if (firstDue === null) return []
 
   // 扫描上限只用于防呆（约 270 年的日任务），不代表要执行这么多次 ——
   // `once` 必须先扫到「现在」才能取到最近一次，用 maxRuns 截断扫描会让它
-  // 停在积压区间的开头（休眠 9 天时补跑的却是第 5 天）。
+  // 停在积压区间的开头。
   const SCAN_LIMIT = 100_000
   const due: number[] = []
-  let cursor = startFrom
-  while (due.length < SCAN_LIMIT) {
-    const next = nextRunAfter(schedule, cursor)
-    if (next === null || next > now) break
-    due.push(next)
-    cursor = next
+  let candidate = firstDue
+  while (due.length < SCAN_LIMIT && candidate <= now) {
+    due.push(candidate)
+    const next = nextRunAfter(schedule, candidate)
+    if (next === null) break
+    candidate = next
   }
+
+  if (catchUp === 'skip') return []
 
   // `once`：补**最近**的一次，而不是最早的一次。
   //
-  // 对一个「每天扫描某群、把作业整理成笔记」的任务来说，机器休眠三天后
-  // 去跑三天前那次毫无意义（数据窗口早就错位了）；用户想要的是「现在补上
-  // 今天这一次」。所以取最后一个。
+  // 对一个「每天扫描某群、把作业整理成笔记」的任务来说，机器休眠三天后去跑
+  // 三天前那次毫无意义（数据窗口早就错位了）；用户想要的是「现在补上今天
+  // 这一次」。所以取最后一个。
   if (catchUp === 'once') return due.length > 0 ? [due[due.length - 1]] : []
 
-  // `all`：从头补齐，但**限制次数** —— 休眠一周后一次性发起上百个任务会把
-  // 模型和 WCDB 宿主一起打爆。
+  // `all`：从头补齐，但限制次数 —— 休眠一周后一次性发起上百个任务会把模型
+  // 和 WCDB 宿主一起打爆。
   return due.slice(0, maxRuns)
 }
 
