@@ -328,7 +328,7 @@ class McpService {
   }
 
   private async createSession(): Promise<McpHttpSession> {
-    const server = new McpServer({ name: 'weport-mcp', version: '0.9.11' })
+    const server = new McpServer({ name: 'weport-mcp', version: '1.0.0' })
     this.registerTools(server)
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
