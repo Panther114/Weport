@@ -23,44 +23,33 @@
 // -----------------------------------------------------------------------------
 // 视图切换
 // -----------------------------------------------------------------------------
+//
+// 顶部的「定时任务 / 笔记」切换已移除：左侧栏的 WeBot / WeBot 笔记 两项就是
+// 同一个动作。一页里出现两套等价导航，只会让人犹豫该点哪个。
+// 取而代之的是一条紧凑工具栏：左侧说明当前视图，右侧放该视图的动作。
 
-.webot-tabs {
+.webot-toolbar {
   display: flex;
-  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   flex-shrink: 0;
 
-  button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: var(--control-h);
-    padding: 0 var(--space-3);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-    background: var(--bg-raised);
-    color: var(--text-dim);
-    font-family: inherit;
-    font-size: 13px;
-    cursor: pointer;
-    transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+  h2 {
+    font-size: 13.5px;
+    font-weight: 700;
+  }
 
-    &:hover {
-      color: var(--text);
-    }
-
-    &[data-active='true'] {
-      background: var(--accent-soft);
-      border-color: var(--accent-soft);
-      color: var(--text);
-      font-weight: 600;
-    }
+  .webot-toolbar-sub {
+    font-size: 11.5px;
+    color: var(--text-faint);
   }
 }
 
-.webot-count {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
+.webot-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .webot-message {
@@ -85,27 +74,39 @@
 }
 
 // -----------------------------------------------------------------------------
-// 任务列表 + 编辑器（两栏；窄窗口下堆叠）
+// 任务列表 + 编辑器
 // -----------------------------------------------------------------------------
+//
+// 单栏：编辑器（展开时）在上，任务卡片网格在下。
+//
+// 之前是「列表 1fr | 编辑器 420px」并排。窗口在 150% 缩放下 CSS 视口只有约
+// 1066px，页面内容宽约 750px —— 编辑器占满 420 后列表只剩约 300px，而卡片里
+// 那排 flex-shrink:0 的动作按钮宽约 220px，把标题压成了每行一个字。
+// 列表才是这一页的内容，编辑器只是偶尔打开的表单：所以列表拿满宽，编辑器
+// 用自己内部的两栏来消化宽度。
+
+.webot {
+  // 编辑器内部的两栏按**内容宽度**断点，而不是视口宽度 —— 侧栏占多少、用户
+  // 把窗口拉多宽都不影响这里的判断。
+  container-type: inline-size;
+}
 
 .webot-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  display: flex;
+  flex-direction: column;
   gap: var(--space-4);
-  align-items: start;
   min-height: 0;
 }
 
-@media (max-width: 1100px) {
-  .webot-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
+// 断点从 1100px 降到 900px：Windows 显示缩放会让 CSS 视口远小于截图像素
+// （150% 缩放下 1600px 的窗口只有约 1066 CSS px），1100 的断点在这台机器上
+// **永远**走单栏分支。这与左侧栏那个 1180→900 的修正完全同源。
 
 .webot-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--space-3);
+  align-items: stretch;
   min-width: 0;
 }
 
@@ -120,9 +121,8 @@
 
 .webot-card {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
+  flex-direction: column;
+  gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -132,25 +132,37 @@
     border-color: var(--accent);
     box-shadow: inset 2px 0 0 var(--accent);
   }
-}
 
-.webot-card-main {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
+  // 停用的任务整体压暗（开关本身保持全亮）：列表里一眼分出哪些还在跑。
+  &[data-enabled='false'] header,
+  &[data-enabled='false'] .webot-card-meta,
+  &[data-enabled='false'] .ref-chips,
+  &[data-enabled='false'] .webot-card-actions {
+    opacity: 0.6;
+  }
+
+  header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
 }
 
 .webot-card-title {
   font-size: 14px;
   font-weight: 600;
+  line-height: 1.5;
   color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .webot-card-meta {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  gap: 4px var(--space-3);
   font-size: 12px;
   color: var(--text-dim);
 
@@ -172,6 +184,14 @@
   align-items: center;
   gap: var(--space-1);
   flex-shrink: 0;
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
+// 删除是破坏性动作，推到最右边与「运行 / 编辑」拉开距离，避免连点删掉任务。
+.webot-card-delete {
+  margin-left: auto;
 }
 
 .webot-chip-kind {
@@ -245,11 +265,32 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-3);
 
   h3 {
-    font-size: 13.5px;
+    font-size: 14px;
     font-weight: 700;
   }
+}
+
+.webot-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: var(--space-4) var(--space-5);
+
+  // 640 是量出来的：默认窗口下 `.webot` 的内容盒约 750px，窄窗口（986 视口）
+  // 下约 670px —— 两者都还够两栏。窗口高度只有约 635 CSS px，单栏会让表单竖着
+  // 排到 1000px 高，用户得来回滚。
+  @container (max-width: 640px) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.webot-editor-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
 }
 
 .webot-field {
@@ -385,6 +426,10 @@
 .webot-editor-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
 }
 
 // -----------------------------------------------------------------------------
@@ -396,13 +441,6 @@
   flex-direction: column;
   gap: var(--space-3);
   min-height: 0;
-}
-
-.webot-notes-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
 }
 
 .webot-note-list {

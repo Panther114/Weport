@@ -2331,12 +2331,7 @@ export default function App() {
 
         {tab === 'ai' && <WeportAiPanel />}
         {tab === 'weclone' && <WeClonePage />}
-        {(tab === 'webot' || tab === 'webot-notes') && (
-          <WeBotModule
-            section={tab === 'webot-notes' ? 'notes' : 'tasks'}
-            onSectionChange={(next) => switchTab(next === 'notes' ? 'webot-notes' : 'webot')}
-          />
-        )}
+        {(tab === 'webot' || tab === 'webot-notes') && <WeBotModule section={tab === 'webot-notes' ? 'notes' : 'tasks'} />}
         {tab === 'sns' && <SnsPage />}
         {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
 

@@ -7,6 +7,9 @@ param(
   [string]$ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path,
   [string]$OutputDir = (Join-Path $env:TEMP "weport-electron-screenshots"),
   [string]$UserDataDir = (Join-Path $env:TEMP ("weport-electron-screenshot-user-data-" + [guid]::NewGuid().ToString('N'))),
+  # 17 张截图 + 一次响应式窗口重排。120s 是 12 张时代的预算，机器一忙就会在
+  # 中途（WeportAI 那一步）超时，看起来像"截图失败"，其实是预算不够。
+  [int]$TimeoutSeconds = 300,
   [switch]$PublishToDocs
 )
 
@@ -71,10 +74,10 @@ if ($ProjectRootArg) {
   $processArgs = @("--user-data-dir=$UserDataDir")
 }
 $p = Start-Process -FilePath $Executable -ArgumentList $processArgs -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
-$waited = $p.WaitForExit(120000)
+$waited = $p.WaitForExit($TimeoutSeconds * 1000)
 if (-not $waited) {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-  throw "Weport screenshot mode timed out after 120s (see $appOut / $appErr)"
+  throw "Weport screenshot mode timed out after ${TimeoutSeconds}s (see $appOut / $appErr)"
 }
 $code = $p.ExitCode
 if ($null -eq $code) {
@@ -191,6 +194,18 @@ foreach ($name in @('narrow', 'wide')) {
   if ($m.statusChips -lt 3) {
     throw "global status strip incomplete at ${name}: $($m.statusChips) chips (expected >= 3). Aborting."
   }
+  # WeBot 布局回归：编辑器必须占满内容宽度（旧版并排两栏把任务列表挤到约
+  # 300px，卡片标题被动作按钮压成每行一两个字），且卡片本身不能窄到塌掉。
+  if ($m.webotEditorW -le 0) {
+    throw "WeBot editor missing at ${name} - the task page did not render. Aborting."
+  }
+  if ($m.webotTitleW -lt 60) {
+    throw "WeBot task title squeezed to $($m.webotTitleW)px at ${name} - the card actions are starving the title. Aborting."
+  }
+  if ($m.webotCardW -lt 300) {
+    throw "WeBot task card collapsed to $($m.webotCardW)px at ${name}. Aborting."
+  }
+  Write-Output "  [webot:$name] card=$($m.webotCardW) title=$($m.webotTitleW) listCols=$($m.webotListCols) editorGridCols=$($m.webotGridCols)"
 }
 if ($metrics.narrow.labelsVisible -ne $true) {
   throw "navigation labels hidden at $($metrics.narrow.viewport)px - the rail collapsed far too early. Aborting."

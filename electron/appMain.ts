@@ -3066,9 +3066,17 @@ function demoAntiRevokeSessions() {
 }
 
 function installScreenshotDemoHandlers() {
+  // WEPORT_TRACE_AI=1 时把渲染进程实际发出的 ai:* 调用打到 stdout：截图模式里
+  // "AI 页面只渲染出空态"这类问题，只有看清调用了哪些通道、拿到了什么才能定位。
+  const traceAi = process.env.WEPORT_TRACE_AI === '1'
   const override = (channel: string, handler: (...args: any[]) => unknown) => {
     ipcMain.removeHandler(channel)
-    ipcMain.handle(channel, handler)
+    ipcMain.handle(channel, (event, ...args) => {
+      if (traceAi && channel.startsWith('ai:')) {
+        console.log(`[ai-trace] ${channel} <- ${JSON.stringify(args)}`)
+      }
+      return handler(event, ...args)
+    })
   }
   override('config:get', (_e, key: string) => demoConfigValue(String(key || '')))
   override('config:set', async () => { /* 截图模式不落盘：演示数据绝不写进真实配置 */ })
@@ -3142,7 +3150,29 @@ function installScreenshotDemoHandlers() {
     read: false,
     pinned: false,
   }
-  override('webot:listTasks', () => [demoWebBotTask])
+  // 三条任务而不是一条：任务列表是「卡片网格」，一条任务时看不出网格是否
+  // 真的排开；第二条停用、第三条是每周任务，顺带覆盖停用态与每周排期文案。
+  const demoWebBotTask2 = {
+    ...demoWebBotTask,
+    id: 'task-demo-2',
+    title: '家庭群每周摘要',
+    description: '每周日晚上把 @一家人 的聊天整理成一段摘要。',
+    schedule: { kind: 'weekly' as const, weekday: 0, hour: 21, minute: 0 },
+    enabled: false,
+    references: [{ id: 'demo-family@chatroom', label: '一家人', kind: 'group' as const }],
+    nextRunAt: Date.now() + 3 * 86_400_000,
+    lastRunAt: Date.now() - 4 * 86_400_000,
+  }
+  const demoWebBotTask3 = {
+    ...demoWebBotTask,
+    id: 'task-demo-3',
+    title: '项目群进展跟踪',
+    description: '每隔 6 小时看一次 @项目协作 群，把新的进展和待办挑出来。',
+    schedule: { kind: 'interval' as const, everyMinutes: 360, anchorMs: 0 },
+    references: [{ id: 'demo-work@chatroom', label: '项目协作', kind: 'group' as const }],
+    nextRunAt: Date.now() + 540_000,
+  }
+  override('webot:listTasks', () => [demoWebBotTask, demoWebBotTask2, demoWebBotTask3])
   override('webot:listNotes', () => [demoWebBotNote])
   override('webot:getNote', () => demoWebBotNote)
   override('webot:updateNote', () => demoWebBotNote)
@@ -4221,21 +4251,38 @@ const groupDetailDom = results.groupDetail as Record<string, any>
     await sleep(1200)
     const webot = await wc.executeJavaScript(`
       (() => {
+        // 编辑器默认收起，先点「新建任务」把它展开再量：v1.0 的布局是
+        // 「列表占满宽 + 编辑器（展开时）在列表上方」。
+        const btn = Array.from(document.querySelectorAll('.webot-toolbar-actions button')).find((x) => x.textContent.includes('新建任务'));
+        btn?.click();
+        return { opened: !!btn };
+      })()
+    `)
+    await sleep(400)
+    const webotLayout = await wc.executeJavaScript(`
+      (() => {
         const body = document.querySelector('.webot-body');
-        const cols = body ? getComputedStyle(body).gridTemplateColumns.split(' ').length : 0;
+        const list = document.querySelector('.webot-list');
+        const card = document.querySelector('.webot-card');
         const editor = document.querySelector('.webot-editor');
+        const grid = document.querySelector('.webot-editor-grid');
+        const title = document.querySelector('.webot-card-title');
         return {
           mounted: !!document.querySelector('.webot'),
           editor: !!editor,
           editorW: editor ? Math.round(editor.getBoundingClientRect().width) : 0,
-          cols,
+          bodyW: body ? Math.round(body.getBoundingClientRect().width) : 0,
+          gridCols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : 0,
+          listCols: list ? getComputedStyle(list).gridTemplateColumns.split(' ').length : 0,
+          cardW: card ? Math.round(card.getBoundingClientRect().width) : 0,
+          titleW: title ? Math.round(title.getBoundingClientRect().width) : 0,
           docOverflow: document.documentElement.scrollWidth - window.innerWidth,
         };
       })()
     `)
-    log(`webot@${width} = ${JSON.stringify(webot)}`)
+    log(`webot@${width} = ${JSON.stringify(webot)} opened=${webot.opened} layout=${JSON.stringify(webotLayout)}`)
 
-    return { snsClick, anaClick, cardClick, sns, global, shell, webotClick, webot }
+    return { snsClick, anaClick, cardClick, sns, global, shell, webotClick, webot: webotLayout }
   }
   const medium = await layoutProbe(1000, 680)
   log(`layout@1000 = ${JSON.stringify(medium)}`)
@@ -4266,9 +4313,24 @@ const groupDetailDom = results.groupDetail as Record<string, any>
     app.exit(1)
     return
   }
+  // v1.0 WeBot 布局：编辑器展开后必须几乎占满内容宽度（而不是把列表挤成
+  // 约 300px 的窄条 —— 那是被修掉的旧两栏布局），并且任务卡片的标题不能被
+  // 那排动作按钮压到每行一两个字。
   if (!medium.webot?.mounted || !medium.webot.editor) {
     results.fail = 'webot page did not mount'
     log(`FAIL: WeBot 页面未挂载 ${JSON.stringify(medium.webot)}`)
+    app.exit(1)
+    return
+  }
+  if (medium.webot.editorW < medium.webot.bodyW * 0.8) {
+    results.fail = 'webot editor not full width'
+    log(`FAIL: WeBot 编辑器没有占满内容宽度 ${JSON.stringify(medium.webot)}`)
+    app.exit(1)
+    return
+  }
+  if (medium.webot.listCols < 2 || medium.webot.titleW < 60) {
+    results.fail = 'webot task list squeezed'
+    log(`FAIL: WeBot 任务列表/卡片被压扁 ${JSON.stringify(medium.webot)}`)
     app.exit(1)
     return
   }
@@ -4915,10 +4977,19 @@ async function runScreenshotMode() {
     await clickTab('设置')
   })
 
-  // WeBot（v1.0）：任务构建器与笔记板。两者都断言到了具体的 DOM 节点，
+  // WeBot（v1.0）：任务列表与笔记板。两者都断言到了具体的 DOM 节点，
   // 因此「页面挂载了但内容没渲染」这种情况会直接失败而不是产出一张空图。
-  await captureV09('webot', 'webot.png', ['.webot-editor', '.webot-card', '.webot-tabs'], async () => {
+  await captureV09('webot', 'webot.png', ['.webot-card'], async () => {
     await clickTab('WeBot')
+  })
+
+  // WeBot 编辑器：点「新建任务」展开表单，断言内部两栏网格真的存在。
+  await captureV09('webot-editor', 'webot-editor.png', ['.webot-editor-grid', '.webot-editor'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const b = Array.from(document.querySelectorAll('.webot-toolbar-actions button')).find((x) => x.textContent.includes('新建任务')); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
   })
 
   await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {
@@ -4944,6 +5015,11 @@ async function runScreenshotMode() {
         (() => {
           const rail = document.querySelector('.rail');
           const label = rail ? rail.querySelector('.rail-item span') : null;
+          const editor = document.querySelector('.webot-editor');
+          const grid = document.querySelector('.webot-editor-grid');
+          const list = document.querySelector('.webot-list');
+          const card = document.querySelector('.webot-card');
+          const title = document.querySelector('.webot-card-title');
           return {
             viewport: window.innerWidth,
             railW: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
@@ -4951,6 +5027,13 @@ async function runScreenshotMode() {
             railItems: document.querySelectorAll('.rail-item').length,
             statusChips: document.querySelectorAll('.rail-foot .status-chip').length,
             docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+            // WeBot 布局：编辑器应占满列表宽度（旧的并排两栏会把列表挤到约
+            // 300px），卡片标题不能被那排动作按钮压扁。
+            webotEditorW: editor ? Math.round(editor.getBoundingClientRect().width) : 0,
+            webotGridCols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : 0,
+            webotListCols: list ? getComputedStyle(list).gridTemplateColumns.split(' ').length : 0,
+            webotCardW: card ? Math.round(card.getBoundingClientRect().width) : 0,
+            webotTitleW: title ? Math.round(title.getBoundingClientRect().width) : 0,
           };
         })()
       `)
@@ -4958,7 +5041,14 @@ async function runScreenshotMode() {
     mainWindow.setSize(1000, 680)
     await sleep(1000)
     await clickTab('WeBot')
-    await sleep(800)
+    await sleep(600)
+    // 编辑器在这一步是收起的（切换标签会重挂载 WeBot 页面），而它恰恰是最需要
+    // 验证响应式的那块：窄窗口下两栏要能塌成一栏。先展开再截图兼测量。
+    await mainWindow.webContents.executeJavaScript(
+      `(() => { const b = Array.from(document.querySelectorAll('.webot-toolbar-actions button')).find((x) => x.textContent.includes('新建任务')); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
     await saveStable(mainWindow, 'webot-narrow.png')
     viewportMetrics.narrow = await measure()
 

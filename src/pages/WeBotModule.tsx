@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { CalendarClock, Check, Clock, Pin, Play, Plus, Trash2, X } from 'lucide-react'
+import { Check, Clock, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
 import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../components/reference/ReferencePicker'
 import { applyMention, findActiveMention, referenceKindLabel, type ChatReference } from '../utils/mentionTrigger'
 import { CATCH_UP_OPTIONS, WEEKDAY_OPTIONS, describeNextRun, describeRelativeTime, describeSchedule } from '../utils/weBotFormat'
@@ -9,7 +9,6 @@ export type WeBotSection = 'tasks' | 'notes'
 
 interface Props {
   section: WeBotSection
-  onSectionChange: (section: WeBotSection) => void
 }
 
 interface SessionLike {
@@ -72,7 +71,7 @@ type Draft = ReturnType<typeof emptyDraft>
  * 的两面 —— 任务产出笔记，笔记链接回任务。分成两个平级入口只会让用户在
  * 两个页面之间来回跳。
  */
-export default function WeBotModule({ section, onSectionChange }: Props) {
+export default function WeBotModule({ section }: Props) {
   const api = window.electronAPI
   const [tasks, setTasks] = useState<WeBotTask[]>([])
   const [notes, setNotes] = useState<WeBotNote[]>([])
@@ -83,12 +82,16 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft)
   const [unreadOnly, setUnreadOnly] = useState(false)
+  const [unread, setUnread] = useState(0)
   const [message, setMessage] = useState('')
+  // 编辑器默认收起：任务列表才是这一页的内容，表单只在要建/改任务时出现。
+  const [editorOpen, setEditorOpen] = useState(false)
 
   // `@` 引用状态：pick 的锚点（start/query）与光标位置。
   const [mention, setMention] = useState<{ start: number; query: string; caret: number } | null>(null)
   const pickerRef = useRef<ReferencePickerHandle>(null)
   const descriptionRef = useRef<HTMLTextAreaElement | null>(null)
+  const titleRef = useRef<HTMLInputElement | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -100,6 +103,8 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
       setTasks(nextTasks)
       setNotes(nextNotes)
       setRuns(nextRuns)
+      // 未读数是**全量**的，不受「只看未读」筛选影响，因此单独取。
+      setUnread(await api.weBot.unreadCount())
     } catch (error) {
       setMessage(`读取 WeBot 数据失败：${String((error as Error)?.message || error)}`)
     } finally {
@@ -135,6 +140,15 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
   )
   useEffect(() => unsubscribe(), [unsubscribe])
 
+  // 一个任务都没有时自动展开编辑器：新用户第一次进来不该只看到一个空列表，
+  // 直接把「怎么建第一个任务」摆在他面前。只自动展开一次，之后尊重用户的手动收起。
+  const autoOpened = useRef(false)
+  useEffect(() => {
+    if (loading || autoOpened.current) return
+    autoOpened.current = true
+    if (tasks.length === 0) setEditorOpen(true)
+  }, [loading, tasks.length])
+
   const runsByTask = useMemo(() => {
     const map = new Map<string, WeBotRun>()
     for (const run of runs) if (!map.has(run.taskId)) map.set(run.taskId, run)
@@ -163,6 +177,23 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
             ? { scheduleKind: 'monthly', hour: task.schedule.hour, minute: task.schedule.minute, day: task.schedule.day }
             : { scheduleKind: 'interval', everyMinutes: task.schedule.everyMinutes }),
     })
+  }
+
+  const openCreate = () => {
+    startCreate()
+    setEditorOpen(true)
+    // 打开后把光标送进标题：这一步几乎总是用户点「新建任务」后想做的事。
+    requestAnimationFrame(() => titleRef.current?.focus())
+  }
+
+  const openEdit = (task: WeBotTask) => {
+    startEdit(task)
+    setEditorOpen(true)
+  }
+
+  const closeEditor = () => {
+    setEditorOpen(false)
+    startCreate()
   }
 
   const buildSchedule = (value: Draft): WeBotSchedule => {
@@ -200,7 +231,7 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
         })
       }
       setMessage('')
-      startCreate()
+      closeEditor()
       await refresh()
     } catch (error) {
       setMessage(`保存失败：${String((error as Error)?.message || error)}`)
@@ -209,7 +240,7 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
 
   const removeTask = async (task: WeBotTask) => {
     await api.weBot.deleteTask(task.id)
-    if (editingId === task.id) startCreate()
+    if (editingId === task.id) closeEditor()
     await refresh()
   }
 
@@ -268,17 +299,44 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
 
   return (
     <div className="webot">
-      <div className="webot-tabs" role="tablist" aria-label="WeBot 视图">
-        <button type="button" role="tab" aria-selected={section === 'tasks'} data-active={section === 'tasks'} onClick={() => onSectionChange('tasks')}>
-          <CalendarClock size={14} />
-          定时任务
-          <span className="webot-count">{tasks.length}</span>
-        </button>
-        <button type="button" role="tab" aria-selected={section === 'notes'} data-active={section === 'notes'} onClick={() => onSectionChange('notes')}>
-          <Pin size={14} />
-          笔记
-          <span className="webot-count">{notes.length}</span>
-        </button>
+      {/* 顶部不再放「定时任务 / 笔记」切换 —— 左侧栏的 WeBot / WeBot 笔记
+          就是同一个动作，一页里两套等价导航只会让人犹豫该点哪个。
+          这里只保留一条紧凑工具栏：左边说明当前视图，右边放该视图的动作。 */}
+      <div className="webot-toolbar">
+        <div>
+          <h2>{section === 'tasks' ? '定时任务' : '笔记'}</h2>
+          <span className="webot-toolbar-sub">
+            {section === 'tasks'
+              ? `共 ${tasks.length} 个任务；任务到点自动执行，结果写入笔记`
+              : `共 ${notes.length} 条笔记${unread > 0 ? ` · ${unread} 条未读` : ''}`}
+          </span>
+        </div>
+        <div className="webot-toolbar-actions">
+          {section === 'tasks' ? (
+            <button type="button" className="secondary-btn" onClick={openCreate}>
+              <Plus size={14} /> 新建任务
+            </button>
+          ) : (
+            <>
+              <label className="webot-checkbox">
+                <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} />
+                <span>只看未读</span>
+              </label>
+              {notes.length > 0 ? (
+                <button
+                  type="button"
+                  className="ghost-btn webot-danger"
+                  onClick={async () => {
+                    await api.weBot.clearNotes()
+                    await refresh()
+                  }}
+                >
+                  <Trash2 size={13} /> 清空
+                </button>
+              ) : null}
+            </>
+          )}
+        </div>
       </div>
 
       {message ? (
@@ -292,51 +350,270 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
 
       {section === 'tasks' ? (
         <div className="webot-body">
+          {editorOpen ? (
+            <section className="webot-editor" aria-label={editingId ? '编辑任务' : '新建任务'}>
+              <header className="webot-editor-head">
+                <h3>{editingId ? '编辑任务' : '新建任务'}</h3>
+                <button type="button" className="ghost-btn" onClick={closeEditor}>
+                  <X size={14} /> 关闭
+                </button>
+              </header>
+
+              <div className="webot-editor-grid">
+                <div className="webot-editor-col">
+                  <label className="webot-field">
+                    <span>标题</span>
+                    <input
+                      ref={titleRef}
+                      value={draft.title}
+                      maxLength={80}
+                      placeholder="例如：化学群作业整理"
+                      onChange={(e) => setDraft((prev) => ({ ...prev, title: e.target.value }))}
+                    />
+                  </label>
+
+                  <div className="webot-field">
+                    <span>任务内容</span>
+                    <textarea
+                  ref={descriptionRef}
+                  rows={5}
+                  value={draft.description}
+                  placeholder="描述要做什么。输入 @ 可以引用一个群或联系人，例如：@化学 3 班 每天找出布置的作业并整理成笔记。"
+                  onChange={(e) => {
+                    setDraft((prev) => ({ ...prev, description: e.target.value }))
+                    syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length)
+                  }}
+                  onKeyDown={(e) => {
+                    if (!mention) return
+                    // 选择器把按键交给它处理；只有它消费了按键我们才阻止默认行为，
+                    // 否则用户没法在描述里正常打字。
+                    const consumed = pickerRef.current?.handleKeyDown(e as unknown as { key: string; preventDefault: () => void })
+                    if (consumed) e.preventDefault()
+                    if (!consumed && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
+                      setMention(null)
+                    }
+                  }}
+                  onBlur={() => {
+                    // 延迟关闭：点击选择器条目时会先触发 blur。
+                    setTimeout(() => setMention(null), 120)
+                  }}
+                />
+                {mention ? (
+                  <div className="webot-picker-anchor">
+                    <ReferencePicker
+                      ref={pickerRef}
+                      query={mention.query}
+                      candidates={candidates}
+                      onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
+                      onPick={pickReference}
+                      onClose={() => setMention(null)}
+                    />
+                  </div>
+                ) : null}
+              </div>
+
+              {draft.references.length > 0 ? (
+                <div className="ref-chips">
+                  {draft.references.map((reference) => (
+                    <span className="ref-chip" key={reference.id}>
+                      @{reference.label}
+                      <button type="button" onClick={() => removeReference(reference.id)} aria-label={`移除引用 ${reference.label}`}>
+                        <X size={11} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+                </div>
+
+                <div className="webot-editor-col">
+                  <div className="webot-field">
+                    <span>执行频率</span>
+                <div className="segmented" role="radiogroup" aria-label="执行频率">
+                  {(
+                    [
+                      { id: 'daily', label: '每天' },
+                      { id: 'weekly', label: '每周' },
+                      { id: 'monthly', label: '每月' },
+                      { id: 'interval', label: '间隔' },
+                    ] as const
+                  ).map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={draft.scheduleKind === option.id}
+                      className="segmented-item"
+                      data-active={draft.scheduleKind === option.id}
+                      onClick={() => setDraft((prev) => ({ ...prev, scheduleKind: option.id }))}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="webot-schedule-row">
+                  {draft.scheduleKind === 'interval' ? (
+                    <label>
+                      <span>每</span>
+                      <input
+                        type="number"
+                        min={5}
+                        max={1440}
+                        value={draft.everyMinutes}
+                        onChange={(e) => setDraft((prev) => ({ ...prev, everyMinutes: Number(e.target.value) || 60 }))}
+                      />
+                      <span>分钟</span>
+                    </label>
+                  ) : (
+                    <>
+                      {draft.scheduleKind === 'weekly' ? (
+                        <select value={draft.weekday} onChange={(e) => setDraft((prev) => ({ ...prev, weekday: Number(e.target.value) }))}>
+                          {WEEKDAY_OPTIONS.map((label, index) => (
+                            <option key={label} value={index}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : null}
+                      {draft.scheduleKind === 'monthly' ? (
+                        <label>
+                          <span>每月</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={31}
+                            value={draft.day}
+                            onChange={(e) => setDraft((prev) => ({ ...prev, day: Number(e.target.value) || 1 }))}
+                          />
+                          <span>日</span>
+                        </label>
+                      ) : null}
+                      <label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={23}
+                          value={draft.hour}
+                          onChange={(e) => setDraft((prev) => ({ ...prev, hour: Number(e.target.value) || 0 }))}
+                        />
+                        <span>:</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={59}
+                          value={draft.minute}
+                          onChange={(e) => setDraft((prev) => ({ ...prev, minute: Number(e.target.value) || 0 }))}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+                <p className="webot-hint">
+                  {describeSchedule(buildSchedule(draft))} · 下次 {describeNextRun(Date.now() + 60_000)}
+                </p>
+              </div>
+
+              <div className="webot-field">
+                <span>错过时怎么办</span>
+                <div className="webot-radio-list">
+                  {CATCH_UP_OPTIONS.map((option) => (
+                    <label key={option.id} className="webot-radio">
+                      <input
+                        type="radio"
+                        name="webot-catchup"
+                        checked={draft.catchUp === option.id}
+                        onChange={() => setDraft((prev) => ({ ...prev, catchUp: option.id }))}
+                      />
+                      <span>
+                        <strong>{option.label}</strong>
+                        <em>{option.hint}</em>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <label className="webot-checkbox">
+                <input
+                  type="checkbox"
+                  checked={draft.allowParallel}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, allowParallel: e.target.checked }))}
+                />
+                <span>允许与其他任务同时运行（默认串行，避免同时抢占数据库）</span>
+              </label>
+                </div>
+              </div>
+
+              <div className="webot-editor-actions">
+                <button type="button" className="ghost-btn" onClick={closeEditor}>
+                  取消
+                </button>
+                <button type="button" className="primary-btn" onClick={() => void save()}>
+                  <Check size={14} />
+                  {editingId ? '保存修改' : '创建任务'}
+                </button>
+              </div>
+            </section>
+          ) : null}
+
           <div className="webot-list">
             {tasks.length === 0 ? (
               <div className="webot-empty">
-                还没有定时任务。右侧可以创建一个：比如「每天 08:30 扫描化学群，把作业整理成笔记」。
+                还没有定时任务。点击右上角「新建任务」可以创建一个 —— 比如「每天 08:30 扫描化学群，把作业整理成笔记」。
               </div>
             ) : null}
 
             {tasks.map((task) => {
               const lastRun = runsByTask.get(task.id)
               return (
-                <div className="webot-card" key={task.id} data-active={editingId === task.id}>
-                  <div className="webot-card-main">
-                    <div className="webot-card-title">{task.title}</div>
-                    <div className="webot-card-meta">
-                      <span>
-                        <Clock size={12} /> {describeSchedule(task.schedule)}
-                      </span>
-                      <span>下次 {describeNextRun(task.nextRunAt)}</span>
-                    </div>
-                    {task.references.length > 0 ? (
-                      <div className="ref-chips">
-                        {task.references.map((reference) => (
-                          <span className="ref-chip" key={reference.id}>
-                            @{reference.label}
-                            <span className="webot-chip-kind">{referenceKindLabel(reference.kind)}</span>
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {lastRun?.status === 'error' ? <div className="webot-card-error">上次失败：{lastRun.error}</div> : null}
-                  </div>
-
-                  <div className="webot-card-actions">
-                    <label className="webot-switch" title={task.enabled ? '已启用' : '已停用'}>
+                <div className="webot-card" key={task.id} data-active={editingId === task.id} data-enabled={task.enabled}>
+                  <header>
+                    <h4 className="webot-card-title">{task.title}</h4>
+                    <label className="webot-switch" title={task.enabled ? '已启用，点击停用' : '已停用，点击启用'}>
                       <input type="checkbox" checked={task.enabled} onChange={() => void toggleEnabled(task)} />
                       <span />
                     </label>
+                  </header>
+
+                  <div className="webot-card-meta">
+                    <span>
+                      <Clock size={12} /> {describeSchedule(task.schedule)}
+                    </span>
+                    <span>下次 {describeNextRun(task.nextRunAt)}</span>
+                  </div>
+
+                  {task.references.length > 0 ? (
+                    <div className="ref-chips">
+                      {task.references.map((reference) => (
+                        <span className="ref-chip" key={reference.id}>
+                          @{reference.label}
+                          <span className="webot-chip-kind">{referenceKindLabel(reference.kind)}</span>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {lastRun?.status === 'error' ? <div className="webot-card-error">上次失败：{lastRun.error}</div> : null}
+
+                  {/* 动作单独占一行：卡片宽度只有 340px 上下，把开关和三个按钮塞进
+                      标题那一行会把标题挤成每行一两个字。 */}
+                  <div className="webot-card-actions">
                     <button type="button" className="ghost-btn" disabled={busyTaskId === task.id} onClick={() => void runTask(task)} title="立即运行一次">
                       <Play size={13} />
                       {busyTaskId === task.id ? '运行中…' : '运行'}
                     </button>
-                    <button type="button" className="ghost-btn" onClick={() => startEdit(task)}>
-                      编辑
+                    <button type="button" className="ghost-btn" onClick={() => openEdit(task)}>
+                      <PenLine size={13} /> 编辑
                     </button>
-                    <button type="button" className="ghost-btn webot-danger" onClick={() => void removeTask(task)} title="删除任务（已有笔记会保留）">
+                    <button
+                      type="button"
+                      className="ghost-btn webot-danger webot-card-delete"
+                      onClick={() => void removeTask(task)}
+                      title="删除任务（已有笔记会保留）"
+                      aria-label={`删除任务 ${task.title}`}
+                    >
                       <Trash2 size={13} />
                     </button>
                   </div>
@@ -344,220 +621,9 @@ export default function WeBotModule({ section, onSectionChange }: Props) {
               )
             })}
           </div>
-
-          <div className="webot-editor">
-            <div className="webot-editor-head">
-              <h3>{editingId ? '编辑任务' : '新建任务'}</h3>
-              {editingId ? (
-                <button type="button" className="ghost-btn" onClick={startCreate}>
-                  <Plus size={13} /> 改为新建
-                </button>
-              ) : null}
-            </div>
-
-            <label className="webot-field">
-              <span>标题</span>
-              <input value={draft.title} maxLength={80} placeholder="例如：化学群作业整理" onChange={(e) => setDraft((prev) => ({ ...prev, title: e.target.value }))} />
-            </label>
-
-            <div className="webot-field">
-              <span>任务内容</span>
-              <textarea
-                ref={descriptionRef}
-                rows={5}
-                value={draft.description}
-                placeholder="描述要做什么。输入 @ 可以引用一个群或联系人，例如：@化学 3 班 每天找出布置的作业并整理成笔记。"
-                onChange={(e) => {
-                  setDraft((prev) => ({ ...prev, description: e.target.value }))
-                  syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length)
-                }}
-                onKeyDown={(e) => {
-                  if (!mention) return
-                  // 选择器把按键交给它处理；只有它消费了按键我们才阻止默认行为，
-                  // 否则用户没法在描述里正常打字。
-                  const consumed = pickerRef.current?.handleKeyDown(e as unknown as { key: string; preventDefault: () => void })
-                  if (consumed) e.preventDefault()
-                  if (!consumed && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
-                    setMention(null)
-                  }
-                }}
-                onBlur={() => {
-                  // 延迟关闭：点击选择器条目时会先触发 blur。
-                  setTimeout(() => setMention(null), 120)
-                }}
-              />
-              {mention ? (
-                <div className="webot-picker-anchor">
-                  <ReferencePicker
-                    ref={pickerRef}
-                    query={mention.query}
-                    candidates={candidates}
-                    onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
-                    onPick={pickReference}
-                    onClose={() => setMention(null)}
-                  />
-                </div>
-              ) : null}
-            </div>
-
-            {draft.references.length > 0 ? (
-              <div className="ref-chips">
-                {draft.references.map((reference) => (
-                  <span className="ref-chip" key={reference.id}>
-                    @{reference.label}
-                    <button type="button" onClick={() => removeReference(reference.id)} aria-label={`移除引用 ${reference.label}`}>
-                      <X size={11} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : null}
-
-            <div className="webot-field">
-              <span>执行频率</span>
-              <div className="segmented" role="radiogroup" aria-label="执行频率">
-                {(
-                  [
-                    { id: 'daily', label: '每天' },
-                    { id: 'weekly', label: '每周' },
-                    { id: 'monthly', label: '每月' },
-                    { id: 'interval', label: '间隔' },
-                  ] as const
-                ).map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={draft.scheduleKind === option.id}
-                    className="segmented-item"
-                    data-active={draft.scheduleKind === option.id}
-                    onClick={() => setDraft((prev) => ({ ...prev, scheduleKind: option.id }))}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="webot-schedule-row">
-                {draft.scheduleKind === 'interval' ? (
-                  <label>
-                    <span>每</span>
-                    <input
-                      type="number"
-                      min={5}
-                      max={1440}
-                      value={draft.everyMinutes}
-                      onChange={(e) => setDraft((prev) => ({ ...prev, everyMinutes: Number(e.target.value) || 60 }))}
-                    />
-                    <span>分钟</span>
-                  </label>
-                ) : (
-                  <>
-                    {draft.scheduleKind === 'weekly' ? (
-                      <select value={draft.weekday} onChange={(e) => setDraft((prev) => ({ ...prev, weekday: Number(e.target.value) }))}>
-                        {WEEKDAY_OPTIONS.map((label, index) => (
-                          <option key={label} value={index}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    ) : null}
-                    {draft.scheduleKind === 'monthly' ? (
-                      <label>
-                        <span>每月</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={31}
-                          value={draft.day}
-                          onChange={(e) => setDraft((prev) => ({ ...prev, day: Number(e.target.value) || 1 }))}
-                        />
-                        <span>日</span>
-                      </label>
-                    ) : null}
-                    <label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={23}
-                        value={draft.hour}
-                        onChange={(e) => setDraft((prev) => ({ ...prev, hour: Number(e.target.value) || 0 }))}
-                      />
-                      <span>:</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={59}
-                        value={draft.minute}
-                        onChange={(e) => setDraft((prev) => ({ ...prev, minute: Number(e.target.value) || 0 }))}
-                      />
-                    </label>
-                  </>
-                )}
-              </div>
-              <p className="webot-hint">
-                {describeSchedule(buildSchedule(draft))} · 下次 {describeNextRun(Date.now() + 60_000)}
-              </p>
-            </div>
-
-            <div className="webot-field">
-              <span>错过时怎么办</span>
-              <div className="webot-radio-list">
-                {CATCH_UP_OPTIONS.map((option) => (
-                  <label key={option.id} className="webot-radio">
-                    <input
-                      type="radio"
-                      name="webot-catchup"
-                      checked={draft.catchUp === option.id}
-                      onChange={() => setDraft((prev) => ({ ...prev, catchUp: option.id }))}
-                    />
-                    <span>
-                      <strong>{option.label}</strong>
-                      <em>{option.hint}</em>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <label className="webot-checkbox">
-              <input
-                type="checkbox"
-                checked={draft.allowParallel}
-                onChange={(e) => setDraft((prev) => ({ ...prev, allowParallel: e.target.checked }))}
-              />
-              <span>允许与其他任务同时运行（默认串行，避免同时抢占数据库）</span>
-            </label>
-
-            <div className="webot-editor-actions">
-              <button type="button" className="primary-btn" onClick={() => void save()}>
-                <Check size={14} />
-                {editingId ? '保存修改' : '创建任务'}
-              </button>
-            </div>
-          </div>
         </div>
       ) : (
         <div className="webot-notes">
-          <div className="webot-notes-head">
-            <label className="webot-checkbox">
-              <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} />
-              <span>只看未读</span>
-            </label>
-            {notes.length > 0 ? (
-              <button
-                type="button"
-                className="ghost-btn webot-danger"
-                onClick={async () => {
-                  await api.weBot.clearNotes()
-                  await refresh()
-                }}
-              >
-                <Trash2 size={13} /> 清空笔记
-              </button>
-            ) : null}
-          </div>
-
           {notes.length === 0 ? (
             <div className="webot-empty">还没有笔记。任务跑完后，结果会以简短卡片的形式出现在这里。</div>
           ) : null}
