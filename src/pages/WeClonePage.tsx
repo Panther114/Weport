@@ -181,7 +181,7 @@ export default function WeClonePage() {
     try {
       const setup = await api.ai.getSetup()
       if (!setup.profiles || setup.profiles.length === 0 || !setup.hasApiKey) {
-        pushToast('err', '请先配置 WePort AI', '生成人格档案需要可用的 AI 服务，请前往「WeportAI」页添加服务配置')
+        pushToast('err', '请先配置 WePort AI', '生成人格档案需要可用的 AI 服务，请前往「设置 → AI 服务」添加')
         return
       }
     } catch { /* 忽略预检失败，由主进程兜底报错 */ }

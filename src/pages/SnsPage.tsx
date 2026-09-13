@@ -104,6 +104,7 @@ export default function SnsPage() {
   const postsRef = useRef(posts)
   postsRef.current = posts
   const feedRef = useRef<HTMLDivElement | null>(null)
+  const jumpPopoverRef = useRef<HTMLDivElement | null>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const loadingRef = useRef(false)
   const transientRetryRef = useRef(0)
@@ -704,6 +705,20 @@ export default function SnsPage() {
   useEscape(() => setDebugPost(null), !!debugPost)
   useEscape(() => setShowJumpPopover(false), showJumpPopover)
 
+  // 日历弹层点外面就关。原来只能点同一个按钮切回来或按 Esc，用户点了别处
+  // 以为关掉了，结果它一直盖在列表上——「弹窗关不掉」的来源之一。
+  useEffect(() => {
+    if (!showJumpPopover) return
+    const onDown = (e: MouseEvent) => {
+      const node = e.target as Node
+      if (jumpPopoverRef.current?.contains(node)) return
+      if ((node as HTMLElement).closest?.('.sns-sidebar-date')) return
+      setShowJumpPopover(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [showJumpPopover])
+
   const selectAllAuthors = () => {
     setSelected(new Set(authors.map((a) => a.username)))
   }
@@ -856,162 +871,176 @@ export default function SnsPage() {
       </div>
 
       <div className="sns-main">
-        {/* 筛选侧栏：搜索 / 日期 / 发布者 三段，用分隔线断开 —— 之前三段连着排，
-            看起来像一坨输入框。 */}
+        {/* 筛选侧栏：搜索 / 日期 / 发布者 三段，每段一条小标题。之前三段连着排，
+            看起来像一坨输入框，用户分不清哪个框管什么。 */}
         <aside className="sns-sidebar">
-          <div className="sns-sidebar-search">
-            <Search size={14} />
-            <input
-              value={keywordDraft}
-              placeholder="搜索动态内容…"
-              onChange={(e) => setKeywordDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') applyKeyword()
-              }}
-            />
-            {keyword && (
-              <button className="sns-sidebar-clear" title="清除关键词" onClick={() => { setKeyword(''); setKeywordDraft('') }}>
-                <X size={13} />
-              </button>
-            )}
-          </div>
-          <label className="sns-search-comments" title="开启后同时搜索正文与评论（数据量大时稍慢）">
-            <input
-              type="checkbox"
-              checked={searchComments}
-              onChange={(e) => {
-                setSearchComments(e.target.checked)
-                if (keyword) setKeyword(keyword.trim() || '')
-              }}
-            />
-            <span>同时搜索评论</span>
-          </label>
-
-          <div className="sns-sidebar-date">
-            <CalendarDays size={14} />
-            <button
-              type="button"
-              className={`sns-date-jump-btn ${dateJump ? 'active' : ''}`}
-              onClick={openJumpPopover}
-              title={dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
-            >
-              {dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
-            </button>
-            {dateJump && (
-              <button className="sns-sidebar-clear" title="清除日期筛选" onClick={() => { setDateJump(null); setShowJumpPopover(false) }}>
-                <X size={13} />
-              </button>
-            )}
-            {showJumpPopover && (
-              <div className="sns-calendar-popover">
-                <div className="sns-calendar-head">
-                  <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(-1)} title="上个月">
-                    <ChevronLeft size={14} />
-                  </button>
-                  <span className="sns-calendar-title">
-                    {jumpPopoverDate.getFullYear()}年{jumpPopoverDate.getMonth() + 1}月
-                  </span>
-                  <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(1)} title="下个月">
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
-                <div className="sns-calendar-grid">
-                  {['日', '一', '二', '三', '四', '五', '六'].map((w) => (
-                    <span key={w} className="sns-calendar-weekday">
-                      {w}
-                    </span>
-                  ))}
-                  {jumpCalendarDays.map((day, idx) =>
-                    day ? (
-                      <button
-                        key={idx}
-                        type="button"
-                        className={`sns-calendar-day ${dateJump && toDayKey(dateJump.start) === toDayKey(day.getTime() / 1000) ? 'selected' : ''}`}
-                        onClick={() => jumpToDate(day)}
-                      >
-                        {day.getDate()}
-                        {(jumpDateCounts[toDayKey(day.getTime() / 1000)] || 0) > 0 && <i className="sns-calendar-dot" />}
-                      </button>
-                    ) : (
-                      <span key={idx} className="sns-calendar-empty" />
-                    ),
-                  )}
-                </div>
-                <div className="sns-calendar-foot">
-                  {jumpDateCountsLoading ? (
-                    <Loader2 size={12} className="spin" />
-                  ) : (
-                    <span>点击日期跳转到当天动态</span>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="sns-sidebar-head">
-            <span>发布者</span>
-            <div className="sns-sidebar-head-actions">
-              <button
-                className="sns-sidebar-reset"
-                title="刷新发布者列表与统计"
-                onClick={() => {
-                  void loadOverview()
-                  void loadAuthors()
+          <div className="sns-side-block">
+            <div className="sns-side-label">
+              <Search size={12} />
+              搜索
+            </div>
+            <div className="sns-sidebar-search">
+              <Search size={14} />
+              <input
+                value={keywordDraft}
+                placeholder="搜索动态内容…"
+                onChange={(e) => setKeywordDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') applyKeyword()
                 }}
-              >
-                <RefreshCw size={12} />
-                刷新
-              </button>
-              <button className="sns-sidebar-reset" onClick={selectAllAuthors}>
-                <CheckSquare size={12} />
-                全选
-              </button>
-              {(selected.size > 0 || keyword || searchComments || dateJump) && (
-                <button className="sns-sidebar-reset" onClick={clearFilters}>
-                  <X size={12} />
-                  重置
+              />
+              {keyword && (
+                <button className="sns-sidebar-clear" title="清除关键词" onClick={() => { setKeyword(''); setKeywordDraft('') }}>
+                  <X size={13} />
                 </button>
+              )}
+            </div>
+            <label className="sns-search-comments" title="开启后同时搜索正文与评论（数据量大时稍慢）">
+              <input
+                type="checkbox"
+                checked={searchComments}
+                onChange={(e) => {
+                  setSearchComments(e.target.checked)
+                  if (keyword) setKeyword(keyword.trim() || '')
+                }}
+              />
+              <span>同时搜索评论</span>
+            </label>
+          </div>
+
+          <div className="sns-side-block">
+            <div className="sns-side-label">
+              <CalendarDays size={12} />
+              日期
+            </div>
+            <div className="sns-sidebar-date">
+              <button
+                type="button"
+                className={`sns-date-jump-btn ${dateJump ? 'active' : ''}`}
+                onClick={openJumpPopover}
+                title={dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
+              >
+                {dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
+              </button>
+              {dateJump && (
+                <button className="sns-sidebar-clear" title="清除日期筛选" onClick={() => { setDateJump(null); setShowJumpPopover(false) }}>
+                  <X size={13} />
+                </button>
+              )}
+              {showJumpPopover && (
+                <div className="sns-calendar-popover" ref={jumpPopoverRef}>
+                  <div className="sns-calendar-head">
+                    <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(-1)} title="上个月">
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span className="sns-calendar-title">
+                      {jumpPopoverDate.getFullYear()}年{jumpPopoverDate.getMonth() + 1}月
+                    </span>
+                    <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(1)} title="下个月">
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                  <div className="sns-calendar-grid">
+                    {['日', '一', '二', '三', '四', '五', '六'].map((w) => (
+                      <span key={w} className="sns-calendar-weekday">
+                        {w}
+                      </span>
+                    ))}
+                    {jumpCalendarDays.map((day, idx) =>
+                      day ? (
+                        <button
+                          key={idx}
+                          type="button"
+                          className={`sns-calendar-day ${dateJump && toDayKey(dateJump.start) === toDayKey(day.getTime() / 1000) ? 'selected' : ''}`}
+                          onClick={() => jumpToDate(day)}
+                        >
+                          {day.getDate()}
+                          {(jumpDateCounts[toDayKey(day.getTime() / 1000)] || 0) > 0 && <i className="sns-calendar-dot" />}
+                        </button>
+                      ) : (
+                        <span key={idx} className="sns-calendar-empty" />
+                      ),
+                    )}
+                  </div>
+                  <div className="sns-calendar-foot">
+                    {jumpDateCountsLoading ? (
+                      <Loader2 size={12} className="spin" />
+                    ) : (
+                      <span>点击日期跳转到当天动态</span>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           </div>
 
-          <div className="sns-author-search">
-            <Search size={13} />
-            <input
-              value={authorSearch}
-              placeholder="搜索发布者"
-              spellCheck={false}
-              onChange={(e) => setAuthorSearch(e.target.value)}
-            />
-            {authorSearch && (
-              <button
-                className="sns-author-search-clear"
-                title="清除发布者搜索"
-                onClick={() => setAuthorSearch('')}
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
+          <div className="sns-side-block sns-side-block-grow">
+            <div className="sns-side-label">
+              <Users2 size={12} />
+              发布者
+              <div className="sns-side-label-actions">
+                <button
+                  className="sns-sidebar-reset"
+                  title="刷新发布者列表与统计"
+                  onClick={() => {
+                    void loadOverview()
+                    void loadAuthors()
+                  }}
+                >
+                  <RefreshCw size={12} />
+                  刷新
+                </button>
+                <button className="sns-sidebar-reset" onClick={selectAllAuthors}>
+                  <CheckSquare size={12} />
+                  全选
+                </button>
+                {(selected.size > 0 || keyword || searchComments || dateJump) && (
+                  <button className="sns-sidebar-reset" onClick={clearFilters}>
+                    <X size={12} />
+                    重置
+                  </button>
+                )}
+              </div>
+            </div>
 
-          <div className="sns-author-list">
-            {authorsLoading && <div className="wp-loading">加载发布者…</div>}
-            {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
-            {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
-              <div className="wp-empty">无匹配发布者</div>
-            )}
-            {visibleAuthors.map((a) => (
-              <button
-                key={a.username}
-                type="button"
-                className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
-                onClick={() => toggleAuthor(a.username)}
-              >
-                <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
-                <span className="sns-author-name">{a.displayName}</span>
-                <span className="sns-author-count">{a.postCount ?? ''}</span>
-              </button>
-            ))}
+            <div className="sns-author-search">
+              <Search size={13} />
+              <input
+                value={authorSearch}
+                placeholder="搜索发布者"
+                spellCheck={false}
+                onChange={(e) => setAuthorSearch(e.target.value)}
+              />
+              {authorSearch && (
+                <button
+                  className="sns-author-search-clear"
+                  title="清除发布者搜索"
+                  onClick={() => setAuthorSearch('')}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            <div className="sns-author-list">
+              {authorsLoading && <div className="wp-loading">加载发布者…</div>}
+              {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
+              {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
+                <div className="wp-empty">无匹配发布者</div>
+              )}
+              {visibleAuthors.map((a) => (
+                <button
+                  key={a.username}
+                  type="button"
+                  className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
+                  onClick={() => toggleAuthor(a.username)}
+                >
+                  <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
+                  <span className="sns-author-name">{a.displayName}</span>
+                  <span className="sns-author-count">{a.postCount ?? ''}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </aside>
 

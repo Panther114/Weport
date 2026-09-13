@@ -59,6 +59,8 @@ import {
 } from 'lucide-react'
 
 import WeportAiPanel from './components/weportAi/WeportAiPanel'
+import AiSettingsModal from './components/weportAi/AiSettingsModal'
+import type { SetupInfo } from './components/weportAi/aiPanelTypes'
 import WeBotModule from './pages/WeBotModule'
 import WeClonePage from './pages/WeClonePage'
 import AiMarkdown from './components/weportAi/AiMarkdown'
@@ -68,6 +70,7 @@ import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import {
   ACCENT_OPTIONS,
+  ACCENT_STRENGTH_OPTIONS,
   DENSITY_OPTIONS,
   MODE_OPTIONS,
   PRESET_ACCENTS,
@@ -77,6 +80,7 @@ import {
   normalizeHexColor,
   probeBackground,
   setAccent,
+  setAccentStrength,
   setBackgroundBlur,
   setBackgroundDim,
   setBackgroundPath,
@@ -324,7 +328,7 @@ export default function App() {
   const [httpApiPort, setHttpApiPort] = useState(5031)
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
-  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'data' | 'connect' | 'about'>('general')
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'data' | 'connect' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
@@ -376,6 +380,16 @@ export default function App() {
     summary: string
   } | null>(null)
   const [macDiagBusy, setMacDiagBusy] = useState(false)
+  /** 「设置 → AI 服务」内联的提供商编辑器数据源（provider 配置只在这里可改）。 */
+  const [aiSetup, setAiSetup] = useState<SetupInfo | null>(null)
+
+  async function refreshAiSetup() {
+    try {
+      setAiSetup((await api.ai.getSetup()) as unknown as SetupInfo)
+    } catch {
+      setAiSetup(null)
+    }
+  }
 
   useEffect(() => {
     // 主题（强调色 × 明暗）与背景都在 initAppearance 里恢复 —— v1.0 之前
@@ -384,6 +398,7 @@ export default function App() {
     // 移走或删掉。加载失败时自动清空并回退到纯色，避免留下一块破图。
     void initAppearance().then(() => probeBackground(() => pushToast('err', '背景已失效', '找不到原来选择的文件，已恢复纯色背景。', 9000)))
     void refreshAiAssignments()
+    void refreshAiSetup()
   }, [])
 
   // 导出选项（WeFlow 对齐）
@@ -2030,8 +2045,8 @@ export default function App() {
                 )}
                 {keyStatus && <p className="hint">{keyStatus}</p>}
 
-                <details className="steps-details" open>
-                  <summary>如何获取密钥？</summary>
+                <div className="steps-details">
+                  <div className="steps-details-title">如何获取密钥？</div>
                   <ol className="steps">
                     <li>
                       <span className="step-num">1</span>
@@ -2063,7 +2078,7 @@ export default function App() {
                       ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
                       : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
                   </p>
-                </details>
+                </div>
               </div>
             </section>
 
@@ -2110,13 +2125,26 @@ export default function App() {
         )}
 
         {tab === 'export' && (
-          <section className="panel panel-fill">
-            <div className="panel-head">
+          <section className="panel panel-fill export-page">
+            <div className="panel-head exp-head">
               {/* 主操作放在页头并让页头吸顶：导出按钮从此**始终可见**，而且
                   不会像底部悬浮条那样盖住内容。页头右侧依次是「范围状态 →
                   恢复默认 → 清空导出库 → 开始导出」，破坏性操作离主操作最远。 */}
+              <div className="exp-head-state">
+                <span className="exp-head-chip">
+                  <FileType size={13} />
+                  {FORMATS.find((f) => f.value === format)?.label}
+                </span>
+                <span className="exp-head-chip">
+                  <FolderOpen size={13} />
+                  {WRITE_LAYOUTS.find((l) => l.value === writeLayout)?.label}
+                </span>
+                <span className="exp-head-chip">
+                  <Users size={13} />
+                  {exportSelectionMode === 'all' ? '全部会话' : `已选 ${selectedExportSessionIds.size} 个`}
+                </span>
+              </div>
               <div className="panel-head-actions">
-                <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
                 <button
                   className="ghost-btn"
                   type="button"
@@ -2147,384 +2175,394 @@ export default function App() {
               </div>
             </div>
 
-            {/* 1. 输出设置 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">1</span>
-                <FolderOpen size={14} />
-                输出设置
-              </div>
-              <div className="field">
-                <label htmlFor="exportPath">输出文件夹</label>
-                <div className="path-row">
-                  <input
-                    id="exportPath"
-                    className="path-input"
-                    value={exportPath}
-                    placeholder="选择导出根目录…"
-                    onChange={(e) => setExportPath(e.target.value)}
-                    onBlur={() => {
-                      if (exportPath.trim()) void persist({ exportPath: exportPath.trim() })
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && exportPath.trim()) {
-                        void persist({ exportPath: exportPath.trim() })
-                        void refreshExportLog(exportPath.trim())
-                      }
-                    }}
-                    spellCheck={false}
-                  />
-                  <button className="ghost-btn" type="button" onClick={() => void pickExportFolder()} disabled={busy}>
-                    浏览
-                  </button>
-                </div>
-              </div>
-              <div className="field" style={{ marginBottom: 0 }}>
-                <label>目录结构</label>
-                <div className="layout-row" role="radiogroup" aria-label="目录结构">
-                  {WRITE_LAYOUTS.map((l) => (
-                    <button
-                      key={l.value}
-                      type="button"
-                      className="chip format-chip layout-chip"
-                      data-active={writeLayout === l.value}
-                      role="radio"
-                      aria-checked={writeLayout === l.value}
-                      onClick={() => {
-                        setWriteLayout(l.value)
-                        void saveExportOptions({ layout: l.value })
-                      }}
-                      disabled={busy}
-                    >
-                      <strong>
-                        <span className="layout-badge">{l.value}</span>
-                        {l.label}
-                      </strong>
-                      <code className="layout-tree">
-                        {l.tree.map((line, i) => (
-                          <span key={i}>{line}</span>
-                        ))}
+            {/* 两栏：左边是「怎么导 / 导哪些」这几步，右边是常驻的动作与状态。
+                原来五段纵向堆叠，页面有三屏高，主按钮和进度条要靠吸顶页头才
+                找得到；现在进度、高级选项、上次导出、取消都在右栏常驻可见。 */}
+            <div className="export-layout">
+              <div className="export-main">
+                {/* 1. 输出设置 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">1</span>
+                    <FolderOpen size={14} />
+                    输出设置
+                  </div>
+                  <div className="field">
+                    <label htmlFor="exportPath">输出文件夹</label>
+                    <div className="path-row">
+                      <input
+                        id="exportPath"
+                        className="path-input"
+                        value={exportPath}
+                        placeholder="选择导出根目录…"
+                        onChange={(e) => setExportPath(e.target.value)}
+                        onBlur={() => {
+                          if (exportPath.trim()) void persist({ exportPath: exportPath.trim() })
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && exportPath.trim()) {
+                            void persist({ exportPath: exportPath.trim() })
+                            void refreshExportLog(exportPath.trim())
+                          }
+                        }}
+                        spellCheck={false}
+                      />
+                      <button className="ghost-btn" type="button" onClick={() => void pickExportFolder()} disabled={busy}>
+                        浏览
+                      </button>
+                    </div>
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>目录结构</label>
+                    <div className="layout-row" role="radiogroup" aria-label="目录结构">
+                      {WRITE_LAYOUTS.map((l) => (
+                        <button
+                          key={l.value}
+                          type="button"
+                          className="chip format-chip layout-chip"
+                          data-active={writeLayout === l.value}
+                          role="radio"
+                          aria-checked={writeLayout === l.value}
+                          onClick={() => {
+                            setWriteLayout(l.value)
+                            void saveExportOptions({ layout: l.value })
+                          }}
+                          disabled={busy}
+                        >
+                          <strong>
+                            <span className="layout-badge">{l.value}</span>
+                            {l.label}
+                          </strong>
+                          <code className="layout-tree">
+                            {l.tree.map((line, i) => (
+                              <span key={i}>{line}</span>
+                            ))}
+                          </code>
+                          <span>{l.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="hint" style={{ marginTop: 8 }}>
+                      输出预览：
+                      <code className="exp-path">
+                        {exportPath.trim()
+                          ? `${exportPath.trim()}\\${formatFolder}\\${writeLayout === 'B' ? 'texts\\' : writeLayout === 'C' ? '群聊_名称\\' : ''}`
+                          : '未选择根目录'}
                       </code>
-                      <span>{l.desc}</span>
-                    </button>
-                  ))}
+                      <span> · 命名：<code>群聊_名称</code> / <code>私聊_名称</code></span>
+                    </p>
+                  </div>
                 </div>
-                <p className="hint" style={{ marginTop: 8 }}>
-                  输出预览：
-                  <code className="exp-path">
-                    {exportPath.trim()
-                      ? `${exportPath.trim()}\\${formatFolder}\\${writeLayout === 'B' ? 'texts\\' : writeLayout === 'C' ? '群聊_名称\\' : ''}`
-                      : '未选择根目录'}
-                  </code>
-                  <span> · 命名：<code>群聊_名称</code> / <code>私聊_名称</code></span>
-                </p>
-              </div>
-            </div>
 
-            {/* 2. 导出格式 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">2</span>
-                <FileType size={14} />
-                导出格式
-              </div>
-              <div className="format-grid" role="radiogroup" aria-label="导出格式">
-                {FORMATS.map((f) => {
-                  const FIcon = f.icon
-                  return (
-                    <button
-                      key={f.value}
-                      type="button"
-                      className="chip format-chip"
-                      data-active={format === f.value}
-                      role="radio"
-                      aria-checked={format === f.value}
-                      onClick={() => {
-                        setFormat(f.value)
-                        void saveExportOptions({ format: f.value })
-                      }}
-                      disabled={busy}
-                    >
-                      <span className="fmt-head">
-                        <FIcon size={14} strokeWidth={1.8} />
-                        <strong>{f.label}</strong>
+                {/* 2. 导出格式 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">2</span>
+                    <FileType size={14} />
+                    导出格式
+                  </div>
+                  <div className="format-grid" role="radiogroup" aria-label="导出格式">
+                    {FORMATS.map((f) => {
+                      const FIcon = f.icon
+                      return (
+                        <button
+                          key={f.value}
+                          type="button"
+                          className="chip format-chip"
+                          data-active={format === f.value}
+                          role="radio"
+                          aria-checked={format === f.value}
+                          onClick={() => {
+                            setFormat(f.value)
+                            void saveExportOptions({ format: f.value })
+                          }}
+                          disabled={busy}
+                        >
+                          <span className="fmt-head">
+                            <FIcon size={14} strokeWidth={1.8} />
+                            <strong>{f.label}</strong>
+                          </span>
+                          <span>{f.desc}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* 3. 内容 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">3</span>
+                    <Paperclip size={14} />
+                    内容（媒体与附件）
+                  </div>
+                  <div className="media-row">
+                    {([
+                      ['images', '图片'],
+                      ['videos', '视频'],
+                      ['voices', '语音'],
+                      ['emojis', '表情包'],
+                      ['files', '文件'],
+                    ] as Array<[keyof typeof exportMedia, string]>).map(([key, label]) => (
+                      <label key={key} className="media-check">
+                        <input
+                          type="checkbox"
+                          checked={exportMedia[key] === true}
+                          onChange={(e) => {
+                            const next = { ...exportMedia, [key]: e.target.checked }
+                            setExportMedia(next)
+                            void saveExportOptions({ media: next })
+                          }}
+                          disabled={busy}
+                        />
+                        <span>导出{label}</span>
+                      </label>
+                    ))}
+                    {(exportMedia.videos || exportMedia.files) && (
+                      <label className="media-size">
+                        <span>视频/文件最大体积</span>
+                        <input
+                          className="num-input"
+                          type="number"
+                          min={1}
+                          max={4096}
+                          value={exportMedia.maxFileSizeMb}
+                          onChange={(e) => {
+                            const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
+                            setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
+                          }}
+                          onBlur={() => void saveExportOptions({ media: exportMedia })}
+                          disabled={busy}
+                        />
+                        <span>MB</span>
+                      </label>
+                    )}
+                  </div>
+                  {exportMedia.images && imageKeyRequired && (
+                    <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={() => void extractImageKey()}
+                        disabled={busy}
+                      >
+                        {imageKeysOk ? '重新获取图片密钥' : '获取图片密钥'}
+                      </button>
+                      <span className="hint" style={{ margin: 0 }}>
+                        {imageKeyStatus || (imageKeysOk
+                          ? '图片密钥已配置（按账号保存）'
+                          : '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）')}
                       </span>
-                      <span>{f.desc}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
+                    </div>
+                  )}
+                  <p className="hint" style={{ marginTop: 6 }}>
+                    不勾选则仅导出文字消息（默认）。导出媒体时会同时导出对应文字消息。
+                  </p>
+                </div>
 
-            {/* 3. 内容 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">3</span>
-                <Paperclip size={14} />
-                内容（媒体与附件）
+                {/* 4. 选择会话 —— 放在配置之后。
+                    旧顺序是「235 行会话列表 → 四组配置 → 导出按钮」：列表先把全部
+                    配置挤到折叠线以下，而主按钮在整段最底部。现在的顺序对应真实的
+                    心智顺序：先决定怎么导 → 再决定导哪些 → 最后按下去。 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">4</span>
+                    <Users size={14} />
+                    选择会话
+                  </div>
+                  <ExportSessionPicker
+                    sessions={filteredExportSessions}
+                    totalSessions={exportSessions.length}
+                    selectedIds={selectedExportSessionIds}
+                    selectionMode={exportSelectionMode}
+                    search={exportSessionSearch}
+                    type={exportSessionType}
+                    loading={exportSessionsLoading}
+                    onSearchChange={setExportSessionSearch}
+                    onTypeChange={setExportSessionType}
+                    onSelectionModeChange={setExportSelectionMode}
+                    onToggle={toggleExportSession}
+                    onToggleVisible={toggleVisibleExportSessions}
+                    onRefresh={() => void loadExportSessions()}
+                    allVisibleSelected={allVisibleExportSessionsSelected}
+                    disabled={busy}
+                  />
+                </div>
               </div>
-              <div className="media-row">
-                {([
-                  ['images', '图片'],
-                  ['videos', '视频'],
-                  ['voices', '语音'],
-                  ['emojis', '表情包'],
-                  ['files', '文件'],
-                ] as Array<[keyof typeof exportMedia, string]>).map(([key, label]) => (
-                  <label key={key} className="media-check">
-                    <input
-                      type="checkbox"
-                      checked={exportMedia[key] === true}
-                      onChange={(e) => {
-                        const next = { ...exportMedia, [key]: e.target.checked }
-                        setExportMedia(next)
-                        void saveExportOptions({ media: next })
-                      }}
-                      disabled={busy}
-                    />
-                    <span>导出{label}</span>
-                  </label>
-                ))}
-                {(exportMedia.videos || exportMedia.files) && (
-                  <label className="media-size">
-                    <span>视频/文件最大体积</span>
-                    <input
-                      className="num-input"
-                      type="number"
-                      min={1}
-                      max={4096}
-                      value={exportMedia.maxFileSizeMb}
-                      onChange={(e) => {
-                        const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
-                        setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
-                      }}
-                      onBlur={() => void saveExportOptions({ media: exportMedia })}
-                      disabled={busy}
-                    />
-                    <span>MB</span>
-                  </label>
+
+              <aside className="export-side">
+                {progress && (
+                  <div className="exp-side-card progress" aria-live="polite">
+                    <div className="progress-track">
+                      <div
+                        className={`progress-fill${!progress.total || progress.phase === 'preparing' ? ' indeterminate' : ''}`}
+                        style={progress.total ? { width: `${progressPct}%` } : undefined}
+                      />
+                    </div>
+                    <div className="progress-meta">
+                      <strong className="progress-session" title={progress.currentSession || ''}>{progress.currentSession || '准备中…'}</strong>
+                      <span className="progress-count">
+                        {progress.total > 0
+                          ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}`
+                          : ''}
+                      </span>
+                    </div>
+                    {busy && progress.phase !== 'complete' && (
+                      <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
+                        取消导出
+                      </button>
+                    )}
+                  </div>
                 )}
-              </div>
-              {exportMedia.images && imageKeyRequired && (
-                <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
+
+                {/* 5. 高级选项 */}
+                <div className="exp-side-card">
                   <button
                     type="button"
-                    className="ghost-btn"
-                    onClick={() => void extractImageKey()}
-                    disabled={busy}
+                    className="exp-sec-head exp-collapse"
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    aria-expanded={showAdvanced}
                   >
-                    {imageKeysOk ? '重新获取图片密钥' : '获取图片密钥'}
+                    <SettingsIcon size={14} />
+                    高级选项
+                    <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
                   </button>
-                  <span className="hint" style={{ margin: 0 }}>
-                    {imageKeyStatus || (imageKeysOk
-                      ? '图片密钥已配置（按账号保存）'
-                      : '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）')}
-                  </span>
+                  {showAdvanced && (
+                    <div className="opt-panel">
+                      <div className="opt-checks">
+                        <label className="check-row opt">
+                          <input
+                            type="checkbox"
+                            checked={exportAvatars}
+                            onChange={(e) => {
+                              setExportAvatars(e.target.checked)
+                              void saveExportOptions({ avatars: e.target.checked })
+                            }}
+                            disabled={busy}
+                          />
+                          <span>包含联系人头像</span>
+                        </label>
+                        <label className="check-row opt">
+                          <input
+                            type="checkbox"
+                            checked={exportVoiceAsText}
+                            onChange={(e) => {
+                              setExportVoiceAsText(e.target.checked)
+                              void saveExportOptions({ voiceAsText: e.target.checked })
+                            }}
+                            disabled={busy}
+                          />
+                          <span>语音转文字（若已转换）</span>
+                        </label>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">媒体路径</span>
+                        <div className="seg" role="radiogroup" aria-label="媒体路径">
+                          {PATH_STYLE_OPTIONS.map((o) => (
+                            <button
+                              key={o.value}
+                              type="button"
+                              data-active={exportPathStyle === o.value}
+                              onClick={() => {
+                                setExportPathStyle(o.value)
+                                void saveExportOptions({ pathStyle: o.value })
+                              }}
+                              disabled={busy}
+                            >
+                              {o.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">同名文件</span>
+                        <div className="seg" role="radiogroup" aria-label="同名文件">
+                          {CONFLICT_OPTIONS.map((o) => (
+                            <button
+                              key={o.value}
+                              type="button"
+                              data-active={exportConflict === o.value}
+                              onClick={() => {
+                                setExportConflict(o.value)
+                                void saveExportOptions({ conflict: o.value })
+                              }}
+                              disabled={busy}
+                            >
+                              {o.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">命名方式</span>
+                        <div className="seg" role="radiogroup" aria-label="命名方式">
+                          {NAME_PREF_OPTIONS.map((o) => (
+                            <button
+                              key={o.value}
+                              type="button"
+                              data-active={displayNamePref === o.value}
+                              onClick={() => {
+                                setDisplayNamePref(o.value)
+                                void saveExportOptions({ namePref: o.value })
+                              }}
+                              disabled={busy}
+                            >
+                              {o.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">导出并发数</span>
+                        <div className="seg" role="radiogroup" aria-label="导出并发数">
+                          {CONCURRENCY_OPTIONS.map((c) => (
+                            <button
+                              key={c}
+                              type="button"
+                              data-active={exportConcurrency === c}
+                              onClick={() => {
+                                setExportConcurrency(c)
+                                void saveExportOptions({ concurrency: c })
+                              }}
+                              disabled={busy}
+                              title={c >= 10 ? '最快，易卡顿' : undefined}
+                            >
+                              {c}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-              <p className="hint" style={{ marginTop: 6 }}>
-                不勾选则仅导出文字消息（默认）。导出媒体时会同时导出对应文字消息。
-              </p>
-            </div>
 
-            {/* 4. 高级选项 */}
-            <div className="exp-section">
-              <button
-                type="button"
-                className="exp-sec-head exp-collapse"
-                onClick={() => setShowAdvanced((v) => !v)}
-                aria-expanded={showAdvanced}
-              >
-                <span className="exp-num">4</span>
-                <SettingsIcon size={14} />
-                高级选项
-                <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
-              </button>
-              {showAdvanced && (
-                <div className="opt-panel">
-                  <div className="opt-checks">
-                    <label className="check-row opt">
-                      <input
-                        type="checkbox"
-                        checked={exportAvatars}
-                        onChange={(e) => {
-                          setExportAvatars(e.target.checked)
-                          void saveExportOptions({ avatars: e.target.checked })
-                        }}
-                        disabled={busy}
-                      />
-                      <span>包含联系人头像</span>
-                    </label>
-                    <label className="check-row opt">
-                      <input
-                        type="checkbox"
-                        checked={exportVoiceAsText}
-                        onChange={(e) => {
-                          setExportVoiceAsText(e.target.checked)
-                          void saveExportOptions({ voiceAsText: e.target.checked })
-                        }}
-                        disabled={busy}
-                      />
-                      <span>语音转文字（若已转换）</span>
-                    </label>
+                <div className="exp-side-card export-meta" aria-live="polite">
+                  <div className="row">
+                    <span>上次 TXT</span>
+                    <strong className={exportLog?.txt ? undefined : 'muted'}>{exportLog?.txt || '尚未导出'}</strong>
                   </div>
-                  <div className="opt-row">
-                    <span className="opt-label">媒体路径</span>
-                    <div className="seg" role="radiogroup" aria-label="媒体路径">
-                      {PATH_STYLE_OPTIONS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          data-active={exportPathStyle === o.value}
-                          onClick={() => {
-                            setExportPathStyle(o.value)
-                            void saveExportOptions({ pathStyle: o.value })
-                          }}
-                          disabled={busy}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="row">
+                    <span>上次 JSON</span>
+                    <strong className={exportLog?.json ? undefined : 'muted'}>{exportLog?.json || '尚未导出'}</strong>
                   </div>
-                  <div className="opt-row">
-                    <span className="opt-label">同名文件</span>
-                    <div className="seg" role="radiogroup" aria-label="同名文件">
-                      {CONFLICT_OPTIONS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          data-active={exportConflict === o.value}
-                          onClick={() => {
-                            setExportConflict(o.value)
-                            void saveExportOptions({ conflict: o.value })
-                          }}
-                          disabled={busy}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="opt-row">
-                    <span className="opt-label">命名方式</span>
-                    <div className="seg" role="radiogroup" aria-label="命名方式">
-                      {NAME_PREF_OPTIONS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          data-active={displayNamePref === o.value}
-                          onClick={() => {
-                            setDisplayNamePref(o.value)
-                            void saveExportOptions({ namePref: o.value })
-                          }}
-                          disabled={busy}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="opt-row">
-                    <span className="opt-label">导出并发数</span>
-                    <div className="seg" role="radiogroup" aria-label="导出并发数">
-                      {CONCURRENCY_OPTIONS.map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          data-active={exportConcurrency === c}
-                          onClick={() => {
-                            setExportConcurrency(c)
-                            void saveExportOptions({ concurrency: c })
-                          }}
-                          disabled={busy}
-                          title={c >= 10 ? '最快，易卡顿' : undefined}
-                        >
-                          {c}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="row">
+                    <span>日志文件</span>
+                    <span className="muted">export_log.txt</span>
                   </div>
                 </div>
-              )}
-            </div>
-
-            <div className="export-meta" aria-live="polite">
-              <div className="row">
-                <span>上次 TXT</span>
-                <strong className={exportLog?.txt ? undefined : 'muted'}>{exportLog?.txt || '尚未导出'}</strong>
-              </div>
-              <div className="row">
-                <span>上次 JSON</span>
-                <strong className={exportLog?.json ? undefined : 'muted'}>{exportLog?.json || '尚未导出'}</strong>
-              </div>
-              <div className="row">
-                <span>日志文件</span>
-                <span className="muted">export_log.txt</span>
-              </div>
-            </div>
-
-            {progress && (
-              <div className="progress" aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className={`progress-fill${!progress.total || progress.phase === 'preparing' ? ' indeterminate' : ''}`}
-                    style={progress.total ? { width: `${progressPct}%` } : undefined}
-                  />
-                </div>
-                <div className="progress-meta">
-                  <strong className="progress-session" title={progress.currentSession || ''}>{progress.currentSession || '准备中…'}</strong>
-                  <span className="progress-count">
-                    {progress.total > 0
-                      ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}`
-                      : ''}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* 5. 选择会话 —— 放在配置之后。
-                旧顺序是「235 行会话列表 → 四组配置 → 导出按钮」：列表先把全部
-                配置挤到折叠线以下，而主按钮在整段最底部。现在的顺序对应真实的
-                心智顺序：先决定怎么导 → 再决定导哪些 → 最后按下去。 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">5</span>
-                <Users size={14} />
-                选择会话
-              </div>
-              <ExportSessionPicker
-                sessions={filteredExportSessions}
-                totalSessions={exportSessions.length}
-                selectedIds={selectedExportSessionIds}
-                selectionMode={exportSelectionMode}
-                search={exportSessionSearch}
-                type={exportSessionType}
-                loading={exportSessionsLoading}
-                onSearchChange={setExportSessionSearch}
-                onTypeChange={setExportSessionType}
-                onSelectionModeChange={setExportSelectionMode}
-                onToggle={toggleExportSession}
-                onToggleVisible={toggleVisibleExportSessions}
-                onRefresh={() => void loadExportSessions()}
-                allVisibleSelected={allVisibleExportSessionsSelected}
-                disabled={busy}
-              />
-            </div>
-
-            <div className="export-actions">
-              {/* 主按钮已移到吸顶页头（始终可见且不遮挡内容）。这里只保留
-                  导出**过程中**才出现的进度与取消。 */}
-              {busy && progress && progress.phase !== 'complete' && (
-                <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
-                  取消导出
-                </button>
-              )}
+              </aside>
             </div>
           </section>
         )}
 
-        {tab === 'ai' && <WeportAiPanel />}
+        {tab === 'ai' && (
+          <WeportAiPanel
+            onOpenSettings={() => {
+              setSettingsSection('ai')
+              switchTab('settings')
+            }}
+          />
+        )}
         {tab === 'weclone' && <WeClonePage />}
         {(tab === 'webot' || tab === 'webot-notes') && <WeBotModule section={tab === 'webot-notes' ? 'notes' : 'tasks'} />}
         {tab === 'sns' && <SnsPage />}
@@ -2545,13 +2583,10 @@ export default function App() {
                 </strong>
                 <span className="hint">触发器装在微信侧，装好后不必保持 Weport 运行</span>
               </div>
-              <details className="status-bar-details" open>
-                <summary>说明</summary>
-                <p>
-                  对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
-                  安装 / 卸载针对具体会话，微信升级后一般无需重装。
-                </p>
-              </details>
+              <p className="status-bar-note">
+                对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
+                安装 / 卸载针对具体会话，微信升级后一般无需重装。
+              </p>
               <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
                 <RefreshCw size={14} />
                 {antiRevokeBusy ? '刷新中…' : '刷新状态'}
@@ -2869,7 +2904,8 @@ export default function App() {
                 [
                   { id: 'general', label: '常规', hint: '启动与后台', icon: Rocket },
                   { id: 'appearance', label: '外观', hint: '背景 · 强调色 · 主题', icon: Images },
-                  { id: 'ai', label: 'AI 服务', hint: '提供商 · 模型 · 分配', icon: Sparkles },
+                  { id: 'ai', label: 'AI 服务', hint: '提供商 · 模型 · 密钥', icon: Sparkles },
+                  { id: 'assign', label: '服务分配', hint: '功能面用哪个服务', icon: PlugZap },
                   { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
                   { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
                   { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
@@ -3142,6 +3178,32 @@ export default function App() {
 
               <div className="setting-row">
                 <div className="setting-label">
+                  <Palette size={14} />
+                  <div>
+                    <strong>用色浓度</strong>
+                    <span className="hint">控制强调色铺开多少：从只标选中项，到面板也带色底</span>
+                  </div>
+                </div>
+                <div className="segmented" role="radiogroup" aria-label="用色浓度">
+                  {ACCENT_STRENGTH_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={appearance.accentStrength === option.id}
+                      className="segmented-item"
+                      data-active={appearance.accentStrength === option.id}
+                      title={option.hint}
+                      onClick={() => setAccentStrength(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
                   <div>
                     <strong>界面密度</strong>
                     <span className="hint">紧凑模式收紧间距，字号保持不变</span>
@@ -3173,15 +3235,35 @@ export default function App() {
                       <Sparkles size={15} />
                       AI 服务
                     </h2>
-                    <span>WeportAI · WeBot · 人格克隆 共用这里的服务</span>
+                    <span>提供商与密钥只在这里配置，WeportAI · WeBot · 人格克隆共用</span>
                   </div>
 
-                  {aiAssignments === null ? (
+                  {aiSetup ? (
+                    <AiSettingsModal
+                      inline
+                      setup={aiSetup}
+                      onSaved={(next) => {
+                        setAiSetup(next)
+                        void refreshAiAssignments()
+                      }}
+                    />
+                  ) : (
                     <div className="wp-loading">正在读取 AI 服务配置…</div>
-                  ) : aiAssignments.profiles.length === 0 ? (
-                    <div className="empty">
-                      还没有配置任何 AI 服务。到「WeportAI」页添加一个提供商与模型，这里就会出现。
-                    </div>
+                  )}
+                </section>
+              )}
+
+              {settingsSection === 'assign' && aiAssignments !== null && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Sparkles size={15} />
+                      服务分配
+                    </h2>
+                    <span>哪个功能面用哪个服务（默认都跟随默认服务）</span>
+                  </div>
+                  {aiAssignments.profiles.length === 0 ? (
+                    <div className="empty">还没有配置任何 AI 服务。到「AI 服务」添加一个提供商与模型，这里就会出现。</div>
                   ) : (
                     <>
                       {/* 三个功能面各一行。它们默认都跟随「默认服务」，所以绝大多数
@@ -3248,7 +3330,7 @@ export default function App() {
                         <div className="setting-label">
                           <div>
                             <strong>已配置的服务</strong>
-                            <span className="hint">添加、修改或删除服务在 WeportAI 页面完成（那里有完整的模型发现与测试）</span>
+                            <span className="hint">增删改都在「AI 服务」页；这里只做分配</span>
                           </div>
                         </div>
                         <div className="ai-profile-list">
@@ -3265,10 +3347,6 @@ export default function App() {
                             </div>
                           ))}
                         </div>
-                        <button className="secondary-btn" type="button" onClick={() => switchTab('ai')}>
-                          <Sparkles size={13} />
-                          打开 WeportAI 管理服务
-                        </button>
                       </div>
                     </>
                   )}

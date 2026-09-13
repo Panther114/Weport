@@ -4,6 +4,24 @@
   gap: 6px;
 }
 
+/* 内联模式：同一块面板嵌在「设置 → AI 服务」里。弹窗的边距、滚动高度都由
+   .modal 提供，内联时没有这些宿主，得自己撑开并跟随设置页的排版节奏。 */
+.ai-provider-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.ai-provider-inline > .ai-profile-layout {
+  margin: 0;
+}
+
+.ai-provider-inline > .modal-actions {
+  justify-content: flex-start;
+  margin-top: 2px;
+}
+
 .ai-provider-modal > h3 {
   margin-bottom: 0;
 }

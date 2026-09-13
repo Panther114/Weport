@@ -594,6 +594,8 @@ export const GlobalAnalytics: React.FC = () => {
         <div className={`ranking-list ${rankingLoading ? 'is-loading' : ''}`}>
           {rankings.map((r, i) => (
             <div key={r.username} className="ranking-row" style={{ ['--rank-color' as string]: blueRamp(1 - i / Math.max(1, rankings.length - 1), colorMode) }}>
+              {/* 序号用文字色而不是色阶色：色阶最深的一档（--accent-deep）是给
+                  进度条用的，深色主题下它压在面板上只有 2.6 对比度。 */}
               <span className={`ranking-no ${i < 3 ? 'ranking-top' : ''}`}>{i + 1}</span>
               <Avatar src={r.avatarUrl} name={r.displayName} size={30} shape="rounded" />
               <div className="ranking-info">

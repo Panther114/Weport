@@ -237,7 +237,6 @@
   font-size: 17px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .v09-stat span {
   font-size: 11px;
@@ -353,6 +352,39 @@
   min-height: 0;
   overflow: hidden;
 }
+
+/* 侧栏分区：每段一条小标题。之前三个功能段直接摞在一起，输入框、复选框、
+   日历按钮长得一样，用户看不出哪一块管什么。 */
+.sns-side-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line, #17171b);
+  min-height: 0;
+}
+.sns-side-block:last-child {
+  border-bottom: none;
+}
+.sns-side-block-grow {
+  flex: 1;
+  min-height: 0;
+}
+.sns-side-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.sns-side-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
 /* 侧栏头部（合并原顶栏：标题 / 统计 / 操作，紧凑单栏布局） */
 .sns-sidebar-hero {
   display: flex;
@@ -418,13 +450,17 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 10px 10px 0;
   padding: 7px 10px;
   background: var(--bg);
   border: 1px solid var(--line, #1c1c21);
   border-radius: var(--radius-sm);
   color: var(--text-faint);
   position: relative;
+  transition: border-color 0.15s ease;
+}
+.sns-sidebar-search:focus-within,
+.sns-sidebar-date:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 .sns-sidebar-search input,
 .sns-sidebar-date input {
@@ -456,12 +492,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 10px 10px 0;
-  padding: 7px 10px;
+  padding: 6px 9px;
   background: var(--bg);
   border: 1px solid var(--line, #1c1c21);
   border-radius: var(--radius-sm);
   color: var(--text-faint);
+  transition: border-color 0.15s ease;
+}
+.sns-author-search:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 .sns-author-search input {
   flex: 1;
@@ -520,7 +559,7 @@
 .sns-author-list {
   flex: 1;
   overflow-y: auto;
-  padding: 2px 8px 10px;
+  padding: 0 0 4px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -533,19 +572,17 @@
   border: none;
   background: transparent;
   border-radius: var(--radius-sm);
-  padding: 4px 7px;
+  padding: 5px 7px;
   cursor: pointer;
   text-align: left;
-  transition: background 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .sns-author:hover {
-  background: var(--accent-softer, rgba(255, 255, 255, 0.05));
-  transform: translateX(3px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .sns-author-active {
-  background: rgba(255, 255, 255, 0.09);
-  outline: 1px solid rgba(255, 255, 255, 0.16);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
 }
 .sns-author-name {
   flex: 1;
@@ -562,7 +599,6 @@
 .sns-author-count {
   font-size: 11px;
   color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 当前筛选摘要条 */
@@ -588,14 +624,12 @@
   gap: 5px;
 }
 
-/* 动态流 */
+/* 动态流：不套外框。原来一个描边大卡片包住整列，只有两三条动态时底下留出
+   一大片空框，看着像「没加载完」。改成每条动态自己是一张卡，滚动区透明。 */
 .sns-feed {
-  background: var(--bg-raised);
-  border: 1px solid var(--line, #1c1c21);
-  border-radius: var(--radius);
   overflow: hidden;
   min-height: 0;
-  padding: 14px 16px 30px;
+  padding: 0 2px 30px 0;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -605,6 +639,7 @@
   flex: 1;
   min-height: 0;
   height: 100%;
+  padding-right: 6px;
 }
 .sns-feed-sentinel {
   display: flex;
@@ -641,7 +676,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 14px 0;
+  padding: 2px 2px 0;
   font-size: 11.5px;
   color: var(--text-dim);
   cursor: pointer;
@@ -790,31 +825,23 @@
 .sns-post-item {
   display: flex;
   gap: 12px;
-  padding: 14px 6px;
-  border-bottom: 1px solid var(--line, #17171b);
-  border-radius: var(--radius-sm);
-  transition: background 0.18s ease;
+  padding: 14px 16px;
+  margin: 0 0 10px;
+  background: var(--panel);
+  border: 1px solid var(--line, #1c1c21);
+  border-radius: var(--radius);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
   animation: wp-post-in 0.34s cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
-.sns-post-item:nth-child(1) { animation-delay: 0.02s; }
-.sns-post-item:nth-child(2) { animation-delay: 0.05s; }
-.sns-post-item:nth-child(3) { animation-delay: 0.08s; }
-.sns-post-item:nth-child(4) { animation-delay: 0.11s; }
-.sns-post-item:nth-child(5) { animation-delay: 0.14s; }
-.sns-post-item:nth-child(6) { animation-delay: 0.17s; }
-.sns-post-item:nth-child(7) { animation-delay: 0.2s; }
-.sns-post-item:nth-child(8) { animation-delay: 0.23s; }
 .sns-post-item:hover {
-  background: rgba(255, 255, 255, 0.025);
+  border-color: var(--line-strong, #33333d);
+  box-shadow: var(--elev-1, 0 6px 18px rgba(0, 0, 0, 0.28));
 }
 @keyframes wp-post-in {
   from {
     opacity: 0;
     transform: translateY(12px);
   }
-}
-.sns-post-item:last-child {
-  border-bottom: none;
 }
 .sns-post-item.post-deleted {
   opacity: 0.55;
@@ -1300,7 +1327,6 @@
 .lightbox-count {
   font-size: 13px;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 .lightbox-actions {
   display: flex;
@@ -1317,6 +1343,21 @@
   width: 100%;
   height: 100%;
   padding: 40px;
+}
+/* 放大后可拖动平移；光标随之变化，用户才知道图能拖。 */
+.lightbox-body[data-zoomed='true'] {
+  cursor: grab;
+}
+.lightbox-body[data-dragging='true'] {
+  cursor: grabbing;
+}
+.lightbox-zoom-tag {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 11px;
 }
 .lightbox-media {
   max-width: 100%;
@@ -1696,7 +1737,6 @@
   font-size: 22px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -1740,7 +1780,6 @@
   font-size: 16px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 图表双栏 */
@@ -1790,7 +1829,6 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 .ranking-top {
@@ -1831,7 +1869,6 @@
   font-size: 13px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   min-width: 56px;
   text-align: right;
 }
@@ -2168,7 +2205,6 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   min-width: 56px;
   text-align: right;
 }
@@ -2220,7 +2256,6 @@
 .phrase-count {
   font-size: 12px;
   color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
 }
 .emoji-tags {
   display: flex;
@@ -2255,7 +2290,6 @@
 .member-msg-time {
   color: var(--text-faint);
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
 .member-msg-content {
   color: var(--text-dim);
@@ -2288,7 +2322,6 @@
 .media-type-list b {
   margin-left: auto;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 年度报告 */
@@ -2443,7 +2476,6 @@
   font-size: 18px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .annual-monthly-list {
   display: flex;
@@ -2467,7 +2499,6 @@
   color: var(--text-faint);
   width: 42px;
   flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
 }
 .annual-monthly-name {
   flex: 1;
@@ -2480,7 +2511,6 @@
 .annual-monthly-row b {
   font-size: 13px;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 .annual-fun-grid {
   display: grid;
@@ -2521,7 +2551,6 @@
   color: var(--text);
   display: block;
   text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 .sns-type-chips {
   display: flex;
@@ -2672,7 +2701,9 @@
 }
 .theme-picker {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  /* 12 套主题（2 明暗 × 6 强调色）：两列时整页要滚三屏，选之前看不到全部选项。
+     自适应列数让默认窗口下一屏半就能看全。 */
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
 }
 .theme-card {
@@ -2883,7 +2914,6 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 .dual-report-hero {
   display: flex;
@@ -2966,7 +2996,6 @@
   font-size: 18px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .dual-report-stat-card span:last-child {
   font-size: 11px;
@@ -3027,7 +3056,7 @@
 }
 .chat-mini-line.me span:first-child { color: var(--accent, #60a5fa); }
 .chat-mini-line p { color: var(--text-dim); margin: 0; word-break: break-word; min-width: 0; }
-.chat-mini-time { color: var(--text-faint) !important; font-size: 10.5px !important; font-variant-numeric: tabular-nums; text-align: right; min-width: 0 !important; font-weight: 400 !important; }
+.chat-mini-time { color: var(--text-faint) !important; font-size: 10.5px !important; text-align: right; min-width: 0 !important; font-weight: 400 !important; }
 .dual-report-initiative {
   display: flex;
   flex-direction: column;
@@ -3052,7 +3081,7 @@
   font-size: 12px;
   color: var(--text-dim);
 }
-.dual-report-initiative-labels b { color: var(--text); font-variant-numeric: tabular-nums; }
+.dual-report-initiative-labels b { color: var(--text); }
 .dual-report-response {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3106,7 +3135,6 @@
   border: 1px solid var(--line, #1c1c21);
   padding: 1px 6px;
   border-radius: 999px;
-  font-variant-numeric: tabular-nums;
 }
 .dual-report-phrase.me { border-color: color-mix(in srgb, var(--accent) 22%, var(--line)); background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
 .dual-report-phrase.friend { border-color: color-mix(in srgb, var(--accent-2) 18%, var(--line)); }
@@ -3282,7 +3310,6 @@
   padding: 4px 7px;
   border-radius: 6px;
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
@@ -3311,9 +3338,14 @@
   min-height: 46px;
   padding-block: 9px;
 }
+// 序号与数量：用可读的文字色，前 3 名用强调色（强调色在深浅两档下都保证 ≥3 对比度，
+// 色阶里的深色档不是 —— 它只适合当进度条填充）。
 .ranking-row .ranking-no,
 .ranking-row .ranking-count {
-  color: var(--rank-color, var(--text));
+  color: var(--text-dim);
+}
+.ranking-row .ranking-no.ranking-top {
+  color: var(--accent);
 }
 .ranking-row .ranking-bar .progress-fill {
   transition: width 0.25s ease, background 0.25s ease;

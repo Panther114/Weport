@@ -175,7 +175,6 @@
   font-size: 12px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -455,7 +454,6 @@
 .weclone-stage-idx {
   font-size: 9.5px;
   opacity: 0.75;
-  font-variant-numeric: tabular-nums;
 }
 
 .weclone-stage.active {
@@ -493,7 +491,6 @@
 .weclone-progress-msg span {
   font-size: 12px;
   font-weight: 700;
-  font-variant-numeric: tabular-nums;
   color: var(--text);
 }
 

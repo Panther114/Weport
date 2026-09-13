@@ -20,6 +20,8 @@ export type AccentId = 'blue' | 'violet' | 'teal' | 'rose' | 'amber' | 'graphite
 export type Density = 'comfortable' | 'compact'
 export type Mode = 'dark' | 'light'
 export type BackgroundKind = 'none' | 'image' | 'video'
+/** 强调色的用量：只影响色块浓度，不改色相。 */
+export type AccentStrength = 'soft' | 'standard' | 'vivid'
 
 export interface Appearance {
   /** 绝对路径；空字符串＝纯色背景。图片或视频由扩展名决定。 */
@@ -33,6 +35,8 @@ export interface Appearance {
   customAccent: string
   mode: Mode
   density: Density
+  /** 强调色浓度：换色相之外的第二个自定义轴。 */
+  accentStrength: AccentStrength
 }
 
 export const APPEARANCE_DEFAULT: Appearance = {
@@ -43,7 +47,14 @@ export const APPEARANCE_DEFAULT: Appearance = {
   customAccent: '#5b8eff',
   mode: 'dark',
   density: 'comfortable',
+  accentStrength: 'standard',
 }
+
+export const ACCENT_STRENGTH_OPTIONS: Array<{ id: AccentStrength; label: string; hint: string }> = [
+  { id: 'soft', label: '淡雅', hint: '只在选中态与图表上着色' },
+  { id: 'standard', label: '标准', hint: '按钮、数值、图标都用强调色' },
+  { id: 'vivid', label: '浓郁', hint: '面板与卡片也带强调色底' },
+]
 
 export const ACCENT_OPTIONS: Array<{ id: AccentId; label: string; swatch: string }> = [
   { id: 'blue', label: '冷蓝', swatch: '#5b8eff' },
@@ -85,6 +96,7 @@ const KEYS = {
   customAccent: 'appearanceCustomAccent',
   mode: 'appearanceMode',
   density: 'appearanceDensity',
+  accentStrength: 'appearanceAccentStrength',
 } as const
 
 let current: Appearance = { ...APPEARANCE_DEFAULT }
@@ -94,6 +106,8 @@ const isAccent = (value: unknown): value is AccentId =>
   value === 'custom' || ACCENT_OPTIONS.some((option) => option.id === value)
 const isMode = (value: unknown): value is Mode => value === 'dark' || value === 'light'
 const isDensity = (value: unknown): value is Density => value === 'comfortable' || value === 'compact'
+const isStrength = (value: unknown): value is AccentStrength =>
+  ACCENT_STRENGTH_OPTIONS.some((option) => option.id === value)
 /** #rrggbb / #rgb → #rrggbb；非法输入返回空串。 */
 export function normalizeHexColor(value: unknown): string {
   const raw = String(value || '').trim()
@@ -102,6 +116,22 @@ export function normalizeHexColor(value: unknown): string {
   const hex = match[1]
   if (hex.length === 6) return `#${hex.toLowerCase()}`
   return `#${hex.split('').map((c) => c + c).join('').toLowerCase()}`
+}
+
+/**
+ * 浅色模式下强调色需要压深（否则当文字用在浅底上对比度不足），预设色在
+ * `theme.scss` 里写死，自定义色只能运行时算。
+ *
+ * 为什么 `--accent` 必须是字面色值、不能用 `color-mix()` 现算：Chromium 不支持
+ * `color-mix()` 嵌套，而 `--accent` 会被塞进二十多处 `color-mix(in srgb, var(--accent) …)`；
+ * 它一旦是 color-mix，那些声明在浅色下全部作废（主按钮没有底色 → 白字落在白面板上）。
+ */
+function darkenForLight(hex: string, factor = 0.72): string {
+  const value = normalizeHexColor(hex)
+  if (!value) return hex
+  const channel = (start: number) =>
+    Math.max(0, Math.min(255, Math.round(parseInt(value.slice(start, start + 2), 16) * factor)))
+  return `#${[1, 3, 5].map((i) => channel(i).toString(16).padStart(2, '0')).join('')}`
 }
 
 /** 把绝对路径转成渲染层可用的协议 URL（盘符必须编码进 pathname，不能放 host）。 */
@@ -126,13 +156,18 @@ function applyDom(appearance: Appearance): void {
   root.dataset.accent = appearance.accent
   root.dataset.mode = appearance.mode
   root.dataset.density = appearance.density
+  root.dataset.accentStrength = appearance.accentStrength
   // 自定义强调色：直接覆盖 --accent-raw，其余色阶由 theme.scss 用 color-mix
   // 从它推导，因此自定义色和 6 个预设走的是同一条链路。
   if (appearance.accent === 'custom') {
     const hex = normalizeHexColor(appearance.customAccent) || APPEARANCE_DEFAULT.customAccent
     root.style.setProperty('--accent-raw', hex)
+    // 浅色模式的压深值预设色写在 CSS 里，自定义色只能这里算。
+    if (appearance.mode === 'light') root.style.setProperty('--accent', darkenForLight(hex))
+    else root.style.removeProperty('--accent')
   } else {
     root.style.removeProperty('--accent-raw')
+    root.style.removeProperty('--accent')
   }
   // 旧字段：仍有少量 CSS（以及 ECharts 主题）按 data-theme 判断灰阶。
   root.dataset.theme = appearance.accent === 'graphite' ? 'mono' : 'colorful'
@@ -179,6 +214,9 @@ export const setMode = (mode: Mode): void =>
 export const setDensity = (density: Density): void =>
   commit({ density: isDensity(density) ? density : 'comfortable' }, (key, value) => void window.electronAPI.config.set(key, value))
 
+export const setAccentStrength = (strength: AccentStrength): void =>
+  commit({ accentStrength: isStrength(strength) ? strength : 'standard' }, (key, value) => void window.electronAPI.config.set(key, value))
+
 /**
  * 背景存在性探测。
  *
@@ -218,7 +256,7 @@ export async function initAppearance(): Promise<Appearance> {
     }
   }
 
-  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, legacyColorMode] = await Promise.all([
+  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, accentStrength, legacyColorMode] = await Promise.all([
     read(KEYS.backgroundPath),
     read(KEYS.backgroundDim),
     read(KEYS.backgroundBlur),
@@ -226,6 +264,7 @@ export async function initAppearance(): Promise<Appearance> {
     read(KEYS.customAccent),
     read(KEYS.mode),
     read(KEYS.density),
+    read(KEYS.accentStrength),
     // v1.0 之前的「色彩主题」：colorful / mono。它现在只是强调色的一种，
     // 因此在没有新的 accent 配置时把它迁移过来，而不是丢下不管。
     read('colorMode'),
@@ -245,6 +284,7 @@ export async function initAppearance(): Promise<Appearance> {
     customAccent: normalizeHexColor(customAccent) || APPEARANCE_DEFAULT.customAccent,
     mode: isMode(mode) ? mode : APPEARANCE_DEFAULT.mode,
     density: isDensity(density) ? density : APPEARANCE_DEFAULT.density,
+    accentStrength: isStrength(accentStrength) ? accentStrength : APPEARANCE_DEFAULT.accentStrength,
   }
 
   current = next

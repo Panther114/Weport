@@ -9,6 +9,124 @@
 //   同优先级下后者胜出），因此不需要一次性重写。
 //
 // 本文件只负责外壳与令牌，不碰任何页面内部布局。
+//
+// 0. 强调色的铺开
+// ---------------
+// 六个色板此前几乎只影响"选中项那一块"：主按钮是固定的白底黑字（v0.9 黑白
+// 主题的遗留），统计数字、进度条、段落序号全是素色。这里把强调色推到几个
+// 高频、低风险的表面（主按钮 / 数值 / 序号 / 焦点环 / 进度 / 复选框），
+// 浓度由 --accent-fill / --tint-* 控制（见 styles/theme.scss）。
+// =============================================================================
+
+.primary-btn {
+  // 两层：background-color 给对比度审计读（渐变它看不见），background-image 才是
+  // 实际观感。两者同色系，所以视觉上就是一块带微渐变的强调色。
+  background-color: var(--accent-fill-color);
+  background-image: var(--accent-fill);
+  color: var(--accent-fill-text);
+  border-color: var(--accent-fill-border);
+}
+
+// 选中态从"纯白底黑字"改成强调色底。
+//
+// 白底黑字是 v0.9 黑白主题的遗留：在一个几乎全黑的界面里它比主按钮还亮，于是
+// 导出的格式卡、目录结构卡、页签全都抢同一份注意力；而且白色和 6 个色板毫无
+// 关系 —— 换了强调色，这些卡片依然是白的（"配色只体现在选中高亮"）。
+.chip[data-active='true'],
+.tab[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent-raw) 16%, transparent);
+}
+
+.chip[data-active='true'] svg,
+.tab[data-active='true'] svg,
+.format-chip[data-active='true'] .fmt-head svg {
+  color: var(--accent);
+}
+
+.chip[data-active='true'] strong {
+  color: var(--accent);
+}
+
+// 分段控件（媒体路径 / 同名文件 / 命名方式 / 并发数）同样的白底黑字问题。
+.seg button[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+// `.chip-active` 是另一种"选中"写法（朋友圈筛选摘要、导出对话框、分析页）。
+// 深色下它同样是纯白底黑字，和 .chip[data-active] 的规则并行存在 —— 两条都
+// 改成强调色，否则同一个界面里会出现两种不同的"选中"外观。
+.chip.chip-active {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent-raw) 16%, transparent);
+}
+
+.chip.chip-active:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+// 禁止合成加粗。
+//
+// Weport 用的是仓耳渔阳体 W03，字体文件里**只有 Regular 一档**（OS/2 fsSelection
+// 只有 REGULAR，name 表里也只有 "Regular"），而且不含 GSUB/GPOS 特性表。于是任何
+// `font-weight: 600+` 都只能由 Chromium 描边合成：小字号 CJK 上表现为笔画边缘发
+// 毛、横竖粗细不均，看起来就像"字体坏了"（朋友圈的统计标签、列表标题最明显）。
+//
+// 关掉合成之后所有粗体回到真正的 Regular 字形，层级靠字号与颜色表达：
+// --text / --text-dim / --text-faint 三档本来就承担了大部分层次。
+:root {
+  font-synthesis-weight: none;
+}
+
+.primary-btn:hover:not(:disabled) {
+  opacity: 1;
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--accent-raw) 34%, transparent);
+}
+
+button,
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+// 数值与序号用强调色：它们是每页最先被读到的信息，而此前全是纯白/纯灰。
+.v09-stat b,
+.exp-num,
+.status-bar strong,
+.analytics-hub-card b {
+  color: var(--accent);
+}
+
+.panel-head h2 svg,
+.exp-sec-head svg,
+.v09-toolbar-title svg {
+  color: var(--accent);
+}
+
+.progress-fill {
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent-raw) 70%, #ffffff));
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent-raw) 45%, var(--line-strong));
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+/* 表格/列表的斑马纹与悬停也走强调色，浓淡随 --accent-softer 变。 */
+.table-row:hover,
+.setting-row:hover {
+  background: var(--accent-softer);
+}
 
 // -----------------------------------------------------------------------------
 // 1. 设计令牌
@@ -353,6 +471,73 @@
   .rail-brand,
   .status-busy::before {
     transition: none;
+    animation: none;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6b. 全局过渡层
+// -----------------------------------------------------------------------------
+//
+// 之前只有少数几个页面自己写了入场动画（朋友圈卡片、分析卡片），切页、开弹窗、
+// 弹 toast 都是"瞬间出现"。这里补一条统一的、克制的动效：
+//   - 切页：内容淡入 + 上移 6px，180ms，让人知道"换页了"；
+//   - 弹层：遮罩淡入 + 面板轻微放大弹入（与 DSH 的 layer 弹层一致）；
+//   - 交互控件：hover/active 统一 150ms，不再各自为政。
+// 时长全部 ≤200ms：再长就会让高频操作（切页、开设置）显得迟钝。
+
+@keyframes wp-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes wp-veil {
+  from {
+    opacity: 0;
+  }
+}
+
+.workspace > .panel,
+.workspace > .page-stack,
+.workspace > .single-col,
+.workspace > .two-col,
+.workspace > .page {
+  animation: wp-enter 0.18s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.modal-backdrop {
+  animation: wp-veil 0.14s ease both;
+}
+
+.modal {
+  animation: wp-enter 0.18s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.modal-backdrop:has(.ai-add-dialog),
+.modal-backdrop:has(.ai-provider-modal) {
+  animation-duration: 0.12s;
+}
+
+// 交互控件统一节拍：按钮/输入/行/卡片的颜色与位移变化都用同一条曲线。
+button,
+input,
+select,
+textarea,
+.setting-row,
+.rail-item,
+.account-item,
+.notify-row {
+  transition-duration: 0.15s;
+  transition-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace > *,
+  .modal,
+  .modal-backdrop,
+  .toast {
     animation: none;
   }
 }
@@ -922,25 +1107,24 @@
 // 按钮 —— 一张要人动手的卡片，顺序却是「说明书在前、按钮在后」。现在说明收进
 // details，默认折叠，控件在前。
 
+// 按钮 —— 一张要人动手的卡片，顺序却是「说明书在前、按钮在后」。现在控件在前，
+// 说明跟在下面。
+//
+// 说明**不做成可折叠**：用户在连接页最想知道的就是"密钥怎么来"，折叠一次之后就
+// 再也不会被打开，遇到问题只能猜。代价是卡片长一点，换来的是不用点开也能读。
+
 .steps-details {
   margin-top: var(--space-3);
   border-top: 1px solid var(--line);
   padding-top: var(--space-3);
 
-  > summary {
-    cursor: pointer;
-    font-size: 12.5px;
-    color: var(--text-dim);
-    list-style: none;
+  .steps-details-title {
     display: flex;
     align-items: center;
     gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-dim);
 
-    &::-webkit-details-marker {
-      display: none;
-    }
-
-    // 自绘三角：Chrome 默认标记与我们的图标体系不一致。
     &::before {
       content: '';
       width: 0;
@@ -948,16 +1132,8 @@
       border-left: 5px solid currentColor;
       border-top: 4px solid transparent;
       border-bottom: 4px solid transparent;
-      transition: rotate 0.16s ease;
+      rotate: 90deg;
     }
-
-    &:hover {
-      color: var(--text);
-    }
-  }
-
-  &[open] > summary::before {
-    rotate: 90deg;
   }
 
   .steps {
@@ -1026,7 +1202,7 @@
 // 改成吸顶页头：主按钮放在页头右端，页头吸顶。动作**始终可见**，而且它在正常
 // 流里的位置就在顶部，永远不会和下方内容争位置。
 
-.panel:has(.export-actions) > .panel-head {
+.panel.export-page > .panel-head {
   position: sticky;
   top: 0;
   z-index: 6;
@@ -1055,6 +1231,120 @@
 
 .export-actions:empty {
   display: none;
+}
+
+// -----------------------------------------------------------------------------
+// 导出页两栏
+// -----------------------------------------------------------------------------
+//
+// 五段纵向堆叠时整页约三屏高：会话列表要看，配置要回去翻，进度和取消按钮在
+// 最底部。宽窗口下改成「左边配置 + 会话，右边常驻动作与状态」。
+//
+// 断点用 min-width 而不是 max-width：应用默认窗口只有约 1060 CSS px（Windows
+// 150% 缩放下 1599 物理 px），此时两栏会把正文压到 400px 宽 —— 单栏才是对的。
+// 只有真正拉宽（>=1280）才并排。
+
+.export-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.export-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.export-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+@media (min-width: 1280px) {
+  .export-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: var(--space-5);
+  }
+
+  .export-side {
+    position: sticky;
+    top: var(--space-3);
+  }
+}
+
+.exp-side-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: var(--hairline) solid var(--stroke-l1);
+  border-radius: var(--radius);
+  background: var(--layer-2);
+}
+
+.exp-side-card .exp-sec-head {
+  padding: 0;
+  border: 0;
+}
+
+// 页头左侧的三枚状态徽标（格式 / 目录结构 / 范围）。
+.exp-head-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.exp-head-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-softer);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.exp-head-chip svg {
+  color: var(--accent);
+}
+
+// 高级选项：标签与控件贴在一起。原来是 space-between，标签在左、单选组被推到
+// 最右边，中间空出 700px —— 窄窗口下读一行要在屏幕上横跳一次。
+.opt-row {
+  display: grid;
+  grid-template-columns: minmax(0, 120px) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.opt-row .seg {
+  justify-self: start;
+  flex-wrap: wrap;
+}
+
+.opt-panel {
+  padding: var(--space-3);
+}
+
+// 路径输入不再横跨整栏：默认窗口只有约 1060 CSS px，整宽输入框会把「浏览」
+// 甩到屏幕另一头，而路径本身通常二十来个字符就够读。
+.export-main .path-row {
+  max-width: 560px;
+}
+
+// 格式卡在窄窗口里仍要排 3-4 列，不能再靠固定宽度。
+.export-main .format-grid {
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
 }
 
 // 数字序号在配置段里代表"第几步"，字号要比正文大一点才读得出次序。
@@ -1429,6 +1719,11 @@
     font-style: normal;
     font-size: 11px;
     color: var(--text-faint);
+    // 说明文字只允许一行：换行会把导航项撑成两行高，一列里就出现参差不齐的
+    // 打卡片（「服务分配」的说明最长，最容易触发）。
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   &:hover {
@@ -1587,6 +1882,17 @@
 }
 
 // 状态条里的折叠说明（防撤回那三行解释就是塞在这里的）
+// 防撤回说明：整条说明直接展开在状态条下面，不做折叠（折叠后没人会点开，
+// 而"装在微信侧、无需常驻"恰恰是用户最需要知道的一句）。
+.status-bar-note {
+  flex-basis: 100%;
+  order: 9;
+  margin: var(--space-2) 0 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
 .status-bar-details {
   flex-basis: 100%;
   order: 9;

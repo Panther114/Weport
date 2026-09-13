@@ -197,7 +197,9 @@
 .webot-chip-kind {
   margin-left: 4px;
   font-size: 10px;
-  color: var(--text-faint);
+  // 这个标签坐在 .ref-chip 的强调色淡底上：--text-faint 压在那层底上只有 2.83，
+  // 已经是"看不清"的范围（深色模式的对比度审计抓出来的）。
+  color: var(--text-dim);
 }
 
 .webot-danger {

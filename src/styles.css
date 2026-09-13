@@ -1514,7 +1514,6 @@ button:disabled {
 .export-session-count {
   color: var(--text-faint);
   font-size: 10px;
-  font-variant-numeric: tabular-nums;
 }
 
 .export-session-empty {
@@ -1988,7 +1987,6 @@ button:disabled {
   min-width: 92px;
   max-width: 92px;
   text-align: right;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   line-height: 18px;

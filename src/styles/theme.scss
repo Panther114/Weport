@@ -75,11 +75,71 @@
   --accent-4: color-mix(in srgb, var(--accent-raw) 74%, var(--mix-dark));
   --accent-deep: color-mix(in srgb, var(--accent-raw) 62%, var(--mix-dark));
 
-  --accent-soft: color-mix(in srgb, var(--accent-raw) 16%, transparent);
-  --accent-softer: color-mix(in srgb, var(--accent-raw) 9%, transparent);
   --accent-glow: color-mix(in srgb, var(--accent-raw) 30%, transparent);
   --accent-grad: linear-gradient(165deg, color-mix(in srgb, var(--accent-raw) 24%, transparent), color-mix(in srgb, var(--accent-raw) 4%, transparent));
   --accent-grad-strong: linear-gradient(165deg, color-mix(in srgb, var(--accent-raw) 36%, transparent), color-mix(in srgb, var(--accent-raw) 12%, transparent));
+}
+
+// -----------------------------------------------------------------------------
+// 强调色浓度（设置 → 外观）
+// -----------------------------------------------------------------------------
+//
+// 只有色相可选的话，六个色板除了"选中项那一块"几乎看不出差别 —— 用户的反馈
+// 是"很多配色只体现在选中高亮上"。浓度轴把强调色的**用量**也交出来：
+// --accent-soft/-softer 这两档半透明底色是所有卡片/导航/表的着色源，缩放它们
+// 就等于整体调浓淡，而不必给每个组件写一份覆盖。
+
+:root,
+:root[data-accent-strength='standard'] {
+  --tint-soft: 16%;
+  --tint-softer: 9%;
+  --tint-line: 34%;
+}
+
+:root[data-accent-strength='soft'] {
+  --tint-soft: 9%;
+  --tint-softer: 5%;
+  --tint-line: 24%;
+
+  --accent-soft: color-mix(in srgb, var(--accent-raw) var(--tint-soft), transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) var(--tint-softer), transparent);
+  // 淡雅档：主按钮不用实色填充，避免整屏到处是色块。
+  --accent-fill: var(--elevated);
+  --accent-fill-color: var(--elevated);
+  --accent-fill-text: var(--text);
+  --accent-fill-border: var(--line-strong);
+}
+
+:root[data-accent-strength='vivid'] {
+  --tint-soft: 24%;
+  --tint-softer: 14%;
+  --tint-line: 46%;
+}
+
+:root[data-accent-strength='vivid'] .panel,
+:root[data-accent-strength='vivid'] .sns-post-item,
+:root[data-accent-strength='vivid'] .v09-panel {
+  background-image: var(--accent-grad);
+}
+
+:root {
+  --accent-soft: color-mix(in srgb, var(--accent-raw) var(--tint-soft), transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) var(--tint-softer), transparent);
+  --accent-line: color-mix(in srgb, var(--accent-raw) var(--tint-line), transparent);
+  // 主按钮底色：把原色向**黑**压 28%（而不是向 --mix-dark —— 那在浅色模式里是
+  // 白色，会把按钮调亮，白字对比度掉到 3.2 以下）。压深后六种色相都是 4.2-5.8，
+  // 白字在任何主题下都够读，而且按钮颜色仍然明显属于当前色板。
+  //
+  // 同时给 background-color：对比度审计读的是 background-color，只看 background-image
+  // 的渐变它会当作透明，然后拿白色面板去算白字（浅色模式下必然误报 1.0）。
+  --accent-fill-color: color-mix(in srgb, var(--accent-raw) 72%, #000000);
+  --accent-fill: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent-raw) 80%, #000000) 0%,
+    color-mix(in srgb, var(--accent-raw) 72%, #000000) 100%
+  );
+  --accent-fill-text: #ffffff;
+  --accent-fill-border: color-mix(in srgb, var(--accent-raw) 60%, #000000);
 }
 
 // graphite 是灰阶：软色底和渐变要更淡，否则一行行灰块看起来像禁用态。
@@ -98,10 +158,23 @@
 
   // 强调色当**文字**用在浅底上时，原始色相太亮：浅蓝 #5b8eff 在 #f4f5f9 上只有
   // 2.85 对比度（设置页分类名、双人报告里的名字都栽在这里，是对比度审计抓出来
-  // 的）。浅色模式下把基准色压深一档，于是所有直接使用 var(--accent) 的文字
+  // 的）。浅色模式下把基准色压深 28%，于是所有直接使用 var(--accent) 的文字
   // 一起变可读；--accent-soft/-softer 仍是半透明色底，不受影响。
-  --accent: color-mix(in srgb, var(--accent-raw) 72%, #000000);
-  --accent-strong: color-mix(in srgb, var(--accent-raw) 72%, #000000);
+  //
+  // 这里写死六个压深后的色值，而不是写 `color-mix(... var(--accent-raw) ...)`：
+  // Chromium 不支持 color-mix() 里再嵌一个 color-mix()，而 --accent 会被塞进
+  // 二十多处 `color-mix(in srgb, var(--accent) N%, …)`。一旦 --accent 本身是
+  // color-mix，那些声明在浅色模式下全部变成非法值 —— 主按钮因此没有底色（白字
+  // 落在白面板上，对比度 1.0），卡片描边、选中态也一起丢掉。所以 --accent 必须
+  // 始终是**字面色值**。自定义强调色由 appearance.ts 在运行时算好同样的 0.72。
+  // 具体色值见文件下方 `:root[data-mode='light'][data-accent=…]` 一组。
+
+  // --accent-4 / --accent-deep 原本向 `--mix-dark` 混色，而浅色模式下 `--mix-dark`
+  // 是白色 —— 于是这两档在浅底上变成浅色。它们被当作**文字/图标**颜色用（分析
+  // 卡片箭头、词云、排行序号、.chip-active 的文字），浅色下直接掉到 1.5-2.3 对比度
+  // （浅色模式的对比度审计抓出来的）。这里改成向黑混，保留"深色端"的语义。
+  --accent-4: color-mix(in srgb, var(--accent-raw) 74%, #000000);
+  --accent-deep: color-mix(in srgb, var(--accent-raw) 62%, #000000);
 
   --bg: #f4f5f9;
   --bg-raised: #ffffff;
@@ -125,6 +198,45 @@
   --elev-2: 0 4px 14px rgba(24, 28, 48, 0.12);
 
   color-scheme: light;
+}
+
+// 浅色模式下每种强调色的"文字/描边"用色：原始色相 × 0.72（压深 28%）。
+// 放在下面单独一组，因为它们要按 data-accent 分别命中。
+:root[data-mode='light'] {
+  --accent: #4166b8;
+  --accent-strong: #4166b8;
+}
+
+:root[data-mode='light'][data-accent='violet'] {
+  --accent: #7059b8;
+  --accent-strong: #7059b8;
+}
+
+:root[data-mode='light'][data-accent='teal'] {
+  --accent: #228477;
+  --accent-strong: #228477;
+}
+
+:root[data-mode='light'][data-accent='rose'] {
+  --accent: #ae4a67;
+  --accent-strong: #ae4a67;
+}
+
+:root[data-mode='light'][data-accent='amber'] {
+  --accent: #a1732b;
+  --accent-strong: #a1732b;
+}
+
+:root[data-mode='light'][data-accent='graphite'] {
+  --accent: #6f6f76;
+  --accent-strong: #6f6f76;
+}
+
+:root[data-mode='light'][data-accent='custom'] {
+  // 自定义色由 appearance.ts 覆写为运行时算出的同比例压深值；这里给一个兜底，
+  // 免得 JS 还没来得及写入时按钮落到"未定义"。
+  --accent: var(--accent-raw);
+  --accent-strong: var(--accent-raw);
 }
 
 :root {

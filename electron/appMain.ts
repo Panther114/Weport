@@ -5091,11 +5091,29 @@ async function runScreenshotMode() {
       const rows = (await mainWindow.webContents.executeJavaScript(
         `(() => {
            const parse = (value) => {
-             const m = /rgba?\\(([^)]+)\\)/.exec(value || '')
-             if (!m) return null
-             const parts = m[1].split(',').map((v) => Number.parseFloat(v.trim()))
-             if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null
-             return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 }
+             const raw = value || ''
+             const m = /rgba?\\(([^)]+)\\)/.exec(raw)
+             if (m) {
+               const parts = m[1].split(',').map((v) => Number.parseFloat(v.trim()))
+               if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null
+               return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 }
+             }
+             // color-mix() 的计算值序列化为 color(srgb r g b [/ a])，通道是 0..1 的小数。
+             // 只认 rgb() 的话，所有由 color-mix 得到底色的元素都会被当成透明：审计
+             // 于是拿祖先层去算，浅色模式下会把白底上的白字报成 1.0（假失败），
+             // 真正的问题也会被更外层的背景掩盖。
+             const c = /color\\(srgb\\s+([^)]+)\\)/.exec(raw)
+             if (c) {
+               const parts = c[1].split(/[\\s/]+/).filter(Boolean).map((v) => Number.parseFloat(v))
+               if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null
+               return {
+                 r: parts[0] * 255,
+                 g: parts[1] * 255,
+                 b: parts[2] * 255,
+                 a: parts.length > 3 && Number.isFinite(parts[3]) ? parts[3] : 1,
+               }
+             }
+             return null
            }
            const lum = (c) => {
              const f = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4) }
