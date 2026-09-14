@@ -120,10 +120,13 @@ export function NotificationToast({
             <LiquidGlass
                 cornerRadius={16}
                 padding="12px 10px"
-                blurAmount={0.3}
+                // 与 NotificationWindow 的 GLASS_PARAMS 保持一致：原生面板按那份
+                // 参数渲染折射，两边不一致时"同一张卡片"在原生/回退两条路径上
+                // 会出现不同的玻璃厚度。纱层压薄之后这些折射参数才是观感主角。
+                blurAmount={0.4}
                 saturation={175}
-                displacementScale={85}
-                aberrationIntensity={1.5}
+                displacementScale={100}
+                aberrationIntensity={2}
                 backdropImage={backdropImage}
                 backdropStream={backdropStream}
                 nativeBackdrop={nativeBackdrop}

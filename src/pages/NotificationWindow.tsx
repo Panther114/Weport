@@ -10,8 +10,14 @@ import {
 import '../components/NotificationToast.scss'
 import './NotificationWindow.scss'
 
-/** 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值） */
-const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 4, displacementScale: 85, aberrationIntensity: 1.5, saturation: 175 }
+/**
+ * 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值）。
+ *
+ * 纱层压到近乎全透之后，卡片的"玻璃感"就全落在折射本身了：blurSigma 6 让玻璃
+ * 读起来是"厚玻璃"而不是"贴纸"，displacementScale/aberration 抬高一档让边缘的
+ * 透镜弯曲与色散可见（之前 0.42~0.58 的厚纱层把这些全盖住了）。
+ */
+const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 6, displacementScale: 100, aberrationIntensity: 2, saturation: 175 }
 const DEFAULT_NOTIFICATION_DURATION_MS = 5000
 const MIN_NOTIFICATION_DURATION_MS = 1000
 const MAX_NOTIFICATION_DURATION_MS = 60_000

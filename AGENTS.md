@@ -230,6 +230,38 @@ The harness is a DSH-derived port: it keeps DSH's cache discipline and evidence 
 - Deletion of a `memory/` or `notes/` file always goes through a confirmation dialog
   (`noteDeleteTarget`); those files are the only copy.
 
+## Glass Surfaces — v1.0
+
+Two separate "the background is white" bugs, both from getting the *layer* wrong:
+
+- **`背景遮罩` must never be tinted with `var(--bg)`.** It was, and in light mode
+  `--bg` is `#f4f5f9` — so the "dim" layer painted a **white film** over the wallpaper,
+  and turning it up made the picture greyer rather than darker. It is a fixed dark
+  `#06060a` now. Anything whose job is to *darken* must not be a theme colour.
+- **`data-has-bg` shell.** `.shell` carries two blue radial glows which used to stay on
+  top of the wallpaper in image mode (the old override only handled `data-bg-kind`), so
+  `遮罩 0%` was never actually clear. They are dropped whenever a background exists.
+  Panel translucency lives in **theme.scss** (`data-has-bg`, plus a `data-mode='light'`
+  variant) as literal `rgba()` — **not** `color-mix(… calc(…))`, whose percentage slot
+  resolves inconsistently across Chromium versions and silently invalidates the whole
+  declaration, leaving every panel fully transparent.
+
+Popup glass (`NotificationToast.scss` + `useNotificationAdaptiveTheme.ts`):
+
+- **The card veil is thin on purpose** (`[0.06, 0.24]` white / `[0.1, 0.3]` dark) and is
+  solved against `VEIL_CONTRAST_BUDGET` (2.0), not 4.5. Letting the veil solve for 4.5
+  drives it to its cap and the card becomes frosted plastic — that was the `0.42–0.58`
+  era. The 4.5 budget lives on the **text colour + solved text scrim**
+  (`--noti-text-scrim` / `--noti-text-scrim-strong`).
+- Both scrim gradient stops are emitted by the engine. Do not derive one from the other
+  with `color-mix(in srgb, var(--x) 118%, transparent)` — that nests `color-mix` inside
+  `color-mix`, which Chromium rejects, and the declaration dies.
+- Each sample is a `getImageData()` — a **synchronous GPU→CPU readback**. It only
+  decides text colour, so `MIN_SAMPLE_GAP_MS` is 100 ms (was 33 ms / ~30 Hz).
+- `BACKDROP_CAPTURE_SCALE` is 0.25 (was 0.5). Capture cost is dominated by output pixels
+  and the frame gets blurred to nothing anyway; this is what lets the backdrop loop run
+  fast enough for the glass to track the desktop (measured frame delta 1.64 → 3.60).
+
 ## Notification Popup (Permanent — Do Not Change)
 
 The popup is `electron/windows/notificationWindow.ts` (WeFlow port): a separate

@@ -288,10 +288,18 @@
   backface-visibility: hidden;
 }
 
+/**
+ * 背景遮罩。**必须是中性深色**，不能用 `var(--bg)`。
+ *
+ * 之前是 `background: var(--bg)`：深色模式下 --bg 是近黑，看起来"压暗"没问题；
+ * 但浅色模式下 --bg 是 #f4f5f9 —— 于是这个"遮罩"实际在往壁纸上刷一层**白膜**，
+ * 用户把遮罩拉到 55% 只看到画面越来越灰白，而不是变暗。这也正是"0% 也不够透明"
+ * 观感的一部分：0% 时它虽然 opacity:0 不显形，但任何非 0 值都在提亮而不是压暗。
+ */
 .app-bg-dim {
   position: absolute;
   inset: 0;
-  background: var(--bg);
+  background: #06060a;
   opacity: var(--app-bg-dim, 0);
 }
 
@@ -410,10 +418,31 @@
   --surface-elevated: #eef0f6;
 }
 
-:root[data-bg-kind='video'] {
-  --bg-raised: color-mix(in srgb, var(--surface-raised) 94%, transparent);
-  --panel: color-mix(in srgb, var(--surface-panel) 90%, transparent);
-  --elevated: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
+/**
+ * 面板"有多透"。视频/图片背景存在的整个意义就是能看见桌面，所以面板必须真的
+ * 半透明 —— 原来 94%/90% 接近不透明，浅色模式下更是一片纯白，用户看到的
+ * 就是"某些地方底是白的"。
+ *
+ * 写成字面 rgba 而不是 `color-mix(... calc(...) ...)`：calc 出现在 color-mix 的
+ * 百分比槽位在不同 Chromium 版本上解析不一致，一旦解析失败整条声明作废、
+ * 面板底色直接变成全透明（比不透明更难查）。
+ *
+ * 这里**不做逐帧 backdrop-filter**：那是视频背景卡顿的主因（每帧一次全屏模糊，
+ * 结果无法复用）。玻璃观感改由"单层半透明 + 用户可调的整体背景模糊
+ * (--app-bg-blur)"提供，而不是让每个面板自己做毛玻璃。
+ */
+:root[data-has-bg='true'] {
+  --bg-raised: rgba(17, 17, 22, 0.78);
+  --panel: rgba(23, 23, 29, 0.72);
+  --elevated: rgba(30, 30, 38, 0.8);
+}
+
+// 浅色模式的半透明面板要给得更实：白底叠在浅色壁纸上时，72% 的白会把背景糊成
+// 一片雾。提到 0.84 仍然透得出壁纸，而文字稳。
+:root[data-mode='light'][data-has-bg='true'] {
+  --bg-raised: rgba(255, 255, 255, 0.84);
+  --panel: rgba(255, 255, 255, 0.8);
+  --elevated: rgba(238, 240, 246, 0.86);
 }
 
 // -----------------------------------------------------------------------------

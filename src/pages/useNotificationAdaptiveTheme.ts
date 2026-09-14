@@ -40,14 +40,30 @@ export interface BandSample {
 
 const SAMPLE_W = 48
 const SAMPLE_H = 16
-/** 相邻两次采样的最小间隔：采样由视频出帧驱动，此值防止背景高频变化时空转（~30Hz） */
-const MIN_SAMPLE_GAP_MS = 33
+/**
+ * 相邻两次采样的最小间隔。
+ *
+ * `readBand` 里有一次 `ctx.getImageData()` —— 那是把像素从 GPU 读回 CPU 的**同步**
+ * 操作，会把渲染线程卡住。之前 33ms（≈30Hz）意味着每秒 30 次同步回读；对一个
+ * 只用来决定"文字用什么颜色"的采样来说完全没必要，而且正是弹窗"发飘/跟不上"
+ * 的一部分原因。降到 ~10Hz：文字颜色的变化本来就该是缓的，背景变化时也看不
+ * 出这 70ms 的差别，但主线程压力只有原来的 1/3。
+ */
+const MIN_SAMPLE_GAP_MS = 100
 /** 兜底轮询间隔：桌面静止（视频不出帧）但通知自身布局变化时仍能刷新 */
-const FALLBACK_INTERVAL_MS = 250
+const FALLBACK_INTERVAL_MS = 500
 /** 与 NotificationToast 传给 LiquidGlass 的 saturation=175 保持一致 */
 const GLASS_SATURATION = 1.75
 /** WCAG AA 小字号文本的目标对比度 */
 const TARGET_CONTRAST = 4.5
+/**
+ * 整卡纱层单独要负责的对比度预算。
+ *
+ * 刻意远低于 4.5：纱层只要把观感定调（浅底白纱 / 深底黑纱）就够了，真正的
+ * 可读性由「文字色 + 文字后方 scrim + 光晕」负责。若让纱层独自扛 4.5，求解器
+ * 会一路顶到上限，卡片又变回磨砂塑料 —— 这正是之前 0.42~0.58 的由来。
+ */
+const VEIL_CONTRAST_BUDGET = 2.0
 /** 极性切换所需的对比度优势（滞回），避免临界背景来回翻转 */
 const POLARITY_MARGIN = 0.5
 /** 小幅波动的指数平滑系数（0~1，越大跟随越快） */
@@ -60,11 +76,19 @@ const RECT_BLEED = 4
 const WHITE_VEIL: RGB = [255, 255, 255]
 const DARK_VEIL: RGB = [22, 20, 18]
 /**
- * 纱层 alpha 求解范围：下限保证整卡自带半透明背景（不依赖桌面明暗即可读），
- * 上限防止退化成实心色块。~0.5 的半透明磨砂卡片即 Apple 液态玻璃观感。
+ * 玻璃纱层 alpha 求解范围（下限 → 上限）。
+ *
+ * 这是整张卡片"有多透"的唯一旋钮。旧值 `[0.42, 0.58]`（深色 `[0.5, 0.65]`）
+ * 实际上是**磨砂塑料**：卡背被压到半透明以上，桌面在玻璃里几乎看不见，用户
+ * 反馈的"不够透明"就是这里。液态玻璃的观感来自「几乎不压暗的背景 + 只在文字
+ * 后面薄薄一层纱」，所以下限压到 0.06/0.10。
+ *
+ * 可读性**不靠**提高这里的下限，而是靠 `--noti-*-scrim`（文字后方局部纱层，
+ * 见 NotificationToast.scss）+ 文字色/光晕。把整卡压暗来换对比度是最省事但
+ * 最毁观感的做法 —— 那等于把玻璃换成毛玻璃。
  */
-const WHITE_VEIL_ALPHA: readonly [number, number] = [0.42, 0.58]
-const DARK_VEIL_ALPHA: readonly [number, number] = [0.5, 0.65]
+const WHITE_VEIL_ALPHA: readonly [number, number] = [0.06, 0.24]
+const DARK_VEIL_ALPHA: readonly [number, number] = [0.1, 0.3]
 
 /**
  * 标题与正文共用同一组主文字锚点：灰色正文在蓝色等彩色背景上即使对比度达标，
@@ -171,6 +195,10 @@ interface BandTone {
     t: number
     /** 最不利分位数背景下的对比度缺口（0~1），驱动光晕强度 */
     deficit: number
+    /** 纱层合成后的本区域背景色，供 scrim 求解 */
+    glassBg: RGB
+    /** 最不利分位数处的背景色（已含纱层），scrim 就按它求解 */
+    adverseBg: RGB
 }
 
 /** 沿 offsetParent 链累计布局坐标：不受出入场 transform 影响，采样区域始终对准卡片落点 */
@@ -234,12 +262,13 @@ export function createAdaptiveThemeEngine() {
 
         const bestWithWhite = contrastRatio(ANCHORS.body.dark.strong, compositeVeil(WHITE_VEIL, WHITE_VEIL_ALPHA[1], bg))
         const bestWithDark = contrastRatio(ANCHORS.body.light.strong, compositeVeil(DARK_VEIL, DARK_VEIL_ALPHA[1], bg))
+        // 极性切换仍按"能不能真正读清"（4.5）判断，只有浓度求解用低预算
         if (next === 'white' && bestWithWhite < TARGET_CONTRAST && bestWithDark > bestWithWhite + POLARITY_MARGIN) next = 'dark'
         if (next === 'dark' && bestWithDark < TARGET_CONTRAST && bestWithWhite > bestWithDark + POLARITY_MARGIN) next = 'white'
         veilPolarity = next
         return next === 'white'
-            ? { color: WHITE_VEIL, alpha: solveVeilAlpha(WHITE_VEIL, WHITE_VEIL_ALPHA, bg, ANCHORS.body.dark.relaxed, TARGET_CONTRAST) }
-            : { color: DARK_VEIL, alpha: solveVeilAlpha(DARK_VEIL, DARK_VEIL_ALPHA, bg, ANCHORS.body.light.relaxed, TARGET_CONTRAST) }
+            ? { color: WHITE_VEIL, alpha: solveVeilAlpha(WHITE_VEIL, WHITE_VEIL_ALPHA, bg, ANCHORS.body.dark.relaxed, VEIL_CONTRAST_BUDGET) }
+            : { color: DARK_VEIL, alpha: solveVeilAlpha(DARK_VEIL, DARK_VEIL_ALPHA, bg, ANCHORS.body.light.relaxed, VEIL_CONTRAST_BUDGET) }
     }
 
     const resolveBand = (key: 'title' | 'body', sample: BandSample, veil: { color: RGB; alpha: number }): BandTone => {
@@ -264,7 +293,7 @@ export function createAdaptiveThemeEngine() {
             saturateRgb(scaleRgb(sample.mean, adverseLuma / meanLuma), GLASS_SATURATION)
         )
         const deficit = clamp01((TARGET_CONTRAST - contrastRatio(tone.color, adverseBg)) / TARGET_CONTRAST)
-        return { polarity: next, color: tone.color, t: tone.t, deficit }
+        return { polarity: next, color: tone.color, t: tone.t, deficit, glassBg, adverseBg }
     }
 
     /** 反向微光晕：深字配白晕、浅字配黑影，强度随对比度缺口无级增强 */
@@ -274,14 +303,31 @@ export function createAdaptiveThemeEngine() {
             : `0 1px 3px rgba(0, 0, 0, ${(0.4 + 0.4 * tone.deficit).toFixed(2)})`
 
     /**
-     * 文字可读性纱层：与文字极性相反方向压一层半透明底色，
-     * 保证任何背景（包括过亮/过暗的极端桌面）下文字都有保底对比度；
-     * 纱层半透明，玻璃折射观感不受影响
+     * 文字后方的可读性纱层（scrim）：与文字极性相反方向的一层局部底色。
+     *
+     * 这是把整卡纱层压薄的**前提**。整卡保持几乎透明（液态玻璃观感），可读性
+     * 集中到文字这一小块 —— 先用文字色尽可能达标，不够的缺口由 scrim 的 alpha
+     * 精确补上（对最不利分位数背景求解）。这样 scrim 只在真正需要时才变浓，
+     * 而不是给所有卡片糊一层厚底。
      */
-    const scrimFor = (tone: BandTone) =>
-        tone.polarity === 'dark'
-            ? 'rgba(255, 255, 255, 0.16)'
-            : 'rgba(10, 10, 14, 0.45)'
+    const scrimFor = (tone: BandTone): { alpha: number; css: string } => {
+        const base = tone.polarity === 'dark' ? WHITE_VEIL : DARK_VEIL
+        const bg = tone.adverseBg
+        if (contrastRatio(tone.color, bg) >= TARGET_CONTRAST) {
+            // 已经达标：仍留一层极淡的 scrim，让文字在背景快速变化时不闪烁
+            const floor = tone.polarity === 'dark' ? 0.06 : 0.1
+            return { alpha: floor, css: cssRgba(base, floor) }
+        }
+        let lo = 0
+        let hi = 1
+        for (let i = 0; i < 7; i++) {
+            const mid = (lo + hi) / 2
+            if (contrastRatio(tone.color, compositeVeil(base, mid, bg)) >= TARGET_CONTRAST) hi = mid
+            else lo = mid
+        }
+        const alpha = Math.min(0.72, hi * 1.05) // 5% 余量抵消采样噪声
+        return { alpha, css: cssRgba(base, alpha) }
+    }
 
     return {
         /** 输入三区域原始统计（title/body 缺省时退回整卡），刷新全部 --noti-* 变量 */
@@ -297,17 +343,29 @@ export function createAdaptiveThemeEngine() {
             const bodySample = smooth('body', raw.body ?? null) ?? cardSample
 
             const title = resolveBand('title', titleSample, veil)
+            const titleScrim = scrimFor(title)
             setVar('--noti-title-color', cssRgb(title.color))
             setVar('--noti-title-halo', haloFor(title))
-            setVar('--noti-title-scrim', scrimFor(title))
+            setVar('--noti-title-scrim', titleScrim.css)
             const tertiaryAnchor = ANCHORS.tertiary[title.polarity]
             setVar('--noti-title-tertiary', cssRgb(lerpRgb(tertiaryAnchor.relaxed, tertiaryAnchor.strong, title.t)))
             setVar('--noti-close-hover-bg', title.polarity === 'dark' ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.14)')
 
             const body = resolveBand('body', bodySample, veil)
+            const bodyScrim = scrimFor(body)
             setVar('--noti-body-color', cssRgb(body.color))
             setVar('--noti-body-halo', haloFor(body))
-            setVar('--noti-body-scrim', scrimFor(body))
+            setVar('--noti-body-scrim', bodyScrim.css)
+
+            // 文字块在 DOM 上是一个容器（标题 + 正文共用一层纱），所以取两者中
+            // 更浓的那份：宁可多补一点，也不要让正文落在没有底的像素上；正文
+            // 字号更小、更难读，本来就该是更保守的那一侧。
+            const mask = bodyScrim.alpha >= titleScrim.alpha ? bodyScrim : titleScrim
+            // 纱层颜色跟随正文的极性（跨到标题通常只有几像素，不值得再分两层）
+            const scrimBase = body.polarity === 'dark' ? WHITE_VEIL : DARK_VEIL
+            setVar('--noti-text-scrim', cssRgba(scrimBase, mask.alpha))
+            // 渐变起点：加浓 18% 补偿沿宽度的线性衰减（上限仍受 scrim 的 0.72 约束）
+            setVar('--noti-text-scrim-strong', cssRgba(scrimBase, Math.min(0.78, mask.alpha * 1.18)))
         }
     }
 }

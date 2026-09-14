@@ -207,17 +207,28 @@ function stopBackdropStream() {
 }
 
 /**
- * 抓一帧桌面（半分辨率 JPEG）。
+ * 抓一帧桌面（低分辨率 JPEG）。
  *
  * JPEG 而不是 PNG：玻璃会再模糊一次，压缩噪点看不见；而编码成本差 5 倍以上
  * （本机实测 PNG 7.6ms / JPEG 1.6ms，体积 56KB / 32KB），在几百毫秒一帧的循环里
  * 这个差别直接决定能不能跑。
+ *
+ * 抓帧分辨率比例（相对显示器尺寸）从 0.5 降到 0.25 是本轮延迟优化的关键：
+ * `desktopCapturer.getSources` 的成本几乎完全由输出像素数决定，4K 屏上 0.5
+ * 意味着每秒要生成好几张 1920×1080 位图，主进程直接饱和 —— 而这张图**接下来
+ * 会被玻璃整张模糊掉**，分辨率本身毫无价值。0.25（4K 屏约 960×540）在玻璃里
+ * 看不出区别，成本降到约 1/4。竖直方向尤其浪费：弹窗只有 ~114px 高，采样时
+ * 还要缩到 48×16，真正被消费的信息量只有几百个像素。
  */
+const BACKDROP_CAPTURE_SCALE = 0.25
+/** JPEG 质量：玻璃会再模糊一次，压缩噪点看不见，但编码成本差很多 */
+const BACKDROP_JPEG_QUALITY = 55
+
 async function grabDesktopFrame(): Promise<string | null> {
   const startedAt = Date.now();
   try {
     const display = screen.getPrimaryDisplay();
-    const scale = 0.5;
+    const scale = BACKDROP_CAPTURE_SCALE;
     const sources = await desktopCapturer.getSources({
       types: ["screen"],
       thumbnailSize: {
@@ -229,7 +240,7 @@ async function grabDesktopFrame(): Promise<string | null> {
     if (!cachedSourceId && source?.id) cachedSourceId = source.id;
     const thumb = source?.thumbnail;
     if (!thumb || thumb.isEmpty()) return null;
-    const dataUrl = `data:image/jpeg;base64,${thumb.toJPEG(60).toString("base64")}`;
+    const dataUrl = `data:image/jpeg;base64,${thumb.toJPEG(BACKDROP_JPEG_QUALITY).toString("base64")}`;
     return dataUrl;
   } catch (error) {
     console.warn("[NotificationWindow] desktop frame grab failed:", error);

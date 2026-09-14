@@ -562,13 +562,31 @@ textarea,
   background-repeat: no-repeat;
 }
 
-// 有背景图时把面板变成半透明玻璃，否则不透明的面板会把背景完全盖住，
-// 用户上传的图等于白传。
-:root[data-has-bg='true'] {
-  --bg-raised: rgba(17, 17, 22, 0.74);
-  --panel: rgba(23, 23, 29, 0.66);
-  --elevated: rgba(30, 30, 38, 0.7);
+// 有背景（图片 / 视频）时，.shell 上**只**保留用户自己的那张图和遮罩。
+//
+// 之前只有 type.scss 里一条 `data-bg-kind='video'` 的覆盖去让开底色，图片模式
+// 没有对应处理，而两层蓝色径向光晕在两种模式下都一直在 —— 于是「遮罩 0%」也
+// 压着一层去不掉的暗色和蓝晕，怎么调都还是不够透明。收敛到只剩「图 + 遮罩」
+// 之后，0% 就是真的一点都不压。
+:root[data-has-bg='true'] .shell {
+  background-image:
+    linear-gradient(rgba(6, 6, 8, var(--app-bg-dim, 0)), rgba(6, 6, 8, var(--app-bg-dim, 0))),
+    var(--app-bg-url, none);
+}
 
+// 视频模式再把纯色底也让开：视频是独立的 <video> 图层（不在 background 里），
+// 纯色底会盖住它。
+:root[data-bg-kind='video'] .shell {
+  background-color: transparent;
+}
+
+// 有背景（图 / 视频）时把面板变成半透明玻璃，否则不透明的面板会把背景完全
+// 盖住，用户上传的图等于白传。
+//
+// 透明度**不在这里定义**：面板底色是主题级变量，浅色/深色两套值统一在
+// theme.scss 的 `data-has-bg` 规则里给出。这里只负责给 rail/topbar 加背景模糊
+// ——静态图片的模糊结果可以复用，所以这条在图片模式下是安全的。
+:root[data-has-bg='true'] {
   .rail,
   .topbar {
     backdrop-filter: blur(14px);

@@ -33,7 +33,7 @@
     // 无级计算后写入 <html> 的 --noti-* 变量（纱层方向/浓度、分区连续文字色、光晕强度）；
     // 此处提供采样失败/过亮背景下的安全默认值：白字 + 深色文字纱层，任何背景下都可读
     --liquid-glass-shadow: var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22));
-    --liquid-glass-tint: var(--noti-tint, rgba(255, 255, 255, 0.1));
+    --liquid-glass-tint: var(--noti-tint, rgba(255, 255, 255, 0.06));
 
     color: var(--noti-title-color, #ffffff);
 
@@ -52,6 +52,36 @@
         flex: 1;
         min-width: 0;
         position: relative; // 时间锚定在文本块内，贴右缘
+
+        // 文字后方局部可读性纱层：alpha 由自适应引擎按"最不利背景"求解
+        // （见 useNotificationAdaptiveTheme 的 scrimFor）。整卡纱层被压到近乎
+        // 全透之后，可读性集中在这里 —— 所以这一块必须有底色，否则文字直接
+        // 落在桌面像素上。
+        //
+        // 浓度沿宽度线性衰减到 0（而不是"实底 + 一刀切"）：后者会在收尾处留下
+        // 一条可见的竖向边界，玻璃上凭空多出一个方块。起点用引擎给的加浓值
+        // （--noti-text-scrim-strong）补偿衰减，保证文字起始处仍达到目标浓度。
+        // 两个色标都由引擎算好 —— 不在 CSS 里用 color-mix 现算：那会把
+        // color-mix 嵌套进另一个 color-mix，Chromium 下整条声明作废。
+        &::before {
+            content: '';
+            position: absolute;
+            inset: -5px -9px -4px -7px;
+            border-radius: 9px;
+            background: linear-gradient(
+                90deg,
+                var(--noti-text-scrim-strong, rgba(10, 10, 14, 0.24)) 0%,
+                var(--noti-text-scrim, rgba(10, 10, 14, 0.2)) 55%,
+                transparent 100%
+            );
+            pointer-events: none;
+            transition: background 0.08s linear;
+        }
+
+        // 内容抬到纱层之上
+        > * {
+            position: relative;
+        }
 
         .notification-header {
             display: flex;

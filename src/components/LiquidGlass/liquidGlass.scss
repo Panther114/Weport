@@ -6,14 +6,18 @@
 // - --liquid-glass-ring：边缘高光环强度系数（0~1）。玻璃直接叠在透明窗口背景上时
 //   混合层会全强度过曝，需要调低（如独立通知窗口）
 // 个别表面需要微调时，在其玻璃节点的 class 上覆盖同名变量即可
+//
+// 色调层浓度刻意压得很低：液态玻璃的观感来自"背景基本不被压暗"，可读性靠
+// 文字自身的颜色/光晕/局部纱层解决（通知卡片就是这么做的）。这里一旦给到
+// 0.4 以上，玻璃就退化成磨砂塑料 —— 那是这个文件之前的问题。
 
 :root {
-    --liquid-glass-tint: rgba(255, 255, 255, 0.42);
+    --liquid-glass-tint: rgba(255, 255, 255, 0.1);
     --liquid-glass-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05), 0 12px 40px rgba(0, 0, 0, 0.24);
     --liquid-glass-ring: 1;
 }
 
 [data-mode="dark"] {
-    --liquid-glass-tint: rgba(24, 22, 20, 0.4);
+    --liquid-glass-tint: rgba(24, 22, 20, 0.14);
     --liquid-glass-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 12px 40px rgba(0, 0, 0, 0.45);
 }
