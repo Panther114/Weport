@@ -5,28 +5,25 @@ import type { WeCloneListItem } from '../../types/weclone'
 /**
  * 和分身对话的抽屉。
  *
- * 用户报的「我不知道现在怎么跟我的分身说话」是真实缺口：生成完了、上传完了，
- * 界面里没有任何入口，只能去终端敲 `weport weclone.chat`。这里补上入口 ——
- * 知识库在服务器上，所以每轮就是一次 HTTP 调用，不涉及本地 AI provider。
- *
- * 注意 `clone.id` 与本机档案的关系：本机档案的 id 是目录名，服务器只认
- * `serverId`。选择走哪一条在 service 侧决定（`chatWithClone`），这里不重复判断。
+ * **全程在本机完成**（v1.0 起）：主进程读出这个人格克隆的五份 MD，在你本机的
+ * 语料上做一次 BM25 检索挑出相关片段，连同多轮历史一起交给**你自己配置的模型**。
+ * 没有服务器、不上传、也没有联网检索 —— 所以这里的失败原因只有两类：还没生成过
+ * 克隆，或者模型 key 不可用。
  */
 export default function WeCloneChatDrawer({
   clone,
-  serverConfigured,
   onClose,
 }: {
   clone: WeCloneListItem
-  serverConfigured: boolean
   onClose: () => void
 }) {
   const api = window.electronAPI
-  type Turn = { role: 'user' | 'assistant'; content: string; error?: boolean; hint?: string }
+  type Turn = { role: 'user' | 'assistant'; content: string; error?: boolean; hint?: string; stats?: string }
   const [turns, setTurns] = useState<Turn[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [elapsed, setElapsed] = useState<number | null>(null)
+  const [lastStats, setLastStats] = useState<string | null>(null)
   const threadRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -62,8 +59,16 @@ export default function WeCloneChatDrawer({
       if (res.success && res.reply) {
         setTurns((prev) => [...prev, { role: 'assistant', content: res.reply as string }])
         setElapsed(typeof res.elapsedMs === 'number' ? res.elapsedMs : null)
+        // 把本地检索的命中情况显示出来：这是唯一会悄悄退化的环节，
+        // 看不到数字就没法判断"它答得敷衍"是模型问题还是根本没检索到东西。
+        const m = res.meta
+        setLastStats(
+          m
+            ? `本地检索命中 ${m.corpusHits} 段 · 用时 ${m.retrieveCostMs}ms`
+            : null
+        )
       } else {
-        // 失败信息原样带出来：最有用的是「连不上 127.0.0.1:8099」这类具体原因，
+        // 失败信息原样带出来：最有用的是「人格档案不完整」这类具体原因，
         // 不是重新包装成「请求失败」。
         setTurns((prev) => [...prev, { role: 'assistant', content: res.error || '对话失败', error: true, hint: res.hint }])
       }
@@ -89,9 +94,7 @@ export default function WeCloneChatDrawer({
             <div>
               <h3 id="weclone-chat-title">{clone.displayName || clone.wxid || clone.id}</h3>
               <span className="hint">
-                {serverConfigured
-                  ? '对话由服务器上的知识库驱动；回答风格来自你的聊天语料。'
-                  : '尚未配置服务器，发送会提示如何配置。'}
+                人格档案与语料都在本机；每轮会先在本机检索相关聊天片段，再交给你的模型。
               </span>
             </div>
           </div>
@@ -146,7 +149,12 @@ export default function WeCloneChatDrawer({
             发送
           </button>
         </div>
-        {elapsed !== null && <div className="weclone-chat-foot">上一轮用时 {(elapsed / 1000).toFixed(1)}s</div>}
+        {elapsed !== null && (
+          <div className="weclone-chat-foot">
+            上一轮用时 {(elapsed / 1000).toFixed(1)}s
+            {lastStats ? ` · ${lastStats}` : ''}
+          </div>
+        )}
       </div>
     </div>
   )

@@ -7,19 +7,17 @@ const STAGES: Array<{ key: WeCloneStage; label: string }> = [
   { key: 'scan', label: '扫描与脱敏' },
   { key: 'generate', label: '生成人格 MD' },
   { key: 'filter', label: '隐私二审' },
-  { key: 'upload', label: '上传服务器' },
 ]
 
 interface WeCloneProgressProps {
   running: boolean
   progress: WeCloneProgressInfo | null
   logs: string[]
-  serverConfigured: boolean
   onCancel: () => void
   onDismiss: () => void
 }
 
-export default function WeCloneProgress({ running, progress, logs, serverConfigured, onCancel, onDismiss }: WeCloneProgressProps) {
+export default function WeCloneProgress({ running, progress, logs, onCancel, onDismiss }: WeCloneProgressProps) {
   const logRef = useRef<HTMLDivElement | null>(null)
 
   // 新日志到达时滚到底部（生成日志是追加式的）
@@ -53,9 +51,7 @@ export default function WeCloneProgress({ running, progress, logs, serverConfigu
           )}
           克隆生成进度
         </h3>
-        <span className="hint">
-          {serverConfigured ? '完成后将上传到私有服务器' : '未配置私有服务器 · 结果仅保存在本地'}
-        </span>
+        <span className="hint">全程在本机完成，档案与语料不会离开这台电脑</span>
         {!running && (
           <button className="ghost-btn compact" type="button" onClick={onDismiss}>
             收起

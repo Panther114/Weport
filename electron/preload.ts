@@ -312,12 +312,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   weclone: {
-    generate: (opts?: { localOnly?: boolean }) => ipcRenderer.invoke('weclone:generate', opts),
+    generate: () => ipcRenderer.invoke('weclone:generate'),
     list: () => ipcRenderer.invoke('weclone:list'),
     get: (id: string) => ipcRenderer.invoke('weclone:get', id),
-    delete: (id: string, remote?: boolean) => ipcRenderer.invoke('weclone:delete', id, remote),
-    setVisibility: (id: string, visibility: string) => ipcRenderer.invoke('weclone:setVisibility', id, visibility),
-    getServerStatus: () => ipcRenderer.invoke('weclone:getServerStatus'),
+    // 纯本地：删除就是删掉本机目录，没有 remote 参数
+    delete: (id: string) => ipcRenderer.invoke('weclone:delete', id),
+    // on-device 对话：人格档案 + 本地检索都在主进程完成，不上传
     chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
       ipcRenderer.invoke('weclone:chat', cloneId, message, history),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),

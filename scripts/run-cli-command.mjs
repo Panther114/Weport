@@ -128,7 +128,12 @@ try {
   child.send({ kind: 'hello', token })
   const ready = await waitFor((m) => m?.kind === 'ready', 60_000, 'handshake')
   child.send({ kind: 'call', id: 'c1', command: commandName, args })
-  const result = await waitFor((m) => m?.id === 'c1', 200_000, commandName)
+  // 命令超时要按**最慢的命令**给：weclone.generate 要扫完整库、生成 5 份 MD 再
+  // 二审，实测 83k 条消息要三分钟以上。原来固定 200s，于是生成还没结束客户端就
+  // 先超时退出，退出时又发了 bye → 引擎把它当成取消，最终报「已取消」——
+  // 看起来像生成被取消，其实是客户端等不起。可用 WEPORT_CLI_TIMEOUT_MS 覆盖。
+  const commandTimeoutMs = Math.max(60_000, Number(process.env.WEPORT_CLI_TIMEOUT_MS) || 900_000)
+  const result = await waitFor((m) => m?.id === 'c1', commandTimeoutMs, commandName)
   finish(result?.success === false ? 1 : 0, { version: ready.version, ...result })
 } catch (error) {
   console.error(String(error?.message || error))

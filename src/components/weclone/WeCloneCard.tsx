@@ -3,31 +3,15 @@ import {
   AlertTriangle,
   Boxes,
   CalendarDays,
-  Check,
   ChevronDown,
-  Copy,
   FileText,
   Loader2,
   MessageSquareText,
+  ShieldCheck,
   Trash2,
   Users2,
 } from 'lucide-react'
-import type { WeCloneListItem, WeCloneMdsPreview, WeCloneVisibility } from '../../types/weclone'
-import { copyTextToClipboard } from '../../utils/clipboard'
-import WeCloneVisibilityToggle from './WeCloneVisibilityToggle'
-
-// 徽标也用中文，并保留英文缩写作为 title —— 见 WeCloneVisibilityToggle 里的说明。
-const VISIBILITY_LABEL: Record<WeCloneVisibility, { text: string; title: string }> = {
-  private: { text: '私密', title: '可见性：私密 (PRIVATE)' },
-  public: { text: '公开', title: '可见性：公开 (PUBLIC)' },
-  link: { text: '链接分享', title: '可见性：链接可见 (LINK)' },
-}
-
-const SOURCE_LABEL: Record<WeCloneListItem['source'], { text: string; title: string }> = {
-  local: { text: '本机档案', title: '档案位置：本机 (LOCAL)' },
-  remote: { text: '仅服务器', title: '档案位置：仅服务器 (REMOTE ONLY)' },
-  both: { text: '本机 + 服务器', title: '档案位置：本机与服务器 (LOCAL+REMOTE)' },
-}
+import type { WeCloneListItem, WeCloneMdsPreview } from '../../types/weclone'
 
 const MD_SECTIONS: Array<{ key: keyof WeCloneMdsPreview; label: string }> = [
   { key: 'profile', label: '人格画像 · profile.md' },
@@ -47,53 +31,21 @@ function formatDateTime(iso: string): string {
 
 interface WeCloneCardProps {
   clone: WeCloneListItem
-  serverBaseUrl: string
-  /** 切换可见性；返回服务端下发的分享链接（若有） */
-  onVisibilityChange: (clone: WeCloneListItem, v: WeCloneVisibility) => Promise<string | undefined>
   onDeleteRequest: (clone: WeCloneListItem) => void
-  /** 打开对话抽屉（知识库在服务器上，入口由页面统一持有） */
+  /** 打开对话抽屉（对话在本机完成，不需要任何服务器） */
   onChat: (clone: WeCloneListItem) => void
 }
 
-export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, onDeleteRequest, onChat }: WeCloneCardProps) {
-  const [visBusy, setVisBusy] = useState(false)
-  const [shareUrl, setShareUrl] = useState(clone.shareUrl || '')
-  const [copied, setCopied] = useState(false)
+export default function WeCloneCard({ clone, onDeleteRequest, onChat }: WeCloneCardProps) {
   const [mdOpen, setMdOpen] = useState(false)
   const [mdLoading, setMdLoading] = useState(false)
   const [mds, setMds] = useState<WeCloneMdsPreview | null>(null)
   const [mdError, setMdError] = useState('')
 
-  const remoteOnly = clone.source === 'remote'
-  const busy = visBusy
-
-  const resolvedShareUrl =
-    shareUrl || (clone.serverId && serverBaseUrl ? `${serverBaseUrl}/share/${clone.serverId}` : '')
-
-  async function handleVisibility(v: WeCloneVisibility) {
-    if (remoteOnly || busy || v === clone.visibility) return
-    setVisBusy(true)
-    try {
-      const url = await onVisibilityChange(clone, v)
-      if (v === 'link' && url) setShareUrl(url)
-    } finally {
-      setVisBusy(false)
-    }
-  }
-
-  async function handleCopyShare() {
-    if (!resolvedShareUrl) return
-    const ok = await copyTextToClipboard(resolvedShareUrl)
-    if (ok) {
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1600)
-    }
-  }
-
   async function toggleMds() {
     const next = !mdOpen
     setMdOpen(next)
-    if (next && mds === null && !remoteOnly) {
+    if (next && mds === null) {
       setMdLoading(true)
       try {
         const r = await window.electronAPI.weclone.get(clone.id)
@@ -115,18 +67,11 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
           <span className="weclone-card-id" title={clone.id}>{clone.id}</span>
         </div>
         <div className="weclone-badges">
-          <span className={`badge weclone-badge-${clone.visibility}`} title={VISIBILITY_LABEL[clone.visibility].title}>
-            {VISIBILITY_LABEL[clone.visibility].text}
+          {/* 只有一个徽标，而且说的是**边界**而不是"上传状态"：v1.0 的承诺就是
+              这个克隆只活在这台机器上，把这句话放在最显眼处比放"本机档案"更有用。 */}
+          <span className="badge" title="人格档案与语料只保存在本机，对话也在本机完成">
+            <ShieldCheck size={10} strokeWidth={2} /> 仅本机
           </span>
-          <span className="badge" title={SOURCE_LABEL[clone.source].title}>
-            {SOURCE_LABEL[clone.source].text}
-          </span>
-          {clone.uploadStatus === 'failed' && (
-            <span className="badge weclone-badge-failed" title="上传失败">上传失败</span>
-          )}
-          {!remoteOnly && clone.uploadStatus === 'local_only' && serverBaseUrl && (
-            <span className="badge weclone-badge-muted" title="未上传到服务器">未上传</span>
-          )}
         </div>
       </div>
 
@@ -155,14 +100,11 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
         {clone.truncated && <span>· 数据量过大已截断</span>}
       </div>
 
-      {/* 对话入口对所有分身可见，包括「仅服务器」的那些 —— 档案不在本机并不
-          妨碍聊天（知识库本来就在服务器上），而只能对话的克隆恰恰最需要这个
-          按钮。生成/上传完成后用户的第一诉求就是「跟它说句话」。 */}
       <div className="weclone-card-actions">
         <button
           className="primary-btn weclone-card-chat"
           type="button"
-          title="和这个分身对话（知识库在服务器上）"
+          title="和这个分身对话（人格档案 + 本地检索，全程不上传）"
           onClick={() => onChat(clone)}
         >
           <MessageSquareText size={13} />
@@ -170,82 +112,49 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
         </button>
       </div>
 
-      {remoteOnly ? (
-        <p className="hint" style={{ margin: 0 }}>
-          该克隆仅存在于服务器（本机无档案），无法在此修改或删除，但可以直接对话。
-        </p>
-      ) : (
-        <>
-          <div className="chip-group">
-            <WeCloneVisibilityToggle value={clone.visibility} disabled={busy} onChange={(v) => void handleVisibility(v)} />
-            <button className="ghost-btn compact" type="button" disabled={busy} onClick={() => void toggleMds()}>
-              {mdLoading ? <Loader2 size={13} className="spin" /> : <FileText size={13} />}
-              {mdOpen ? '收起档案' : '查看档案'}
-              <ChevronDown size={12} className={mdOpen ? 'chevron open' : 'chevron'} />
-            </button>
-            <button
-              className="ghost-btn compact weclone-card-delete"
-              type="button"
-              disabled={busy}
-              title="删除本地档案，并同步删除服务器上的克隆"
-              onClick={() => onDeleteRequest(clone)}
-            >
-              <Trash2 size={13} />
-              删除
-            </button>
-          </div>
+      <div className="chip-group">
+        <button className="ghost-btn compact" type="button" onClick={() => void toggleMds()}>
+          {mdLoading ? <Loader2 size={13} className="spin" /> : <FileText size={13} />}
+          {mdOpen ? '收起档案' : '查看档案'}
+          <ChevronDown size={12} className={mdOpen ? 'chevron open' : 'chevron'} />
+        </button>
+        <button
+          className="ghost-btn compact weclone-card-delete"
+          type="button"
+          title="删除本机档案与语料（本机是唯一副本，删除后无法恢复）"
+          onClick={() => onDeleteRequest(clone)}
+        >
+          <Trash2 size={13} />
+          删除
+        </button>
+      </div>
 
-          {clone.visibility === 'link' && (
-            <div className="weclone-share-row">
-              {resolvedShareUrl ? (
-                <>
-                  <input readOnly value={resolvedShareUrl} onFocus={(e) => e.target.select()} spellCheck={false} />
-                  <button
-                    className="ghost-btn compact"
-                    type="button"
-                    title={copied ? '已复制' : '复制链接'}
-                    aria-label={copied ? '已复制' : '复制链接'}
-                    onClick={() => void handleCopyShare()}
-                  >
-                    {copied ? <Check size={13} /> : <Copy size={13} />}
-                  </button>
-                </>
-              ) : (
-                <span className="hint" style={{ margin: 0 }}>
-                  已设为链接可见。上传到私有服务器后可获得可分享的对话链接。
-                </span>
-              )}
-            </div>
+      {mdOpen && (
+        <div className="weclone-md-view">
+          {mdError ? (
+            <p className="weclone-error-line"><AlertTriangle size={12} /> {mdError}</p>
+          ) : mds === null ? (
+            <div className="wp-loading"><Loader2 size={14} className="spin" /> 正在读取档案…</div>
+          ) : (
+            MD_SECTIONS.map(({ key, label }) => {
+              const content = mds[key]
+              return (
+                <details key={key} className="weclone-md-item" open={Boolean(content) && key === 'profile'}>
+                  <summary className="weclone-md-item-head">
+                    <FileText size={12} />
+                    {label}
+                    {!content && <span className="weclone-md-missing">缺失</span>}
+                  </summary>
+                  {content ? (
+                    <pre className="weclone-md-pre">{content}</pre>
+                  ) : (
+                    <p className="hint" style={{ padding: '0 10px 10px', margin: 0 }}>该档案不存在（可能生成时被跳过）。</p>
+                  )}
+                </details>
+              )
+            })
           )}
-
-          {mdOpen && (
-            <div className="weclone-md-view">
-              {mdError ? (
-                <p className="weclone-error-line"><AlertTriangle size={12} /> {mdError}</p>
-              ) : mds === null ? (
-                <div className="wp-loading"><Loader2 size={14} className="spin" /> 正在读取档案…</div>
-              ) : (
-                MD_SECTIONS.map(({ key, label }) => {
-                  const content = mds[key]
-                  return (
-                    <details key={key} className="weclone-md-item" open={Boolean(content) && key === 'profile'}>
-                      <summary className="weclone-md-item-head">
-                        <FileText size={12} />
-                        {label}
-                        {!content && <span className="weclone-md-missing">缺失</span>}
-                      </summary>
-                      {content ? (
-                        <pre className="weclone-md-pre">{content}</pre>
-                      ) : (
-                        <p className="hint" style={{ padding: '0 10px 10px', margin: 0 }}>该档案不存在（可能生成时被跳过）。</p>
-                      )}
-                    </details>
-                  )
-                })
-              )}
-            </div>
-          )}
-        </>
+        </div>
       )}
     </article>
   )

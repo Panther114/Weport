@@ -182,12 +182,12 @@ interface ConfigSchema {
   weportAiMaxToolChars: number
   weportAiContextWindow: number
 
-  // WeClone（人格克隆）
-  /** 私有服务地址，空 = 仅本地生成 */
-  weCloneServerUrl: string
-  /** ownerToken（safeStorage 加密，复用 mcpToken 模式） */
-  weCloneServerToken: string
-  weCloneEnabled: boolean
+  // WeClone（人格克隆）—— v1.0 起**纯本地**
+  //
+  // 这里原有 weCloneServerUrl / weCloneServerToken / weCloneEnabled 三个键，
+  // 对应"把克隆上传到私有服务、聊天时向它发 HTTP"的旧设计。v1.0 的边界是数据
+  // 不出本机，那条路径整体删除，键也一并移除（包括加密键清单里的 token）。
+  // 老配置文件里残留的这三个键会在下次写入时被丢弃 —— 它们不再被读取。
   /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
   weCloneLastCutoff: string
 
@@ -210,7 +210,6 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'aiInsightWeiboCookie',
   'weportAiApiKey',
   'weportAiProfilesBlob',
-  'weCloneServerToken',
   'weportConnectorsBlob'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
@@ -391,9 +390,6 @@ export class ConfigService {
       weportAiMaxToolChars: 12000,
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
-      weCloneServerUrl: '',
-      weCloneServerToken: '',
-      weCloneEnabled: true,
       weCloneLastCutoff: '',
       weportConnectorsBlob: '',
       connectorsAllowAgent: true,
@@ -1306,33 +1302,11 @@ export function getWeCloneForcedProviderStatus(): WeCloneForcedProviderInfo {
   }
 }
 
-// === 私有服务配置 ===
+// === WeClone 私有服务配置已移除（v1.0） ===
+//
+// 这里原来有 WeCloneServerConfig / getWeCloneServerConfig()，用来读取"私有服务
+// 地址 + ownerToken"。v1.0 的边界是**数据不出本机**：生成好的档案与语料不再上传，
+// 对话也在本机完成（人格 MD + 本地 BM25 检索 + 用户自己的模型 API）。因此这套
+// 配置连同它的加密键一起删除，而不是保留成"未使用"——留着就会有人再接回去。
 
-export interface WeCloneServerConfig {
-  enabled: boolean
-  /** 规范化后的服务地址（无尾斜杠），空字符串表示未配置 */
-  baseUrl: string
-  /** ownerToken 明文（get 时已由 safeStorage 解密） */
-  token: string
-  /** enabled 且配置了 baseUrl 才视为已配置 */
-  configured: boolean
-}
-
-/** 读取 WeClone 私有服务配置（token 自动解密；键缺失时优雅兜底） */
-export function getWeCloneServerConfig(): WeCloneServerConfig {
-  const svc = ConfigService.getInstance()
-  let enabled = true
-  let baseUrl = ''
-  let token = ''
-  try {
-    enabled = svc.get('weCloneEnabled') !== false
-  } catch { /* 键缺失时保持默认 */ }
-  try {
-    baseUrl = String(svc.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
-  } catch { /* noop */ }
-  try {
-    token = String(svc.get('weCloneServerToken') || '').trim()
-  } catch { /* noop */ }
-  return { enabled, baseUrl, token, configured: enabled && baseUrl.length > 0 }
-}
 

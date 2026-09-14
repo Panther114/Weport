@@ -8,7 +8,7 @@ import {
   KeyRound,
   Loader2,
   RefreshCw,
-  Server,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Users,
@@ -17,15 +17,9 @@ import {
 import { EmptyState } from '../components/EmptyState'
 import WeCloneProgress from '../components/weclone/WeCloneProgress'
 import WeCloneCard from '../components/weclone/WeCloneCard'
-import WeCloneServerConfig from '../components/weclone/WeCloneServerConfig'
 import WeCloneForcedKey from '../components/weclone/WeCloneForcedKey'
 import WeCloneChatDrawer from '../components/weclone/WeCloneChatDrawer'
-import type {
-  WeCloneListItem,
-  WeCloneProgressInfo,
-  WeCloneServerStatusInfo,
-  WeCloneVisibility,
-} from '../types/weclone'
+import type { WeCloneListItem, WeCloneProgressInfo } from '../types/weclone'
 
 type WeCloneSection = 'hub' | 'manage' | 'create'
 
@@ -49,7 +43,6 @@ export default function WeClonePage() {
   const [clones, setClones] = useState<WeCloneListItem[]>([])
   const [listLoading, setListLoading] = useState(true)
   const [remoteError, setRemoteError] = useState('')
-  const [serverStatus, setServerStatus] = useState<WeCloneServerStatusInfo | null>(null)
 
   // ---------------------------------------------------------------- 生成流程
   const [generating, setGenerating] = useState(false)
@@ -115,21 +108,17 @@ export default function WeClonePage() {
     }
   }, [api, pushToast])
 
-  const refreshServerStatus = useCallback(async () => {
-    try {
-      setServerStatus(await api.weclone.getServerStatus())
-    } catch {
-      setServerStatus(null)
-    }
-  }, [api])
-
   // 进度订阅 + 首次加载（仅挂载一次）
   useEffect(() => {
     void refreshList()
-    void refreshServerStatus()
     const unsub = api.weclone.onProgress((payload) => {
+      // 主进程只会发 scan / generate / filter / done；这里收紧一次类型，
+      // 免得 "upload" 这种已经不存在的阶段漏进 UI（上传功能已整体移除）。
+      const rawStage = String(payload?.stage || 'scan')
+      const stage: WeCloneProgressInfo['stage'] =
+        rawStage === 'generate' || rawStage === 'filter' || rawStage === 'done' ? rawStage : 'scan'
       const p: WeCloneProgressInfo = {
-        stage: payload?.stage ?? 'scan',
+        stage,
         progress: Number(payload?.progress) || 0,
         message: String(payload?.message || ''),
       }
@@ -145,7 +134,6 @@ export default function WeClonePage() {
 
   // ---------------------------------------------------------------- 派生统计
   const totalClones = clones.length
-  const publicClones = useMemo(() => clones.filter((c) => c.visibility === 'public').length, [clones])
   const latestCutoff = useMemo(() => {
     let max = ''
     for (const c of clones) {
@@ -154,14 +142,10 @@ export default function WeClonePage() {
     return max
   }, [clones])
 
-  const serverConfigured = serverStatus?.configured === true
-  const serverOnline = serverConfigured && serverStatus?.online === true
-
   const handleRefreshAll = useCallback(() => {
     setListLoading(true)
     void refreshList()
-    void refreshServerStatus()
-  }, [refreshList, refreshServerStatus])
+  }, [refreshList])
 
   // ---------------------------------------------------------------- 一键生成
   const handleGenerate = useCallback(async () => {
@@ -197,16 +181,9 @@ export default function WeClonePage() {
     setLogs([])
 
     try {
-      const result = await api.weclone.generate({})
+      const result = await api.weclone.generate()
       if (result.success) {
-        pushToast(
-          'ok',
-          '克隆生成完成',
-          result.status === 'uploaded'
-            ? '人格档案已上传到私有服务器'
-            : '人格档案已保存在本地（未上传）',
-          7000
-        )
+        pushToast('ok', '克隆生成完成', '人格档案与语料已保存在本机，可以开始对话了', 7000)
         setProgress((prev) => (prev ? { ...prev, stage: 'done', progress: 100, message: '生成完成' } : prev))
         void refreshList()
       } else if (result.aborted) {
@@ -239,37 +216,15 @@ export default function WeClonePage() {
     } catch { /* noop */ }
   }, [api, pushToast])
 
-  // ---------------------------------------------------------------- 可见性 / 删除
-  const handleVisibilityChange = useCallback(
-    async (clone: WeCloneListItem, v: WeCloneVisibility): Promise<string | undefined> => {
-      try {
-        const result = await api.weclone.setVisibility(clone.id, v)
-        if (result.success) {
-          const label = v === 'private' ? '私密' : v === 'public' ? '公开' : '链接可见'
-          pushToast('ok', `可见性已切换为「${label}」`, clone.serverId ? '已同步到服务器' : undefined)
-          setClones((prev) =>
-            prev.map((c) => (c.id === clone.id ? { ...c, visibility: v, shareUrl: result.shareUrl } : c))
-          )
-          return result.shareUrl
-        }
-        pushToast('err', '可见性更新失败', result.error)
-        return undefined
-      } catch (e) {
-        pushToast('err', '可见性更新失败', String(e))
-        return undefined
-      }
-    },
-    [api, pushToast]
-  )
-
+  // ---------------------------------------------------------------- 删除
   const handleDelete = useCallback(async () => {
     const target = confirmDelete
     if (!target || deleteBusy) return
     setDeleteBusy(true)
     try {
-      const result = await api.weclone.delete(target.id, true)
+      const result = await api.weclone.delete(target.id)
       if (result.success) {
-        pushToast('ok', '克隆已删除', target.serverId ? '本地档案与服务器克隆均已移除' : '本地档案已移除')
+        pushToast('ok', '克隆已删除', '本机档案与语料已移除')
         setConfirmDelete(null)
         void refreshList()
       } else {
@@ -296,8 +251,8 @@ export default function WeClonePage() {
             <div className="analytics-big-title">管理分身</div>
             <div className="analytics-big-desc">
               {totalClones > 0
-                ? `${totalClones} 个分身 · ${publicClones} 个公开 · 知识截止 ${latestCutoff || '—'}`
-                : '查看已生成分身 · 可见性、分享链接与档案预览'}
+                ? `${totalClones} 个分身 · 知识截止 ${latestCutoff || '—'} · 全部仅存本机`
+                : '查看已生成分身 · 档案预览与本机对话'}
             </div>
             <div className="analytics-big-arrow">
               进入管理
@@ -332,9 +287,11 @@ export default function WeClonePage() {
       </div>
       <div className="v09-actions">
         {section === 'manage' && (
-          <span className={`weclone-server-chip${serverOnline ? ' online' : serverConfigured ? ' offline' : ''}`}>
+          /* 原来这里是一个"服务器在线/离线"指示灯 —— 没有服务器了，改成说明
+             这个功能的边界。用户最该知道的一件事就是"数据不出本机"。 */
+          <span className="weclone-server-chip online" title="人格档案与语料只保存在本机；对话也在本机完成">
             <span className="weclone-server-dot" />
-            {serverConfigured ? (serverOnline ? '服务器在线' : '服务器离线') : '未配置服务器'}
+            数据仅存本机
           </span>
         )}
         <button type="button" className="chip" onClick={() => setSection('hub')}>
@@ -349,11 +306,7 @@ export default function WeClonePage() {
   // 「管理分身」是独立的 early return，之前只把抽屉加到末尾，于是从列表点
   // 「开始对话」永远不会打开任何东西 —— 状态改了，但没有地方渲染它。
   const chatDrawer = chatTarget ? (
-    <WeCloneChatDrawer
-      clone={chatTarget}
-      serverConfigured={Boolean(serverStatus?.configured)}
-      onClose={() => setChatTarget(null)}
-    />
+    <WeCloneChatDrawer clone={chatTarget} onClose={() => setChatTarget(null)} />
   ) : null
 
   // ---------------------------------------------------------------- Manage（列表）
@@ -405,8 +358,6 @@ export default function WeClonePage() {
                 <WeCloneCard
                   key={clone.id}
                   clone={clone}
-                  serverBaseUrl={serverStatus?.baseUrl || ''}
-                  onVisibilityChange={handleVisibilityChange}
                   onDeleteRequest={(c) => setConfirmDelete(c)}
                   onChat={(c) => setChatTarget(c)}
                 />
@@ -425,9 +376,7 @@ export default function WeClonePage() {
               </div>
               <h3 className="wp-dialog-title">删除克隆「{confirmDelete.displayName || confirmDelete.id}」？</h3>
               <p className="wp-dialog-desc">
-                将删除本机的人格档案与语料
-                {confirmDelete.serverId ? '，并同步删除服务器上的克隆' : ''}
-                。此操作不可恢复。
+                将删除本机的人格档案与语料。本机是唯一副本，删除后无法恢复。
               </p>
               <div className="wp-dialog-actions">
                 <button className="secondary-btn" type="button" disabled={deleteBusy} onClick={() => setConfirmDelete(null)}>
@@ -475,7 +424,6 @@ export default function WeClonePage() {
           running={generating}
           progress={progress}
           logs={logs}
-          serverConfigured={serverConfigured}
           onCancel={() => void handleCancelGenerate()}
           onDismiss={() => setPanelOpen(false)}
         />
@@ -484,26 +432,18 @@ export default function WeClonePage() {
       <div className="v09-panel">
         <div className="v09-panel-head">
           <h3>
-            <Server size={15} />
-            生成服务配置
+            <KeyRound size={15} />
+            生成用的模型
           </h3>
-          <span className="v09-sub">API Key 与私有服务器（均可选）</span>
+          <span className="v09-sub">用哪个 AI 把聊天记录提炼成人格档案</span>
         </div>
 
         <WeCloneForcedKey notify={pushToast} />
 
-        <WeCloneServerConfig
-          onStatusUpdate={setServerStatus}
-          onSaved={() => {
-            setListLoading(true)
-            void refreshList()
-          }}
-          notify={pushToast}
-        />
-
         <p className="weclone-exp-sub" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <KeyRound size={12} />
-          两项配置保存后立即生效；不配置服务器时分身仅保存在本机。
+          <ShieldCheck size={12} />
+          你的聊天记录、生成出的档案与语料**只保存在本机**：不上传、不经过任何 Weport
+          服务器。对话时只会把它们交给你在这里配置的模型。
         </p>
       </div>
 

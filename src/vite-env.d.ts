@@ -78,10 +78,6 @@ interface WeCloneMetaInfo {
   sessionCount: number
   chunkCount: number
   generatedAt: string
-  visibility: 'private' | 'public' | 'link'
-  uploaded: boolean
-  uploadStatus?: 'local_only' | 'uploaded' | 'failed'
-  serverId?: string
   piiHits?: number
   truncated?: boolean
 }
@@ -524,24 +520,33 @@ interface ElectronApi {
     setAgentSettings: (patch: { allowAgentWrite?: boolean }) => Promise<{ allowAgentWrite: boolean }>
   }
   weclone: {
-    /** 和分身对话。`hint` 是给用户看的下一步指引（服务器没起 / 服务器没这个分身）。 */
+    /**
+     * 和分身对话 —— **完全在本机完成**（人格档案 + 本地检索 + 用户自己的模型 API）。
+     * `hint` 是给用户看的下一步指引（还没生成过克隆 / 模型 key 不可用）。
+     */
     chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) => Promise<{
       success: boolean
       reply?: string
       elapsedMs?: number
       error?: string
       hint?: string
+      meta?: {
+        cloneId: string
+        displayName: string
+        retrievedChunks: number
+        corpusHits: number
+        retrieveCostMs: number
+      }
     }>
-    generate: (opts?: { localOnly?: boolean }) => Promise<{
+    generate: () => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo
-      status?: 'local_only' | 'uploaded' | 'failed'
       aborted?: boolean
       error?: string
     }>
     list: () => Promise<{
       success: boolean
-      clones: Array<WeCloneMetaInfo & { source: 'local' | 'remote' | 'both'; shareUrl?: string }>
+      clones: Array<WeCloneMetaInfo & { source: 'local' }>
       error?: string
     }>
     get: (id: string) => Promise<{
@@ -550,17 +555,7 @@ interface ElectronApi {
       mds?: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>
       error?: string
     }>
-    delete: (id: string, remote?: boolean) => Promise<{ success: boolean; error?: string }>
-    setVisibility: (id: string, visibility: 'private' | 'public' | 'link') => Promise<{ success: boolean; shareUrl?: string; error?: string }>
-    getServerStatus: () => Promise<{
-      configured: boolean
-      enabled: boolean
-      baseUrl: string
-      hasToken: boolean
-      online?: boolean
-      version?: string
-      error?: string
-    }>
+    delete: (id: string) => Promise<{ success: boolean; error?: string }>
     cancel: () => Promise<{ success: boolean }>
     getForcedProviderStatus: () => Promise<{
       providerId: string

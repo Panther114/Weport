@@ -3,8 +3,6 @@
  * 及 electron/services/weCloneService.ts 保持一致）。
  */
 
-export type WeCloneVisibility = 'private' | 'public' | 'link'
-
 /**
  * 生成阶段。
  *
@@ -14,7 +12,7 @@ export type WeCloneVisibility = 'private' | 'public' | 'link'
  * 转圈 —— 一个已经死掉的步骤看起来还在跑。用户报的「导出完成后仍显示准备中」
  * 是同一类缺陷的另一个出口：**结束状态没有显式落地**。
  */
-export type WeCloneStage = 'scan' | 'generate' | 'filter' | 'upload' | 'done' | 'failed' | 'aborted'
+export type WeCloneStage = 'scan' | 'generate' | 'filter' | 'done' | 'failed' | 'aborted'
 
 /** 已结束的阶段：不再有任何步骤处于"进行中" */
 export const WECLONE_TERMINAL_STAGES: readonly WeCloneStage[] = ['done', 'failed', 'aborted']
@@ -28,20 +26,10 @@ export interface WeCloneProgressInfo {
 
 /** WeCloneMetaInfo 来自 vite-env.d.ts（全局接口） */
 export interface WeCloneListItem extends WeCloneMetaInfo {
-  source: 'local' | 'remote' | 'both'
-  shareUrl?: string
+  /** v1.0 只有本地克隆；保留字段是为了列表分组逻辑不用改 */
+  source: 'local'
 }
 
 export type WeCloneMdsPreview = Partial<
   Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>
 >
-
-export interface WeCloneServerStatusInfo {
-  configured: boolean
-  enabled: boolean
-  baseUrl: string
-  hasToken: boolean
-  online?: boolean
-  version?: string
-  error?: string
-}

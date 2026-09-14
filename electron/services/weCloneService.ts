@@ -1,20 +1,22 @@
 /**
- * WeClone 人格克隆服务（v0.9.10）。
+ * WeClone 人格克隆服务（v1.0 **纯本地**）。
  *
  * 管线：chatService.getSessions → wcdbService 消息游标扫描（批 500 / 并发 2 /
  * 单会话 15 万条上限）→ 本地 PII 正则脱敏 → 800 字符分块 → 流式 JSONL 落盘
- * （userData/weclone-staging/<wxid>/chunks.jsonl，原子写）→ 强制 provider
- * （opencode-go / muse-spark-1.2-contributor，复用 weportAiProfilesBlob 加密
- * 存储，见 ensureForcedProvider）逐份生成 MD（profile/relationships/knowledge/
- * timeline/language）→ LLM 二次 PII 审查（MD 全量 + 抽样 5% 语料）→ 上传 Railway
- * 私有服务（未配置则 local_only）。
+ * （userData/weclone-staging/<wxid>/chunks.jsonl，原子写）→ 强制 provider 逐份
+ * 生成 MD（profile/relationships/knowledge/timeline/language）→ LLM 二次 PII 审查。
  *
- * 内存纪律：全量历史从不一次性驻留 RAM —— 扫描阶段只保留当前批次与分块缓冲，
- * 上传阶段用 readline 流式回读 JSONL。WCDB 宿主约束不变（复用现有游标协议）。
+ * **边界（v1.0）：数据不出本机。** 这里原先把生成好的 MD + 语料 gzip 上传到一个
+ * `weclone-server`，聊天时再向它发 HTTP。那条路径整体移除了 —— 上传、远端删除、
+ * 可见性、服务器状态、本地服务自动拉起、HTTP 聊天全部删除；`chatWithClone` 改为
+ * **本机**完成（人格 MD 注入上下文 + 本地 BM25 检索语料片段，见 ai/localRetrieval.ts）。
+ * 唯一的外呼是用户自己配置的模型 API。
+ *
+ * 内存纪律：全量历史从不一次性驻留 RAM —— 扫描阶段只保留当前批次与分块缓冲；
+ * 检索阶段单遍流式读 JSONL，只把 token 与长度留在内存，原文等 top-K 定了再回读。
  */
 import { app } from 'electron'
 import { join, dirname } from 'path'
-import { tmpdir } from 'os'
 import {
   existsSync,
   mkdirSync,
@@ -27,11 +29,8 @@ import {
   appendFileSync,
 } from 'fs'
 import { createInterface } from 'readline'
-import { spawn } from 'child_process'
-import { gzipSync } from 'zlib'
 import {
   ConfigService,
-  getWeCloneServerConfig,
   WECLONE_FORCED_PROVIDER_ID,
   WECLONE_FORCED_BASE_URL,
   WECLONE_FORCED_MODEL,
@@ -49,7 +48,14 @@ import {
   WECLONE_SYSTEM_PROMPT,
   WECLONE_MD_PROMPTS,
   WECLONE_FILTER_PROMPT,
+  buildWeCloneChatSystemPrompt,
 } from './weClonePrompts'
+import {
+  buildRetrievedContext,
+  createCorpusBuilder,
+  rankDocs,
+  tokenize,
+} from './ai/localRetrieval'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -71,8 +77,6 @@ export interface WeCloneMds {
   language: string
 }
 
-export type WeCloneVisibility = 'private' | 'public' | 'link'
-
 export interface WeCloneMeta {
   id: string
   wxid: string
@@ -83,20 +87,21 @@ export interface WeCloneMeta {
   sessionCount: number
   chunkCount: number
   generatedAt: string
-  visibility: WeCloneVisibility
-  uploaded: boolean
-  uploadStatus?: 'local_only' | 'uploaded' | 'failed'
-  serverId?: string
   piiHits?: number
   truncated?: boolean
 }
 
+/**
+ * 列表项。
+ *
+ * v1.0 只有本地克隆，因此 `source` 恒为 `'local'`（保留字段是为了 UI 分组
+ * 逻辑不用改），也不再需要 `shareUrl` —— 没有服务器就没有分享链接。
+ */
 export interface WeCloneListItem extends WeCloneMeta {
-  source: 'local' | 'remote' | 'both'
-  shareUrl?: string
+  source: 'local'
 }
 
-export type WeCloneProgressStage = 'scan' | 'generate' | 'filter' | 'upload' | 'done'
+export type WeCloneProgressStage = 'scan' | 'generate' | 'filter' | 'done'
 
 export interface WeCloneProgress {
   stage: WeCloneProgressStage
@@ -106,27 +111,33 @@ export interface WeCloneProgress {
   detail?: Record<string, unknown>
 }
 
-export interface WeCloneGenerateOptions {
-  /** 跳过上传，仅本地生成 */
-  localOnly?: boolean
-}
-
 export interface WeCloneGenerateResult {
   success: boolean
   clone?: WeCloneMeta
-  status?: 'local_only' | 'uploaded' | 'failed'
   aborted?: boolean
   error?: string
 }
 
-export interface WeCloneServerStatus {
-  configured: boolean
-  enabled: boolean
-  baseUrl: string
-  hasToken: boolean
-  online?: boolean
-  version?: string
+/**
+ * 本机对话的结果。
+ *
+ * `meta` 里带上检索统计（命中条数、耗时）而不是只回一句话：本地检索是这个功能
+ * 里唯一会悄悄退化的环节（语料被删、检索没命中），把它暴露出来才能区分"模型
+ * 没答好"和"根本没检索到东西"。
+ */
+export interface LocalChatResult {
+  success: boolean
+  reply?: string
+  elapsedMs?: number
   error?: string
+  hint?: string
+  meta?: {
+    cloneId: string
+    displayName: string
+    retrievedChunks: number
+    corpusHits: number
+    retrieveCostMs: number
+  }
 }
 
 /** 强制 provider 状态（渲染侧安全，不含明文 key） */
@@ -177,6 +188,20 @@ const SAMPLE_RANDOM_CHUNKS = 200
 const SAMPLE_RECENT_CHUNKS = 50
 /** 生成上下文总字符上限 */
 const GENERATION_CONTEXT_CHAR_LIMIT = 120_000
+/** 本地检索：扫描的语料行数上限（内存与耗时的兜底护栏） */
+const CORPUS_SCAN_LINE_CAP = 400_000
+/** 本地检索：取回的片段数 */
+const RETRIEVE_TOP_K = 24
+/** 本地检索：拼进 prompt 的检索内容字符上限 */
+const RETRIEVED_CONTEXT_CHAR_LIMIT = 12_000
+/** 聊天：带上的历史轮数 */
+const CHAT_HISTORY_LIMIT = 20
+/** 聊天：模型调用超时（本地检索已预先完成，这里只等模型） */
+const CHAT_TIMEOUT_MS = 180_000
+/** 生成：遇到瞬时网络故障时同一个服务最多尝试几次（含首次） */
+const LLM_TRANSIENT_ATTEMPTS = 3
+/** 生成：重试退避基数（第 n 次等 n×base） */
+const LLM_RETRY_BASE_DELAY_MS = 4_000
 
 // ---------------------------------------------------------------------------
 // 服务
@@ -204,17 +229,6 @@ export class WeCloneService {
     }
   }
 
-  private getServerConfig(): { enabled: boolean; baseUrl: string; token: string; configured: boolean } {
-    try {
-      const cfg = getWeCloneServerConfig()
-      return cfg
-    } catch {
-      const enabled = this.cfgGet('weCloneEnabled') !== false
-      const baseUrl = String(this.cfgGet('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
-      const token = String(this.cfgGet('weCloneServerToken') || '').trim()
-      return { enabled, baseUrl, token, configured: enabled && !!baseUrl }
-    }
-  }
 
   private getMyWxid(): string {
     return String(this.configService.getMyWxidCleaned() || this.configService.get('myWxid') || '').trim() || 'unknown'
@@ -256,6 +270,9 @@ export class WeCloneService {
     try {
       const raw = JSON.parse(readFileSync(metaPath, 'utf8')) as Partial<WeCloneMeta>
       if (!raw || typeof raw !== 'object' || !raw.id) return null
+      // 老 metadata.json 里还留着 visibility/uploaded/uploadStatus/serverId
+      // （上传时代的字段）。这里只挑当前模型认识的键：多出来的键直接忽略，
+      // 不读、不写回，下一次 writeMeta 自然清掉，无需迁移脚本。
       return {
         id: String(raw.id),
         wxid: String(raw.wxid || ''),
@@ -265,10 +282,6 @@ export class WeCloneService {
         sessionCount: Number(raw.sessionCount) || 0,
         chunkCount: Number(raw.chunkCount) || 0,
         generatedAt: String(raw.generatedAt || ''),
-        visibility: raw.visibility === 'public' || raw.visibility === 'link' ? raw.visibility : 'private',
-        uploaded: raw.uploaded === true,
-        uploadStatus: raw.uploadStatus === 'uploaded' || raw.uploadStatus === 'failed' ? raw.uploadStatus : 'local_only',
-        serverId: raw.serverId ? String(raw.serverId) : undefined,
         piiHits: Number(raw.piiHits) || 0,
         truncated: raw.truncated === true,
       }
@@ -689,6 +702,12 @@ export class WeCloneService {
       .replace(/(?<![\uD800-\uDFFF])[\uDC00-\uDFFF]/g, '\uFFFD')
   }
 
+  /**
+   * 单次模型调用（生成 MD / 二审用）。
+   *
+   * 这里**不带回落**：调用方负责依次尝试候选服务（见 generateClone 里的
+   * `callLlmWithFallback`），否则失败时会被最里层吞掉、外面看不出究竟试了谁。
+   */
   private async callLlm(
     profile: ProviderProfile,
     systemContent: string,
@@ -697,7 +716,8 @@ export class WeCloneService {
   ): Promise<string> {
     const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
     const result = await getProviderAdapter(profile).stream({
-      profile,
+      // 网关识别 header 一定要带上，否则 OpenCode 直接 400
+      profile: withGatewayHeaders(profile),
       messages: [
         { role: 'system', content: this.sanitizeForApi(systemContent) },
         { role: 'user', content: this.sanitizeForApi(userContent) },
@@ -709,6 +729,91 @@ export class WeCloneService {
       onText: () => undefined,
     })
     return String(result.content || '')
+  }
+
+  /**
+   * 按顺序在候选服务上重试同一次调用，返回首个成功的结果。
+   *
+   * 只在"服务方不可用"的错误上换下一个（地区限制、网关 5xx、网络不通）——
+   * 密钥错 / 配额超限换服务也解决不了，原样抛出让用户看到真实原因。
+   *
+   * 为什么生成也要回落：默认的 OpenCode Go 在本机实测会按地区拒绝
+   * （`This model is not available in your country.`），没有回落就等于
+   * 人格克隆生成永远失败，而用户明明已经配好了可用的默认服务。
+   */
+  /**
+   * 跨服务 + 跨重试的一次模型调用。
+   *
+   * 两层容错，对应两类完全不同的失败：
+   *
+   * 1. **服务方不可用**（地区限制 / 网关 5xx）→ 换下一个候选服务。
+   * 2. **瞬时网络故障**（`fetch failed` / 连接被重置 / 超时）→ 同一个服务重试。
+   *
+   * 第 2 层是实测加的：一次生成里 `knowledge.md` 这一步报了 `fetch failed`，
+   * 整条生成直接失败、前四份 MD 白生成。生成一份上下文 12 万字符的请求本来
+   * 就慢，偶发断连不该把几分钟的工作一起丢掉。重试带退避，且**每个候选服务
+   * 每个错误各试一次重试**，不做无限循环。
+   *
+   * 明确的失败不重试：密钥错、配额超限、模型不存在 —— 那些重试只是让用户多等。
+   */
+  private async callLlmWithFallback(
+    candidates: ProviderProfile[],
+    systemContent: string,
+    userContent: string,
+    signal?: AbortSignal,
+    label = ''
+  ): Promise<string> {
+    const tag = label ? `（${label}）` : ''
+    let lastError = ''
+    for (const [index, profile] of candidates.entries()) {
+      const isLastProvider = index === candidates.length - 1
+      for (let attempt = 0; attempt < LLM_TRANSIENT_ATTEMPTS; attempt += 1) {
+        try {
+          return await this.callLlm(profile, systemContent, userContent, signal)
+        } catch (e) {
+          if ((e as Error)?.name === 'WeCloneAbortedError' || signal?.aborted) throw e
+          lastError = String((e as Error)?.message || e)
+
+          if (!isProviderUnavailable(lastError)) throw e
+
+          const isTransient = isTransientNetworkError(lastError)
+          const canRetrySameProvider = isTransient && attempt < LLM_TRANSIENT_ATTEMPTS - 1
+          if (canRetrySameProvider) {
+            const waitMs = LLM_RETRY_BASE_DELAY_MS * (attempt + 1)
+            console.warn(`[WeClone]${tag} ${profile.model} 瞬时失败（${lastError}），${waitMs}ms 后重试第 ${attempt + 2} 次`)
+            await new Promise((r) => setTimeout(r, waitMs))
+            continue
+          }
+          if (isLastProvider) break
+          console.warn(`[WeClone]${tag} ${profile.model} 不可用（${lastError}），回落到下一个服务`)
+          break
+        }
+      }
+    }
+    throw new Error(lastError || '没有可用的 AI 服务')
+  }
+
+  /**
+   * 生成时可用的服务列表：首选人格克隆指定的服务，其次是默认（聊天）服务。
+   *
+   * `ensureForcedProvider` 在没有强制 key 时会抛 —— 那种情况不该让整条生成
+   * 流程失败，直接用默认服务即可。
+   */
+  private async resolveGenerationProviders(): Promise<ProviderProfile[]> {
+    const out: ProviderProfile[] = []
+    try {
+      const primary = await this.ensureForcedProvider()
+      this.assertProfileReady(primary)
+      out.push(primary)
+    } catch (e) {
+      console.warn('[WeClone] 首选生成服务不可用，使用默认服务:', String((e as Error)?.message || e))
+    }
+    const fallback = this.providerProfiles.getForConsumer('chat')
+    if (fallback && !out.some((p) => p.id === fallback.id)) out.push(fallback)
+    if (out.length === 0) {
+      throw new Error('没有可用的 AI 服务：请到「设置 → AI 服务」添加提供商与密钥')
+    }
+    return out
   }
 
   // -------------------------------------------------------------------------
@@ -752,7 +857,7 @@ export class WeCloneService {
   }
 
   private async runSecondPassFilter(
-    profile: ProviderProfile,
+    providers: ProviderProfile[],
     mds: WeCloneMds,
     jsonlPath: string,
     signal: AbortSignal | undefined,
@@ -776,7 +881,7 @@ export class WeCloneService {
       onProgress(`LLM 审查 ${key}.md`, 0)
       try {
         const content = WECLONE_FILTER_PROMPT.replace('{content}', filteredMds[key])
-        const response = await this.callLlm(profile, '你是严格的隐私审查器，只输出 JSON。', content, signal)
+        const response = await this.callLlmWithFallback(providers, '你是严格的隐私审查器，只输出 JSON。', content, signal)
         const spans = this.parseFilterResponse(response)
         if (spans.length > 0) {
           const applied = this.applyLlmSpans(filteredMds[key], spans)
@@ -798,7 +903,7 @@ export class WeCloneService {
       for (const chunk of sampled) {
         this.ensureNotAborted(signal)
         try {
-          const response = await this.callLlm(profile, '你是严格的隐私审查器，只输出 JSON。', WECLONE_FILTER_PROMPT.replace('{content}', chunk.text), signal)
+          const response = await this.callLlmWithFallback(providers, '你是严格的隐私审查器，只输出 JSON。', WECLONE_FILTER_PROMPT.replace('{content}', chunk.text), signal)
           const spans = this.parseFilterResponse(response)
           if (spans.length > 0) {
             const applied = this.applyLlmSpans(chunk.text, spans)
@@ -830,8 +935,7 @@ export class WeCloneService {
 
   async generateClone(
     progressCb: ((progress: WeCloneProgress) => void) | undefined,
-    externalSignal: AbortSignal | undefined,
-    options: WeCloneGenerateOptions = {}
+    externalSignal: AbortSignal | undefined
   ): Promise<WeCloneGenerateResult> {
     if (this.runningController) {
       return { success: false, error: '已有克隆生成任务进行中' }
@@ -858,8 +962,8 @@ export class WeCloneService {
     try {
       // ---- 0. 前置检查 -----------------------------------------------------
       report('scan', 0, '正在检查配置…')
-      const profile = await this.ensureForcedProvider()
-      this.assertProfileReady(profile)
+      // 候选服务列表（首选 + 默认），每次调用按顺序重试
+      const providers = await this.resolveGenerationProviders()
 
       const connectResult = await chatService.connect()
       if (!connectResult.success) {
@@ -892,7 +996,7 @@ export class WeCloneService {
         this.ensureNotAborted(signal)
         report('generate', 54 + (i / mdKeys.length) * 28, `正在生成 ${key}.md…`)
         const prompt = WECLONE_MD_PROMPTS[key].replace('{context}', contextBase)
-        const content = await this.callLlm(profile, WECLONE_SYSTEM_PROMPT, prompt, signal)
+        const content = await this.callLlmWithFallback(providers, WECLONE_SYSTEM_PROMPT, prompt, signal, `${key}.md`)
         const cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
         if (!cleaned) throw new Error(`${key}.md 生成结果为空`)
         mds[key] = cleaned
@@ -908,14 +1012,15 @@ export class WeCloneService {
 
       // ---- 4. 第二阶段 PII 审查 --------------------------------------------
       report('filter', 84, '正在进行二次隐私审查…')
-      const filterResult = await this.runSecondPassFilter(profile, fullMds, jsonlFinal, signal, (message) => {
+      const filterResult = await this.runSecondPassFilter(providers, fullMds, jsonlFinal, signal, (message) => {
         report('filter', 85, message)
       })
       for (const { key, path } of this.mdFilePaths(dir)) {
         this.atomicWriteFile(path, filterResult.mds[key])
       }
 
-      // ---- 5. 元数据（先落本地，无论是否上传） ------------------------------
+      // ---- 5. 元数据 --------------------------------------------------------
+      // v1.0 数据不出本机，所以这里就是终点：写 metadata.json，没有第 6 步上传。
       const now = new Date()
       const meta: WeCloneMeta = {
         id: `wc_${wxid}_${now.getTime().toString(36)}`,
@@ -928,9 +1033,6 @@ export class WeCloneService {
         sessionCount: stats.sessionCount,
         chunkCount: 0,
         generatedAt: now.toISOString(),
-        visibility: 'private',
-        uploaded: false,
-        uploadStatus: 'local_only',
         piiHits: filterResult.hits,
         truncated: stats.truncated,
       }
@@ -938,28 +1040,8 @@ export class WeCloneService {
       this.writeMeta(dir, meta)
       try { this.configService.set('weCloneLastCutoff', meta.knowledgeCutoff) } catch { /* noop */ }
 
-      // ---- 6. 上传 ----------------------------------------------------------
-      let status: 'local_only' | 'uploaded' | 'failed' = 'local_only'
-      const serverCfg = this.getServerConfig()
-      if (options.localOnly !== true && serverCfg.configured) {
-        report('upload', 90, '正在上传到私有服务…')
-        try {
-          const serverId = await this.uploadToServer(serverCfg, meta, filterResult.mds, jsonlFinal, filterResult.chunkPatches, signal)
-          meta.serverId = serverId
-          meta.uploaded = true
-          meta.uploadStatus = 'uploaded'
-          status = 'uploaded'
-          this.writeMeta(dir, meta)
-        } catch (e) {
-          if ((e as Error)?.name === 'WeCloneAbortedError') throw e
-          meta.uploadStatus = 'failed'
-          this.writeMeta(dir, meta)
-          console.warn('[WeClone] 上传失败（克隆已保存在本地）:', e)
-        }
-      }
-
-      report('done', 100, status === 'uploaded' ? '克隆生成并上传完成' : '克隆已在本地生成', { status })
-      return { success: true, clone: meta, status }
+      report('done', 100, '克隆已在本地生成', { local: true })
+      return { success: true, clone: meta }
     } catch (e) {
       const aborted = (e as Error)?.name === 'WeCloneAbortedError' || signal.aborted
       const message = aborted ? '已取消' : String((e as Error)?.message || e)
@@ -972,586 +1054,363 @@ export class WeCloneService {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 上传 / 服务端交互
-  // -------------------------------------------------------------------------
-
-  private async fetchWithTimeout(url: string, init: Parameters<typeof fetch>[1], timeoutMs: number, externalSignal?: AbortSignal): Promise<Response> {
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
-    const onExternalAbort = () => ctrl.abort()
-    externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
-    try {
-      return await fetch(url, { ...init, signal: ctrl.signal })
-    } finally {
-      clearTimeout(timer)
-      externalSignal?.removeEventListener('abort', onExternalAbort)
-    }
-  }
-
-  private authHeaders(token: string): Record<string, string> {
-    return token ? { Authorization: `Bearer ${token}` } : {}
-  }
-
   /**
-   * 流式回读 chunks.jsonl 组装上传 payload（应用二审补丁），gzip 后 POST。
-   * chunks 预算 gzip 前 ≤ 20 MB，超出优雅截断。
+   * 列出本地克隆，按生成时间倒序。
+   *
+   * v1.0 起**只有本地**：没有远端列表可合并，也就没有 `remote_` 合成 id 和
+   * "仅服务器"这种来源。每个克隆就是 userData 下的一个目录。
    */
-  private async uploadToServer(
-    serverCfg: { baseUrl: string; token: string },
-    meta: WeCloneMeta,
-    mds: WeCloneMds,
-    jsonlPath: string,
-    chunkPatches: Map<string, string>,
-    signal: AbortSignal | undefined
-  ): Promise<string> {
-    const lines: string[] = []
-    let bytes = 0
-    let truncated = false
-    const rl = createInterface({ input: createReadStream(jsonlPath, { encoding: 'utf8' }), crlfDelay: Infinity })
-    try {
-      for await (const line of rl) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        let chunk: WeCloneChunk | null = null
-        try { chunk = JSON.parse(trimmed) as WeCloneChunk } catch { chunk = null }
-        const text = chunk && chunkPatches.has(chunk.id) ? JSON.stringify({ ...(chunk as WeCloneChunk), text: chunkPatches.get(chunk.id) }) : trimmed
-        const size = Buffer.byteLength(text, 'utf8') + 1
-        if (bytes + size > MAX_CHUNKS_UPLOAD_BYTES) {
-          truncated = true
-          break
-        }
-        lines.push(text)
-        bytes += size
-      }
-    } finally {
-      rl.close()
-    }
-
-    const payload = {
-      meta: {
-        wxid: meta.wxid,
-        displayName: meta.displayName,
-        knowledgeCutoff: meta.knowledgeCutoff,
-        createdAt: Date.now(),
-        clientVersion: app.getVersion(),
-        messageCount: meta.messageCount,
-        sessionCount: meta.sessionCount,
-        chunkCount: lines.length,
-        chunksTruncated: truncated,
-        piiHits: meta.piiHits || 0,
-      },
-      mds: {
-        'profile.md': mds.profile,
-        'relationships.md': mds.relationships,
-        'knowledge.md': mds.knowledge,
-        'timeline.md': mds.timeline,
-        'language.md': mds.language,
-      },
-      chunks: lines.map((line) => JSON.parse(line) as WeCloneChunk),
-      visibility: meta.visibility,
-    }
-
-    const body = gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
-    const url = `${serverCfg.baseUrl}/api/weclone/upload`
-    const resp = await this.fetchWithTimeout(
-      url,
-      {
-        method: 'POST',
-        headers: {
-          ...this.authHeaders(serverCfg.token),
-          'Content-Type': 'application/json',
-          'Content-Encoding': 'gzip',
-        },
-        body: new Uint8Array(body),
-      },
-      120_000,
-      signal
-    )
-    const text = await resp.text().catch(() => '')
-    if (!resp.ok) {
-      throw new Error(`上传失败 HTTP ${resp.status}${text ? `：${text.slice(0, 200)}` : ''}`)
-    }
-    let parsed: { success?: boolean; id?: string; error?: string } = {}
-    try { parsed = JSON.parse(text) as { success?: boolean; id?: string; error?: string } } catch { /* noop */ }
-    if (parsed.success === false) throw new Error(parsed.error || '服务端拒绝上传')
-    const serverId = String(parsed.id || '').trim()
-    if (!serverId) throw new Error('服务端未返回 clone id')
-    return serverId
+  async getClones(): Promise<{ success: boolean; clones: WeCloneListItem[]; error?: string }> {
+    return { success: true, clones: this.listLocalClones().map((m) => ({ ...m, source: 'local' as const })) }
   }
 
-  async deleteClone(id: string, remote: boolean): Promise<{ success: boolean; error?: string }> {
-    const root = this.getStagingRoot()
-    let targetDir: string | null = null
-    let meta: WeCloneMeta | null = null
-    for (const entry of readdirSyncSafe(root)) {
-      const dir = join(root, entry)
-      const m = this.readMeta(dir)
-      if (m && m.id === id) {
-        targetDir = dir
-        meta = m
-        break
-      }
-    }
-    if (!targetDir || !meta) return { success: false, error: '找不到该克隆' }
-
-    const serverCfg = this.getServerConfig()
-    if (remote && serverCfg.configured && meta.serverId) {
-      try {
-        const resp = await this.fetchWithTimeout(
-          `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(meta.serverId)}`,
-          { method: 'DELETE', headers: this.authHeaders(serverCfg.token) },
-          30_000
-        )
-        if (!resp.ok && resp.status !== 404) {
-          return { success: false, error: `服务端删除失败 HTTP ${resp.status}` }
-        }
-      } catch (e) {
-        return { success: false, error: `服务端删除失败：${String((e as Error)?.message || e)}` }
-      }
-    }
-    try {
-      rmSync(targetDir, { recursive: true, force: true })
-    } catch (e) {
-      return { success: false, error: `本地目录删除失败：${String((e as Error)?.message || e)}` }
-    }
-    return { success: true }
-  }
-
-  async setVisibility(id: string, visibility: string): Promise<{ success: boolean; shareUrl?: string; error?: string }> {
-    const v = String(visibility || '')
-    if (!['private', 'public', 'link'].includes(v)) return { success: false, error: '无效的可见性' }
+  /** 克隆目录定位（id → 目录） */
+  private findCloneDir(id: string): string | null {
     const root = this.getStagingRoot()
     for (const entry of readdirSyncSafe(root)) {
       const dir = join(root, entry)
       const meta = this.readMeta(dir)
-      if (!meta || meta.id !== id) continue
-      meta.visibility = v as WeCloneVisibility
-      this.writeMeta(dir, meta)
-      const serverCfg = this.getServerConfig()
-      const remoteId = meta.serverId
-      if (serverCfg.configured && remoteId) {
-        try {
-          const resp = await this.fetchWithTimeout(
-            `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(remoteId)}/visibility`,
-            {
-              method: 'PATCH',
-              headers: { ...this.authHeaders(serverCfg.token), 'Content-Type': 'application/json' },
-              body: JSON.stringify({ visibility: v }),
-            },
-            30_000
-          )
-          const text = await resp.text().catch(() => '')
-          if (!resp.ok) return { success: false, error: `服务端更新失败 HTTP ${resp.status}` }
-          try {
-            const parsed = JSON.parse(text) as { shareUrl?: string }
-            if (parsed.shareUrl) return { success: true, shareUrl: parsed.shareUrl }
-          } catch { /* noop */ }
-        } catch (e) {
-          return { success: false, error: `服务端更新失败：${String((e as Error)?.message || e)}` }
-        }
-      }
-      return { success: true }
+      if (meta && meta.id === id) return dir
     }
-    return { success: false, error: '找不到该克隆' }
-  }
-
-  /** 合并本地 + 远端克隆列表 */
-  async getClones(): Promise<{ success: boolean; clones: WeCloneListItem[]; error?: string }> {
-    const local = this.listLocalClones().map<WeCloneListItem>((m) => ({ ...m, source: 'local' }))
-    const serverCfg = this.getServerConfig()
-    if (!serverCfg.configured) return { success: true, clones: local }
-
-    // 本机服务没起就先拉起来：`chatWithClone` 支持按名字挑克隆，而名字要在这份
-    // 列表里找。少了这一步，服务器还没起时远端行为空，报出来的是「没有名字包含…
-    // 的克隆」——看着像克隆不存在，其实只是服务没启动。
-    // 远端 baseUrl 不做这件事（那是别人的服务器），`isLocalBaseUrl` 会直接返回。
-    await this.startLocalServerIfNeeded()
-
-    type RemoteRow = { id?: string; displayName?: string; cutoff?: string; visibility?: string; createdAt?: number }
-    let remoteRows: RemoteRow[] = []
-    let remoteError: string | undefined
-    try {
-      const resp = await this.fetchWithTimeout(
-        `${serverCfg.baseUrl}/api/weclone/list`,
-        { method: 'GET', headers: this.authHeaders(serverCfg.token) },
-        15_000
-      )
-      const text = await resp.text().catch(() => '')
-      if (resp.ok) {
-        const parsed = JSON.parse(text) as { clones?: RemoteRow[] }
-        remoteRows = Array.isArray(parsed.clones) ? parsed.clones : []
-      } else {
-        remoteError = `HTTP ${resp.status}`
-      }
-    } catch (e) {
-      remoteError = String((e as Error)?.message || e)
-    }
-
-    const byServerId = new Map(local.filter((m) => m.serverId).map((m) => [m.serverId as string, m]))
-    const merged: WeCloneListItem[] = local.map((m) => ({ ...m }))
-    for (const row of remoteRows) {
-      const rid = String(row.id || '').trim()
-      if (!rid) continue
-      const existing = byServerId.get(rid)
-      if (existing) {
-        existing.source = 'both'
-        if (row.visibility === 'public' || row.visibility === 'link' || row.visibility === 'private') {
-          existing.visibility = row.visibility
-        }
-        if (row.displayName) existing.displayName = row.displayName
-      } else {
-        merged.push({
-          id: `remote_${rid}`,
-          wxid: '',
-          displayName: String(row.displayName || rid),
-          knowledgeCutoff: String(row.cutoff || ''),
-          messageCount: 0,
-          sessionCount: 0,
-          chunkCount: 0,
-          generatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
-          visibility: row.visibility === 'public' || row.visibility === 'link' ? row.visibility : 'private',
-          uploaded: true,
-          uploadStatus: 'uploaded',
-          serverId: rid,
-          source: 'remote',
-        })
-      }
-    }
-    return { success: true, clones: merged, error: remoteError }
+    return null
   }
 
   /**
-   * 和分身对话。
+   * 删除一个本地克隆。
    *
-   * 知识库在**服务器**上（Weport 只是客户端），所以这里一次 HTTP 调用就完了 ——
-   * 不需要 AI provider，也不需要旁路任何本地逻辑。`stream: false` 让服务器直接
-   * 回一个 JSON，界面拿整段渲染；SSE 那套留给以后需要打字机效果时再加。
+   * 本地是唯一副本（不再有服务器上的另一份），所以这里**直接删目录**，包括
+   * 生成的 MD 与语料 chunks.jsonl。没有远端分支可走。
+   */
+  async deleteClone(id: string): Promise<{ success: boolean; error?: string }> {
+    const target = this.findCloneDir(id)
+    if (!target) return { success: false, error: '找不到该克隆' }
+    try {
+      rmSync(target, { recursive: true, force: true })
+    } catch (e) {
+      return { success: false, error: `删除失败：${String((e as Error)?.message || e)}` }
+    }
+    return { success: true }
+  }
+
+  /**
+   * 和分身对话 —— **完全在本机完成**。
    *
-   * 三个容易踩的点，都在这里处理：
-   *  1. `cloneId` 必须是**服务器的** id。本机档案的 `id` 是本地目录名，
-   *     上传过的才有 `serverId`；直接把本地 id 拼进 URL 会 404。
-   *  2. 没配置服务器时不能只说"失败"，要告诉用户去哪儿配 —— 这是最常见的
-   *     第一脚（用户装完 app 想跟分身说话，但服务还跑在 127.0.0.1:8099）。
-   *  3. 服务器返回非 JSON（Express 的错误页、代理的 HTML）时必须保留原文，
-   *     否则用户只看到「HTTP 500」。
+   * 三步，全部离线可解释：
+   *   1. 读出生成时落盘的五份 MD（人格画像/关系图谱/知识库/时间线/语言样例）；
+   *   2. 在本机语料 chunks.jsonl 上做一次词面检索（BM25），挑出跟这句话最相关的片段；
+   *   3. 用 buildWeCloneChatSystemPrompt 拼出 system prompt，交给用户自己配置的
+   *      AI 提供商生成回复。
+   *
+   * 唯一的外呼是模型 API —— 与 WeportAI / WeBot 共用同一份 provider 配置。
+   * **语料、人格档案、聊天记录都不出本机**，没有检索服务、没有上传。
    */
   async chatWithClone(input: {
     cloneId: string
     message: string
     history?: Array<{ role: string; content: string }>
     signal?: AbortSignal
-  }): Promise<{ success: boolean; reply?: string; elapsedMs?: number; error?: string; hint?: string }> {
-    const serverCfg = this.getServerConfig()
-    if (!serverCfg.configured) {
-      return {
-        success: false,
-        error: '尚未配置分身服务器，无法对话',
-        hint: '分身的知识库跑在服务器上。本地可以先 `node weclone-server` 起一个，再回到「设置 → 人格克隆」把地址（默认 http://127.0.0.1:8099）和 token 填上。',
-      }
-    }
-    // 服务器认的 id 有三种来源，按可靠性排序：
-    //   1. 本机档案的 serverId（上传成功后记下的权威值）；
-    //   2. 传进来的 id 本身就是服务器 id；
-    //   3. `remote_<uuid>` —— getClones() 给「仅服务器」条目造的合成 id，
-    //      前缀必须剥掉，否则请求打到 `/api/weclone/remote_<uuid>/chat`，
-    //      服务器回 `clone not found`。这个洞是实测撞出来的：从列表点第一个
-    //      「仅服务器」克隆聊天，必然走到这里。
-    const local = this.listLocalClones().find((m) => m.id === input.cloneId || m.serverId === input.cloneId)
-    const rawId = String(input.cloneId || '').trim()
-    const targetId = String(local?.serverId || rawId.replace(/^remote_/, '')).trim()
-    if (!targetId) return { success: false, error: '缺少分身 id' }
+  }): Promise<LocalChatResult> {
     const message = String(input.message || '').trim()
     if (!message) return { success: false, error: '消息不能为空' }
+
+    const listed = this.listLocalClones()
+    if (listed.length === 0) {
+      return {
+        success: false,
+        error: '本机还没有人格克隆',
+        hint: '在「人格克隆」页面点「生成克隆」—— 全程在本机完成，不需要任何服务器。',
+      }
+    }
+    // 没指定就用最新那个；指定了但找不到也退回最新（比报错更不容易卡住用户）
+    const meta = listed.find((m) => m.id === input.cloneId) || listed[0]
+    const dir = this.findCloneDir(meta.id)
+    if (!dir) return { success: false, error: '克隆目录已丢失，请重新生成' }
+
+    const mds: Partial<WeCloneMds> = {}
+    for (const { key, path } of this.mdFilePaths(dir)) {
+      try {
+        if (existsSync(path)) mds[key] = readFileSync(path, 'utf8')
+      } catch { /* 单份缺失不致命，prompt 里对应小节为空 */ }
+    }
+    if (!mds.profile) {
+      return { success: false, error: '人格档案不完整（profile.md 缺失）', hint: '请在「人格克隆」里重新生成一次。' }
+    }
+
+    let retrieved: string[] = []
+    let corpusHits = 0
+    let retrieveCostMs = 0
+    const jsonlPath = join(dir, 'chunks.jsonl')
+    if (existsSync(jsonlPath)) {
+      const t0 = Date.now()
+      try {
+        const r = await this.retrieveLocalChunks(jsonlPath, message, meta.wxid)
+        retrieved = r.snippets
+        corpusHits = r.hits
+      } catch (e) {
+        // 检索失败不该让聊天失败：退化成"只用人格档案回答"并留痕
+        console.warn('[WeClone] 本地检索失败，退回仅人格档案:', e)
+      }
+      retrieveCostMs = Date.now() - t0
+    }
+
+    const systemPrompt = buildWeCloneChatSystemPrompt({
+      displayName: meta.displayName || meta.wxid,
+      knowledgeCutoff: meta.knowledgeCutoff,
+      mds,
+      retrievedChunks: retrieved,
+    })
+
     const history = Array.isArray(input.history)
-      ? input.history.filter((h) => h && typeof h.content === 'string' && h.content.trim()).slice(-40)
+      ? input.history.filter((h) => h && typeof h.content === 'string' && h.content.trim()).slice(-CHAT_HISTORY_LIMIT)
       : []
+    const transcript = history.length
+      ? `${history.map((h) => `${h.role === 'assistant' ? meta.displayName : '对方'}：${h.content}`).join('\n')}\n对方：${message}`
+      : message
 
-    const started = Date.now()
+    const startedAt = Date.now()
+    /**
+     * 依次尝试的模型。
+     *
+     * 首选是「人格克隆」这一面被指定的服务（默认就是 OpenCode Go）；但如果它是
+     * 因为**服务方不可用**而失败，就回落到用户的一般默认服务重试一次。
+     *
+     * 为什么必须这样：实测 OpenCode Go 会按地区拒绝 ——
+     * `This model is not available in your country.`。那种情况下把错误直接抛给
+     * 用户等于"人格克隆永远用不了"，而用户明明已经配好了另一个可用的服务
+     * （顶栏那个模型）。这里只在**可用性**错误上回落，密钥错、配额错之类照旧
+     * 原样上报 —— 那些换服务也解决不了，沉默重试只会掩盖真实原因。
+     */
+    const attempts: Array<{ profile: ProviderProfile; label: string }> = []
+    /**
+     * 首选「人格克隆」被指定的服务。
+     *
+     * `ensureForcedProvider` 在**没有强制 key**时会抛（它的提示文案是"请在人格
+     * 克隆设置内填入 OpenCode Go API Key"）。这里不能让它把整个流程带走 ——
+     * 那会跳过回落，用户明明配好了可用服务却看到"两个服务都不可用"。
+     * 拿不到首选就只试回落。
+     */
     try {
-      const resp = await this.fetchWithTimeout(
-        `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(targetId)}/chat`,
-        {
-          method: 'POST',
-          headers: { ...this.authHeaders(serverCfg.token), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, history, stream: false }),
-        },
-        180_000,
-        input.signal
-      )
-      const text = await resp.text().catch(() => '')
-      let payload: { reply?: string; error?: string } | null = null
-      try {
-        payload = JSON.parse(text) as { reply?: string; error?: string }
-      } catch {
-        payload = null
+      const primary = await this.ensureForcedProvider()
+      this.assertProfileReady(primary)
+      attempts.push({ profile: primary, label: '人格克隆服务' })
+    } catch (e) {
+      console.warn('[WeClone] 首选服务不可用，直接使用默认服务:', String((e as Error)?.message || e))
+    }
+    // 回落用「聊天」这一面的服务（没单独指定时就是默认服务）。刻意不用
+    // 'weclone'：那已经被强制 profile 占了，回落等于重试同一个东西。
+    const fallback = this.providerProfiles.getForConsumer('chat')
+    if (fallback && !attempts.some((a) => a.profile.id === fallback.id)) {
+      attempts.push({ profile: fallback, label: '默认服务' })
+    }
+    if (attempts.length === 0) {
+      return {
+        success: false,
+        error: '没有可用的 AI 服务',
+        hint: '到「设置 → AI 服务」添加一个提供商与密钥后重试。人格克隆和 WeportAI 共用这份配置。',
       }
-      if (!resp.ok || !payload) {
-        const detail = payload?.error || text.trim().slice(0, 300)
+    }
+
+    let lastError = ''
+    let attemptsRun = 0
+    for (const [index, attempt] of attempts.entries()) {
+      attemptsRun += 1
+      try {
+        const reply = String(await this.callLlmWithSystem(attempt.profile, systemPrompt, transcript, input.signal)).trim()
+        if (!reply) {
+          // 空回复按"这个服务没给出东西"处理，值得换下一个试
+          lastError = `${attempt.label}（${attempt.profile.model}）返回了空内容`
+          continue
+        }
         return {
-          success: false,
-          error: detail || `HTTP ${resp.status}`,
-          hint: resp.status === 404 ? '服务器上没有这个分身：先在「人格克隆」里生成并上传一个。' : undefined,
+          success: true,
+          reply,
+          elapsedMs: Date.now() - startedAt,
+          meta: {
+            cloneId: meta.id,
+            displayName: meta.displayName || meta.wxid,
+            retrievedChunks: retrieved.length,
+            corpusHits,
+            retrieveCostMs,
+          },
         }
+      } catch (e) {
+        lastError = String((e as Error)?.message || e)
+        const isLast = index === attempts.length - 1
+        if (isLast || !isProviderUnavailable(lastError)) break
+        console.warn(`[WeClone] ${attempt.label} 不可用（${lastError}），回落到下一个服务重试`)
       }
-      const reply = String(payload.reply || '').trim()
-      if (!reply) {
-        // 服务器 200 但正文为空：WeClone 的模型偶尔只输出思考内容，值得单独说清。
-        return { success: false, error: '分身没有返回内容（模型可能只输出了思考过程），请重试' }
-      }
-      return { success: true, reply, elapsedMs: Date.now() - started }
-    } catch (e) {
-      const detail = String((e as Error)?.message || e)
-      const unreachable = /fetch failed|ECONNREFUSED|abort|ENOTFOUND/i.test(detail)
-      if (!unreachable) return { success: false, error: detail }
-      // 本地服务器没起时**自己拉起来再试一次**。
-      //
-      // 用户报的「Weclone talking doesnt work + 连不上 127.0.0.1:8099」几乎总是这个
-      // 原因：分身的知识库在本地服务里，而那个服务默认不会常驻 —— 关掉终端就没
-      // 了，普通用户根本没有"再把它启动起来"的手段。v1.0 既然只支持离线跟分身
-      // 说话，就不能要求用户自己记住一条命令行。
-      const retried = await this.ensureLocalServerAndRetry(targetId, { message, history })
-      if (retried) return retried
-      return {
-        success: false,
-        error: detail,
-        hint: `连不上 ${serverCfg.baseUrl}：本地分身服务没能启动。可手动运行 scripts/run-weclone-server.ps1 后重试。`,
-      }
+    }
+    return {
+      success: false,
+      error: lastError,
+      hint:
+        attemptsRun > 1
+          ? `已依次尝试 ${attempts.map((a) => a.profile.model).join(' 与 ')}；到「设置 → AI 服务」确认提供商与密钥。`
+          : '检查「设置 → AI 服务」里的提供商与密钥是否可用。',
     }
   }
 
   /**
-   * 判断 baseUrl 是否指向本机（只有本机才允许自动拉起 —— 远端服务器不该由
-   * 客户端去启动）。
+   * 本地语料检索：在 chunks.jsonl 上跑一遍 BM25（实现见 ai/localRetrieval.ts）。
+   *
+   * 单遍流式读取 —— 只把每条分块的 token 与长度留在内存，原文等 top-K 定了再
+   * 回读那几行。峰值内存与语料大小基本无关，2M 条消息也不会把主进程撑爆；
+   * 这正是"离线可用"必须守住的纪律。
    */
-  private isLocalBaseUrl(baseUrl: string): boolean {
+  private async retrieveLocalChunks(
+    jsonlPath: string,
+    query: string,
+    myWxid: string
+  ): Promise<{ snippets: string[]; hits: number }> {
+    const queryTokens = tokenize(query)
+    if (queryTokens.length === 0) return { snippets: [], hits: 0 }
+
+    const builder = createCorpusBuilder()
+    const docs: Array<{ index: number; tokens: string[] }> = []
+    let scanned = 0
+    const rl = createInterface({ input: createReadStream(jsonlPath, { encoding: 'utf8' }), crlfDelay: Infinity })
     try {
-      const host = new URL(baseUrl).hostname.toLowerCase()
-      return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '0.0.0.0'
-    } catch {
-      return false
-    }
-  }
-
-  /** 本机服务拉起中：并发多条消息时只启动一次 */
-  private localServerStarting: Promise<boolean> | null = null
-
-  /**
-   * 找到启动脚本的真实位置（用来定位仓库根，进而找到 weclone-server）。
-   *
-   * 不能只用 `process.cwd()`：CLI host 通过别的 shell 启动，工作目录不保证是
-   * 项目根。这里按可靠性依次尝试，返回第一个真实存在的。
-   */
-  private resolveServerLauncher(): string | null {
-    const candidates: string[] = []
-    const override = String(process.env.WEPORT_WECLONE_SERVER_SCRIPT || '').trim()
-    if (override) candidates.push(override)
-    try {
-      candidates.push(join(app.getAppPath(), 'scripts', 'run-weclone-server.ps1'))
-      candidates.push(join(app.getAppPath(), '..', '..', 'scripts', 'run-weclone-server.ps1'))
-    } catch {
-      /* app 不可用时跳过 */
-    }
-    for (const base of [process.env.WEPORT_RESOURCES_PATH, process.resourcesPath]) {
-      if (!base) continue
-      candidates.push(join(base, 'scripts', 'run-weclone-server.ps1'))
-      candidates.push(join(base, '..', '..', 'scripts', 'run-weclone-server.ps1'))
-    }
-    candidates.push(join(process.cwd(), 'scripts', 'run-weclone-server.ps1'))
-    return candidates.find((candidate) => existsSync(candidate)) || null
-  }
-
-  /** 由 scripts/*.ps1 的位置反推仓库根目录 */
-  private resolveRepoRoot(launcherScript: string): string {
-    return dirname(dirname(launcherScript))
-  }
-
-  /**
-   * 拉起本地 weclone-server 并重发一次请求。
-   *
-   * 只在「baseUrl 是本机 + 启动脚本存在 + 这是开发目录」时生效；打包后的安装
-   * 版没有启动脚本，会直接返回 null 走原来的报错路径（那条路径的 hint 已经
-   * 写清了怎么办）。
-   */
-  private async ensureLocalServerAndRetry(
-    targetId: string,
-    body: { message: string; history: Array<{ role: string; content: string }> }
-  ): Promise<{ success: boolean; reply?: string; elapsedMs?: number; error?: string; hint?: string } | null> {
-    const cfg = this.getServerConfig()
-    if (!this.isLocalBaseUrl(cfg.baseUrl)) return null
-
-    const launcher = this.resolveServerLauncher()
-    if (!launcher) return null
-
-    const started = await this.startLocalServerIfNeeded()
-    if (!started) return null
-
-    return this.resendChat(targetId, body)
-  }
-
-  /**
-   * 本机服务没起就拉起来。**幂等**：并发调用共用同一次启动。
-   *
-   * `chatWithClone` 与 `getClones` 都要用它 —— 只挂在聊天路径上时，按名字挑克隆
-   * 会先调 `getClones()`，那时服务器还没起、远端行为空，于是报「没有名字包含…的
-   * 克隆」，看起来像克隆不存在，其实只是服务没启动。
-   */
-  private async startLocalServerIfNeeded(): Promise<boolean> {
-    const cfg = this.getServerConfig()
-    if (!this.isLocalBaseUrl(cfg.baseUrl)) return false
-
-    const launcher = this.resolveServerLauncher()
-    if (!launcher) return false
-
-    const port = (() => {
-      try {
-        return new URL(cfg.baseUrl).port || '8099'
-      } catch {
-        return '8099'
-      }
-    })()
-
-    if (!this.localServerStarting) {
-      this.localServerStarting = (async () => {
+      for await (const line of rl) {
+        if (scanned >= CORPUS_SCAN_LINE_CAP) break
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        let chunk: WeCloneChunk
         try {
-          // 直接起 node，**不经过 powershell**。
-          //
-          // 原来这里 spawn 的是 scripts/run-weclone-server.ps1，实测不可靠：
-          // 脚本本身在终端里跑得好好的，但由 Electron 主进程 spawn 出来时，
-          // 它内部的 `Start-Process -WindowStyle Hidden` 不会真正拉起 node
-          // （进程起来了、日志一行没写、端口没监听）。那条启动路径是为
-          // `cmd /c start` 设计的一次性命令，不适合被应用当成服务管理器用。
-          //
-          // 现在统一成「用 electron 自己的二进制以 Node 模式跑 server.js」，
-          // 和 WCDB 宿主（wcdbHostClient）用的是同一套办法：不依赖系统装了什么、
-          // 不依赖 PATH、也不需要一个常驻的 shell。
-          const repoRoot = this.resolveRepoRoot(launcher)
-          const serverDir = join(repoRoot, 'weclone-server')
-          const entry = join(serverDir, 'dist', 'server.js')
-          if (!existsSync(entry)) return false
-
-          const child = spawn(process.execPath, [entry], {
-            cwd: serverDir,
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: true,
-            env: {
-              ...process.env,
-              // electron 二进制 + 这个变量 = 纯 Node 运行时
-              ELECTRON_RUN_AS_NODE: '1',
-              PORT: port,
-              HOST: '127.0.0.1',
-              WECLONE_DATA_DIR: join(serverDir, 'data'),
-              // LLM 网关密钥。缺了它 weclone-server 会回 "[Mock WeClone] …" 这种
-              // 模板回复 —— 界面看起来"能聊"，其实不是分身。允许环境变量覆盖；
-              // 本地自评服务沿用与 scripts/run-weclone-server.ps1 一致的默认值。
-              WECLONE_LLM_API_KEY:
-                process.env.WECLONE_LLM_API_KEY ||
-                'sk-qCluV5o9ldutuuxtQPkhaFxqEi5d6uTE6SqLxugxtN6RDtoALWPJxxsArxZmRizO',
-              // 本地自评专用：放开上传/聊天限流。绝不要用在可被外部访问的主机上。
-              WECLONE_E2E: process.env.WECLONE_E2E || '1',
-              WECLONE_RATE_LIMIT_UPLOAD: process.env.WECLONE_RATE_LIMIT_UPLOAD || '200',
-              WECLONE_RATE_LIMIT_CHAT: process.env.WECLONE_RATE_LIMIT_CHAT || '2000',
-              WECLONE_MAX_CLONES_PER_TOKEN: process.env.WECLONE_MAX_CLONES_PER_TOKEN || '40',
-            },
-          })
-          child.unref()
-          try {
-            writeFileSync(join(tmpdir(), 'weclone-server.pid'), String(child.pid ?? ''), 'utf8')
-          } catch {
-            /* 写不了 pid 文件不影响服务运行 */
-          }
-          // 等它开始监听（node 冷启动 + 数据加载通常几秒）
-          for (let i = 0; i < 40; i += 1) {
-            await new Promise((r) => setTimeout(r, 500))
-            try {
-              const probe = await this.fetchWithTimeout(`${cfg.baseUrl}/health`, { method: 'GET' }, 2000)
-              if (probe.ok) return true
-            } catch {
-              /* 还没起来，继续等 */
-            }
-          }
-          return false
+          chunk = JSON.parse(trimmed) as WeCloneChunk
         } catch {
-          return false
-        } finally {
-          // 允许后续再次尝试（比如用户手动关掉了服务）
-          setTimeout(() => { this.localServerStarting = null }, 5000)
+          continue
         }
-      })()
+        if (!chunk || typeof chunk.text !== 'string') continue
+        const tokens = tokenize(chunk.text)
+        builder.add(tokens)
+        docs.push({ index: scanned, tokens })
+        scanned += 1
+      }
+    } finally {
+      rl.close()
+    }
+    if (!docs.length) return { snippets: [], hits: 0 }
+
+    const ranked = rankDocs(queryTokens, docs, builder.finish(), RETRIEVE_TOP_K)
+    if (!ranked.length) return { snippets: [], hits: 0 }
+
+    // 回读命中行（第二次读同一个文件，只取需要的那几行）
+    const wanted = new Set(ranked.map((h) => h.index))
+    const picked: Array<{ ts: number; label: string; text: string }> = []
+    let lineNo = -1
+    const rl2 = createInterface({ input: createReadStream(jsonlPath, { encoding: 'utf8' }), crlfDelay: Infinity })
+    try {
+      for await (const line of rl2) {
+        lineNo += 1
+        if (!wanted.has(lineNo)) continue
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          const chunk = JSON.parse(trimmed) as WeCloneChunk
+          if (chunk && typeof chunk.text === 'string') {
+            picked.push({ ts: chunk.ts, label: this.labelForTalker(chunk.talker, myWxid), text: chunk.text })
+          }
+        } catch { /* 单行坏了就跳过 */ }
+        if (picked.length >= ranked.length) break
+      }
+    } finally {
+      rl2.close()
     }
 
-    return this.localServerStarting
+    const context = buildRetrievedContext(picked, RETRIEVED_CONTEXT_CHAR_LIMIT)
+    return { snippets: context ? [context] : [], hits: picked.length }
   }
 
   /**
-   * 服务起来之后重发一次聊天请求。仍然失败就把真实原因交回给调用方，不再重试。
+   * 带自定义 system prompt 的模型调用（聊天用）。
+   *
+   * 与生成用的 callLlm 分开：那个只发"system + 单条 user"，而聊天需要把多轮
+   * 历史压进 user 侧（适配器只接受单条 user，历史在这里被格式化成一段对话记录）。
    */
-  private async resendChat(
-    targetId: string,
-    body: { message: string; history: Array<{ role: string; content: string }> }
-  ): Promise<{ success: boolean; reply?: string; elapsedMs?: number; error?: string; hint?: string }> {
-    const cfg = this.getServerConfig()
-    try {
-      const resp = await this.fetchWithTimeout(
-        `${cfg.baseUrl}/api/weclone/${encodeURIComponent(targetId)}/chat`,
-        {
-          method: 'POST',
-          headers: { ...this.authHeaders(cfg.token), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...body, stream: false }),
-        },
-        180_000
-      )
-      const text = await resp.text().catch(() => '')
-      const payload = (() => {
-        try {
-          return JSON.parse(text) as { reply?: string; error?: string }
-        } catch {
-          return null
-        }
-      })()
-      if (!resp.ok || !payload) {
-        return { success: false, error: payload?.error || text.trim().slice(0, 300) || `HTTP ${resp.status}` }
-      }
-      const reply = String(payload.reply || '').trim()
-      if (!reply) return { success: false, error: '分身没有返回内容，请重试' }
-      return { success: true, reply }
-    } catch (retryError) {
-      return {
-        success: false,
-        error: String((retryError as Error)?.message || retryError),
-        hint: '本地分身服务启动后仍连不上，请查看 weclone-server 的日志。',
-      }
-    }
+  private async callLlmWithSystem(
+    profile: ProviderProfile,
+    systemContent: string,
+    userContent: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
+    const result = await getProviderAdapter(profile).stream({
+      // 网关识别 header 一定要带上，否则 OpenCode 直接 400
+      profile: withGatewayHeaders(profile),
+      messages: [
+        { role: 'system', content: this.sanitizeForApi(systemContent) },
+        { role: 'user', content: this.sanitizeForApi(userContent) },
+      ],
+      tools: [],
+      reasoningEffort,
+      signal: signal ?? AbortSignal.timeout(CHAT_TIMEOUT_MS),
+      onReasoning: () => undefined,
+      onText: () => undefined,
+    })
+    return String(result.content || '')
   }
 
-  async getServerStatus(): Promise<WeCloneServerStatus> {
-    const cfg = this.getServerConfig()
-    const base: WeCloneServerStatus = {
-      configured: cfg.configured,
-      enabled: cfg.enabled,
-      baseUrl: cfg.baseUrl,
-      hasToken: Boolean(cfg.token),
-    }
-    if (!cfg.configured) return base
-    try {
-      const resp = await this.fetchWithTimeout(`${cfg.baseUrl}/health`, { method: 'GET' }, 8_000)
-      const text = await resp.text().catch(() => '')
-      if (!resp.ok) return { ...base, online: false, error: `HTTP ${resp.status}` }
-      try {
-        const parsed = JSON.parse(text) as { ok?: boolean; version?: string }
-        return { ...base, online: parsed.ok !== false, version: parsed.version }
-      } catch {
-        return { ...base, online: resp.ok }
-      }
-    } catch (e) {
-      return { ...base, online: false, error: String((e as Error)?.message || e) }
-    }
+  /**
+   * 语料里的 talker → 显示名。
+   *
+   * 本人（talker 等于自己的 wxid）显示成「我」；其余保持原始标识（群聊里就是
+   * 发言人昵称/wxid）。检索片段带这个标签，模型才知道哪句是"自己说的"——
+   * 这正是人格克隆的语气依据。
+   */
+  private labelForTalker(talker: string, myWxid: string): string {
+    const t = String(talker || '')
+    if (!t || t === myWxid) return '我'
+    return t
   }
 }
 
-function readdirSyncSafe(dir: string): string[] {
-  try {
+/**
+ * OpenCode 网关要求带 `x-opencode-session` 才能被路由，否则直接 400：
+ * `Request is missing x-opencode-session and cannot be routed efficiently`
+ * （这条实测踩过两次：先是对话标题生成，后是人格克隆聊天）。
+ *
+ * 头值用 profile.id —— 网关只把它当路由标识，不校验内容。
+ * 用户自定义的同名 header 优先（合并顺序保证）。
+ */
+const OPENCODE_GATEWAYS = new Set(['opencode-zen', 'opencode-go'])
+
+function withGatewayHeaders(profile: ProviderProfile): ProviderProfile {
+  if (!OPENCODE_GATEWAYS.has(profile.providerId)) return profile
+  return { ...profile, headers: { 'x-opencode-session': profile.id, ...(profile.headers || {}) } }
+}
+
+/**
+ * 这个错误是不是"服务方不可用"（换一个服务就有可能成功）。
+ *
+ * 只在这种错误上做回落重试。**密钥错、配额超限、模型不存在**这些刻意排除在外：
+ * 换服务也解决不了，而且真正需要用户知道的就是这类信息，沉默重试会把它盖掉。
+ *
+ * 实测触发过的原文：`This model is not available in your country.`
+ * （OpenCode Go 按地区拒绝）。
+ */
+function isProviderUnavailable(message: string): boolean {
+  const m = String(message || '').toLowerCase()
+  if (!m) return false
+  // 明确不是"服务不可用"的：不必重试，原样上报
+  if (/invalid api key|incorrect api key|unauthorized|401|403 forbidden|quota|rate limit|insufficient|余额|密钥无效|未配置/.test(m)) {
+    return false
+  }
+  return /not available in your country|not available in your region|region|country|unavailable|service unavailable|503|502|bad gateway|econnrefused|enotfound|etimedout|network|fetch failed|socket hang up/.test(m)
+}
+
+/**
+ * 这个错误是不是"瞬时网络故障"（同一个服务重试就可能成功）。
+ *
+ * 与 `isProviderUnavailable` 的差别在**要不要换服务**：地区限制换服务才有意义，
+ * 断连则在原地重试更划算（换服务要重建连接、且可能同样断）。
+ * 实测触发：生成 `knowledge.md` 时 `fetch failed`。
+ */
+function isTransientNetworkError(message: string): boolean {
+  const m = String(message || '').toLowerCase()
+  return /fetch failed|socket hang up|econnreset|econnaborted|etimedout|network|terminated|und_err|other side closed|connection.*(reset|closed)/.test(m)
+}
+
+function readdirSyncSafe(dir: string): string[] {  try {
     return existsSync(dir) ? readdirSync(dir) : []
   } catch {
     return []

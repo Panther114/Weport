@@ -969,18 +969,39 @@ button:disabled {
   cursor: default;
 }
 
-/* 防撤回列表：更紧凑的单行布局，占满剩余高度 */
+/* 防撤回列表：更紧凑的单行布局，占满剩余高度。
+ *
+ * 行高压缩（v1.0）：用户要求**图标大小与字号都不动，只压掉多余的垂直空间**。
+ * 原来一行 = padding 3px×2 + 内容 22px + 边框 = 40px；列表里 192 个会话要滚很久。
+ * 现在把内边距压到 1px、行间距归零、按钮高度收窄，单行落到 ~26px —— 同样高度
+ * 多显示出将近一半的会话。字号、图标 SVG、头像尺寸全部保持原样。 */
 .anti-revoke-list {
   max-height: calc(100vh - 300px);
   min-height: 280px;
-  gap: 2px;
+  gap: 0;
   margin-top: 12px;
   transition: max-height 0.2s ease;
 }
 
 .anti-revoke-list .account-item {
-  padding: 3px 10px;
-  gap: 8px;
+  padding: 1px 8px;
+  gap: 6px;
+  border-radius: 4px;
+  /* 行与行之间不再有独立高度：紧凑列表里 1px 描边已经足够分界 */
+  min-height: 0;
+}
+
+/* 行内按钮跟着收窄：默认按钮高度会把这一行重新撑回 30px 以上 */
+.anti-revoke-list .account-item > button {
+  padding: 2px 8px;
+  min-height: 20px;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.anti-revoke-list .account-item .avatar-component {
+  width: 18px;
+  height: 18px;
 }
 
 .anti-revoke-list .ar-name {

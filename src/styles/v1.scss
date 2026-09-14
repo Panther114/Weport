@@ -2314,6 +2314,12 @@ textarea,
   cursor: pointer;
   user-select: none;
 
+  // 行内变体：和「深浅」分段排在同一行，不再各占一行
+  &.inline {
+    margin: 0;
+    flex: none;
+  }
+
   input {
     accent-color: var(--accent);
     cursor: pointer;
@@ -2361,14 +2367,17 @@ textarea,
 // -----------------------------------------------------------------------------
 // 25. 防撤回会话行的类型图标
 // -----------------------------------------------------------------------------
-
+//
+// 行高压缩：图标槽位 22px → 18px。注意 **SVG 仍是 12px** —— 用户明确要求
+// "图标大小与字号都不动，只压掉多余的垂直空间"，所以缩小的是装着图标的盒子，
+// 不是图标本身。真正的行高来自 `.anti-revoke-list .account-item` 的内边距。
 .ar-kind {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
   flex-shrink: 0;
   background: var(--accent-softer);
   color: var(--accent-3);
@@ -2728,4 +2737,53 @@ textarea,
     border-top: 0;
     box-shadow: inset 0 var(--hairline) 0 var(--stroke-l2);
   }
+}
+
+// -----------------------------------------------------------------------------
+// 27. 行内链接按钮
+// -----------------------------------------------------------------------------
+//
+// 「关于」里的仓库地址要可点，但按钮样式（边框、内边距）会让它在一行说明文字里
+// 显得很突兀。这里做成"看起来是链接、可点、可聚焦"的行内按钮：没有边框和内边距，
+// 只保留强调色与下划线，键盘 Tab 到它时仍有可见的 focus ring。
+.link-inline {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-3);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+
+  &:hover {
+    color: var(--accent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent-line);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+}
+// -----------------------------------------------------------------------------
+// 28. 主题两轴：深浅 / 强调色
+// -----------------------------------------------------------------------------
+//
+// 「深浅」是一个分段控件 + 可选的"跟随背景"复选，排在主题卡组之前。它是独立
+// 的一行，不再和强调色绑成 12 张组合卡片 —— 点颜色不会顺手把深浅翻过去。
+
+.theme-axis {
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+// 主题卡组：7 张（6 预设色 + 自定义）。列宽比原来宽一点（少了明暗前缀文字），
+// 窄窗口下自动折行，不会横向溢出。
+.setting-block .theme-picker {
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
 }

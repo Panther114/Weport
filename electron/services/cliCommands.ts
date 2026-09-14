@@ -503,31 +503,64 @@ export function registerCliCommands(): void {
 
     // ------------------------------------------------------------------ WeClone
     {
+      name: 'weclone.generate',
+      summary: 'Generate a personality clone from local chat history. Runs entirely on this device.',
+      mutating: true,
+      run: async () => {
+        // 生成本来只能在界面里点按钮 —— 那意味着脚本与 TUI 都够不到它，也让
+        // "生成一次再对着它聊天"这条端到端验证只能靠人去点。挂到命令面之后，
+        // 界面 / 终端 / 以后的 MCP 走的是同一条实现（appMain 的 IPC 也调它）。
+        const result = await weCloneService.generateClone(undefined, undefined)
+        if (!result.success) {
+          return { success: false, error: result.aborted ? '已取消' : result.error || '生成失败' }
+        }
+        const c = result.clone
+        return {
+          success: true,
+          data: c
+            ? {
+                id: c.id,
+                displayName: c.displayName,
+                knowledgeCutoff: c.knowledgeCutoff,
+                messageCount: c.messageCount,
+                sessionCount: c.sessionCount,
+                chunkCount: c.chunkCount,
+              }
+            : null,
+          text: c ? `已生成克隆 ${c.id}（${c.messageCount.toLocaleString()} 条消息 / ${c.sessionCount} 个会话）` : '已生成',
+        }
+      },
+    },
+    {
       name: 'weclone.clones',
-      summary: 'List the personality clones the configured server knows about.',
+      summary: 'List the personality clones generated on this device.',
       mutating: false,
       run: async () => {
-        const server = String(config.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
-        const token = String(config.get('weCloneServerToken') || '').trim()
-        if (!server) return { success: false, error: '未配置 weCloneServerUrl（设置 → 人格克隆）' }
-        const response = await fetch(`${server}/api/weclone/list`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-          signal: AbortSignal.timeout(30000),
-        })
-        const payload = (await response.json().catch(() => null)) as { clones?: unknown[]; error?: string } | null
-        if (!response.ok) return { success: false, error: payload?.error || `HTTP ${response.status}` }
-        const clones = Array.isArray(payload?.clones) ? payload.clones : []
-        return { success: true, data: clones, text: `${clones.length} 个克隆` }
+        // 纯本地：直接读 weclone-staging 下的目录。没有服务器可查。
+        const listed = await weCloneService.getClones()
+        const clones = listed.clones || []
+        return {
+          success: true,
+          data: clones.map((c) => ({
+            id: c.id,
+            displayName: c.displayName,
+            generatedAt: c.generatedAt,
+            knowledgeCutoff: c.knowledgeCutoff,
+            messageCount: c.messageCount,
+            sessionCount: c.sessionCount,
+          })),
+          text: `${clones.length} 个本地克隆`,
+        }
       },
     },
     {
       name: 'weclone.chat',
-      summary: 'Talk to a clone (the server holds its knowledge base; Weport is just the client).',
+      summary: 'Talk to a clone. Runs entirely on this device — nothing is uploaded.',
       mutating: true,
       args: [
         { name: 'message', type: 'string', required: true },
         { name: 'id', type: 'string', description: '克隆 id；留空则用最近生成的那个' },
-        { name: 'name', type: 'string', description: '按名字片段选克隆（如「语音」），避免误聊到旧的' },
+        { name: 'name', type: 'string', description: '按名字片段选克隆，避免误聊到旧的' },
         { name: 'history', type: 'string', description: 'JSON 数组，形如 [{"role":"user","content":"…"}]' },
       ],
       run: async (args) => {
@@ -543,8 +576,8 @@ export function registerCliCommands(): void {
           }
         }
 
-        // 全部交给服务层：克隆选择、服务器 id 解析（remote_ 前缀）、
-        // 本地服务自动拉起都在那一处，CLI 不再自己实现一遍。
+        // 克隆选择也交给服务层：它会在没指定/找不到时退回最新那个本地克隆。
+        // CLI 只负责按名字筛一遍候选。
         let cloneId = String(args.id || '').trim()
         const wanted = String(args.name || '').trim()
         if (!cloneId && wanted) {
@@ -552,30 +585,36 @@ export function registerCliCommands(): void {
           const lower = wanted.toLowerCase()
           const matches = listed.clones.filter((c) => String(c.displayName || '').toLowerCase().includes(lower))
           if (matches.length === 0) {
-            return { success: false, error: `没有名字包含「${wanted}」的克隆：先在「人格克隆」里生成并上传一个` }
+            const names = listed.clones.map((c) => c.displayName).filter(Boolean)
+            return {
+              success: false,
+              error: `没有名字包含「${wanted}」的本地克隆`,
+              hint: names.length ? `本机现有：${names.join('、')}` : '先在「人格克隆」页面生成一个。',
+            }
           }
           matches.sort((a, b) => String(b.generatedAt || '').localeCompare(String(a.generatedAt || '')))
           cloneId = String(matches[0]?.id || '')
-        }
-        if (!cloneId) {
-          const listed = await weCloneService.getClones()
-          // 只挑**服务器上有**的克隆：`serverId` 是服务端认得的 id，本地档案
-          // 没有它就是没上传过，拿它去聊天必然 "clone not found"。
-          // 再按生成时间取最新 —— 远程行没有 generatedAt，所以用原顺序兜底，
-          // 不要用一个空字符串去比大小（那会随机挑中一个）。
-          const usable = listed.clones.filter((c) => c.serverId || c.source !== 'remote')
-          if (usable.length === 0) {
-            return { success: false, error: '没有已上传到服务器的克隆：先在「人格克隆」里生成并上传一个' }
-          }
-          const sorted = [...usable].sort((a, b) => String(b.generatedAt || '').localeCompare(String(a.generatedAt || '')))
-          cloneId = String(sorted[0]?.id || '')
         }
 
         const result = await weCloneService.chatWithClone({ cloneId, message, history })
         if (!result.success) {
           return { success: false, error: result.hint ? `${result.error}\n${result.hint}` : result.error }
         }
-        return { success: true, data: { cloneId, reply: result.reply, elapsedMs: result.elapsedMs }, text: result.reply }
+        return {
+          success: true,
+          data: {
+            cloneId: result.meta?.cloneId ?? cloneId,
+            displayName: result.meta?.displayName,
+            reply: result.reply,
+            elapsedMs: result.elapsedMs,
+            // 把检索统计一并回给调用方：本地检索是这个功能里唯一会悄悄退化的
+            // 环节，CLI/TUI 里看不到就等于没法排查
+            retrievedChunks: result.meta?.retrievedChunks,
+            corpusHits: result.meta?.corpusHits,
+            retrieveCostMs: result.meta?.retrieveCostMs,
+          },
+          text: result.reply,
+        }
       },
     },
     {

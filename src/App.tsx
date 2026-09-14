@@ -54,6 +54,7 @@ import {
   Pin,
   Fingerprint,
   Copy,
+  GitPullRequest,
   Loader2,
   Server,
   Settings2 as SettingsIcon,
@@ -3051,9 +3052,15 @@ export default function App() {
                     <span>明暗 · 强调色 · 背景 · 密度</span>
                   </div>
 
-              {/* 主题一览提到最前面，取代原来的「明暗模式 + 强调色」两行：
-                  它们描述的是同一件事（这套界面长什么样），分成两处分头设置时
-                  用户得自己在脑子里组合。12 套预设 + 一个自定义色。<br/> */}
+              {/* 主题 = 明暗 × 强调色，但**两个轴分别可选**。
+                  
+                  原来是 12 张"深色·冷蓝 / 浅色·冷蓝 …"的组合卡片，点哪张就把
+                  明暗和颜色一起改掉 —— 于是"我只想换个颜色"会顺手把深浅翻过去，
+                  「自定义」那张的标题还跟着当前明暗变（"深色·自定义"↔"浅色·自定义"），
+                  看起来像另一套独立设置。用户指出的正是这个：深浅不该由选色决定。
+
+                  现在：先选深浅（两个分段按钮），再选强调色（7 个色块）。两轴互不
+                  干扰，"自定义"只是第 7 个色块，选中后才展开调色面板。 */}
               <div className="setting-block">
                 <div className="setting-label">
                   <Palette size={14} />
@@ -3061,44 +3068,60 @@ export default function App() {
                     <strong>主题</strong>
                     <span className="hint">
                       {appearance.modeAuto && appearance.backgroundPath
-                        ? `跟随背景：${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · `
-                        : `当前：${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · `}
+                        ? `明暗跟随背景：${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · `
+                        : ''}
+                      强调色：
                       {appearance.accent === 'custom' ? '自定义' : ACCENT_OPTIONS.find((a) => a.id === appearance.accent)?.label}
                     </span>
                   </div>
                 </div>
-                {/* 明暗自适应开关。默认跟着背景走（亮壁纸→深色主题），
-                    用户一旦手动点过明暗就自动关掉 —— 这里可以重新打开。 */}
-                {appearance.backgroundPath ? (
-                  <label className="mode-auto-toggle">
-                    <input
-                      type="checkbox"
-                      checked={appearance.modeAuto}
-                      onChange={(e) => {
-                        setModeAuto(e.target.checked)
-                        // 重新打开时立刻按当前背景重判一次，不用等重启
-                        if (e.target.checked) void adoptModeFromBackground()
-                      }}
-                    />
-                    <span>明暗跟随背景（按背景亮度自动选深色 / 浅色，手动选过主题即关闭）</span>
-                  </label>
-                ) : null}
+
+                {/* 轴一：深浅 */}
+                <div className="opt-row theme-axis">
+                  <span className="opt-label">深浅</span>
+                  <div className="seg" role="radiogroup" aria-label="深浅">
+                    {MODE_OPTIONS.map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        data-active={appearance.mode === mode.id}
+                        title={mode.hint}
+                        onClick={() => setMode(mode.id)}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                  {appearance.backgroundPath ? (
+                    <label className="mode-auto-toggle inline">
+                      <input
+                        type="checkbox"
+                        checked={appearance.modeAuto}
+                        onChange={(e) => {
+                          setModeAuto(e.target.checked)
+                          // 重新打开时立刻按当前背景重判一次，不用等重启
+                          if (e.target.checked) void adoptModeFromBackground()
+                        }}
+                      />
+                      <span>跟随背景</span>
+                    </label>
+                  ) : null}
+                </div>
+
+                {/* 轴二：强调色（含自定义）。只改颜色，不动深浅。 */}
                 <div className="theme-picker">
-                  {MODE_OPTIONS.flatMap((mode) => PRESET_ACCENTS.map((accent) => ({ mode, accent }))).map(({ mode, accent }) => {
-                    const active = appearance.mode === mode.id && appearance.accent === accent.id
-                    const dark = mode.id === 'dark'
+                  {PRESET_ACCENTS.map((accent) => {
+                    const active = appearance.accent === accent.id
+                    const dark = appearance.mode === 'dark'
                     const surface = dark ? '#17171d' : '#ffffff'
                     const ink = dark ? '#f2f2f5' : '#16171d'
                     return (
                       <button
-                        key={`${mode.id}-${accent.id}`}
+                        key={accent.id}
                         type="button"
                         className={`theme-card ${active ? 'theme-card-active' : ''}`}
-                        title={`${mode.label} · ${accent.label}`}
-                        onClick={() => {
-                          setMode(mode.id)
-                          setAccent(accent.id)
-                        }}
+                        title={accent.label}
+                        onClick={() => setAccent(accent.id)}
                       >
                         <div className="theme-card-head">
                           <span
@@ -3108,7 +3131,7 @@ export default function App() {
                             <i style={{ background: accent.swatch }} />
                             <i style={{ background: ink, opacity: 0.35 }} />
                           </span>
-                          <strong>{mode.label} · {accent.label}</strong>
+                          <strong>{accent.label}</strong>
                           {active && <span className="theme-card-check">当前</span>}
                         </div>
                         <div className="theme-swatches">
@@ -3120,10 +3143,8 @@ export default function App() {
                       </button>
                     )
                   })}
-                  {/* 「自定义」是主题的**第 7 个选项**，不是并列的另一个设置。
-                      之前它单独占一行、且始终可见，于是"选了预设色、下面还挂着
-                      一个自定义色板"，看起来像两套互相冲突的配色。现在它和预设
-                      一样是主题卡片，选中后才展开调色面板。 */}
+                  {/* 「自定义」是强调色的**第 7 个色块**：标题不带深浅（那由上面的
+                      「深浅」分段决定），选中后才展开调色面板。 */}
                   {(() => {
                     const dark = appearance.mode === 'dark'
                     const surface = dark ? '#17171d' : '#ffffff'
@@ -3134,7 +3155,7 @@ export default function App() {
                       <button
                         type="button"
                         className={`theme-card theme-card-custom ${active ? 'theme-card-active' : ''}`}
-                        title={`${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · 自定义强调色`}
+                        title="自定义强调色"
                         onClick={() => setAccent('custom')}
                       >
                         <div className="theme-card-head">
@@ -3145,9 +3166,7 @@ export default function App() {
                             <i style={{ background: swatch }} />
                             <i style={{ background: ink, opacity: 0.35 }} />
                           </span>
-                          <strong>
-                            {MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · 自定义
-                          </strong>
+                          <strong>自定义</strong>
                           {active && <span className="theme-card-check">当前</span>}
                         </div>
                         <div className="theme-swatches">
@@ -3160,7 +3179,6 @@ export default function App() {
                     )
                   })()}
                 </div>
-
                 {/* 调色面板只在「自定义」被选中时出现 —— 它是这个主题选项的详情，
                     不是全局常驻设置。含明/暗两个无彩色近路：很多用户想要的只是
                     "黑白主题"而不想自己去挑十六进制。 */}
@@ -3649,13 +3667,33 @@ export default function App() {
                       <Info size={14} />
                       <div>
                         <strong>Weport v{version}</strong>
-                        <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
+                        {/* 更新源不只是一句说明 —— 直接给可点的链接。原来这里只是
+                            一行纯文本 "(Panther114/Weport)"，用户想去看仓库/issues
+                            得自己手敲地址。 */}
+                        <span className="hint">
+                          开源在 GitHub：
+                          <button
+                            className="link-inline"
+                            type="button"
+                            onClick={() => void api.shell.openExternal('https://github.com/Panther114/Weport')}
+                          >
+                            Panther114/Weport
+                          </button>
+                        </span>
                       </div>
                     </div>
                   {/* 操作必须包成**一个**子元素：`.setting-row` 是两列 grid，
                       多塞两个按钮会变成两个新的网格单元、把「更新日志」甩到下一行
                       （用户报的"位置不对"）。 */}
                   <div className="setting-actions">
+                    <button
+                      className="ghost-btn"
+                      type="button"
+                      title="在浏览器里打开项目主页"
+                      onClick={() => void api.shell.openExternal('https://github.com/Panther114/Weport')}
+                    >
+                      <GitPullRequest size={13} />                      GitHub
+                    </button>
                     <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
                       {updateBusy ? '检查中…' : '检查更新'}
                     </button>

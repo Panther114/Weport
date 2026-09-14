@@ -2949,8 +2949,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     try {
       return await weCloneService.generateClone(
         (progress) => mainWindow?.webContents.send('weclone:progress', progress),
-        ctrl.signal,
-        opts && typeof opts === 'object' ? opts : {}
+        ctrl.signal
       )
     } finally {
       wecloneControllers.delete(taskId)
@@ -2958,14 +2957,10 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   })
   ipcMain.handle('weclone:list', () => weCloneService.getClones())
   ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
-  ipcMain.handle('weclone:delete', (_e, id: string, remote?: boolean) =>
-    weCloneService.deleteClone(String(id || ''), remote !== false))
-  ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
-    weCloneService.setVisibility(String(id || ''), String(visibility || '')))
-  ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
-  // 和分身对话：知识库在服务器上，这里只是一次转发调用。返回体带 `hint`，
-  // 因为最常见的失败（服务器没起、服务器没这个分身）需要具体的下一步指引，
-  // 光回一句「失败」对用户没有帮助。
+  ipcMain.handle('weclone:delete', (_e, id: string) => weCloneService.deleteClone(String(id || '')))
+  // 和分身对话：**完全在本机完成**（人格 MD 注入上下文 + 本地检索语料），
+  // 没有服务器可转发，也不上传任何东西。返回体带 `hint`，因为最常见的失败
+  // （还没生成过克隆、模型 key 不可用）需要具体的下一步指引。
   ipcMain.handle(
     'weclone:chat',
     (_e, cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
@@ -3405,14 +3400,10 @@ function installScreenshotDemoHandlers() {
     sessionCount: 37,
     chunkCount: 1284,
     generatedAt: new Date(Date.now() - 86_400_000).toISOString(),
-    visibility: 'private' as const,
-    uploaded: false,
-    uploadStatus: 'local_only' as const,
     piiHits: 3,
   }
   override('weclone:list', () => ({ success: true, clones: [{ ...demoClone, source: 'local' as const }] }))
   override('weclone:get', () => ({ success: true, clone: demoClone, mds: { profile: '# 演示画像\n\n这是脱敏的演示内容。' } }))
-  override('weclone:getServerStatus', () => ({ configured: false, enabled: true, baseUrl: '', hasToken: false }))
   override('weclone:getForcedProviderStatus', () => ({
     providerId: 'opencode-go',
     baseUrl: 'https://opencode.ai/zen/go/v1',
@@ -3422,7 +3413,6 @@ function installScreenshotDemoHandlers() {
   }))
   override('weclone:cancel', () => ({ success: true }))
   override('weclone:delete', () => ({ success: true }))
-  override('weclone:setVisibility', () => ({ success: true }))
   override('weclone:generate', () => ({ success: false, error: '演示模式不执行克隆生成' }))
 }
 
