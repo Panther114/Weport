@@ -405,7 +405,7 @@ export default function WeClonePage() {
           <strong>一键生成分身</strong>
           <span>
             扫描全部聊天记录，AI 提炼人格画像、关系图谱、知识库、时间线与语料样例，
-            经双重隐私脱敏后生成分身 —— 上传后即可像「你本人」一样与人对话。
+            经双重隐私脱敏后<strong>在本机</strong>生成分身，随后就能像「你本人」一样与它对话。
           </span>
         </div>
         <button
@@ -442,8 +442,10 @@ export default function WeClonePage() {
 
         <p className="weclone-exp-sub" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <ShieldCheck size={12} />
-          你的聊天记录、生成出的档案与语料**只保存在本机**：不上传、不经过任何 Weport
-          服务器。对话时只会把它们交给你在这里配置的模型。
+          <span>
+            你的聊天记录、生成出的档案与语料<strong>只保存在本机</strong>
+            ：不上传、不经过任何 Weport 服务器。对话时只会把它们交给你在这里配置的模型。
+          </span>
         </p>
       </div>
 
