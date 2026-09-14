@@ -914,9 +914,24 @@ button:disabled {
   white-space: nowrap;
 }
 
-.account-item div {
+/* 只让**文本列**吃掉剩余宽度。
+ *
+ * 这里原来是裸的 `.account-item div { flex: 1 }`，而 `<Avatar>` 的根节点就是一个
+ * `<div>` —— 于是头像被拉成 `flex: 1`：宽 223px、高 22px，也就是用户看到的
+ * "图标被拉伸变形"。正确做法是点名文本列，而不是按标签名一网打尽。
+ *
+ * `:not()` 里列出不该被拉伸的节点：头像容器（任何形状）、图标槽位，以及本身
+ * 就是一个网格/弹性容器的行。 */
+.account-item div:not(.avatar-component):not(.avatar-placeholder):not(.avatar-loading):not(.avatar-skeleton):not(.ar-kind) {
   min-width: 0;
   flex: 1;
+}
+
+/* 头像与类型图标永远保持正方形、且不参与弹性伸缩 —— 内联的 width/height 是
+ * 尺寸真源，这里只负责挡住会造成变形的 flex 行为。 */
+.account-item .avatar-component,
+.account-item .ar-kind {
+  flex: 0 0 auto;
 }
 
 .account-item span {
@@ -926,6 +941,28 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 上面那条 `display: block` 是给**文本行**写的（一行超长就省略号截断），但它按
+ * 标签名命中，把行里所有 span 都改成了块级，于是三种"本来靠 display 才干活的"
+ * 子元素全被压坏：
+ *  - `.ar-kind` —— 22×22 图标槽位，靠 inline-flex 居中那个 12px 图标。变成 block
+ *    后居中失效，图标贴左上角，看着就是歪的/变形；
+ *  - `.account-avatar.fallback` —— 字母头像，靠 flex 居中字母。变成 block 后字母
+ *    也不再居中（而且它的 height 仍生效，字符基线一偏移就更明显）；
+ *  - `.badge`（当前 / 选择 / 已安装）—— 行内胶囊，变成块级后自己占一整行。
+ * 这里按类名把它们的布局身份收回来。与上面账号列表的 `div` 修复是同一个根因：
+ * **按标签名批量设布局，会连"本身就是组件的元素"一起改掉**。*/
+.account-item .ar-kind {
+  display: inline-flex;
+}
+
+.account-item .account-avatar.fallback {
+  display: flex;
+}
+
+.account-item .badge {
+  display: inline-block;
 }
 
 .account-item.static {

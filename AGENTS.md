@@ -261,6 +261,60 @@ Popup glass (`NotificationToast.scss` + `useNotificationAdaptiveTheme.ts`):
 - `BACKDROP_CAPTURE_SCALE` is 0.25 (was 0.5). Capture cost is dominated by output pixels
   and the frame gets blurred to nothing anyway; this is what lets the backdrop loop run
   fast enough for the glass to track the desktop (measured frame delta 1.64 → 3.60).
+- **Measuring the glass needs the main window moved away.** `capturePage` on a transparent
+  popup only returns the popup's own composite — it cannot see what is *behind* it, so a
+  transmission measurement through it is meaningless. And a GDI desktop grab reads whatever
+  window is under the popup: with the main window parked there, the "card" pixels are the
+  main window's, and swapping the wallpaper changes nothing because the wallpaper is not
+  exposed. Move the main window out of the popup's rect first (`.ui-probe/capture-glass-over-desktop.mjs`),
+  then the card reads the desktop (measured 36.6 over a 30.1 desktop).
+- **Measured cost, live glass on a 1280×720 desktop:** avg **2.2%** total CPU, peak 5.3%
+  (`.ui-probe/measure-glass-cost.mjs`). Anything that pushes this past ~12% breaks the
+  "lightweight + adapts in real time" requirement — re-measure before adding per-frame work.
+- The GL stream path needs a `MediaStream`; when `srcObject` fails (software rendering,
+  no GPU) the pipeline reports `frames` but the canvas is **absent** and the static
+  snapshot `<img>` is what you see. `data-glass` alone does not prove the WebGL path is live.
+
+## Progress & Status Surfaces — v1.0
+
+Two failure modes, both seen in the export page:
+
+- **High-frequency progress must never land in `App` state.** The main process emits
+  `export:progress` every ~400 ms; `App` is 4,000+ lines and renders every page, so each
+  event re-rendered the whole tree. That is the "everything gets pushed and pulled while
+  exporting" glitch — it is a **re-render** problem, not a CSS one, and no amount of
+  `position: sticky` fixes it. `src/components/export/ExportProgressBar.tsx` owns the
+  subscription (including the `taskId` it needs for cancel); `App` touches progress only
+  through a ref, to freeze the bar at the end.
+- **The progress row's geometry must be constant.** `flex: 0 1 auto` on the session name
+  makes its width follow the text, so the track and the cancel button jump on every event.
+  Fixed `flex-basis` + ellipsis, a fixed-width tabular-nums counter, and a fixed
+  `min-height` are what keep the sticky block from resizing the page underneath it.
+- **A terminal state must be written explicitly.** Reporting completion by setting only a
+  phase leaves stale content on screen: the final `export:progress` payload carries
+  `currentSession: ''`, so the bar read `准备中…  189 / 189`. Recognise completion from
+  *either* `phase === 'complete'` *or* `current >= total`, and replace the session label.
+  Same class of bug in WeClone: a failed generation used to leave the panel spinning on
+  the last mid-flight step (now `failed` / `aborted` terminal stages).
+- **Never put `aria-live` on a container whose text changes every frame.** Screen readers
+  announce each update. Put a `.sr-only` `role="status"` node next to it and write to that
+  only on phase changes.
+
+## Renderer Probes — Test Hygiene
+
+- **Always pass a private `--user-data-dir`.** `app.requestSingleInstanceLock()` is keyed
+  on it, so a probe that reuses the default collides with the Weport already running in the
+  tray and exits immediately (`firstWindow` times out). `.ui-probe/userData` and
+  `scripts/ui-probe.mjs` do this; the ad-hoc probes under `.ui-probe/` must too.
+- **`app.evaluate` runs in the main process and receives Electron's modules as its
+  argument** — `async ({ webContents }) => …`. `require('electron')` is undefined there and
+  a dynamic `import()` throws "A dynamic import callback was not specified". Use it to push
+  *real* IPC events (`webContents.send('export:progress', …)`); do not fake them in the page.
+- **`contextBridge` objects are frozen.** Monkey-patching `window.electronAPI.…` in the page
+  fails silently — that is how a probe ends up asserting on zero subscribers.
+- CSS-nesting blocks (`:root[data-x] { :is(...) { … } }`) are dropped wholesale by the
+  engine when malformed, and neither `tsc` nor `vite build` complains. Assert **computed
+  styles** (`.ui-probe/verify-accent-strength.mjs`), not the presence of source lines.
 
 ## Notification Popup (Permanent — Do Not Change)
 
