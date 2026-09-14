@@ -43,6 +43,7 @@ import {
   type PrefixFrame,
 } from './ai/prefixCache'
 import type { ProviderConsumer, ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
+import { buildFallbackTitle, hasCjk, normaliseTitle, titleEchoesSource } from './ai/chatTitle'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -57,6 +58,23 @@ export interface AiToolCall {
   result?: string
 }
 
+/**
+ * 一次模型调用的解码计时，和 DSH 用的是同一套口径：
+ *
+ *   ttftMs   = 首个 token 到达 − 发出请求
+ *   decodeMs = 生成结束 − 首个 token 到达
+ *   TPS      = outputTokens / (decodeMs / 1000)
+ *
+ * 关键是**把首 token 等待从解码时间里扣掉**。用「总耗时」算出来的速度会把
+ * TTFT（长前缀下往往是几秒）算进分子分母，读出来的数字比真实解码速度低一个
+ * 量级，且前缀越长越显得慢 —— 那是延迟，不是吞吐。
+ */
+export interface AiStepTiming {
+  ttftMs: number
+  decodeMs: number
+  outputTokens: number
+}
+
 export interface AiMessage {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -66,6 +84,8 @@ export interface AiMessage {
   toolCallId?: string
   toolName?: string
   createdAt: number
+  /** 本轮解码计时，用于消息尾部的 `N tok/s` 读数 */
+  timing?: AiStepTiming
 }
 
 export interface AiChatMeta {
@@ -102,6 +122,21 @@ export interface AiSetupInfo {
   activeProfileId: string
   profiles: ProviderProfileSummary[]
   catalog: ReturnType<typeof getProviderCatalog>
+  /**
+   * 模型 id → 定价（USD / 百万 token）。渲染侧用它给每个模型下拉项标价。
+   *
+   * 为什么要在这里下发而不是渲染侧自己查：定价来自 models.dev 的 registry，
+   * 那是主进程持有多 MB 级 JSON + 解析缓存的模块，渲染侧拿不到。没有这一项，
+   * 「这个模型多少钱」在选模型的时候就完全不可见 —— 而选模型正是唯一该看它的时刻。
+   */
+  modelCosts?: Record<string, {
+    input?: number
+    output?: number
+    reasoning?: number
+    cacheRead?: number
+    cacheWrite?: number
+    source?: string
+  }>
 }
 
 export interface AiRunUsage {
@@ -118,7 +153,7 @@ export type AiEvent =
   | { type: 'text_delta'; chatId: string; delta: string }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
   | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string }
-  | { type: 'assistant_message'; chatId: string; message: AiMessage }
+  | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: AiStepTiming }
   | { type: 'chat_title'; chatId: string; title: string }
   | { type: 'error'; chatId: string; message: string }
   | { type: 'done'; chatId: string; usage?: AiRunUsage; aborted?: boolean; context?: { promptTokens: number; cacheHitTokens: number; lastRequestTokens: number; recentRate: number; contextWindow: number } }
@@ -545,6 +580,57 @@ class WeportAiService {
 
   private chatFilePath(chatId: string): string {
     return join(this.sessionsDir, `${chatId}.json`)
+  }
+
+  /**
+   * 压缩预算。`trigger` 用 DSH 的比例（0.8 触发 / 0.16 保留），自动触发和
+   * 手动 `/compact` 共用同一个函数 —— 两套阈值必然漂移，然后「手动压缩之后
+   * 下一轮又自动压一次」。
+   */
+  private compactBudgetFor(contextWindow: number, trigger = COMPACT_TRIGGER_RATIO, retain = COMPACT_RETAIN_RATIO) {
+    return {
+      maxChars: Math.floor(contextWindow * CHARS_PER_TOKEN * trigger),
+      retainChars: Math.floor(contextWindow * CHARS_PER_TOKEN * retain),
+    }
+  }
+
+  /**
+   * 手动压缩：把历史收进摘要，保留最近一段原文。
+   *
+   * 这是 Harness 的显式入口（CLI `ai.compact`、面板上的「压缩上下文」），
+   * 与 runChat 里那次自动压缩走同一套代码：`compressOverflow` + 单份摘要 +
+   * 归档。手动指定更低的触发比例，是因为用户主动要求压缩时，通常是要**腾出**
+   * 空间继续长任务，而不是等到 0.8 才动手。
+   *
+   * 返回 `changed: false` 且 `reason: 'below-threshold'` 表示当前历史还没到
+   * 该压的程度 —— 调用方不该谎报"已压缩"，那会让用户以为腾出了空间。
+   */
+  compactChat(chatId: string, options?: { consumer?: ProviderConsumer; trigger?: number; retain?: number }): {
+    success: boolean
+    changed: boolean
+    reason?: 'below-threshold' | 'not-found'
+    dropped?: number
+    kept?: number
+    digestChars?: number
+    error?: string
+  } {
+    try {
+      const chat = this.loadChats().find((c) => c.id === chatId)
+      if (!chat) return { success: false, changed: false, reason: 'not-found', error: '会话不存在' }
+      const stored = this.loadMessages(chatId)
+      const consumer = options?.consumer || 'chat'
+      const contextWindow = this.resolveContextWindow(consumer, this.providerProfiles.getForConsumer(consumer))
+      const budget = this.compactBudgetFor(contextWindow, options?.trigger ?? COMPACT_TRIGGER_RATIO * 0.75, options?.retain ?? COMPACT_RETAIN_RATIO)
+      const { kept, digest, dropped } = this.compressOverflow(stored.messages, budget)
+      if (!digest || dropped.length === 0) {
+        return { success: true, changed: false, reason: 'below-threshold', dropped: 0, kept: stored.messages.length }
+      }
+      this.archiveMessages(chatId, dropped)
+      this.persistMessages(chatId, kept, this.mergeDigest(stored.compressed, digest))
+      return { success: true, changed: true, dropped: dropped.length, kept: kept.length, digestChars: digest.length }
+    } catch (e) {
+      return { success: false, changed: false, error: String(e) }
+    }
   }
 
   private chatArchivePath(chatId: string): string {
@@ -1098,6 +1184,29 @@ class WeportAiService {
         ? { ...item, ...resolvedProfileCache(this.resolveProfileModel({ id: item.id, providerId: item.providerId, protocol: item.protocol, model: item.model })) }
         : item
     )
+
+    // 定价表：每个已配置过的模型都查一遍，渲染侧据此在模型下拉里标价。
+    // 用当前 active profile 的 provider 做解析上下文，让网关类服务的模型也能
+    // 命中 registry（它们大多用上游模型 id）。
+    const modelCosts: NonNullable<AiSetupInfo['modelCosts']> = {}
+    const pricingContext = {
+      id: active?.id || 'pricing',
+      providerId: active?.providerId || 'custom',
+      protocol: active?.protocol || 'openai-compatible',
+    }
+    for (const profile of profiles) {
+      const modelId = String(profile.model || '').trim()
+      if (!modelId || modelCosts[modelId]) continue
+      try {
+        const resolved = this.resolveProfileModel({ ...pricingContext, model: modelId })
+        const cost = resolved.record?.cost
+        if (!cost) continue
+        modelCosts[modelId] = { ...cost, source: resolved.record?.provenance }
+      } catch {
+        /* 缺一个模型的定价不影响设置页 */
+      }
+    }
+
     return {
       hasApiKey: Boolean(active?.apiKey) || Boolean(active && getProviderCatalogEntry(active.providerId)?.apiKeyOptional),
       baseUrl: String(active?.baseUrl || this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim(),
@@ -1114,6 +1223,7 @@ class WeportAiService {
       activeProfileId: active?.id || '',
       profiles,
       catalog: getProviderCatalog(),
+      modelCosts,
     }
   }
 
@@ -2386,10 +2496,7 @@ class WeportAiService {
     // 命中率被钉在 95% 的直接原因。压缩做得罕见且足够大，这一次 prefix miss
     // 才能被之后几十轮的高命中摊薄。
     const contextWindow = this.resolveContextWindow(consumer, activeProfile)
-    const compactBudget = {
-      maxChars: Math.floor(contextWindow * CHARS_PER_TOKEN * COMPACT_TRIGGER_RATIO),
-      retainChars: Math.floor(contextWindow * CHARS_PER_TOKEN * COMPACT_RETAIN_RATIO),
-    }
+    const compactBudget = this.compactBudgetFor(contextWindow)
     const { kept, digest, dropped } = this.compressOverflow(messages, compactBudget)
     if (digest) {
       this.archiveMessages(chatId, dropped)
@@ -2493,6 +2600,7 @@ class WeportAiService {
           reasoning: stepResult.reasoning || '',
           toolCalls: stepResult.toolCalls || [],
           createdAt: Date.now(),
+          timing: stepResult.timing,
         }
         finalAssistant = assistant
         messages.push(assistant)
@@ -2505,7 +2613,7 @@ class WeportAiService {
         if (toolCalls.length === 0) {
           // 最终回答
           this.persistMessages(chatId, messages, compressed)
-          this.emit({ type: 'assistant_message', chatId, message: assistant })
+          this.emit({ type: 'assistant_message', chatId, message: assistant, timing: stepResult.timing })
           break
         }
 
@@ -2736,6 +2844,13 @@ class WeportAiService {
    * v2：标题必须 ≤8 个汉字，概括「用户意图」（用户想做什么），而非复述问题原文。
    * 失败时返回 null，调用方回退到文本截断标题。
    */
+  /**
+   * 生成 AI 标题。纯逻辑（规整 / 判重 / 兜底）在 `ai/chatTitle.ts`，那里可单测。
+   *
+   * 返回 `null` 覆盖三种情况：模型不可用、输出是噪声、输出只是原话的截断。
+   * 第三种是关键 —— 抄回原话的"标题"必须当作失败，否则列表里显示的就是
+   * 用户消息的前几个字，也就是用户报的那个 bug。
+   */
   private async generateAITitle(userText: string): Promise<string | null> {
     try {
       const profile = this.applyProbeOverride(this.providerProfiles.getActive() || ({} as ProviderProfile))
@@ -2748,7 +2863,13 @@ class WeportAiService {
       const result = await adaptive.stream({
         profile,
         messages: [
-          { role: 'system', content: '为对话生成简短标题。只输出标题本身，不要引号、标点或解释；中文不超过 8 个汉字，英文不超过 16 个字符。' },
+          {
+            role: 'system',
+            content:
+              '你是对话标题生成器。用 2-4 个词概括用户这条消息的**主题**（做了什么 / 关于什么），' +
+              '不要复述原话，也不要把原话的前半句当标题。只输出标题本身：不要引号、不要标点、' +
+              '不要「标题：」前缀、不要解释。中文不超过 12 个字，英文不超过 4 个词。',
+          },
           { role: 'user', content: sanitizeForApi(String(userText || '').slice(0, 2000)) },
         ],
         tools: [],
@@ -2757,37 +2878,37 @@ class WeportAiService {
         onReasoning: () => undefined,
         onText: () => undefined,
       })
-      const title = String(result.content || '')
-        .trim()
-        .replace(/["'“”「」]/g, '')
-        .replace(/\s+/g, ' ')
-      if (!title || title.length > 16) return null
-      return title.slice(0, 12)
+      const title = normaliseTitle(String(result.content || ''))
+      if (!title) return null
+      if (titleEchoesSource(title, userText)) return null
+      return title
     } catch {
       return null
     }
   }
+
   private fallbackTitleFromText(text: string): string {
-    const stripped = String(text || '')
-      .trim()
-      .replace(
-        /^(请(你|帮我)?|帮我|我想|我想要|请你|麻烦你|可以|能不能|帮我分析|帮我看看|分析一下|总结一下|梳理一下|看看|查一下|找找|找出|整理一下|给我)\s*/,
-        ''
-      )
-    const cleaned = stripped.replace(/\s+/g, ' ')
-    return cleaned.slice(0, 8) || '新对话'
+    return buildFallbackTitle(text)
   }
 
-  /** 打开会话时，把旧版（过长/复述原文）标题静默升级为 v2 意图标题 */
+  /**
+   * 打开会话时，把旧版「原话截断」标题静默升级为真正的 AI 标题。
+   *
+   * 判定条件是**这条标题是否只是用户原话的截断**，而不是它的长度。旧实现用
+   * `title.length > 8` 当门槛，恰好放过了最难看的那些：8 个字以内的原话截断
+   * （「帮我分析一下我和」「8月8日发生了」）永远不会被升级，用户看到的就一直是
+   * 半句话。反过来，长度超过 8 的**真正标题**又会白白重写一次。
+   */
   private upgradeStaleTitle(chatId: string): void {
     if (this.titleUpgrading.has(chatId)) return
     const chat = this.loadChats().find((c) => c.id === chatId)
     if (!chat) return
     if (chat.titleVersion === 2) return
-    if ((chat.title?.length || 0) <= 8) return
     const stored = this.loadMessages(chatId)
     const firstUser = stored.messages.find((m) => m.role === 'user')
     if (!firstUser?.content) return
+    const looksTruncated = titleEchoesSource(chat.title || '', firstUser.content)
+    if (!looksTruncated && (chat.title?.length || 0) <= 8) return
     this.titleUpgrading.add(chatId)
     void this.generateAITitle(firstUser.content).then((t) => {
       this.titleUpgrading.delete(chatId)
@@ -2875,6 +2996,7 @@ class WeportAiService {
     reasoning?: string
     toolCalls?: AiToolCall[]
     usage?: AiRunUsage
+    timing?: AiStepTiming
     error?: string
     httpStatus?: number
   }> {
@@ -2906,6 +3028,13 @@ class WeportAiService {
     this.persistResolvedModelMetadata(profile, resolved)
     const callProfile: ProviderProfile = { ...this.withGatewayHeaders(profile), modelProtocol: resolved.protocol }
     try {
+      // 解码计时：首个 delta（思考或正文）到达即认为开始解码，和 DSH 的
+      // `firstTokenTime` 一致。之前这里只记 startedAt 与结束时间，算出来的
+      // 「速度」把首 token 等待也摊进去了。
+      let firstTokenAt: number | null = null
+      const markFirstToken = () => {
+        if (firstTokenAt === null) firstTokenAt = Date.now()
+      }
       const result: ProviderStreamResult = await getProviderAdapter(callProfile).stream({
         profile: callProfile,
         messages: apiMessages,
@@ -2916,16 +3045,30 @@ class WeportAiService {
         maxOutputTokens: profile.modelMaxOutputTokens,
         reasoningEffort: String(this.configService.get('weportAiReasoningEffort') || 'high'),
         signal,
-        onReasoning: (delta) => this.emit({ type: 'reasoning_delta', chatId, delta }),
-        onText: (delta) => this.emit({ type: 'text_delta', chatId, delta }),
+        onReasoning: (delta) => {
+          markFirstToken()
+          this.emit({ type: 'reasoning_delta', chatId, delta })
+        },
+        onText: (delta) => {
+          markFirstToken()
+          this.emit({ type: 'text_delta', chatId, delta })
+        },
       })
-      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: resolved.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt })
+      const finishedAt = Date.now()
+      const decodeStartedAt = firstTokenAt ?? finishedAt
+      const timing: AiStepTiming = {
+        ttftMs: Math.max(0, decodeStartedAt - startedAt),
+        decodeMs: Math.max(0, finishedAt - decodeStartedAt),
+        outputTokens: Math.max(0, result.usage?.completionTokens || 0),
+      }
+      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: resolved.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt, ttftMs: timing.ttftMs, decodeMs: timing.decodeMs })
       return {
         ok: true,
         content: result.content,
         reasoning: result.reasoning,
         toolCalls: result.toolCalls.map((call) => ({ id: call.id, name: call.name, args: call.args, friendly: '' })),
         usage: result.usage,
+        timing,
       }
     } catch (error) {
       if (signal.aborted) return { ok: false, error: '已中止' }

@@ -326,6 +326,46 @@ export function registerCliCommands(): void {
       },
     },
     {
+      name: 'ai.costs',
+      summary: 'Per-model pricing (USD per million tokens) for the configured profiles.',
+      mutating: false,
+      args: [{ name: 'models', type: 'string', description: '逗号分隔；留空返回所有已配置模型' }],
+      run: (args) => {
+        const setup = weportAiService.getSetup()
+        const costs = setup.modelCosts || {}
+        const wanted = String(args.models || '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean)
+        const modelIds = wanted.length > 0 ? wanted : Object.keys(costs)
+        const rows = modelIds.map((model) => {
+          const cost = costs[model]
+          return {
+            model,
+            // 未收录就是 null，不是 0 —— 未定价和免费是两件事
+            input: cost?.input ?? null,
+            output: cost?.output ?? null,
+            cacheRead: cost?.cacheRead ?? null,
+            cacheWrite: cost?.cacheWrite ?? null,
+            reasoning: cost?.reasoning ?? null,
+            source: cost?.source ?? null,
+          }
+        })
+        const priced = rows.filter((row) => row.input !== null || row.output !== null).length
+        return {
+          success: true,
+          data: { unit: 'USD per 1M tokens', priced, unpriced: rows.length - priced, rows },
+          text: rows
+            .map((row) =>
+              row.input === null && row.output === null
+                ? `${row.model}\t未定价`
+                : `${row.model}\tin $${row.input ?? '—'} / out $${row.output ?? '—'}`
+            )
+            .join('\n'),
+        }
+      },
+    },
+    {
       name: 'ai.chats',
       summary: 'List WeportAI conversations.',
       mutating: false,
@@ -353,6 +393,32 @@ export function registerCliCommands(): void {
           .reverse()
           .find((message) => message.role === 'assistant')
         return { success: true, data: { chatId, answer: answer?.content || '' }, text: answer?.content || '' }
+      },
+    },
+
+    {
+      name: 'ai.compact',
+      summary: 'Compact one conversation: fold older turns into the digest and keep the recent window.',
+      mutating: true,
+      args: [
+        { name: 'chatId', type: 'string' },
+        { name: 'consumer', type: 'string', description: 'chat | weclone | webot' },
+      ],
+      run: (args) => {
+        const chatId = String(args.chatId || '').trim()
+        if (!chatId) return { success: false, error: '缺少 chatId 参数（用 ai.chats 查看）' }
+        const consumer = (String(args.consumer || 'chat') as 'chat' | 'weclone' | 'webot')
+        const result = weportAiService.compactChat(chatId, { consumer })
+        if (!result.success) return { success: false, error: result.error || '压缩失败' }
+        // 「没压」和「压了」必须分开报：把 below-threshold 说成成功会让用户以为
+        // 上下文已经腾空，紧接着下一轮又看到同样的占用。
+        return {
+          success: true,
+          data: result,
+          text: result.changed
+            ? `已压缩：归档 ${result.dropped} 条，保留 ${result.kept} 条，摘要 ${result.digestChars} 字`
+            : '当前上下文尚未超过压缩阈值，未做改动',
+        }
       },
     },
 

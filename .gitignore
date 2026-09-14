@@ -78,3 +78,14 @@ release-notes-current.md
 # 本地验证令牌（连接器 / 网关探针），绝不提交
 .todoist-token
 .opencode-key
+
+# 本地 UI 探针（scripts/ui-probe.mjs）：隔离的 userData + 截图，绝不提交
+.ui-probe/
+
+# tsc 直接编译 electron/ 时落下的 .js 影子文件。
+# 运行时加载的是 vite 打出来的 dist-electron/，这些同名 .js 只会污染 git status。
+electron/**/*.js
+electron/*.js
+
+# tsc 从 vite.config.mts 落下的影子配置（真正的配置是 .mts）
+vite.config.mjs

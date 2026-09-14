@@ -354,21 +354,26 @@
 }
 
 /* 侧栏分区：每段一条小标题。之前三个功能段直接摞在一起，输入框、复选框、
-   日历按钮长得一样，用户看不出哪一块管什么。 */
+   日历按钮长得一样，用户看不出哪一块管什么。
+   `flex-shrink: 0` 不能少：侧栏是 flex 列，默认 `flex: 0 1 auto` 会让每一段
+   被压到比内容还矮（搜索段实测 24px，内容是 89px），子元素溢出去正好压在
+   日历按钮和发布者列表上 —— 截图里那团糊在一起的文字就是这么来的。 */
 .sns-side-block {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line, #17171b);
-  min-height: 0;
+  flex: 0 0 auto;
 }
 .sns-side-block:last-child {
   border-bottom: none;
 }
 .sns-side-block-grow {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .sns-side-label {
   display: flex;

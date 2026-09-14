@@ -70,6 +70,20 @@ export type SetupInfo = {
   activeProfileId: string
   profiles: ProviderProfileSummary[]
   catalog: ProviderCatalogEntry[]
+  /**
+   * 模型 id → 定价（USD / 百万 token）。主进程从 models.dev registry 解析后下发，
+   * 因为 registry 是主进程里一个数 MB 的 JSON，渲染侧拿不到。
+   *
+   * 缺失表示「未定价」，必须渲染成「未定价」而不是 0 —— 未定价和免费是两件事。
+   */
+  modelCosts?: Record<string, {
+    input?: number
+    output?: number
+    reasoning?: number
+    cacheRead?: number
+    cacheWrite?: number
+    source?: string
+  }>
 }
 
 export type AiAction = { id: string; name: string; prompt: string }

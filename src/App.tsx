@@ -1474,6 +1474,9 @@ export default function App() {
       const sessionsResult = await api.chat.getAntiRevokeSessions()
       const sessions: AntiRevokeSession[] = sessionsResult.sessions || []
       setAntiRevokeSessions(sessions)
+      // 头像/昵称补全不阻塞列表：`getSessions()` 只回缓存里的联系人信息，未读过的
+      // 会话没有头像，先渲染列表再补齐，避免"打开这一页先白等一秒"。
+      void enrichAntiRevokeContacts(sessions)
       if (sessions.length > 0) {
         const ids = sessions.map((s) => s.username)
         const check = await api.chat.checkAntiRevokeTriggers(ids)
@@ -1489,6 +1492,29 @@ export default function App() {
       pushToast('err', '防撤回状态刷新失败', String(e))
     } finally {
       setAntiRevokeBusy(false)
+    }
+  }
+
+  async function enrichAntiRevokeContacts(sessions: AntiRevokeSession[]) {
+    const missing = sessions.filter((s) => !s.avatarUrl || !s.displayName).map((s) => s.username)
+    if (!missing.length) return
+    try {
+      const enriched = await api.chat.enrichSessionsContactInfo(missing)
+      const contacts = enriched?.contacts
+      if (!contacts) return
+      setAntiRevokeSessions((prev) =>
+        prev.map((s) => {
+          const info = contacts[s.username]
+          if (!info) return s
+          return {
+            ...s,
+            displayName: s.displayName || info.displayName,
+            avatarUrl: s.avatarUrl || info.avatarUrl,
+          }
+        })
+      )
+    } catch {
+      /* 补全失败就用首字母占位，不影响安装/还原 */
     }
   }
 
@@ -2128,6 +2154,37 @@ export default function App() {
 
         {tab === 'export' && (
           <section className="panel panel-fill export-page">
+            {/* 页头 + 进度合成一个吸顶块。
+                进度原来挂在右栏卡片流的最前面：窗口不到 1280 CSS px 时右栏整块
+                落到会话列表**下面**，进度条和「取消导出」被推出视口；宽窗口下右栏
+                虽然吸顶，进度也会先把「高级选项」顶到折叠线以下。进度是这一页最
+                需要随时看得见的东西，所以并入吸顶块 —— 两种布局下都始终可见，
+                而且它在正常流里的位置就在顶部，不会盖住任何内容。
+
+                吸顶块本身不设 top，页头保持 top: 0，进度条就是它的下一行。 */}
+            <div className="exp-sticky">
+            {progress && (
+              <div className={`exp-progress-bar phase-${progress.phase || 'running'}`} aria-live="polite">
+                <div className="progress-track">
+                  <div
+                    className={`progress-fill${!progress.total || progress.phase === 'preparing' ? ' indeterminate' : ''}`}
+                    style={progress.total ? { width: `${progressPct}%` } : undefined}
+                  />
+                </div>
+                <span className="exp-progress-session" title={progress.currentSession || ''}>
+                  {progress.currentSession || '准备中…'}
+                </span>
+                <span className="exp-progress-count">
+                  {progress.total > 0 ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}` : ''}
+                </span>
+                {busy && progress.phase !== 'complete' && (
+                  <button className="ghost-btn exp-progress-cancel" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
+                    取消导出
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className="panel-head exp-head">
               {/* 主操作放在页头并让页头吸顶：导出按钮从此**始终可见**，而且
                   不会像底部悬浮条那样盖住内容。页头右侧依次是「范围状态 →
@@ -2176,10 +2233,11 @@ export default function App() {
                 </button>
               </div>
             </div>
+            </div>
 
             {/* 两栏：左边是「怎么导 / 导哪些」这几步，右边是常驻的动作与状态。
-                原来五段纵向堆叠，页面有三屏高，主按钮和进度条要靠吸顶页头才
-                找得到；现在进度、高级选项、上次导出、取消都在右栏常驻可见。 */}
+                原来五段纵向堆叠，页面有三屏高，主按钮够不到；现在主按钮和进度
+                都在吸顶块里，右栏留给高级选项与导出记录。 */}
             <div className="export-layout">
               <div className="export-main">
                 {/* 1. 输出设置 */}
@@ -2393,30 +2451,7 @@ export default function App() {
               </div>
 
               <aside className="export-side">
-                {progress && (
-                  <div className="exp-side-card progress" aria-live="polite">
-                    <div className="progress-track">
-                      <div
-                        className={`progress-fill${!progress.total || progress.phase === 'preparing' ? ' indeterminate' : ''}`}
-                        style={progress.total ? { width: `${progressPct}%` } : undefined}
-                      />
-                    </div>
-                    <div className="progress-meta">
-                      <strong className="progress-session" title={progress.currentSession || ''}>{progress.currentSession || '准备中…'}</strong>
-                      <span className="progress-count">
-                        {progress.total > 0
-                          ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}`
-                          : ''}
-                      </span>
-                    </div>
-                    {busy && progress.phase !== 'complete' && (
-                      <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
-                        取消导出
-                      </button>
-                    )}
-                  </div>
-                )}
-
+                {/* 进度已移到吸顶页头下方；右栏只留「高级选项 / 导出记录」。 */}
                 {/* 5. 高级选项 */}
                 <div className="exp-side-card">
                   <button
@@ -2661,10 +2696,20 @@ export default function App() {
                     return (
                       <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
                         {/* 群/私聊一眼可分：列表里大多是群，混着几个联系人时
-                            光看名字判断不出这是群还是个人。 */}
-                        <span className="ar-kind" title={s.username.endsWith('@chatroom') ? '群聊' : '联系人'}>
-                          {s.username.endsWith('@chatroom') ? <Users size={12} /> : <UserRound size={12} />}
-                        </span>
+                            光看名字判断不出这是群还是个人。能拿到头像就显示头像
+                            （形状本身也区分群/人），拿不到再退回类型图标。 */}
+                        {s.avatarUrl ? (
+                          <Avatar
+                            src={s.avatarUrl}
+                            name={s.displayName || s.username}
+                            size={22}
+                            shape={s.username.endsWith('@chatroom') ? 'rounded' : 'circle'}
+                          />
+                        ) : (
+                          <span className="ar-kind" title={s.username.endsWith('@chatroom') ? '群聊' : '联系人'}>
+                            {s.username.endsWith('@chatroom') ? <Users size={12} /> : <UserRound size={12} />}
+                          </span>
+                        )}
                         <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
                         <span className="ar-id" title={s.username}>{s.username}</span>
                         <button

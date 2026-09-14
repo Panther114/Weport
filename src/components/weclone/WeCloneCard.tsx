@@ -51,9 +51,11 @@ interface WeCloneCardProps {
   /** 切换可见性；返回服务端下发的分享链接（若有） */
   onVisibilityChange: (clone: WeCloneListItem, v: WeCloneVisibility) => Promise<string | undefined>
   onDeleteRequest: (clone: WeCloneListItem) => void
+  /** 打开对话抽屉（知识库在服务器上，入口由页面统一持有） */
+  onChat: (clone: WeCloneListItem) => void
 }
 
-export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, onDeleteRequest }: WeCloneCardProps) {
+export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, onDeleteRequest, onChat }: WeCloneCardProps) {
   const [visBusy, setVisBusy] = useState(false)
   const [shareUrl, setShareUrl] = useState(clone.shareUrl || '')
   const [copied, setCopied] = useState(false)
@@ -153,9 +155,24 @@ export default function WeCloneCard({ clone, serverBaseUrl, onVisibilityChange, 
         {clone.truncated && <span>· 数据量过大已截断</span>}
       </div>
 
+      {/* 对话入口对所有分身可见，包括「仅服务器」的那些 —— 档案不在本机并不
+          妨碍聊天（知识库本来就在服务器上），而只能对话的克隆恰恰最需要这个
+          按钮。生成/上传完成后用户的第一诉求就是「跟它说句话」。 */}
+      <div className="weclone-card-actions">
+        <button
+          className="primary-btn weclone-card-chat"
+          type="button"
+          title="和这个分身对话（知识库在服务器上）"
+          onClick={() => onChat(clone)}
+        >
+          <MessageSquareText size={13} />
+          开始对话
+        </button>
+      </div>
+
       {remoteOnly ? (
         <p className="hint" style={{ margin: 0 }}>
-          该克隆仅存在于服务器（本机无档案），无法在此修改或删除。
+          该克隆仅存在于服务器（本机无档案），无法在此修改或删除，但可以直接对话。
         </p>
       ) : (
         <>

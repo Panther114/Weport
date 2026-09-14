@@ -29,6 +29,7 @@ import { readdir, copyFile, mkdir as mkdirAsync, rm as rmAsync, writeFile as wri
 import { Worker } from 'worker_threads'
 import { ConfigService } from './services/config'
 import { avatarCacheService, toProtocolUrl, protocolUrlToPath } from './services/avatarCacheService'
+import { BackgroundVideoService } from './services/backgroundVideoService'
 import { snsService, isVideoUrl } from './services/snsService'
 import { WasmService } from './services/wasmService'
 import { analyticsService } from './services/analyticsService'
@@ -83,6 +84,8 @@ let tray: Tray | null = null
 let isAppQuitting = false
 let mainWindowReady = false
 let configService: ConfigService | null = null
+/** 视频背景降采样缓存（startApp 里初始化，config:get 会用到） */
+let backgroundVideoService: BackgroundVideoService | null = null
 let messagePushService: MessagePushService | null = null
 let shutdownPromise: Promise<void> | null = null
 let fatalProcessError = false
@@ -1975,7 +1978,17 @@ function registerIpcHandlers() {
   })
 
   // 配置
-  ipcMain.handle('config:get', (_e, key: string) => (configService as any)?.get(key))
+  ipcMain.handle('config:get', (_e, key: string) => {
+    // 视频背景的透明降采样：渲染进程只管拿到「该播哪个文件」，转码与缓存全在
+    // 主进程做（见 backgroundVideoService）。第一次返回原文件并启动后台转码，
+    // 之后返回缓存 —— 启动路径永远不等 ffmpeg。
+    if (key === 'appearanceBackgroundPath') {
+      const requested = String((configService as any)?.get(key) || '')
+      if (!requested || !backgroundVideoService) return requested
+      return backgroundVideoService.resolve(requested).path
+    }
+    return (configService as any)?.get(key)
+  })
   ipcMain.handle('config:set', async (_e, key: string, value: unknown) => {
     (configService as any)?.set(key, value)
     if (key === 'launchAtStartup') {
@@ -2850,6 +2863,9 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     success: weportAiService.deleteChat(String(chatId || '')),
   }))
   ipcMain.handle('ai:getChat', (_e, chatId: string) => weportAiService.getChat(String(chatId || '')))
+  // 手动压缩：与 runChat 的自动压缩共用 service 侧实现，返回体区分
+  // 「已压缩」和「还没到阈值」，面板据此给出不同提示。
+  ipcMain.handle('ai:compactChat', (_e, chatId: string) => weportAiService.compactChat(String(chatId || '')))
   ipcMain.handle('ai:listNotes', (_e, chatId: string) => ({ notes: weportAiService.listNotes(String(chatId || '')) }))
   ipcMain.handle('ai:readNoteFile', (_e, chatId: string, path: string) => ({
     content: weportAiService.readNoteFile(String(chatId || ''), String(path || '')),
@@ -2940,6 +2956,14 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('weclone:setVisibility', (_e, id: string, visibility: string) =>
     weCloneService.setVisibility(String(id || ''), String(visibility || '')))
   ipcMain.handle('weclone:getServerStatus', () => weCloneService.getServerStatus())
+  // 和分身对话：知识库在服务器上，这里只是一次转发调用。返回体带 `hint`，
+  // 因为最常见的失败（服务器没起、服务器没这个分身）需要具体的下一步指引，
+  // 光回一句「失败」对用户没有帮助。
+  ipcMain.handle(
+    'weclone:chat',
+    (_e, cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
+      weCloneService.chatWithClone({ cloneId: String(cloneId || ''), message: String(message || ''), history })
+  )
   ipcMain.handle('weclone:cancel', () => {
     wecloneControllers.get('generate')?.abort()
     weCloneService.cancel()
@@ -7198,6 +7222,9 @@ function startApp() {
 
     // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
     avatarCacheService.init(configService.getCacheBasePath())
+
+    // 视频背景的降采样缓存：把 4K 壁纸转成显示尺寸那一版，省下大部分解码。
+    backgroundVideoService = new BackgroundVideoService(configService.getCacheBasePath())
 
     // weport-media://local/<encodeURIComponent(绝对路径)>：本地媒体只读协议
     // （仅允许文件存在时返回；用于朋友圈视频/图片预览 + 头像磁盘缓存）

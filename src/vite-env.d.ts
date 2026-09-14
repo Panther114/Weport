@@ -367,6 +367,16 @@ interface ElectronApi {
     renameChat: (chatId: string, title: string) => Promise<{ success: boolean }>
     reorderChats: (orderedIds: string[]) => Promise<{ success: boolean }>
     deleteChat: (chatId: string) => Promise<{ success: boolean }>
+    /** 手动压缩上下文：`changed: false` 表示还没到阈值，未做改动。 */
+    compactChat: (chatId: string) => Promise<{
+      success: boolean
+      changed: boolean
+      reason?: 'below-threshold' | 'not-found'
+      dropped?: number
+      kept?: number
+      digestChars?: number
+      error?: string
+    }>
     getChat: (chatId: string) => Promise<{
       chat: { id: string; title: string; createdAt: number; updatedAt: number }
       workspaceDir: string
@@ -378,6 +388,8 @@ interface ElectronApi {
         reasoning?: string
         toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string }>
         createdAt: number
+        /** 本轮解码计时（ttft / decode / output tokens），用于消息尾部 tok/s 读数 */
+        timing?: { ttftMs: number; decodeMs: number; outputTokens: number }
       }>
       lastRun?: {
         usage?: { totalTokens?: number; promptTokens?: number; completionTokens?: number; reasoningTokens?: number; promptCacheHitTokens?: number }
@@ -510,6 +522,14 @@ interface ElectronApi {
     setAgentSettings: (patch: { allowAgentWrite?: boolean }) => Promise<{ allowAgentWrite: boolean }>
   }
   weclone: {
+    /** 和分身对话。`hint` 是给用户看的下一步指引（服务器没起 / 服务器没这个分身）。 */
+    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) => Promise<{
+      success: boolean
+      reply?: string
+      elapsedMs?: number
+      error?: string
+      hint?: string
+    }>
     generate: (opts?: { localOnly?: boolean }) => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo

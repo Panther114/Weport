@@ -19,6 +19,7 @@ import WeCloneProgress from '../components/weclone/WeCloneProgress'
 import WeCloneCard from '../components/weclone/WeCloneCard'
 import WeCloneServerConfig from '../components/weclone/WeCloneServerConfig'
 import WeCloneForcedKey from '../components/weclone/WeCloneForcedKey'
+import WeCloneChatDrawer from '../components/weclone/WeCloneChatDrawer'
 import type {
   WeCloneListItem,
   WeCloneProgressInfo,
@@ -55,6 +56,8 @@ export default function WeClonePage() {
   const [progress, setProgress] = useState<WeCloneProgressInfo | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [panelOpen, setPanelOpen] = useState(false)
+  /** 对话抽屉的目标分身：非空即打开 */
+  const [chatTarget, setChatTarget] = useState<WeCloneListItem | null>(null)
   /** 渲染侧取消句柄：中止本地 UI 状态跟踪（真正的取消走 weclone.cancel IPC） */
   const abortRef = useRef<AbortController | null>(null)
 
@@ -338,6 +341,17 @@ export default function WeClonePage() {
     </div>
   )
 
+  // 对话抽屉必须挂在**每个**分支上，不能只挂在文件末尾那个 return。
+  // 「管理分身」是独立的 early return，之前只把抽屉加到末尾，于是从列表点
+  // 「开始对话」永远不会打开任何东西 —— 状态改了，但没有地方渲染它。
+  const chatDrawer = chatTarget ? (
+    <WeCloneChatDrawer
+      clone={chatTarget}
+      serverConfigured={Boolean(serverStatus?.configured)}
+      onClose={() => setChatTarget(null)}
+    />
+  ) : null
+
   // ---------------------------------------------------------------- Manage（列表）
   if (section === 'manage') {
     return (
@@ -390,9 +404,11 @@ export default function WeClonePage() {
                   serverBaseUrl={serverStatus?.baseUrl || ''}
                   onVisibilityChange={handleVisibilityChange}
                   onDeleteRequest={(c) => setConfirmDelete(c)}
+                  onChat={(c) => setChatTarget(c)}
                 />
               ))}
             </div>
+            {chatDrawer}
           </>
         )}
 
@@ -488,6 +504,7 @@ export default function WeClonePage() {
       </div>
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      {chatDrawer}
     </div>
   )
 }

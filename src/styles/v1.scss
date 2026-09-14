@@ -1202,14 +1202,58 @@ textarea,
 // 改成吸顶页头：主按钮放在页头右端，页头吸顶。动作**始终可见**，而且它在正常
 // 流里的位置就在顶部，永远不会和下方内容争位置。
 
-.panel.export-page > .panel-head {
+// 页头与进度合成一个 sticky 块：块整体滚到顶部就停住，页头和进度永远是紧邻的
+// 两行，不需要硬编码页头高度去算偏移。块内的页头必须去掉自己的 sticky ——
+// sticky 在 sticky 里只会贴着父盒粘，不会贴着滚动容器。
+.panel.export-page > .exp-sticky {
   position: sticky;
   top: 0;
   z-index: 6;
+}
+
+.panel.export-page > .exp-sticky > .panel-head {
+  position: static;
   background: var(--panel);
   margin-inline: calc(var(--space-4) * -1);
   padding-inline: var(--space-4);
   border-bottom: 1px solid var(--line);
+}
+
+// 进度条并入吸顶块后没有自己的背景，滚上去会露出下面的内容，所以给底色。
+.exp-progress-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-inline: calc(var(--space-4) * -1);
+  padding: var(--space-2) var(--space-4);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.exp-progress-bar .progress-track {
+  flex: 1;
+  min-width: 120px;
+}
+
+.exp-progress-session {
+  flex: 0 1 auto;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.exp-progress-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.exp-progress-cancel {
+  flex: 0 0 auto;
 }
 
 // 页头里的操作排成一行，主操作在最右

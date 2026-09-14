@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   CheckCircle2,
   ChevronDown,
@@ -109,6 +110,20 @@ export default function AiSettingsModal({
     ...(editingId ? profiles.find((p) => p.id === editingId)?.discovery?.models || [] : []),
     ...(draft.model ? [draft.model] : []),
   ]))
+
+  /**
+   * 给模型下拉项补上单价后缀。
+   *
+   * 选模型是**唯一**该看价格的时刻 —— 选完之后价格只影响账单。主进程已经把
+   * registry 里的定价解好（`setup.modelCosts`），这里只负责呈现。没有收录的
+   * 模型明确写「未定价」：一片空白会让人以为是免费的。
+   */
+  const modelOptionLabel = (model: string): string => {
+    const cost = setup?.modelCosts?.[model]
+    if (!cost || (cost.input === undefined && cost.output === undefined)) return `${model} · 未定价`
+    const one = (v: number | undefined) => (v === undefined ? '—' : `$${v}`)
+    return `${model} · ${one(cost.input)}/${one(cost.output)} 每百万`
+  }
 
   useEffect(() => {
     void api.ai.listActions().then((r) => setActions(r.actions || [])).catch(() => undefined)
@@ -507,7 +522,37 @@ export default function AiSettingsModal({
                   <div className="field"><label htmlFor="aiProfileName">配置名称</label><input id="aiProfileName" className="path-input ai-input-wide" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
                   <div className="field"><label htmlFor="aiProvider">Provider</label><select id="aiProvider" className="path-input" value={draft.providerId} onChange={(e) => selectProvider(e.target.value)}>{catalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></div>
                   <div className="field"><label htmlFor="aiApiKey">API key</label><input id="aiApiKey" className="path-input ai-input-wide" type="password" value={draft.apiKey} placeholder={editingId ? `已保存 ${profiles.find((p) => p.id === editingId)?.apiKeyHint || '密钥'}；留空保持不变` : (selectedCatalog?.apiKeyOptional ? '本地服务可留空' : '输入 API key')} onChange={(e) => { setDraft({ ...draft, apiKey: e.target.value }); setModelDiscoveryDone(false) }} autoComplete="off" spellCheck={false} /></div>
-                  <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></div>
+                  <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{modelOptionLabel(model)}</option>)}</select></div>
+                  {/* 选中模型的价格明细。列表里只有 `in/out` 两个数，这里给出完整
+                      分项 + 来源，用户才能判断该不该信这个数字。 */}
+                  {draft.model && (
+                    <div className="ai-cost-detail">
+                      {(() => {
+                        const c = setup?.modelCosts?.[draft.model]
+                        if (!c || (c.input === undefined && c.output === undefined)) {
+                          return <span className="ai-cost-none">未收录定价（models.dev）· 请以提供商账单为准</span>
+                        }
+                        const rows: Array<[string, number | undefined]> = [
+                          ['输入', c.input],
+                          ['输出', c.output],
+                          ['缓存读', c.cacheRead],
+                          ['缓存写', c.cacheWrite],
+                          ['推理', c.reasoning],
+                        ]
+                        return (
+                          <>
+                            {rows.map(([label, value]) => (
+                              <span key={label} className="ai-cost-chip" data-missing={value === undefined}>
+                                {label} {value === undefined ? '—' : `$${value}`}
+                              </span>
+                            ))}
+                            <span className="ai-cost-unit">USD / 百万 token</span>
+                            {c.source ? <span className="ai-cost-source">来源 {c.source}</span> : null}
+                          </>
+                        )
+                      })()}
+                    </div>
+                  )}
                   {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
                   {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
                 </div>
@@ -531,8 +576,7 @@ export default function AiSettingsModal({
   )
 
   const addDialog = (
-        <div className="ai-add-overlay" onClick={() => !addSaving && setAddOpen(false)}>
-          <div className="ai-add-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-add-title">
+        <div className="ai-add-overlay" onClick={() => !addSaving && setAddOpen(false)}>          <div className="ai-add-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-add-title">
             <div className="ai-add-head">
               <div className="ai-add-title">
                 <div className="ai-add-icon"><Sparkles size={16} /></div>
@@ -613,11 +657,19 @@ export default function AiSettingsModal({
         </div>
   )
 
+  // 「添加提供商」必须走 portal 挂到 body 上。
+  //
+  // 设置页里这个组件是 `inline` 渲染的 —— 它落在设置页自己的滚动容器内，而
+  // `.modal` / 页面容器带 `animation`（会建立 containing block）。`position: fixed`
+  // 于是不再相对视口定位，浮层被钉在滚动容器的底部，看起来就是"弹窗跑到屏幕最下面"。
+  // 挂到 body 之后，fixed 才真的是相对视口居中。
+  const addOverlay = createPortal(addDialog, document.body)
+
   if (inline) {
     return (
       <div className="ai-provider-inline">
         {body}
-        {addOpen && addDialog}
+        {addOpen && addOverlay}
       </div>
     )
   }
@@ -629,7 +681,7 @@ export default function AiSettingsModal({
         <p className="hint">服务配置按 profile 管理。API key 只在本机加密保存，列表、摘要和 discovery 结果都不会返回原始密钥。</p>
         {body}
       </div>
-      {addOpen && addDialog}
+      {addOpen && addOverlay}
     </div>
   )
 }

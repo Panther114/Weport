@@ -36,7 +36,9 @@ import AiMarkdown from './AiMarkdown'
 import './providerProfiles.css'
 
 type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number }
-type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string }
+// `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
+// ToolChip 渲染转圈而不是把它标成失败。
+type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string }
 type AiMessage = {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -44,6 +46,7 @@ type AiMessage = {
   reasoning?: string
   toolCalls?: AiToolCall[]
   createdAt: number
+  timing?: { ttftMs: number; decodeMs: number; outputTokens: number }
 }
 type AiEvent =
   | { type: 'status'; chatId: string; running: boolean }
@@ -51,7 +54,7 @@ type AiEvent =
   | { type: 'text_delta'; chatId: string; delta: string }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
   | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string }
-  | { type: 'assistant_message'; chatId: string; message: AiMessage }
+  | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: { ttftMs: number; decodeMs: number; outputTokens: number } }
   | { type: 'chat_title'; chatId: string; title: string }
   | { type: 'error'; chatId: string; message: string }
   | { type: 'done'; chatId: string; usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number; totalTokens: number; promptCacheHitTokens?: number }; aborted?: boolean; context?: { promptTokens: number; cacheHitTokens: number; lastRequestTokens: number; recentRate: number; contextWindow: number } }
@@ -60,8 +63,29 @@ type AiEvent =
 import { type AiAction, type ProviderCatalogEntry, type ProviderModelMetadata, type ProviderProfileSummary, type ProviderProtocol, type SetupInfo } from './aiPanelTypes'
 type AiNote = { path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }
 
-type LiveTool = { id: string; name: string; friendly: string; ok?: boolean; summary?: string; running: boolean }
-type LiveState = { reasoning: string; text: string; tools: LiveTool[] }
+type LiveTool = { id: string; name: string; friendly: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; result?: string; running: boolean }
+type LiveState = { reasoning: string; text: string; tools: LiveTool[]; firstTokenAt?: number; lastTokenAt?: number }
+
+/**
+ * 输出速度读数，口径与 DSH 一致：
+ *
+ *   TPS = outputTokens / (decodeMs / 1000)
+ *
+ * 其中 `decodeMs` 只算「首 token 之后」的解码时间，不含 TTFT。用总耗时算出来的
+ * 数字会把长前缀的等待时间摊进吞吐里，慢的不像话还没有可比性。
+ *
+ * 显示规则也照搬 DSH：≥10 取整，<10 保留一位小数，负数夹到 0。
+ */
+function formatTokensPerSecond(tps: number): string {
+  const clamped = Math.max(0, tps)
+  return clamped >= 10 ? String(Math.round(clamped)) : String(Math.round(clamped * 10) / 10)
+}
+
+/** 一轮结束后的读数：`52.3 tok/s`；没有计时数据（旧记录）时返回 null。 */
+function messageTps(timing: AiMessage['timing']): number | null {
+  if (!timing || timing.decodeMs <= 0 || timing.outputTokens <= 0) return null
+  return timing.outputTokens / (timing.decodeMs / 1000)
+}
 
 const TOOL_ICON: Record<string, React.ComponentType<{ size?: number | string; strokeWidth?: number | string }>> = {
   list_sessions: Users,
@@ -128,6 +152,35 @@ function fmtCost(value: number | null): string {
 }
 
 /**
+ * 每百万 token 单价，`$0.14 / $0.28`。缺哪一项就写 `—`。
+ *
+ * 价格来自 models.dev（USD / 1M tokens），**运行时抓取、不是写死的**：
+ * 新模型和新定价自己就会进来，不需要发版。面板必须把来源与取数时间一起显示，
+ * 否则用户没办法判断这个数字是不是过期了。
+ */
+function fmtPrice(cost: ProviderModelMetadata['cost'] | undefined): string {
+  if (!cost || (cost.input === undefined && cost.output === undefined)) return '未定价'
+  const one = (v: number | undefined) => (v === undefined ? '—' : `$${v}`)
+  return `${one(cost.input)} / ${one(cost.output)}`
+}
+
+function costTooltip(meta: ProviderModelMetadata | null): string | undefined {
+  if (!meta) return undefined
+  const c = meta.cost
+  if (!c || (c.input === undefined && c.output === undefined)) {
+    return '这个模型没有公开定价（models.dev 未收录）。未定价 ≠ 免费，请以提供商账单为准。'
+  }
+  const lines = [
+    `输入 ${c.input ?? '—'} / 输出 ${c.output ?? '—'} USD 每百万 token`,
+    c.cacheRead !== undefined ? `缓存读取 ${c.cacheRead}` : null,
+    c.cacheWrite !== undefined ? `缓存写入 ${c.cacheWrite}` : null,
+    c.reasoning !== undefined ? `推理 ${c.reasoning}` : null,
+    meta.source ? `来源：${meta.source}` : null,
+  ].filter(Boolean)
+  return lines.join('\n')
+}
+
+/**
  * Capability chips + the real context window for the active model.
  *
  * Every chip is driven by resolved metadata, and a missing field simply produces
@@ -179,10 +232,27 @@ function splitReasoning(reasoning: string, n: number): string[] {
   return chunks
 }
 
+/** 参数展开区：`{"path":"notes/x.md"}` 这种原始入参是排查工具行为最直接的证据 */
+function formatToolArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) return ''
+  const entries = Object.entries(args)
+  if (entries.length === 0) return ''
+  try {
+    return JSON.stringify(args, null, 2)
+  } catch {
+    return String(args)
+  }
+}
+
 function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
   const [open, setOpen] = useState(false)
   const Icon = TOOL_ICON[call.name] || Info
   const hasResult = typeof call.result === 'string' && call.result.length > 0
+  const argsText = formatToolArgs(call.args)
+  const hasArgs = argsText.length > 0
+  // 运行中也要能展开：工具正在跑的时候用户最想看的就是"它到底带了什么参数"。
+  // 旧实现只允许有 result 的卡片展开，于是进行中的调用点了没反应。
+  const expandable = hasResult || hasArgs
   const isMemoryWrite =
     call.name === 'write_note' &&
     (String(call.args?.path || '').startsWith('memory/') || call.friendly.includes('memory/'))
@@ -191,10 +261,16 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
       <button
         type="button"
         className={`ai-tool-row${open ? ' open' : ''}`}
-        onClick={() => hasResult && setOpen((v) => !v)}
+        onClick={() => expandable && setOpen((v) => !v)}
+        disabled={!expandable}
         aria-expanded={open}
+        title={expandable ? (open ? '收起详情' : '展开参数与结果') : undefined}
       >
-        <ChevronDown size={12} className={`ai-tool-chev${open ? ' open' : ''}`} />
+        {expandable ? (
+          <ChevronDown size={12} className={`ai-tool-chev${open ? ' open' : ''}`} />
+        ) : (
+          <span className="ai-tool-chev-placeholder" />
+        )}
         <span className="ai-tool-icon">
           <Icon size={13} strokeWidth={1.8} />
         </span>
@@ -204,9 +280,20 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
           {call.ok === true ? <CheckCircle2 size={13} /> : call.ok === false ? <XCircle size={13} /> : live ? <span className="ai-spinner" /> : null}
         </span>
       </button>
-      {open && hasResult && (
+      {open && expandable && (
         <div className="ai-tool-detail">
-          <pre>{call.result}</pre>
+          {hasArgs && (
+            <>
+              <div className="ai-tool-detail-label">参数</div>
+              <pre>{argsText}</pre>
+            </>
+          )}
+          {hasResult && (
+            <>
+              <div className="ai-tool-detail-label">结果</div>
+              <pre>{call.result}</pre>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -243,6 +330,11 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [memoryDir, setMemoryDir] = useState('')
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  /** 待删除的记忆/笔记文件：非空时弹出确认框 */
+  const [noteDeleteTarget, setNoteDeleteTarget] = useState<AiNote | null>(null)
+  const [compacting, setCompacting] = useState(false)
+  /** 轻量提示（压缩结果这类不需要打断操作的信息） */
+  const [notice, setNotice] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
@@ -256,6 +348,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const stickToBottom = useRef(true)
+  /** 用户主动上滚后暂停自动跟随；`ai-thread` 右下角给一个「回到底部」的入口 */
+  const [followPaused, setFollowPaused] = useState(false)
+  /** 流式读数的重算触发器（每 400ms +1） */
+  const [nowTick, setNowTick] = useState(0)
   const actionsRef = useRef<HTMLDivElement | null>(null)
   // 用于异步回调里的会话一致性判断（openChat 的 getChat 可能晚于后续切换返回）
   const activeIdRef = useRef<string | null>(null)
@@ -386,18 +482,38 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           setCtxStats({ promptTokens: e.promptTokens, cacheHitTokens: e.cacheHitTokens, lastRequestTokens: e.lastRequestTokens, recentRate: e.recentRate, contextWindow: e.contextWindow })
           break
         case 'reasoning_delta':
-          setLive((prev) => ({ reasoning: (prev?.reasoning || '') + e.delta, text: prev?.text || '', tools: prev?.tools || [] }))
+          setLive((prev) => {
+            const now = Date.now()
+            return {
+              reasoning: (prev?.reasoning || '') + e.delta,
+              text: prev?.text || '',
+              tools: prev?.tools || [],
+              firstTokenAt: prev?.firstTokenAt ?? now,
+              lastTokenAt: now,
+            }
+          })
           break
         case 'text_delta':
-          setLive((prev) => ({ reasoning: prev?.reasoning || '', text: (prev?.text || '') + e.delta, tools: prev?.tools || [] }))
+          setLive((prev) => {
+            const now = Date.now()
+            return {
+              reasoning: prev?.reasoning || '',
+              text: (prev?.text || '') + e.delta,
+              tools: prev?.tools || [],
+              firstTokenAt: prev?.firstTokenAt ?? now,
+              lastTokenAt: now,
+            }
+          })
           break
         case 'tool_start':
           setLive((prev) => ({
             reasoning: prev?.reasoning || '',
             text: prev?.text || '',
+            firstTokenAt: prev?.firstTokenAt,
+            lastTokenAt: prev?.lastTokenAt,
             tools: [
               ...(prev?.tools || []).filter((t) => t.id !== e.callId),
-              { id: e.callId, name: e.name, friendly: e.friendly, running: true },
+              { id: e.callId, name: e.name, friendly: e.friendly, args: e.args, running: true },
             ],
           }))
           break
@@ -405,16 +521,18 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           setLive((prev) => ({
             reasoning: prev?.reasoning || '',
             text: prev?.text || '',
+            firstTokenAt: prev?.firstTokenAt,
+            lastTokenAt: prev?.lastTokenAt,
             tools: (prev?.tools || []).map((t) =>
-              t.id === e.callId ? { ...t, ok: e.ok, summary: e.summary, running: false } : t,
+              t.id === e.callId ? { ...t, ok: e.ok, summary: e.summary, running: false, result: e.detail ?? t.result } : t,
             ),
           }))
           if (e.name === 'write_note' || e.name === 'list_notes') setNotesDirty(true)
           break
         case 'assistant_message': {
           setLive(null)
-          const msg = e as unknown as { message: AiMessage }
-          setMessages((prev) => [...prev, msg.message])
+          const msg = e as unknown as { message: AiMessage; timing?: AiMessage['timing'] }
+          setMessages((prev) => [...prev, msg.timing ? { ...msg.message, timing: msg.timing } : msg.message])
           break
         }
         case 'chat_title':
@@ -481,8 +599,38 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const handleThreadScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    stickToBottom.current = atBottom
+    // 只有"用户自己滚上去"才切到暂停跟随；程序化滚动到底部不算改变意图。
+    setFollowPaused(!atBottom)
   }, [])
+
+  const resumeFollow = useCallback(() => {
+    stickToBottom.current = true
+    setFollowPaused(false)
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [])
+
+  // 流式期间每 400ms 让读数重新计算一次。没有这个 tick，速度只在收到新 delta
+  // 时刷新 —— 模型卡住不动时读数会定格在旧值上，看起来像还在飞速输出。
+  useEffect(() => {
+    if (!live) return
+    const timer = window.setInterval(() => setNowTick((v) => v + 1), 400)
+    return () => window.clearInterval(timer)
+  }, [live])
+
+  // 实时 TPS：与 messageTps 同口径，只是 token 数用字符数估算（流式阶段拿不到
+  // usage）。解码时间同样从首个 token 起算，不含首 token 等待。
+  const liveTps = useMemo(() => {
+    if (!live?.firstTokenAt) return null
+    const chars = (live.text?.length || 0) + (live.reasoning?.length || 0)
+    if (chars === 0) return null
+    // 用「最后一个 delta 的时间」而不是 Date.now()：模型停住时读数应当跟着停住，
+    // 而不是被一个不断变大的分母慢慢稀释成越来越小的数字。
+    const decodeMs = Math.max(1, (live.lastTokenAt || live.firstTokenAt) - live.firstTokenAt)
+    return chars / 2.5 / (decodeMs / 1000)
+  }, [live, nowTick])
 
   useEffect(() => {
     if (running) inputRef.current?.focus()
@@ -705,14 +853,58 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     }
   }
 
-  async function deleteNote(note: AiNote) {
-    if (!activeId) return
-    await api.ai.deleteNoteFile(activeId, note.path)
-    await refreshNotesList()
+  /**
+   * 删除记忆/笔记文件前必须确认。
+   *
+   * 这些文件是 agent 长期记忆的唯一副本（`memory/` 跨会话共享），一次误点的
+   * 代价是不可恢复的。对话删除早就有确认框，文件删除却一直是"点一下就没了"。
+   */
+  function requestDeleteNote(note: AiNote) {
+    setNoteDeleteTarget(note)
+  }
+
+  async function confirmDeleteNote() {
+    const note = noteDeleteTarget
+    setNoteDeleteTarget(null)
+    setViewingNote(null)
+    if (!note || !activeId) return
+    try {
+      await api.ai.deleteNoteFile(activeId, note.path)
+      await refreshNotesList()
+    } catch {
+      setError('删除文件失败')
+    }
+  }
+
+  /** 手动压缩上下文：与 runChat 的自动压缩共用 service 侧实现。 */
+  async function compactNow() {
+    if (!activeId || compacting) return
+    setCompacting(true)
+    try {
+      const res = await api.ai.compactChat(activeId)
+      if (!res.success) {
+        setError(res.error || '压缩失败')
+      } else if (!res.changed) {
+        pushLocalNotice('当前上下文尚未超过压缩阈值，未做改动')
+      } else {
+        pushLocalNotice(`已压缩：归档 ${res.dropped ?? 0} 条，保留 ${res.kept ?? 0} 条`)
+        const data = await api.ai.getChat(activeId)
+        setMessages(data?.messages || [])
+      }
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setCompacting(false)
+    }
   }
 
   function openMemoryFolder() {
     if (memoryDir) void api.shell.openPath(memoryDir)
+  }
+
+  function pushLocalNotice(text: string) {
+    setNotice(text)
+    window.setTimeout(() => setNotice((current) => (current === text ? '' : current)), 4000)
   }
 
   return (
@@ -848,14 +1040,51 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                 <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
               </span>
             ) : null}
+            {/* 当前模型的单价（USD / 1M tokens）。放在顶栏而不是埋在设置里：
+                "这一轮大概花了多少"必须先知道单价。未定价的模型明确写「未定价」，
+                不能显示成 $0.00 —— 未定价和免费是两件事。 */}
+            {activeModelMeta ? (
+              <span
+                className="ai-meter ai-meter-cost"
+                data-tone={runCost === null ? 'warn' : undefined}
+                title={costTooltip(activeModelMeta)}
+              >
+                <span className="ai-meter-label">单价</span>
+                <b>{fmtPrice(activeModelMeta.cost)}</b>
+              </span>
+            ) : null}
             {usage ? (
               <span className="ai-meter" data-tone="ok" title="最近一次请求的缓存命中率">
                 <span className="ai-meter-label">缓存</span>
                 <b>{usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0}%</b>
               </span>
             ) : null}
+            {usage ? (
+              <span className="ai-meter" title={`本轮累计花费（按上面单价估算）：${fmtCost(runCost)}`}>
+                <span className="ai-meter-label">本轮</span>
+                <b>{fmtCost(runCost)}</b>
+              </span>
+            ) : null}
+            {/* 压缩上下文的显式入口。自动压缩只在用户回合边界且超过 0.8 窗口时
+                触发，长任务中途想主动腾空间没有别的办法。 */}
+            <button
+              type="button"
+              className="ai-meter ai-meter-action"
+              onClick={() => void compactNow()}
+              disabled={!activeId || compacting || running}
+              title="把较早的轮次折叠进摘要，保留最近一段原文。归档原文不会丢失。"
+            >
+              <span className="ai-meter-label">{compacting ? '压缩中…' : '压缩'}</span>
+              <b>上下文</b>
+            </button>
           </div>
         </div>
+
+        {notice && (
+          <div className="ai-notice" role="status">
+            {notice}
+          </div>
+        )}
 
         {setup && !setup.hasApiKey && (
           <div className="ai-warn-banner warn">
@@ -929,6 +1158,16 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                     {m.content ? <AiMarkdown text={m.content} /> : null}
                   </>
                 )}
+                {/* 本轮解码速度。只在有计时数据时出现（旧记录没有），不占位。 */}
+                {(() => {
+                  const tps = messageTps(m.timing)
+                  if (tps === null) return null
+                  return (
+                    <div className="ai-msg-stats" title={`首 token ${(m.timing!.ttftMs / 1000).toFixed(1)}s · 解码 ${(m.timing!.decodeMs / 1000).toFixed(1)}s · ${m.timing!.outputTokens} tokens`}>
+                      <span className="ai-msg-tps">{formatTokensPerSecond(tps)} tok/s</span>
+                    </div>
+                  )
+                })()}
               </div>
             ),
           )}
@@ -938,7 +1177,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               {live.tools.length > 0 && (
                 <div className="ai-tool-stack">
                   {live.tools.map((t) => (
-                    <ToolChip key={t.id} call={{ id: t.id, name: t.name, args: {}, friendly: t.friendly, ok: t.ok ?? false }} live />
+                    <ToolChip
+                      key={t.id}
+                      call={{ id: t.id, name: t.name, args: t.args || {}, friendly: t.friendly, ok: t.ok, result: t.result }}                      live={t.running}
+                    />
                   ))}
                 </div>
               )}
@@ -968,6 +1210,14 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                   {live.tools.length > 0 ? <span className="ai-thinking-hint">（正在分析上一步结果…）</span> : <span>…</span>}
                 </div>
               )}
+              {/* 流式期间的实时读数：与 DSH 同一口径（首 token 之后的解码速度）。
+                  token 数按字符数 / CHARS_PER_TOKEN 估算 —— 流式阶段没有 usage，
+                  估算值用来给量级感知，落库后的正式读数走 messageTps。 */}
+              {liveTps !== null && (
+                <div className="ai-msg-stats live">
+                  <span className="ai-msg-tps">{formatTokensPerSecond(liveTps)} tok/s</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -977,6 +1227,17 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             </div>
           )}
         </div>
+
+        {/* 用户上滚阅读时暂停自动跟随，并给出明确的「回到最新」入口。
+            旧实现只在"离底部 < 120px"时才继续跟随，但流式输出把滚动位置一直
+            拽回底部，用户刚滚上去就被拉回来 —— 想读上面一段几乎不可能。 */}
+        {followPaused && (
+          <button type="button" className="ai-follow-resume" onClick={resumeFollow}>
+            <ChevronDown size={13} />
+            回到最新
+            {running && <span className="ai-follow-live" />}
+          </button>
+        )}
 
         {/* 引用 chip 与选择器都放在 composer 之外：composer 是横向 flex，
             把弹层塞进去会被裁切。 */}
@@ -1145,7 +1406,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                             </span>
                           </div>
                         </button>
-                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => void deleteNote(n)}>
+                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => requestDeleteNote(n)}>
                           <Trash2 size={11} />
                         </button>
                       </div>
@@ -1169,7 +1430,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                             </span>
                           </div>
                         </button>
-                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => void deleteNote(n)}>
+                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => requestDeleteNote(n)}>
                           <Trash2 size={11} />
                         </button>
                       </div>
@@ -1263,7 +1524,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                 type="button"
                 className="danger-btn"
                 onClick={() => {
-                  void deleteNote(viewingNote.note)
+                  requestDeleteNote(viewingNote.note)
                   setViewingNote(null)
                 }}
               >
@@ -1272,6 +1533,34 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               </button>
               <button className="secondary-btn" type="button" onClick={() => setViewingNote(null)}>
                 关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {noteDeleteTarget && (
+        <div className="modal-backdrop" onClick={() => setNoteDeleteTarget(null)}>
+          <div className="modal danger" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-del-file-title">
+            <h3 id="ai-del-file-title">
+              <Trash2 size={15} />
+              删除这个文件？
+            </h3>
+            <p>
+              <code>{noteDeleteTarget.path}</code>
+              <br />
+              {noteDeleteTarget.scope === 'memory'
+                ? '这是跨会话共享的长期记忆，删除后 agent 将不再记得其中记录的内容，且不会随对话一起恢复。'
+                : '这是本对话的草稿笔记。'}
+              此操作不可恢复。
+            </p>
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" onClick={() => setNoteDeleteTarget(null)}>
+                取消
+              </button>
+              <button className="danger-btn" type="button" onClick={() => void confirmDeleteNote()}>
+                <Trash2 size={13} />
+                确认删除
               </button>
             </div>
           </div>

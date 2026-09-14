@@ -1213,6 +1213,97 @@ export class WeCloneService {
     return { success: true, clones: merged, error: remoteError }
   }
 
+  /**
+   * 和分身对话。
+   *
+   * 知识库在**服务器**上（Weport 只是客户端），所以这里一次 HTTP 调用就完了 ——
+   * 不需要 AI provider，也不需要旁路任何本地逻辑。`stream: false` 让服务器直接
+   * 回一个 JSON，界面拿整段渲染；SSE 那套留给以后需要打字机效果时再加。
+   *
+   * 三个容易踩的点，都在这里处理：
+   *  1. `cloneId` 必须是**服务器的** id。本机档案的 `id` 是本地目录名，
+   *     上传过的才有 `serverId`；直接把本地 id 拼进 URL 会 404。
+   *  2. 没配置服务器时不能只说"失败"，要告诉用户去哪儿配 —— 这是最常见的
+   *     第一脚（用户装完 app 想跟分身说话，但服务还跑在 127.0.0.1:8099）。
+   *  3. 服务器返回非 JSON（Express 的错误页、代理的 HTML）时必须保留原文，
+   *     否则用户只看到「HTTP 500」。
+   */
+  async chatWithClone(input: {
+    cloneId: string
+    message: string
+    history?: Array<{ role: string; content: string }>
+    signal?: AbortSignal
+  }): Promise<{ success: boolean; reply?: string; elapsedMs?: number; error?: string; hint?: string }> {
+    const serverCfg = this.getServerConfig()
+    if (!serverCfg.configured) {
+      return {
+        success: false,
+        error: '尚未配置分身服务器，无法对话',
+        hint: '分身的知识库跑在服务器上。本地可以先 `node weclone-server` 起一个，再回到「设置 → 人格克隆」把地址（默认 http://127.0.0.1:8099）和 token 填上。',
+      }
+    }
+    // 服务器认的 id 有三种来源，按可靠性排序：
+    //   1. 本机档案的 serverId（上传成功后记下的权威值）；
+    //   2. 传进来的 id 本身就是服务器 id；
+    //   3. `remote_<uuid>` —— getClones() 给「仅服务器」条目造的合成 id，
+    //      前缀必须剥掉，否则请求打到 `/api/weclone/remote_<uuid>/chat`，
+    //      服务器回 `clone not found`。这个洞是实测撞出来的：从列表点第一个
+    //      「仅服务器」克隆聊天，必然走到这里。
+    const local = this.listLocalClones().find((m) => m.id === input.cloneId || m.serverId === input.cloneId)
+    const rawId = String(input.cloneId || '').trim()
+    const targetId = String(local?.serverId || rawId.replace(/^remote_/, '')).trim()
+    if (!targetId) return { success: false, error: '缺少分身 id' }
+    const message = String(input.message || '').trim()
+    if (!message) return { success: false, error: '消息不能为空' }
+    const history = Array.isArray(input.history)
+      ? input.history.filter((h) => h && typeof h.content === 'string' && h.content.trim()).slice(-40)
+      : []
+
+    const started = Date.now()
+    try {
+      const resp = await this.fetchWithTimeout(
+        `${serverCfg.baseUrl}/api/weclone/${encodeURIComponent(targetId)}/chat`,
+        {
+          method: 'POST',
+          headers: { ...this.authHeaders(serverCfg.token), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, history, stream: false }),
+        },
+        180_000,
+        input.signal
+      )
+      const text = await resp.text().catch(() => '')
+      let payload: { reply?: string; error?: string } | null = null
+      try {
+        payload = JSON.parse(text) as { reply?: string; error?: string }
+      } catch {
+        payload = null
+      }
+      if (!resp.ok || !payload) {
+        const detail = payload?.error || text.trim().slice(0, 300)
+        return {
+          success: false,
+          error: detail || `HTTP ${resp.status}`,
+          hint: resp.status === 404 ? '服务器上没有这个分身：先在「人格克隆」里生成并上传一个。' : undefined,
+        }
+      }
+      const reply = String(payload.reply || '').trim()
+      if (!reply) {
+        // 服务器 200 但正文为空：WeClone 的模型偶尔只输出思考内容，值得单独说清。
+        return { success: false, error: '分身没有返回内容（模型可能只输出了思考过程），请重试' }
+      }
+      return { success: true, reply, elapsedMs: Date.now() - started }
+    } catch (e) {
+      const detail = String((e as Error)?.message || e)
+      return {
+        success: false,
+        error: detail,
+        hint: /fetch failed|ECONNREFUSED|abort/i.test(detail)
+          ? `连不上 ${serverCfg.baseUrl}：确认服务器进程还在运行。`
+          : undefined,
+      }
+    }
+  }
+
   async getServerStatus(): Promise<WeCloneServerStatus> {
     const cfg = this.getServerConfig()
     const base: WeCloneServerStatus = {

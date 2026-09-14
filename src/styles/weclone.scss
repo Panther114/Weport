@@ -194,6 +194,170 @@
   }
 }
 
+/* ---------- 对话入口 ---------- */
+/* 主操作：卡片上唯一"动词"性质的按钮。生成完一个分身之后，用户想做的第一件
+   事就是跟它说话，所以它比可见性/档案/删除都更靠前、更重。 */
+.weclone-card-actions {
+  display: flex;
+  padding-top: 11px;
+  border-top: 1px solid var(--line, #1c1c21);
+}
+
+.weclone-card-chat {
+  flex: 1;
+  justify-content: center;
+}
+
+/* ---------- 对话抽屉 ---------- */
+.weclone-chat-backdrop {
+  align-items: center;
+  justify-content: center;
+}
+
+.weclone-chat {
+  width: min(760px, calc(100vw - 48px));
+  height: min(640px, calc(100vh - 96px));
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.weclone-chat-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line, #1c1c21);
+}
+
+.weclone-chat-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.weclone-chat-title h3 {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.weclone-chat-title .hint {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.weclone-chat-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.weclone-chat-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  max-width: 360px;
+}
+
+.weclone-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 86%;
+}
+
+.weclone-turn.user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.weclone-bubble {
+  padding: 9px 13px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--accent-soft, rgba(91, 142, 255, 0.14));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line, #1c1c21));
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.weclone-turn.assistant .weclone-bubble {
+  border-radius: 14px 14px 14px 4px;
+  background: var(--bg-raised, #17171b);
+  border-color: var(--line-strong, #2c2c33);
+}
+
+.weclone-turn.err .weclone-bubble {
+  border-color: rgba(229, 72, 77, 0.45);
+  color: var(--text-dim);
+}
+
+.weclone-bubble.pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-dim);
+}
+
+.weclone-turn-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.weclone-chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line, #1c1c21);
+  background: var(--bg-raised, #17171b);
+}
+
+.weclone-chat-composer textarea {
+  flex: 1;
+  min-height: 38px;
+  max-height: 140px;
+  resize: none;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line, #1c1c21);
+  background: var(--bg, #101013);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.weclone-chat-composer textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line, #1c1c21));
+}
+
+.weclone-chat-foot {
+  padding: 0 16px 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: right;
+}
+
 .weclone-card-foot {
   display: flex;
   align-items: center;

@@ -258,6 +258,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     reorderChats: (orderedIds: string[]) => ipcRenderer.invoke('ai:reorderChats', orderedIds),
     deleteChat: (chatId: string) => ipcRenderer.invoke('ai:deleteChat', chatId),
     getChat: (chatId: string) => ipcRenderer.invoke('ai:getChat', chatId),
+    compactChat: (chatId: string) => ipcRenderer.invoke('ai:compactChat', chatId),
     listNotes: (chatId: string) => ipcRenderer.invoke('ai:listNotes', chatId),
     readNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:readNoteFile', chatId, path),
     deleteNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:deleteNoteFile', chatId, path),
@@ -315,6 +316,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id: string, remote?: boolean) => ipcRenderer.invoke('weclone:delete', id, remote),
     setVisibility: (id: string, visibility: string) => ipcRenderer.invoke('weclone:setVisibility', id, visibility),
     getServerStatus: () => ipcRenderer.invoke('weclone:getServerStatus'),
+    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
+      ipcRenderer.invoke('weclone:chat', cloneId, message, history),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),
     getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
     ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),
