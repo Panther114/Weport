@@ -987,8 +987,13 @@ button:disabled {
   padding: 1px 8px;
   gap: 6px;
   border-radius: 4px;
-  /* 行与行之间不再有独立高度：紧凑列表里 1px 描边已经足够分界 */
-  min-height: 0;
+  /* **不能收缩**。`.anti-revoke-list` 是定高（max-height: calc(100vh - 300px)）
+   * 的 flex 列容器，而 flex 子项默认 flex-shrink: 1 —— 192 行会被"平摊"进
+   * 350px，每行算出来只有 3.3px，头像被裁掉只剩一条边。
+   * 之前 min-height: 0 让它们可以收缩到内容以下，正是塌陷的直接原因。
+   * 紧凑列表靠的是**每行更矮**（见下面的 padding / 按钮高度），不是靠行被压缩。 */
+  flex: 0 0 auto;
+  height: auto;
 }
 
 /* 行内按钮跟着收窄：默认按钮高度会把这一行重新撑回 30px 以上 */
