@@ -146,6 +146,26 @@ function estimateRunCost(
   return ((prompt - cacheHit) * cost.input + cacheHit * cacheRead + completion * cost.output) / 1_000_000
 }
 
+/**
+ * 取当前模型的价格。
+ *
+ * 必须走 `setup.modelCosts[模型 id]`，**不能**读 `profile.cost`：
+ * `ProviderProfileSummary` 不带 `cost` 字段，于是"有定价的模型"在顶栏显示成
+ * 「未定价」—— 一个会让人误判价格的假读数（踩过一次）。`modelCosts` 是主进程
+ * 按模型 id 解出来的权威表。
+ */
+function lookupCost(
+  setup: SetupInfo | null,
+  model: string | undefined,
+): ProviderModelMetadata['cost'] | undefined {
+  const id = String(model || '').trim()
+  if (!setup || !id) return undefined
+  const fromMap = setup.modelCosts?.[id]
+  if (fromMap) return fromMap
+  const profile = setup.profiles.find((p) => p.model === id)
+  return profile?.cost
+}
+
 /** `$0.0123`, or the literal `N/A` when the model has no published price. */
 function fmtCost(value: number | null): string {
   return value === null ? 'N/A' : `$${value.toFixed(4)}`
@@ -164,20 +184,20 @@ function fmtPrice(cost: ProviderModelMetadata['cost'] | undefined): string {
   return `${one(cost.input)} / ${one(cost.output)}`
 }
 
-function costTooltip(meta: ProviderModelMetadata | null): string | undefined {
-  if (!meta) return undefined
-  const c = meta.cost
+function costTooltip(cost: ProviderModelMetadata['cost'] | undefined): string | undefined {
+  const c = cost
   if (!c || (c.input === undefined && c.output === undefined)) {
     return '这个模型没有公开定价（models.dev 未收录）。未定价 ≠ 免费，请以提供商账单为准。'
   }
-  const lines = [
+  return [
     `输入 ${c.input ?? '—'} / 输出 ${c.output ?? '—'} USD 每百万 token`,
     c.cacheRead !== undefined ? `缓存读取 ${c.cacheRead}` : null,
     c.cacheWrite !== undefined ? `缓存写入 ${c.cacheWrite}` : null,
     c.reasoning !== undefined ? `推理 ${c.reasoning}` : null,
-    meta.source ? `来源：${meta.source}` : null,
-  ].filter(Boolean)
-  return lines.join('\n')
+    '来源：models.dev（运行时抓取，24 小时 TTL）',
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 /**
@@ -820,16 +840,22 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     return profile || null
   }, [setup])
 
+  /** 当前模型的价格：主进程按模型 id 解出的权威表（见 lookupCost 的说明） */
+  const activeModelCost = useMemo(
+    () => lookupCost(setup, setup?.model),
+    [setup],
+  )
+
   const runCost = useMemo(
     () =>
       usage
-        ? estimateRunCost(activeModelMeta?.cost, {
+        ? estimateRunCost(activeModelCost, {
             promptTokens: usage.promptTokens,
             cacheHitTokens: usage.cacheHitTokens,
             completionTokens: usage.completionTokens,
           })
         : null,
-    [usage, activeModelMeta],
+    [usage, activeModelCost],
   )
 
   const memoryNotes = notes.filter((n) => n.scope === 'memory')
@@ -1043,14 +1069,14 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             {/* 当前模型的单价（USD / 1M tokens）。放在顶栏而不是埋在设置里：
                 "这一轮大概花了多少"必须先知道单价。未定价的模型明确写「未定价」，
                 不能显示成 $0.00 —— 未定价和免费是两件事。 */}
-            {activeModelMeta ? (
+            {setup?.model ? (
               <span
                 className="ai-meter ai-meter-cost"
-                data-tone={runCost === null ? 'warn' : undefined}
-                title={costTooltip(activeModelMeta)}
+                data-tone={activeModelCost ? undefined : 'warn'}
+                title={costTooltip(activeModelCost)}
               >
                 <span className="ai-meter-label">单价</span>
-                <b>{fmtPrice(activeModelMeta.cost)}</b>
+                <b>{fmtPrice(activeModelCost)}</b>
               </span>
             ) : null}
             {usage ? (

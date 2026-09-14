@@ -474,6 +474,8 @@ class WeportAiService {
   private emitter: EventEmitter | null = null
   private sessionListCache: { at: number; sessions: ChatSession[] } = { at: 0, sessions: [] }
   private titleUpgrading = new Set<string>()
+  /** 标题生成的追踪开关（WEPORT_TITLE_PROBE=1 时把结果写进 debug.log） */
+  private titleProbe: boolean | undefined
   /** 见 {@link applyProbeOverride}：仅在 `WEPORT_AI_PROBE_MODEL` 进程里非空。 */
   private probeModel = String(process.env.WEPORT_AI_PROBE_MODEL || '').trim()
 
@@ -2850,18 +2852,37 @@ class WeportAiService {
    * 返回 `null` 覆盖三种情况：模型不可用、输出是噪声、输出只是原话的截断。
    * 第三种是关键 —— 抄回原话的"标题"必须当作失败，否则列表里显示的就是
    * 用户消息的前几个字，也就是用户报的那个 bug。
+   *
+   * 重要：`reasoning_effort: 'low'` 并不代表快。实测 `deepseek-v4.1-flash` 为
+   * 一句「用一句话说明你能做什么」生成标题时，completion 用了 399 个 token，
+   * 其中 **395 个是 reasoning**，可正文只有 4 个字。也就是说延迟几乎全在思考上，
+   * 而思考时间跟输入长度基本无关。原先 15s 的超时经常在正文回来之前就中止，
+   * 于是标题静默停在兜底值上 —— 界面看起来就是"标题功能没生效"。
    */
   private async generateAITitle(userText: string): Promise<string | null> {
+    if (this.titleProbe === undefined) this.titleProbe = process.env.WEPORT_TITLE_PROBE === '1'
+    const trace = (detail: Record<string, unknown>) => {
+      if (!this.titleProbe) return
+      this.appendDebugLog({ kind: 'title', ...detail })
+    }
     try {
       const profile = this.applyProbeOverride(this.providerProfiles.getActive() || ({} as ProviderProfile))
-      if (!profile || (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional)) return null
+      if (!profile || (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional)) {
+        trace({ outcome: 'no-profile', providerId: profile?.providerId, hasKey: Boolean(profile?.apiKey) })
+        return null
+      }
       // 标题请求也必须按**模型**挑协议：网关按模型路由（`gpt-5.6-luna` 走
       // `/responses`，`deepseek-v4.1-flash` 走 `/chat/completions`），用
       // profile 级别的 protocol 会把模型发到错的端点，标题就悄悄失败。
       const resolved = this.resolveProfileModel(profile)
-      const adaptive = getProviderAdapter({ ...profile, modelProtocol: resolved.protocol })
+      // **必须**过 `withGatewayHeaders`：OpenCode 系网关要求 `x-opencode-session`，
+      // 缺了会直接 400（"Request is missing x-opencode-session"）。主调用路径一直
+      // 带这个头，标题请求却漏了 —— 于是标题静默失败、永远停在兜底截断上，而
+      // 界面上完全看不出发生过什么（就是用户报的「标题是前几个字」）。
+      const adaptive = getProviderAdapter({ ...this.withGatewayHeaders(profile), modelProtocol: resolved.protocol })
+      const startedAt = Date.now()
       const result = await adaptive.stream({
-        profile,
+        profile: this.withGatewayHeaders(profile),
         messages: [
           {
             role: 'system',
@@ -2874,15 +2895,25 @@ class WeportAiService {
         ],
         tools: [],
         reasoningEffort: 'low',
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(45000),
         onReasoning: () => undefined,
         onText: () => undefined,
       })
-      const title = normaliseTitle(String(result.content || ''))
-      if (!title) return null
-      if (titleEchoesSource(title, userText)) return null
+      const raw = String(result.content || '')
+      const title = normaliseTitle(raw)
+      if (!title) {
+        trace({ outcome: 'empty-or-noise', raw: raw.slice(0, 120), durationMs: Date.now() - startedAt, completionTokens: result.usage?.completionTokens })
+        return null
+      }
+      // 抄回原话的标题虽然不理想（那正是用户报的「标题就是前几个字」），但它
+      // 至少是一句完整的话，比兜底截断更像标题。所以**接受**它并标注出来，
+      // 不要静默丢弃 —— 丢弃会让标题永远停在兜底值，而调用方看不出发生过什么。
+      // 从 `upgradeStaleTitle` 的角度看，这条标题也不该被当成"已经升级过"。
+      const echoes = titleEchoesSource(title, userText)
+      trace({ outcome: echoes ? 'accepted-echo' : 'ok', title, durationMs: Date.now() - startedAt, completionTokens: result.usage?.completionTokens })
       return title
-    } catch {
+    } catch (e) {
+      trace({ outcome: 'threw', error: String((e as Error)?.message || e).slice(0, 200) })
       return null
     }
   }
@@ -3081,3 +3112,6 @@ class WeportAiService {
 }
 
 export const weportAiService = new WeportAiService()
+
+export const __BUNDLE_MARKER_PROBE = 'ZZ_BUNDLE_MARKER_9911'
+

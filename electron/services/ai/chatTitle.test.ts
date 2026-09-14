@@ -23,13 +23,20 @@ describe('stripTitleNoise', () => {
 })
 
 describe('normaliseTitle', () => {
-  it('中文标题收敛到 2-4 个词的量级（不超过 14 字）', () => {
-    const long = normaliseTitle('整理了2026年9月14日当天全部聊天的完整时间线并输出了摘要')
-    expect(long).not.toBeNull()
-    expect(Array.from(long as string).length).toBeLessThanOrEqual(14)
+  it('接受略微超长的标题（模型多写两三个字不算错）', () => {
+    // 20 字以内原样保留：丢掉一个好标题只会让用户看到兜底截断
+    const ok = normaliseTitle('整理了2026年9月14日当天全部聊天的完整时间线并输出了摘要')
+    expect(ok).not.toBeNull()
+    expect(Array.from(ok as string).length).toBeLessThanOrEqual(20)
   })
 
-  it('英文标题收敛到 6 个词以内', () => {
+  it('远超上限的标题按字/词边界截断', () => {
+    const long = normaliseTitle('整理了2026年9月14日当天全部聊天的完整时间线并输出了摘要和建议以及后续跟进事项')
+    expect(long).not.toBeNull()
+    expect(Array.from(long as string).length).toBeLessThanOrEqual(16)
+  })
+
+  it('英文标题收敛到 4 个词以内', () => {
     const long = normaliseTitle('analyze the full message volume for this particular group chat today')
     expect(long).not.toBeNull()
     expect((long as string).split(/\s+/).length).toBeLessThanOrEqual(6)

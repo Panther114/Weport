@@ -10,10 +10,24 @@
 // "8 个汉字"和"8 个字符的英文单词"完全不是一个信息量。
 
 /** 中文标题的字符上限（≈ 4 个词） */
-export const TITLE_MAX_CJK_CHARS = 12
+export const TITLE_MAX_CJK_CHARS = 16
+/**
+ * 归一化后允许的最长标题（中文按字、英文按词）。
+ *
+ * 比 `TITLE_MAX_CJK_CHARS` 宽：这里放宽的是**接受门槛**，不是生成目标。
+ * 提示词已经要求 12 字以内，模型偶尔会多写两三个字 —— 那种标题依然是好标题，
+ * 直接丢掉只会让用户看到兜底截断。
+ */
+const TITLE_ACCEPT_CJK_CHARS = 20
+const TITLE_ACCEPT_WORDS = 6
 /** 西文标题的词数上限 */
 export const TITLE_MAX_WORDS = 4
-/** 兜底标题的字符上限：比 AI 标题紧，因为它没有归纳能力，长了就是半句话 */
+/**
+ * 兜底标题的字符上限。
+ *
+ * 8 是刻意压得比较紧的：兜底标题没有归纳能力，长了就是把用户的话抄一半，
+ * 而它存在的意义只是「AI 标题回来之前别空着」。
+ */
 const FALLBACK_MAX_CJK_CHARS = 8
 
 /** 去掉模型爱加的前后缀：代码块、`标题：`、引号、结尾标点 */
@@ -48,12 +62,12 @@ export function normaliseTitle(raw: string): string | null {
 
   if (hasCjk(title)) {
     const chars = Array.from(title)
-    if (chars.length <= TITLE_MAX_CJK_CHARS + 2) return title
-    return chars.slice(0, TITLE_MAX_CJK_CHARS + 2).join('').trim()
+    if (chars.length <= TITLE_ACCEPT_CJK_CHARS) return title
+    return chars.slice(0, TITLE_MAX_CJK_CHARS).join('').trim()
   }
   const words = title.split(/\s+/).filter(Boolean)
-  if (words.length <= TITLE_MAX_WORDS + 2) return title
-  return words.slice(0, TITLE_MAX_WORDS + 2).join(' ')
+  if (words.length <= TITLE_ACCEPT_WORDS) return title
+  return words.slice(0, TITLE_MAX_WORDS).join(' ')
 }
 
 /**
