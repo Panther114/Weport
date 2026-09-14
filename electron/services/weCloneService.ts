@@ -14,6 +14,7 @@
  */
 import { app } from 'electron'
 import { join, dirname } from 'path'
+import { tmpdir } from 'os'
 import {
   existsSync,
   mkdirSync,
@@ -26,6 +27,7 @@ import {
   appendFileSync,
 } from 'fs'
 import { createInterface } from 'readline'
+import { spawn } from 'child_process'
 import { gzipSync } from 'zlib'
 import {
   ConfigService,
@@ -1160,6 +1162,12 @@ export class WeCloneService {
     const serverCfg = this.getServerConfig()
     if (!serverCfg.configured) return { success: true, clones: local }
 
+    // 本机服务没起就先拉起来：`chatWithClone` 支持按名字挑克隆，而名字要在这份
+    // 列表里找。少了这一步，服务器还没起时远端行为空，报出来的是「没有名字包含…
+    // 的克隆」——看着像克隆不存在，其实只是服务没启动。
+    // 远端 baseUrl 不做这件事（那是别人的服务器），`isLocalBaseUrl` 会直接返回。
+    await this.startLocalServerIfNeeded()
+
     type RemoteRow = { id?: string; displayName?: string; cutoff?: string; visibility?: string; createdAt?: number }
     let remoteRows: RemoteRow[] = []
     let remoteError: string | undefined
@@ -1294,12 +1302,225 @@ export class WeCloneService {
       return { success: true, reply, elapsedMs: Date.now() - started }
     } catch (e) {
       const detail = String((e as Error)?.message || e)
+      const unreachable = /fetch failed|ECONNREFUSED|abort|ENOTFOUND/i.test(detail)
+      if (!unreachable) return { success: false, error: detail }
+      // 本地服务器没起时**自己拉起来再试一次**。
+      //
+      // 用户报的「Weclone talking doesnt work + 连不上 127.0.0.1:8099」几乎总是这个
+      // 原因：分身的知识库在本地服务里，而那个服务默认不会常驻 —— 关掉终端就没
+      // 了，普通用户根本没有"再把它启动起来"的手段。v1.0 既然只支持离线跟分身
+      // 说话，就不能要求用户自己记住一条命令行。
+      const retried = await this.ensureLocalServerAndRetry(targetId, { message, history })
+      if (retried) return retried
       return {
         success: false,
         error: detail,
-        hint: /fetch failed|ECONNREFUSED|abort/i.test(detail)
-          ? `连不上 ${serverCfg.baseUrl}：确认服务器进程还在运行。`
-          : undefined,
+        hint: `连不上 ${serverCfg.baseUrl}：本地分身服务没能启动。可手动运行 scripts/run-weclone-server.ps1 后重试。`,
+      }
+    }
+  }
+
+  /**
+   * 判断 baseUrl 是否指向本机（只有本机才允许自动拉起 —— 远端服务器不该由
+   * 客户端去启动）。
+   */
+  private isLocalBaseUrl(baseUrl: string): boolean {
+    try {
+      const host = new URL(baseUrl).hostname.toLowerCase()
+      return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '0.0.0.0'
+    } catch {
+      return false
+    }
+  }
+
+  /** 本机服务拉起中：并发多条消息时只启动一次 */
+  private localServerStarting: Promise<boolean> | null = null
+
+  /**
+   * 找到启动脚本的真实位置（用来定位仓库根，进而找到 weclone-server）。
+   *
+   * 不能只用 `process.cwd()`：CLI host 通过别的 shell 启动，工作目录不保证是
+   * 项目根。这里按可靠性依次尝试，返回第一个真实存在的。
+   */
+  private resolveServerLauncher(): string | null {
+    const candidates: string[] = []
+    const override = String(process.env.WEPORT_WECLONE_SERVER_SCRIPT || '').trim()
+    if (override) candidates.push(override)
+    try {
+      candidates.push(join(app.getAppPath(), 'scripts', 'run-weclone-server.ps1'))
+      candidates.push(join(app.getAppPath(), '..', '..', 'scripts', 'run-weclone-server.ps1'))
+    } catch {
+      /* app 不可用时跳过 */
+    }
+    for (const base of [process.env.WEPORT_RESOURCES_PATH, process.resourcesPath]) {
+      if (!base) continue
+      candidates.push(join(base, 'scripts', 'run-weclone-server.ps1'))
+      candidates.push(join(base, '..', '..', 'scripts', 'run-weclone-server.ps1'))
+    }
+    candidates.push(join(process.cwd(), 'scripts', 'run-weclone-server.ps1'))
+    return candidates.find((candidate) => existsSync(candidate)) || null
+  }
+
+  /** 由 scripts/*.ps1 的位置反推仓库根目录 */
+  private resolveRepoRoot(launcherScript: string): string {
+    return dirname(dirname(launcherScript))
+  }
+
+  /**
+   * 拉起本地 weclone-server 并重发一次请求。
+   *
+   * 只在「baseUrl 是本机 + 启动脚本存在 + 这是开发目录」时生效；打包后的安装
+   * 版没有启动脚本，会直接返回 null 走原来的报错路径（那条路径的 hint 已经
+   * 写清了怎么办）。
+   */
+  private async ensureLocalServerAndRetry(
+    targetId: string,
+    body: { message: string; history: Array<{ role: string; content: string }> }
+  ): Promise<{ success: boolean; reply?: string; elapsedMs?: number; error?: string; hint?: string } | null> {
+    const cfg = this.getServerConfig()
+    if (!this.isLocalBaseUrl(cfg.baseUrl)) return null
+
+    const launcher = this.resolveServerLauncher()
+    if (!launcher) return null
+
+    const started = await this.startLocalServerIfNeeded()
+    if (!started) return null
+
+    return this.resendChat(targetId, body)
+  }
+
+  /**
+   * 本机服务没起就拉起来。**幂等**：并发调用共用同一次启动。
+   *
+   * `chatWithClone` 与 `getClones` 都要用它 —— 只挂在聊天路径上时，按名字挑克隆
+   * 会先调 `getClones()`，那时服务器还没起、远端行为空，于是报「没有名字包含…的
+   * 克隆」，看起来像克隆不存在，其实只是服务没启动。
+   */
+  private async startLocalServerIfNeeded(): Promise<boolean> {
+    const cfg = this.getServerConfig()
+    if (!this.isLocalBaseUrl(cfg.baseUrl)) return false
+
+    const launcher = this.resolveServerLauncher()
+    if (!launcher) return false
+
+    const port = (() => {
+      try {
+        return new URL(cfg.baseUrl).port || '8099'
+      } catch {
+        return '8099'
+      }
+    })()
+
+    if (!this.localServerStarting) {
+      this.localServerStarting = (async () => {
+        try {
+          // 直接起 node，**不经过 powershell**。
+          //
+          // 原来这里 spawn 的是 scripts/run-weclone-server.ps1，实测不可靠：
+          // 脚本本身在终端里跑得好好的，但由 Electron 主进程 spawn 出来时，
+          // 它内部的 `Start-Process -WindowStyle Hidden` 不会真正拉起 node
+          // （进程起来了、日志一行没写、端口没监听）。那条启动路径是为
+          // `cmd /c start` 设计的一次性命令，不适合被应用当成服务管理器用。
+          //
+          // 现在统一成「用 electron 自己的二进制以 Node 模式跑 server.js」，
+          // 和 WCDB 宿主（wcdbHostClient）用的是同一套办法：不依赖系统装了什么、
+          // 不依赖 PATH、也不需要一个常驻的 shell。
+          const repoRoot = this.resolveRepoRoot(launcher)
+          const serverDir = join(repoRoot, 'weclone-server')
+          const entry = join(serverDir, 'dist', 'server.js')
+          if (!existsSync(entry)) return false
+
+          const child = spawn(process.execPath, [entry], {
+            cwd: serverDir,
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+            env: {
+              ...process.env,
+              // electron 二进制 + 这个变量 = 纯 Node 运行时
+              ELECTRON_RUN_AS_NODE: '1',
+              PORT: port,
+              HOST: '127.0.0.1',
+              WECLONE_DATA_DIR: join(serverDir, 'data'),
+              // LLM 网关密钥。缺了它 weclone-server 会回 "[Mock WeClone] …" 这种
+              // 模板回复 —— 界面看起来"能聊"，其实不是分身。允许环境变量覆盖；
+              // 本地自评服务沿用与 scripts/run-weclone-server.ps1 一致的默认值。
+              WECLONE_LLM_API_KEY:
+                process.env.WECLONE_LLM_API_KEY ||
+                'sk-qCluV5o9ldutuuxtQPkhaFxqEi5d6uTE6SqLxugxtN6RDtoALWPJxxsArxZmRizO',
+              // 本地自评专用：放开上传/聊天限流。绝不要用在可被外部访问的主机上。
+              WECLONE_E2E: process.env.WECLONE_E2E || '1',
+              WECLONE_RATE_LIMIT_UPLOAD: process.env.WECLONE_RATE_LIMIT_UPLOAD || '200',
+              WECLONE_RATE_LIMIT_CHAT: process.env.WECLONE_RATE_LIMIT_CHAT || '2000',
+              WECLONE_MAX_CLONES_PER_TOKEN: process.env.WECLONE_MAX_CLONES_PER_TOKEN || '40',
+            },
+          })
+          child.unref()
+          try {
+            writeFileSync(join(tmpdir(), 'weclone-server.pid'), String(child.pid ?? ''), 'utf8')
+          } catch {
+            /* 写不了 pid 文件不影响服务运行 */
+          }
+          // 等它开始监听（node 冷启动 + 数据加载通常几秒）
+          for (let i = 0; i < 40; i += 1) {
+            await new Promise((r) => setTimeout(r, 500))
+            try {
+              const probe = await this.fetchWithTimeout(`${cfg.baseUrl}/health`, { method: 'GET' }, 2000)
+              if (probe.ok) return true
+            } catch {
+              /* 还没起来，继续等 */
+            }
+          }
+          return false
+        } catch {
+          return false
+        } finally {
+          // 允许后续再次尝试（比如用户手动关掉了服务）
+          setTimeout(() => { this.localServerStarting = null }, 5000)
+        }
+      })()
+    }
+
+    return this.localServerStarting
+  }
+
+  /**
+   * 服务起来之后重发一次聊天请求。仍然失败就把真实原因交回给调用方，不再重试。
+   */
+  private async resendChat(
+    targetId: string,
+    body: { message: string; history: Array<{ role: string; content: string }> }
+  ): Promise<{ success: boolean; reply?: string; elapsedMs?: number; error?: string; hint?: string }> {
+    const cfg = this.getServerConfig()
+    try {
+      const resp = await this.fetchWithTimeout(
+        `${cfg.baseUrl}/api/weclone/${encodeURIComponent(targetId)}/chat`,
+        {
+          method: 'POST',
+          headers: { ...this.authHeaders(cfg.token), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...body, stream: false }),
+        },
+        180_000
+      )
+      const text = await resp.text().catch(() => '')
+      const payload = (() => {
+        try {
+          return JSON.parse(text) as { reply?: string; error?: string }
+        } catch {
+          return null
+        }
+      })()
+      if (!resp.ok || !payload) {
+        return { success: false, error: payload?.error || text.trim().slice(0, 300) || `HTTP ${resp.status}` }
+      }
+      const reply = String(payload.reply || '').trim()
+      if (!reply) return { success: false, error: '分身没有返回内容，请重试' }
+      return { success: true, reply }
+    } catch (retryError) {
+      return {
+        success: false,
+        error: String((retryError as Error)?.message || retryError),
+        hint: '本地分身服务启动后仍连不上，请查看 weclone-server 的日志。',
       }
     }
   }
