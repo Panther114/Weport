@@ -19,11 +19,13 @@
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 
 /** 长边目标像素。1080p 对"压在面板下、常被模糊"的背景层绰绰有余。 */
 const TARGET_LONG_EDGE = 1920
+/** 判定背景类型用的扩展名（与渲染层 utils/appearance 的 backgroundKindOf 对应） */
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'm4v', 'mkv'])
 /** 缓存上限：超过就删掉最旧的几份，避免用户换几十次壁纸后缓存失控。 */
 const MAX_CACHE_ENTRIES = 8
 
@@ -210,5 +212,106 @@ export class BackgroundVideoService {
   /** 设置页/CLI 用来解释"为什么没优化" */
   status(): { ffmpeg: string | null; cacheDir: string } {
     return { ffmpeg: findFfmpeg(), cacheDir: this.cacheDir }
+  }
+
+  /**
+   * 背景的平均相对亮度（0=黑，1=白），用于自动决定明暗主题。
+   *
+   * **必须在主进程算**：渲染层拿到的是 `weport-media://`（自定义协议），把它画到
+   * canvas 上会把 canvas 标记为 tainted，`getImageData` 直接抛 SecurityError ——
+   * 在渲染层这条路根本走不通（实测报的就是这个错）。
+   *
+   * 图片用 nativeImage 解码；视频用已有的降采样缓存抽一帧（ffmpeg 缺失时返回
+   * null，明暗自适应就不生效，不影响其它功能）。
+   */
+  async meanLuminance(sourcePath: string): Promise<number | null> {
+    const source = String(sourcePath || '').trim()
+    if (!source || !existsSync(source)) return null
+
+    const ext = (source.split('.').pop() || '').toLowerCase()
+    const png = VIDEO_EXTENSIONS.has(ext)
+      ? await this.extractVideoFramePng(source)
+      : this.readImagePng(source)
+    if (!png) return null
+
+    try {
+      const { nativeImage } = require('electron') as typeof import('electron')
+      const image = nativeImage.createFromBuffer(png)
+      if (image.isEmpty()) return null
+      // 缩到很小的位图：只要平均亮度，32×18 足够且几乎零成本
+      const small = image.resize({ width: 32, height: 18, quality: 'good' })
+      const { width, height } = small.getSize()
+      if (width === 0 || height === 0) return null
+      const bitmap = small.toBitmap() // BGRA
+      const lin = (v: number) => {
+        const s = v / 255
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
+      }
+      let sum = 0
+      let n = 0
+      for (let i = 0; i + 3 < bitmap.length; i += 4) {
+        const b = bitmap[i]
+        const g = bitmap[i + 1]
+        const r = bitmap[i + 2]
+        sum += 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        n += 1
+      }
+      return n > 0 ? sum / n : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 图片 → PNG buffer（nativeImage 直接支持 png/jpg/webp/bmp） */
+  private readImagePng(source: string): Buffer | null {
+    try {
+      const { nativeImage } = require('electron') as typeof import('electron')
+      const image = nativeImage.createFromPath(source)
+      return image.isEmpty() ? null : image.toPNG()
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 视频 → 某一帧的 PNG。
+   *
+   * 取 **1 秒处**而不是第 0 帧：很多壁纸开头是淡入或黑场，用第 0 帧判明暗会把
+   * 所有视频都判成深色。输入优先用已经转好的降采样缓存（更小、抽帧更快）。
+   */
+  private async extractVideoFramePng(source: string): Promise<Buffer | null> {
+    const ffmpeg = findFfmpeg()
+    if (!ffmpeg) return null
+    const key = this.cacheKey(source)
+    if (!key) return null
+    const cached = join(this.cacheDir, `${key}.mp4`)
+    const input = existsSync(cached) ? cached : source
+    const outPath = join(this.cacheDir, `.lum-${key}.png`)
+    try {
+      mkdirSync(this.cacheDir, { recursive: true })
+    } catch {
+      return null
+    }
+    const ok = await new Promise<boolean>((resolve) => {
+      const child = spawn(
+        ffmpeg,
+        ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '1', '-i', input, '-frames:v', '1', '-vf', 'scale=64:-2', outPath],
+        { windowsHide: true, stdio: 'ignore' }
+      )
+      child.on('error', () => resolve(false))
+      child.on('close', (code) => resolve(code === 0))
+    })
+    if (!ok || !existsSync(outPath)) return null
+    try {
+      return readFileSync(outPath)
+    } catch {
+      return null
+    } finally {
+      try {
+        unlinkSync(outPath)
+      } catch {
+        /* 清不掉就留着，下次覆盖 */
+      }
+    }
   }
 }

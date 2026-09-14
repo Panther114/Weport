@@ -67,6 +67,7 @@ import WeBotModule from './pages/WeBotModule'
 import WeClonePage from './pages/WeClonePage'
 import AiMarkdown from './components/weportAi/AiMarkdown'
 import { Avatar } from './components/Avatar'
+import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 import SnsPage from './pages/SnsPage'
 import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
@@ -81,6 +82,7 @@ import {
   initAppearance,
   normalizeHexColor,
   probeBackground,
+  adoptModeFromBackground,
   setAccent,
   setAccentStrength,
   setBackgroundBlur,
@@ -89,6 +91,7 @@ import {
   setCustomAccent,
   setDensity,
   setMode,
+  setModeAuto,
   useAppearance,
 } from './utils/appearance'
 import './styles/v09.scss'
@@ -302,8 +305,14 @@ export default function App() {
   const imageKeyAckRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
-  const [progress, setProgress] = useState<any | null>(null)
-  const [exportTaskId, setExportTaskId] = useState<string | null>(null)
+  /**
+   * 导出进度**完全不进 App 的 state**（连 taskId 都不进）：导出期间主进程按
+   * ~400ms 一条的频率推进度，App 是四千多行、含全部页面的组件，任何一条进度
+   * 落到它的 state 上都会重渲染整棵树 —— 那就是用户看到的"所有元素被推来推去"。
+   * 进度条组件（ExportProgressBar）自己订阅、自己保存 taskId，App 只在导出
+   * 结束时通过 ref 让它定格。
+   */
+  const exportProgressRef = useRef<ExportProgressBarHandle | null>(null)
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(false)
   const [notificationPosition, setNotificationPosition] = useState<NotificationPosition>('top-right')
@@ -371,6 +380,30 @@ export default function App() {
       window.removeEventListener('focus', sync)
       window.removeEventListener('blur', sync)
       document.removeEventListener('visibilitychange', sync)
+    }
+  }, [appearance.backgroundPath])
+
+  /**
+   * 明暗自适应：背景变化后让主进程按背景亮度重判一次明暗。
+   *
+   * 渲染层不参与采样 —— 图片与视频都通过 `weport-media://` 加载，把它们画到
+   * canvas 会 taint，`getImageData` 抛 SecurityError（实测）。主进程侧有
+   * nativeImage 解码（图片）与 ffmpeg 抽帧（视频）两条路。
+   *
+   * 视频首次导入时降采样缓存还在后台生成，所以多试几次；每次都会重新核对
+   * 「用户有没有手动选过明暗 / 背景是否又变了」，不会覆盖用户的选择。
+   */
+  useEffect(() => {
+    if (!appearance.backgroundPath) return
+    let cancelled = false
+    const timers = [600, 3500, 9000].map((delay) =>
+      window.setTimeout(() => {
+        if (!cancelled) void adoptModeFromBackground()
+      }, delay)
+    )
+    return () => {
+      cancelled = true
+      timers.forEach((t) => window.clearTimeout(t))
     }
   }, [appearance.backgroundPath])
   /**
@@ -887,12 +920,6 @@ export default function App() {
       api.key.onImageKeyStatus((payload) => {
         setImageKeyStatus(payload.message)
       }),
-      api.export.onProgress((payload) => {
-        setProgress(payload)
-        // 顶部品牌区不再显示导出进度（避免 `收集消息149,020条·群名` 把页签挤压导致布局跳动），
-        // 导出状态仅在导出面板的进度条上方以固定高度展示当前会话名。
-        if (payload.taskId) setExportTaskId(payload.taskId)
-      }),
       api.app.onUpdateAvailable((info) => {
         setUpdateInfo({ version: info.version, body: info.releaseNotes || undefined })
         pushToast('info', `发现新版本 v${info.version}`, '可在顶部横幅更新')
@@ -1096,8 +1123,7 @@ export default function App() {
     }
 
     setBusy(true)
-    setProgress({ current: 0, total: 0, phaseLabel: '准备中' })
-    setExportTaskId(null)
+    exportProgressRef.current?.reset()
     setBusyLabel(exportSelectionMode === 'all'
       ? '开始导出全部会话…'
       : `开始导出 ${selectedExportSessionIds.size} 个会话…`)
@@ -1134,7 +1160,9 @@ export default function App() {
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
       if (result.success) {
         pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}`, imageKeyMissing > 0 ? 12000 : 7000)
-        setProgress((p: any) => (p ? { ...p, current: p.total || p.current, phaseLabel: '完成', phase: 'complete' } : { current: 1, total: 1, phaseLabel: '完成', phase: 'complete' }))
+        // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
+        // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
+        exportProgressRef.current?.complete()
       } else {
         pushToast('err', '导出未完全成功', `${result.error || `成功 ${result.successCount ?? 0} / 失败 ${result.failCount ?? 0}`}${imageKeyWarning}`, 12000)
       }
@@ -1143,18 +1171,6 @@ export default function App() {
     } finally {
       setBusy(false)
       setBusyLabel('')
-      setExportTaskId(null)
-    }
-  }
-
-  async function cancelExport() {
-    if (!exportTaskId) return
-    const res = await api.export.cancelTask(exportTaskId).catch(() => ({ success: false }))
-    if (!res.success) {
-      pushToast('err', '取消失败', '导出任务不存在或已结束', 6000)
-    } else {
-      pushToast('info', '正在取消导出…', '已写入的部分文件将被清理')
-      setBusyLabel('正在取消导出…')
     }
   }
 
@@ -1559,14 +1575,8 @@ export default function App() {
     }
   }
 
-  const progressPct = useMemo(() => {
-    if (!progress || !progress.total) return progress?.phase === 'complete' ? 100 : 0
-    return Math.max(0, Math.min(100, (progress.current / progress.total) * 100))
-  }, [progress])
-
   const formatFolder = FORMAT_FOLDERS[format] || 'TXT'
   const installedCount = Object.values(antiRevokeInstalled).filter(Boolean).length
-  const isExporting = busy && tab === 'export' && !!progress && progress.phase !== 'complete'
 
   // 会话一多，防撤回列表就没法用了 —— 没有搜索，也没法只看「还没装的」。
   const filteredAntiRevokeSessions = useMemo(() => {
@@ -1767,6 +1777,9 @@ export default function App() {
             muted
             playsInline
             preload="auto"
+            // 出帧后按背景亮度自动定明暗（用户手动选过就不再干预）。
+            // 挂在 loadeddata 而不是 mount：视频没解码完时读不到像素。
+            onLoadedData={() => void adoptModeFromBackground()}
           />
           <div className="app-bg-dim" />
         </div>
@@ -2053,7 +2066,7 @@ export default function App() {
                 <div className="btn-row">
                   <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
                     <KeyRound size={14} />
-                    {busy && !progress ? '提取中…' : '提取密钥'}
+                    {busy ? '提取中…' : '提取密钥'}
                   </button>
                   <button
                     className="secondary-btn"
@@ -2161,29 +2174,14 @@ export default function App() {
                 需要随时看得见的东西，所以并入吸顶块 —— 两种布局下都始终可见，
                 而且它在正常流里的位置就在顶部，不会盖住任何内容。
 
-                吸顶块本身不设 top，页头保持 top: 0，进度条就是它的下一行。 */}
+                吸顶块本身不设 top，页头保持 top: 0，进度条就是它的下一行。
+
+                进度条**自己订阅**导出进度（见 ExportProgressBar）：把它内联在这里、
+                由 App 持有进度 state 时，每条进度事件都会重渲染整个 App（4000 多行、
+                含全部页面），导出期间就是一次持续的全量 reconciliation —— 用户看到
+                的"所有元素被推来推去"的抖动来源就是这个。 */}
             <div className="exp-sticky">
-            {progress && (
-              <div className={`exp-progress-bar phase-${progress.phase || 'running'}`} aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className={`progress-fill${!progress.total || progress.phase === 'preparing' ? ' indeterminate' : ''}`}
-                    style={progress.total ? { width: `${progressPct}%` } : undefined}
-                  />
-                </div>
-                <span className="exp-progress-session" title={progress.currentSession || ''}>
-                  {progress.currentSession || '准备中…'}
-                </span>
-                <span className="exp-progress-count">
-                  {progress.total > 0 ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}` : ''}
-                </span>
-                {busy && progress.phase !== 'complete' && (
-                  <button className="ghost-btn exp-progress-cancel" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
-                    取消导出
-                  </button>
-                )}
-              </div>
-            )}
+            <ExportProgressBar ref={exportProgressRef} api={api.export} busy={busy} />
 
             <div className="panel-head exp-head">
               {/* 主操作放在页头并让页头吸顶：导出按钮从此**始终可见**，而且
@@ -2225,7 +2223,7 @@ export default function App() {
                 </button>
                 <button className="primary-btn" type="button" disabled={busy} onClick={() => void runExport()}>
                   <Download size={14} />
-                  {busy && progress
+                  {busy
                     ? '导出中…'
                     : exportSelectionMode === 'all'
                       ? '开始导出'
@@ -3062,11 +3060,29 @@ export default function App() {
                   <div>
                     <strong>主题</strong>
                     <span className="hint">
-                      当前：{MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} ·{' '}
+                      {appearance.modeAuto && appearance.backgroundPath
+                        ? `跟随背景：${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · `
+                        : `当前：${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · `}
                       {appearance.accent === 'custom' ? '自定义' : ACCENT_OPTIONS.find((a) => a.id === appearance.accent)?.label}
                     </span>
                   </div>
                 </div>
+                {/* 明暗自适应开关。默认跟着背景走（亮壁纸→深色主题），
+                    用户一旦手动点过明暗就自动关掉 —— 这里可以重新打开。 */}
+                {appearance.backgroundPath ? (
+                  <label className="mode-auto-toggle">
+                    <input
+                      type="checkbox"
+                      checked={appearance.modeAuto}
+                      onChange={(e) => {
+                        setModeAuto(e.target.checked)
+                        // 重新打开时立刻按当前背景重判一次，不用等重启
+                        if (e.target.checked) void adoptModeFromBackground()
+                      }}
+                    />
+                    <span>明暗跟随背景（按背景亮度自动选深色 / 浅色，手动选过主题即关闭）</span>
+                  </label>
+                ) : null}
                 <div className="theme-picker">
                   {MODE_OPTIONS.flatMap((mode) => PRESET_ACCENTS.map((accent) => ({ mode, accent }))).map(({ mode, accent }) => {
                     const active = appearance.mode === mode.id && appearance.accent === accent.id
@@ -3104,55 +3120,144 @@ export default function App() {
                       </button>
                     )
                   })}
+                  {/* 「自定义」是主题的**第 7 个选项**，不是并列的另一个设置。
+                      之前它单独占一行、且始终可见，于是"选了预设色、下面还挂着
+                      一个自定义色板"，看起来像两套互相冲突的配色。现在它和预设
+                      一样是主题卡片，选中后才展开调色面板。 */}
+                  {(() => {
+                    const dark = appearance.mode === 'dark'
+                    const surface = dark ? '#17171d' : '#ffffff'
+                    const ink = dark ? '#f2f2f5' : '#16171d'
+                    const swatch = normalizeHexColor(appearance.customAccent) || '#5b8eff'
+                    const active = appearance.accent === 'custom'
+                    return (
+                      <button
+                        type="button"
+                        className={`theme-card theme-card-custom ${active ? 'theme-card-active' : ''}`}
+                        title={`${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · 自定义强调色`}
+                        onClick={() => setAccent('custom')}
+                      >
+                        <div className="theme-card-head">
+                          <span
+                            className="theme-card-preview theme-card-preview-custom"
+                            style={{ background: surface, color: ink, borderColor: swatch }}
+                          >
+                            <i style={{ background: swatch }} />
+                            <i style={{ background: ink, opacity: 0.35 }} />
+                          </span>
+                          <strong>
+                            {MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · 自定义
+                          </strong>
+                          {active && <span className="theme-card-check">当前</span>}
+                        </div>
+                        <div className="theme-swatches">
+                          {[0.95, 0.8, 0.65, 0.5, 0.35, 0.2].map((t) => (
+                            <span key={t} style={{ background: swatch, opacity: t }} />
+                          ))}
+                          <span style={{ background: surface, border: `1px solid ${ink}22` }} />
+                        </div>
+                      </button>
+                    )
+                  })()}
                 </div>
 
-                {/* 自定义强调色：和预设走同一条推导链路（theme.scss 从 --accent-raw
-                    用 color-mix 生成整条色阶），因此不会出现"只有选中态变色"。
-                    色板里放一组常用的，避免用户每次都开系统取色器。 */}
-                <div className="accent-custom">
-                  <span className="accent-custom-label">
-                    <Palette size={13} /> 自定义强调色
-                  </span>
-                  <input
-                    type="color"
-                    className="accent-color-input"
-                    value={normalizeHexColor(appearance.customAccent) || '#5b8eff'}
-                    aria-label="自定义强调色"
-                    onChange={(e) => setCustomAccent(e.target.value)}
-                  />
-                  <input
-                    className="accent-hex-input"
-                    value={customAccentDraft || appearance.customAccent}
-                    maxLength={7}
-                    spellCheck={false}
-                    aria-label="自定义强调色十六进制值"
-                    onChange={(e) => {
-                      // 边打字边校验：合法的十六进制立刻生效，半成品（#5b8e）留在
-                      // 输入框里不提交，否则用户打一半就被强制纠正，光标乱跳。
-                      setCustomAccentDraft(e.target.value)
-                      if (normalizeHexColor(e.target.value)) setCustomAccent(e.target.value)
-                    }}
-                    onBlur={() => setCustomAccentDraft('')}
-                  />
-                  <div className="accent-swatches" role="group" aria-label="常用颜色">
-                    {[
-                      '#5b8eff', '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef',
-                      '#ec4899', '#f43f5e', '#ef4444', '#f97316', '#f59e0b', '#eab308',
-                      '#84cc16', '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9',
-                    ].map((hex) => (
-                      <button
-                        key={hex}
-                        type="button"
-                        className="accent-swatch-mini"
-                        title={hex}
-                        aria-label={hex}
-                        data-active={appearance.accent === 'custom' && appearance.customAccent === hex}
-                        style={{ background: hex }}
-                        onClick={() => setCustomAccent(hex)}
-                      />
-                    ))}
+                {/* 调色面板只在「自定义」被选中时出现 —— 它是这个主题选项的详情，
+                    不是全局常驻设置。含明/暗两个无彩色近路：很多用户想要的只是
+                    "黑白主题"而不想自己去挑十六进制。 */}
+                {appearance.accent === 'custom' && (() => {
+                  // 无彩色色板按明暗分成**方向相反**的两套，见下面注释
+                  const dark = appearance.mode === 'dark'
+                  return (
+                  <div className="accent-custom">
+                    <span className="accent-custom-label">
+                      <Palette size={13} /> 自定义强调色
+                    </span>
+                    <input
+                      type="color"
+                      className="accent-color-input"
+                      value={normalizeHexColor(appearance.customAccent) || '#5b8eff'}
+                      aria-label="自定义强调色"
+                      onChange={(e) => setCustomAccent(e.target.value)}
+                    />
+                    <input
+                      className="accent-hex-input"
+                      value={customAccentDraft || appearance.customAccent}
+                      maxLength={7}
+                      spellCheck={false}
+                      aria-label="自定义强调色十六进制值"
+                      onChange={(e) => {
+                        // 边打字边校验：合法的十六进制立刻生效，半成品（#5b8e）留在
+                        // 输入框里不提交，否则用户打一半就被强制纠正，光标乱跳。
+                        setCustomAccentDraft(e.target.value)
+                        if (normalizeHexColor(e.target.value)) setCustomAccent(e.target.value)
+                      }}
+                      onBlur={() => setCustomAccentDraft('')}
+                    />
+                    {/* 无彩色近路：按当前明暗给出**方向相反**的两套无彩色，而不是
+                        一套通用的"黑到白"。深色背景下白与浅灰是真的能用（提亮、描边、
+                        数值），近黑等于什么都看不见；浅色背景恰恰相反。
+                        之前两档共用同一组色块，深色模式下前三个色块点下去界面上没有
+                        任何变化，看起来像"点了没反应" —— 那不是 bug 而是色块选错了对象。 */}
+                    <div className="accent-swatches" role="group" aria-label={dark ? '无彩色（深色主题）' : '无彩色（浅色主题）'}>
+                      {(dark
+                        ? [
+                            { hex: '#ffffff', label: '纯白' },
+                            { hex: '#f2f2f5', label: '亮白' },
+                            { hex: '#9a9aa4', label: '中性灰' },
+                            { hex: '#5a5a63', label: '深灰' },
+                            { hex: '#17171d', label: '近黑' },
+                          ]
+                        : [
+                            { hex: '#000000', label: '纯黑' },
+                            { hex: '#16171d', label: '近黑' },
+                            { hex: '#4b5563', label: '深灰' },
+                            { hex: '#9ca3af', label: '中性灰' },
+                            { hex: '#ffffff', label: '纯白（仅描边）' },
+                          ]
+                      ).map(({ hex, label }) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          className="accent-swatch-mini"
+                          title={`${label} ${hex}`}
+                          aria-label={`${label} ${hex}`}
+                          data-active={appearance.accent === 'custom' && appearance.customAccent === hex}
+                          data-mono="true"
+                          style={{ background: hex }}
+                          onClick={() => setCustomAccent(hex)}
+                        />
+                      ))}
+                    </div>
+                    <div className="accent-swatches" role="group" aria-label={dark ? '常用颜色（深色主题）' : '常用颜色（浅色主题）'}>
+                      {(dark
+                        // 深色主题：取色板里偏亮的一档，落在深底上才有分量
+                        ? [
+                            '#5b8eff', '#3b82f6', '#818cf8', '#a78bfa', '#c084fc', '#e879f9',
+                            '#f472b6', '#fb7185', '#f87171', '#fb923c', '#fbbf24', '#facc15',
+                            '#a3e635', '#4ade80', '#34d399', '#2dd4bf', '#22d3ee', '#38bdf8',
+                          ]
+                        // 浅色主题：同一批色相压深一档 —— 亮色当文字放在白面板上会看不清
+                        : [
+                            '#4166b8', '#2f6fd0', '#4f46e5', '#7c3aed', '#9333ea', '#c026d3',
+                            '#db2777', '#e11d48', '#dc2626', '#ea580c', '#d97706', '#ca8a04',
+                            '#65a30d', '#16a34a', '#059669', '#0d9488', '#0891b2', '#0284c7',
+                          ]
+                      ).map((hex) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          className="accent-swatch-mini"
+                          title={hex}
+                          aria-label={hex}
+                          data-active={appearance.accent === 'custom' && appearance.customAccent === hex}
+                          style={{ background: hex }}
+                          onClick={() => setCustomAccent(hex)}
+                        />
+                      ))}
+                    </div>
                   </div>
-                </div>
+                  )
+                })()}
               </div>
 
               <div className="setting-row">
@@ -3547,6 +3652,10 @@ export default function App() {
                         <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
                       </div>
                     </div>
+                  {/* 操作必须包成**一个**子元素：`.setting-row` 是两列 grid，
+                      多塞两个按钮会变成两个新的网格单元、把「更新日志」甩到下一行
+                      （用户报的"位置不对"）。 */}
+                  <div className="setting-actions">
                     <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
                       {updateBusy ? '检查中…' : '检查更新'}
                     </button>
@@ -3558,6 +3667,7 @@ export default function App() {
                         {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
                       </button>
                     )}
+                  </div>
                   </div>
                 </section>
               )}

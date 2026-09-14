@@ -219,6 +219,8 @@ interface ElectronApi {
     setLaunchAtStartup: (enabled: boolean) => Promise<any>
     checkForUpdates: () => Promise<{ hasUpdate: boolean; version?: string; releaseNotes?: string; error?: string }>
     getChangelog: () => Promise<{ success: boolean; version?: string; content?: string; error?: string }>
+    /** 背景平均亮度（0=黑，1=白），用于「明暗跟随背景」。拿不到时 success=false。 */
+    backgroundLuminance: (path: string) => Promise<{ success: boolean; luminance: number | null }>
     downloadAndInstall: () => Promise<{ success: boolean; restarting?: boolean; error?: string }>
     ignoreUpdate: (version: string) => Promise<{ success: boolean }>
     onDownloadProgress: (callback: (progress: any) => void) => () => void

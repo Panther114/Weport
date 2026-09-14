@@ -87,8 +87,8 @@ const DARK_VEIL: RGB = [22, 20, 18]
  * 见 NotificationToast.scss）+ 文字色/光晕。把整卡压暗来换对比度是最省事但
  * 最毁观感的做法 —— 那等于把玻璃换成毛玻璃。
  */
-const WHITE_VEIL_ALPHA: readonly [number, number] = [0.06, 0.24]
-const DARK_VEIL_ALPHA: readonly [number, number] = [0.1, 0.3]
+const WHITE_VEIL_ALPHA: readonly [number, number] = [0.04, 0.16]
+const DARK_VEIL_ALPHA: readonly [number, number] = [0.07, 0.2]
 
 /**
  * 标题与正文共用同一组主文字锚点：灰色正文在蓝色等彩色背景上即使对比度达标，

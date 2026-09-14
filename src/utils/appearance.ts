@@ -37,6 +37,11 @@ export interface Appearance {
   density: Density
   /** 强调色浓度：换色相之外的第二个自定义轴。 */
   accentStrength: AccentStrength
+  /**
+   * 明暗是否仍由背景自动决定（true = 用户没有手动指定过）。
+   * 用户手动选一次明暗后置为 false，之后不再被背景覆盖。
+   */
+  modeAuto: boolean
 }
 
 export const APPEARANCE_DEFAULT: Appearance = {
@@ -48,6 +53,7 @@ export const APPEARANCE_DEFAULT: Appearance = {
   mode: 'dark',
   density: 'comfortable',
   accentStrength: 'standard',
+  modeAuto: true,
 }
 
 export const ACCENT_STRENGTH_OPTIONS: Array<{ id: AccentStrength; label: string; hint: string }> = [
@@ -97,6 +103,7 @@ const KEYS = {
   mode: 'appearanceMode',
   density: 'appearanceDensity',
   accentStrength: 'appearanceAccentStrength',
+  modeAuto: 'appearanceModeAuto',
 } as const
 
 let current: Appearance = { ...APPEARANCE_DEFAULT }
@@ -153,6 +160,8 @@ function applyDom(appearance: Appearance): void {
   root.style.setProperty('--app-bg-blur', kind === 'none' ? '0px' : `${Math.max(0, Math.min(40, appearance.backgroundBlur))}px`)
   root.dataset.hasBg = kind === 'none' ? 'false' : 'true'
   root.dataset.bgKind = kind
+  // 明暗自适应是否生效：qa/探针据此判断，不用去猜
+  root.dataset.modeAuto = appearance.modeAuto ? 'true' : 'false'
   root.dataset.accent = appearance.accent
   root.dataset.mode = appearance.mode
   root.dataset.density = appearance.density
@@ -208,8 +217,22 @@ export const setCustomAccent = (color: string): void => {
   commit({ accent: 'custom', customAccent: hex }, (key, value) => void window.electronAPI.config.set(key, value))
 }
 
-export const setMode = (mode: Mode): void =>
-  commit({ mode: isMode(mode) ? mode : 'dark' }, (key, value) => void window.electronAPI.config.set(key, value))
+/**
+ * 手动设置明暗。
+ *
+ * `auto: true` 是"背景自适应"在内部切换时用的：它不能把 modeAuto 关掉，否则
+ * 第一次自动判定之后用户就再也得不到自适应了。只有用户真的点了明暗选项
+ * （默认路径）才把 modeAuto 置 false —— 那就是"手动覆盖"。
+ */
+export const setMode = (mode: Mode, opts?: { auto?: boolean }): void => {
+  const patch: Partial<Appearance> = { mode: isMode(mode) ? mode : 'dark' }
+  if (!opts?.auto) patch.modeAuto = false
+  commit(patch, (key, value) => void window.electronAPI.config.set(key, value))
+}
+
+/** 恢复"明暗跟随背景"（立刻按当前背景重判一次由调用方触发）。 */
+export const setModeAuto = (auto: boolean): void =>
+  commit({ modeAuto: auto }, (key, value) => void window.electronAPI.config.set(key, value))
 
 export const setDensity = (density: Density): void =>
   commit({ density: isDensity(density) ? density : 'comfortable' }, (key, value) => void window.electronAPI.config.set(key, value))
@@ -245,6 +268,52 @@ export function probeBackground(onMissing: (path: string) => void): void {
   image.src = url
 }
 
+/**
+ * 亮度 → 明暗。
+ *
+ * **暗背景配浅色主题**（深色壁纸 + 深色面板 = 糊成一片），**亮背景配深色主题**，
+ * 所以在 0.5 处切开：低于中灰就切浅色主题。
+ *
+ * 第一版把方向写反了（`> 0.42 ? 'dark'`），深色壁纸被判成深色主题 —— 表现成
+ * "自适应没生效"，其实只是反了。scripts/verify-auto-mode.mjs 里的 expected 就是
+ * 本函数的镜像表达式，改动这里要一起改。
+ */
+function modeForLuminance(luminance: number): Mode {
+  return luminance < 0.5 ? 'light' : 'dark'
+}
+
+/**
+ * 按背景的实际亮度自动切换明暗。仅当用户没有手动指定过明暗（modeAuto）时生效。
+ *
+ * 亮度**由主进程算**：渲染层拿到的是 `weport-media://`（自定义协议），把它画到
+ * canvas 会把 canvas 标记为 tainted，`getImageData` 直接抛 SecurityError —— 在
+ * 渲染层这条路根本走不通（实测报的就是这个错）。这里只做一次 IPC + 阈值判断。
+ *
+ * 返回实际采用的明暗；拿不到亮度（ffmpeg 缺失 / 文件损坏）或用户已手动指定时
+ * 返回 null —— 静默不动，绝不猜一个值去覆盖用户的选择。
+ */
+export async function adoptModeFromBackground(): Promise<Mode | null> {
+  if (!current.modeAuto) return null
+  const path = current.backgroundPath
+  if (!path) return null
+  try {
+    const result = await window.electronAPI.app.backgroundLuminance(path)
+    // 期间用户可能换了背景或手动选了明暗，落地前用当前状态再核对一次
+    if (!result?.success || typeof result.luminance !== 'number') return null
+    if (current.backgroundPath !== path || !current.modeAuto) return null
+    const next = modeForLuminance(result.luminance)
+    if (next !== current.mode) setMode(next, { auto: true })
+    return next
+  } catch {
+    return null
+  }
+}
+
+/** 当前的明暗是否由背景自动决定（设置页据此显示"跟随背景"）。 */
+export function isModeAuto(): boolean {
+  return current.modeAuto
+}
+
 /** 应用启动时（App 挂载后）调用一次，从配置恢复外观。 */
 export async function initAppearance(): Promise<Appearance> {
   const api = window.electronAPI
@@ -256,7 +325,7 @@ export async function initAppearance(): Promise<Appearance> {
     }
   }
 
-  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, accentStrength, legacyColorMode] = await Promise.all([
+  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, accentStrength, modeAuto, legacyColorMode] = await Promise.all([
     read(KEYS.backgroundPath),
     read(KEYS.backgroundDim),
     read(KEYS.backgroundBlur),
@@ -265,12 +334,14 @@ export async function initAppearance(): Promise<Appearance> {
     read(KEYS.mode),
     read(KEYS.density),
     read(KEYS.accentStrength),
+    read(KEYS.modeAuto),
     // v1.0 之前的「色彩主题」：colorful / mono。它现在只是强调色的一种，
     // 因此在没有新的 accent 配置时把它迁移过来，而不是丢下不管。
     read('colorMode'),
   ])
 
-  const legacyAccent: AccentId | undefined = legacyColorMode === 'mono' ? 'graphite' : legacyColorMode === 'colorful' ? 'blue' : undefined
+  const legacyAccent: AccentId | undefined =
+    legacyColorMode === 'mono' ? 'graphite' : legacyColorMode === 'colorful' ? 'blue' : undefined
 
   const next: Appearance = {
     backgroundPath: typeof backgroundPath === 'string' ? backgroundPath.trim() : APPEARANCE_DEFAULT.backgroundPath,
@@ -285,6 +356,8 @@ export async function initAppearance(): Promise<Appearance> {
     mode: isMode(mode) ? mode : APPEARANCE_DEFAULT.mode,
     density: isDensity(density) ? density : APPEARANCE_DEFAULT.density,
     accentStrength: isStrength(accentStrength) ? accentStrength : APPEARANCE_DEFAULT.accentStrength,
+    // 从来没写过这个键 → 老用户，默认交给背景自适应；写过就用存下来的值
+    modeAuto: modeAuto === undefined ? APPEARANCE_DEFAULT.modeAuto : modeAuto === true,
   }
 
   current = next
@@ -292,7 +365,6 @@ export async function initAppearance(): Promise<Appearance> {
   listeners.forEach((listener) => listener())
   return next
 }
-
 /** React hook：外观变化时重渲染（设置面板需要同步控件状态）。 */
 export function useAppearance(): Appearance {
   const [value, setValue] = useState<Appearance>(current)

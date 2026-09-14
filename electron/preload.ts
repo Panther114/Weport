@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setLaunchAtStartup: (enabled: boolean) => ipcRenderer.invoke('app:setLaunchAtStartup', enabled),
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
     getChangelog: () => ipcRenderer.invoke('app:getChangelog'),
+    /** 背景平均亮度（0-1），用于「明暗跟随背景」；拿不到时 luminance 为 null */
+    backgroundLuminance: (path: string) => ipcRenderer.invoke('appearance:backgroundLuminance', path),
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
     ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
     onDownloadProgress: (callback: (progress: any) => void) => subscribe('app:downloadProgress', callback),

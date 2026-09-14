@@ -2866,6 +2866,13 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // 手动压缩：与 runChat 的自动压缩共用 service 侧实现，返回体区分
   // 「已压缩」和「还没到阈值」，面板据此给出不同提示。
   ipcMain.handle('ai:compactChat', (_e, chatId: string) => weportAiService.compactChat(String(chatId || '')))
+  // 背景平均亮度：用于「明暗跟随背景」。必须在主进程算 —— 渲染层把
+  // weport-media:// 画到 canvas 会被标记为 tainted，getImageData 抛 SecurityError。
+  ipcMain.handle('appearance:backgroundLuminance', async (_e, path: string) => {
+    if (!backgroundVideoService) return { success: false, luminance: null as number | null }
+    const luminance = await backgroundVideoService.meanLuminance(String(path || ''))
+    return { success: luminance !== null, luminance }
+  })
   ipcMain.handle('ai:listNotes', (_e, chatId: string) => ({ notes: weportAiService.listNotes(String(chatId || '')) }))
   ipcMain.handle('ai:readNoteFile', (_e, chatId: string, path: string) => ({
     content: weportAiService.readNoteFile(String(chatId || ''), String(path || '')),

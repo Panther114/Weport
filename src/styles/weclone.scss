@@ -635,6 +635,17 @@
   color: var(--accent, #fff);
 }
 
+// 失败停在哪一步：那一步用危险色标出来。没有这条时失败会退化成"所有步骤都
+// 没在跑、也没人说清是哪一步断的"。
+.weclone-stage.failed {
+  color: var(--danger, #ff6b6b);
+  border-color: color-mix(in srgb, var(--danger, #ff6b6b) 45%, transparent);
+}
+
+.weclone-stage.failed svg {
+  color: var(--danger, #ff6b6b);
+}
+
 .weclone-progress-msg {
   display: flex;
   align-items: baseline;

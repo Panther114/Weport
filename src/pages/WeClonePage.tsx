@@ -211,8 +211,11 @@ export default function WeClonePage() {
         void refreshList()
       } else if (result.aborted) {
         pushToast('info', '已取消生成', '已扫描的部分不会保留')
+        // 终态必须显式落下：否则面板停在最后一个中途阶段，"已取消"看起来还在跑
+        setProgress((prev) => (prev ? { ...prev, stage: 'aborted', message: '已取消' } : prev))
       } else {
         const msg = String(result.error || '未知错误')
+        setProgress((prev) => (prev ? { ...prev, stage: 'failed', message: msg } : prev))
         if (msg.includes('未配置 AI')) {
           pushToast('err', '请先配置 WePort AI', msg, 9000)
         } else {
@@ -221,6 +224,7 @@ export default function WeClonePage() {
       }
     } catch (e) {
       pushToast('err', '克隆生成失败', String(e), 10000)
+      setProgress((prev) => (prev ? { ...prev, stage: 'failed', message: String(e) } : prev))
     } finally {
       abortRef.current = null
       setGenerating(false)

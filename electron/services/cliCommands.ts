@@ -16,6 +16,7 @@ import { analyticsService } from './analyticsService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { connectorsService } from './connectors/connectorsService'
 import { weportAiService } from './weportAiService'
+import { weCloneService } from './weCloneService'
 import { ConfigService } from './config'
 
 const APP_VERSION = (() => {
@@ -530,70 +531,53 @@ export function registerCliCommands(): void {
         { name: 'history', type: 'string', description: 'JSON 数组，形如 [{"role":"user","content":"…"}]' },
       ],
       run: async (args) => {
-        const server = String(config.get('weCloneServerUrl') || '').trim().replace(/\/+$/, '')
-        const token = String(config.get('weCloneServerToken') || '').trim()
-        if (!server) return { success: false, error: '未配置 weCloneServerUrl（设置 → 人格克隆）' }
         const message = String(args.message || '').trim()
         if (!message) return { success: false, error: '缺少 message 参数' }
-        const auth = token ? { Authorization: `Bearer ${token}` } : {}
-
-        let cloneId = String(args.id || '').trim()
-        if (!cloneId) {
-          const listResponse = await fetch(`${server}/api/weclone/list`, { headers: auth, signal: AbortSignal.timeout(30000) })
-          const list = (await listResponse.json().catch(() => null)) as { clones?: Array<{ id?: string; displayName?: string; createdAt?: string }> } | null
-          let clones = Array.isArray(list?.clones) ? list.clones : []
-          // Selecting by name matters once a server holds more than one clone: the newest
-          // rows here were test uploads of the same corpus, and "newest wins" silently
-          // picked a legacy clone built from a different corpus entirely.
-          const wanted = String(args.name || '').trim().toLowerCase()
-          if (wanted) clones = clones.filter((clone) => String(clone.displayName || '').toLowerCase().includes(wanted))
-          if (clones.length === 0) {
-            return {
-              success: false,
-              error: wanted
-                ? `没有名字包含「${args.name}」的克隆：先在「人格克隆」里生成并上传一个`
-                : '服务器上没有这个 token 的克隆：先在「人格克隆」里生成并上传一个',
-            }
-          }
-          clones.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-          cloneId = String(clones[0]?.id || '')
-        }
-
-        let history: unknown[] = []
+        let history: Array<{ role: string; content: string }> = []
         if (args.history) {
           try {
             const parsed = JSON.parse(String(args.history))
-            if (Array.isArray(parsed)) history = parsed
+            if (Array.isArray(parsed)) history = parsed as Array<{ role: string; content: string }>
           } catch {
             return { success: false, error: 'history 必须是 JSON 数组' }
           }
         }
 
-        const started = Date.now()
-        const response = await fetch(`${server}/api/weclone/${encodeURIComponent(cloneId)}/chat`, {
-          method: 'POST',
-          headers: { ...auth, 'Content-Type': 'application/json' },
-          // Streamed replies arrive as SSE with the whole text in deltas; the non-stream
-          // form returns one JSON body, which is what a terminal caller wants.
-          body: JSON.stringify({ message, history, stream: false }),
-          signal: AbortSignal.timeout(180000),
-        })
-        const text = await response.text()
-        let payload: { reply?: string; error?: string } | null = null
-        try { payload = JSON.parse(text) as { reply?: string; error?: string } } catch { /* html error page */ }
-        if (!response.ok || !payload) {
-          return { success: false, error: payload?.error || text.slice(0, 200) || `HTTP ${response.status}` }
+        // 全部交给服务层：克隆选择、服务器 id 解析（remote_ 前缀）、
+        // 本地服务自动拉起都在那一处，CLI 不再自己实现一遍。
+        let cloneId = String(args.id || '').trim()
+        const wanted = String(args.name || '').trim()
+        if (!cloneId && wanted) {
+          const listed = await weCloneService.getClones()
+          const lower = wanted.toLowerCase()
+          const matches = listed.clones.filter((c) => String(c.displayName || '').toLowerCase().includes(lower))
+          if (matches.length === 0) {
+            return { success: false, error: `没有名字包含「${wanted}」的克隆：先在「人格克隆」里生成并上传一个` }
+          }
+          matches.sort((a, b) => String(b.generatedAt || '').localeCompare(String(a.generatedAt || '')))
+          cloneId = String(matches[0]?.id || '')
         }
-        const reply = String(payload.reply || '').trim()
-        return {
-          success: true,
-          data: { cloneId, reply, elapsedMs: Date.now() - started },
-          text: reply,
+        if (!cloneId) {
+          const listed = await weCloneService.getClones()
+          // 只挑**服务器上有**的克隆：`serverId` 是服务端认得的 id，本地档案
+          // 没有它就是没上传过，拿它去聊天必然 "clone not found"。
+          // 再按生成时间取最新 —— 远程行没有 generatedAt，所以用原顺序兜底，
+          // 不要用一个空字符串去比大小（那会随机挑中一个）。
+          const usable = listed.clones.filter((c) => c.serverId || c.source !== 'remote')
+          if (usable.length === 0) {
+            return { success: false, error: '没有已上传到服务器的克隆：先在「人格克隆」里生成并上传一个' }
+          }
+          const sorted = [...usable].sort((a, b) => String(b.generatedAt || '').localeCompare(String(a.generatedAt || '')))
+          cloneId = String(sorted[0]?.id || '')
         }
+
+        const result = await weCloneService.chatWithClone({ cloneId, message, history })
+        if (!result.success) {
+          return { success: false, error: result.hint ? `${result.error}\n${result.hint}` : result.error }
+        }
+        return { success: true, data: { cloneId, reply: result.reply, elapsedMs: result.elapsedMs }, text: result.reply }
       },
     },
-
-    // ------------------------------------------------------------------ 配置
     {
       name: 'config.get',
       summary: 'Read config values (secrets are returned as a boolean, never plaintext).',

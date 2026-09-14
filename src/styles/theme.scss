@@ -116,10 +116,80 @@
   --tint-line: 46%;
 }
 
-:root[data-accent-strength='vivid'] .panel,
-:root[data-accent-strength='vivid'] .sns-post-item,
-:root[data-accent-strength='vivid'] .v09-panel {
-  background-image: var(--accent-grad);
+// -----------------------------------------------------------------------------
+// 强调色浓度：浓郁档的**应用范围**
+// -----------------------------------------------------------------------------
+//
+// 只把 --tint-* 调高是不够的：那三档半透明底色只覆盖"已经用了强调色的地方"，
+// 而页面骨架（卡片、页头、导航、字段、表头、行分隔）本来全是中性灰 —— 于是
+// 用户选了「浓郁用色」却发现"看起来和标准差不多"。
+//
+// 所以浓郁档额外做两件事：
+//  1. 给原本中性的**容器**加上淡色底 / 有色描边（accent-softer / accent-line）；
+//  2. 让页头、导航、图标这些"身份位"真正带色（文字与图标取 accent-3/-4）。
+//
+// 全部只改颜色与背景图像，不引入 blur/shadow/filter —— 这些规则会命中大量元素，
+// 任何一项复合效果都会变成滚动与重绘的负担。
+
+:root[data-accent-strength='vivid'] {
+  // 骨架容器：统一的淡色底 + 有色描边
+  :is(.panel, .v09-panel, .exp-side-card, .weclone-card, .stat-cards > *, .sns-post-item, .v09-card) {
+    background-image: var(--accent-grad);
+    border-color: var(--accent-line);
+  }
+
+  // 页头 / 分区标题：身份位带色，浓度一眼可见
+  :is(.panel-head, .exp-sec-head, .v09-panel-head, .ai-topbar, .sns-topbar) {
+    background-image: var(--accent-grad);
+  }
+
+  :is(.panel-head h2, .exp-sec-head, .v09-panel-head h3, .panel-head h2 svg, .exp-sec-head svg, .v09-panel-head h3 svg) {
+    color: var(--accent-3);
+  }
+
+  // 左侧导航：未选中项也带一点色，选中项更明显
+  .rail-item {
+    color: color-mix(in srgb, var(--accent-3) 62%, var(--text-dim));
+
+    svg {
+      color: var(--accent-4);
+      opacity: 0.85;
+    }
+
+    &[data-active='true'] {
+      background: var(--accent-soft);
+      border-color: var(--accent-line);
+    }
+  }
+
+  .rail-group-title {
+    color: var(--accent-4);
+  }
+
+  // 表单与列表：让"能操作的东西"整体偏色，而不是只有选中的那一个
+  :is(.setting-row, .account-item, .notify-row, .sns-author, .media-check) {
+    border-color: color-mix(in srgb, var(--accent-raw) 18%, var(--line));
+  }
+
+  :is(.path-input, .filter-input, select, textarea) {
+    border-color: color-mix(in srgb, var(--accent-raw) 26%, var(--line));
+  }
+
+  :is(.chip, .ghost-btn, .secondary-btn) {
+    border-color: color-mix(in srgb, var(--accent-raw) 32%, var(--line));
+    color: color-mix(in srgb, var(--accent-3) 70%, var(--text));
+  }
+
+  // 进度条 / 分隔线：这类细线用浓一档的颜色，观感提升明显而成本为零
+  :is(.progress-fill, .ai-bar-fill) {
+    background: linear-gradient(90deg, var(--accent), var(--accent-3));
+  }
+
+  .exp-head-chip,
+  .badge {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+  }
 }
 
 :root {
@@ -432,17 +502,17 @@
  * (--app-bg-blur)"提供，而不是让每个面板自己做毛玻璃。
  */
 :root[data-has-bg='true'] {
-  --bg-raised: rgba(17, 17, 22, 0.78);
-  --panel: rgba(23, 23, 29, 0.72);
-  --elevated: rgba(30, 30, 38, 0.8);
+  --bg-raised: rgba(17, 17, 22, 0.6);
+  --panel: rgba(23, 23, 29, 0.54);
+  --elevated: rgba(30, 30, 38, 0.66);
 }
 
-// 浅色模式的半透明面板要给得更实：白底叠在浅色壁纸上时，72% 的白会把背景糊成
-// 一片雾。提到 0.84 仍然透得出壁纸，而文字稳。
+// 浅色模式的半透明面板要给得更实：白底叠在浅色壁纸上时，低透明度的白会把背景
+// 糊成一片雾。0.72 仍然透得出壁纸，而文字稳。
 :root[data-mode='light'][data-has-bg='true'] {
-  --bg-raised: rgba(255, 255, 255, 0.84);
-  --panel: rgba(255, 255, 255, 0.8);
-  --elevated: rgba(238, 240, 246, 0.86);
+  --bg-raised: rgba(255, 255, 255, 0.72);
+  --panel: rgba(255, 255, 255, 0.66);
+  --elevated: rgba(238, 240, 246, 0.78);
 }
 
 // -----------------------------------------------------------------------------
@@ -486,5 +556,45 @@
 
 .theme-card-check {
   margin-left: auto;
+}
+
+// -----------------------------------------------------------------------------
+// 占位符字体跟控件走
+// -----------------------------------------------------------------------------
+//
+// 各处的 `input::placeholder` 只设了 color，没设 font —— 而 **placeholder 不继承
+// 宿主元素的 font**，它用的是 UA 默认字体（Windows 上是 Arial）。于是同一个输入框
+// 输入前和输入后是两套字形、两套字宽：AI 服务里的「自定义接口地址」空着时看着比
+// 旁边的标签窄一档，用户报的"输入框空白处字体和别处不同步"就是这个。
+//
+// `font: inherit` 让占位符与宿主控件完全同源，因此空态与填写态必然一致，且以后
+// 无论谁给某个输入框改字体都不需要再补一条占位符规则。
+//
+// 放在 theme.scss（最后加载）而不是 styles.css：那里已有的 ::placeholder 规则只
+// 管颜色，这里的简写若被它后面的同名简写覆盖就白写了 —— 颜色是独立属性，两者不冲突。
+input::placeholder,
+textarea::placeholder {
+  font: inherit;
+}
+
+// -----------------------------------------------------------------------------
+// 读屏专用文本
+// -----------------------------------------------------------------------------
+//
+// 高频更新的进度类界面**不能**把 aria-live 挂在会变的可见文字上：导出期间每秒
+// 2-3 条进度事件，读屏会把每一条都念出来。正确做法是另起一个视觉上不可见、
+// 只在阶段变化时改动的 role="status" 节点（见 ExportProgressBar）。
+// 用 1px + clip 而不是 display:none —— 后者会让节点从无障碍树里消失。
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 

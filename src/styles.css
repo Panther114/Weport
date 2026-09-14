@@ -3652,6 +3652,26 @@ button:disabled {
   margin-bottom: 5px;
 }
 
+/* AI 服务设置里的输入统一用界面字体。
+ *
+ * `.path-input` 全局是等宽字体（文件路径要等宽才好读），但 AI 服务配置里
+ * 输的是"配置名 / 密钥 / 接口地址"这类普通文本，而同一个面板里的提示词
+ * textarea 用的是 `font-family: inherit` —— 于是自定义接口地址那个框
+ * 在一排控件里字形明显不同。这里按容器统一，不动全局的 .path-input。 */
+.ai-settings .path-input,
+.ai-add-dialog .path-input,
+.ai-provider-inline .path-input {
+  font-family: var(--font);
+}
+
+/* 但地址类字段保留等宽：URL 是逐字符核对的东西 */
+.ai-settings .path-input[id*='BaseUrl'],
+.ai-add-dialog .path-input[id*='BaseUrl'],
+.ai-settings .ai-provider-custom-url .path-input,
+.ai-add-dialog .ai-provider-custom-url .path-input {
+  font-family: var(--font-mono);
+}
+
 .ai-settings select.path-input {
   appearance: none;
   background-image: none;

@@ -1238,6 +1238,11 @@ textarea,
 }
 
 // 进度条并入吸顶块后没有自己的背景，滚上去会露出下面的内容，所以给底色。
+//
+// 这一行**尺寸必须恒定**：它是吸顶块的一行，高度一变就把下面整页内容顶上去、
+// 再放下来 —— 导出期间每秒多次进度更新，观感就是"所有东西在互相推挤"。
+// 因此高度固定、会话名占固定基准宽度（只负责溢出省略），计数列始终占位。
+// 进度条组件本身也做了隔离重渲染，见 src/components/export/ExportProgressBar.tsx。
 .exp-progress-bar {
   display: flex;
   align-items: center;
@@ -1246,6 +1251,9 @@ textarea,
   padding: var(--space-2) var(--space-4);
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+  // 固定行高：内容（会话名/计数/取消按钮）怎么变都不改这一行的高度
+  min-height: 34px;
+  box-sizing: border-box;
 }
 
 .exp-progress-bar .progress-track {
@@ -1253,9 +1261,12 @@ textarea,
   min-width: 120px;
 }
 
+// 会话名占固定基准宽度，再靠 flex-shrink 让出空间。
+// 不用 `flex: 0 1 auto`：那样宽度跟着文字走，右侧轨道与「取消导出」会随每条
+// 进度事件左右横跳 —— 这正是用户报的抖动之一。
 .exp-progress-session {
-  flex: 0 1 auto;
-  max-width: 260px;
+  flex: 0 1 260px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1263,8 +1274,11 @@ textarea,
   color: var(--text-dim);
 }
 
+// 计数列固定宽度 + 等宽数字：`9 / 189` → `189 / 189` 不会改变自己的宽度
 .exp-progress-count {
   flex: 0 0 auto;
+  min-width: 66px;
+  text-align: right;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
@@ -2281,6 +2295,67 @@ textarea,
     box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px currentColor;
     color: inherit;
   }
+
+  // 无彩色近路（纯黑 / 灰 / 纯白）：用内描边和色相板区分开，避免被看成一排
+  // 普通色块 —— 它们代表的是"不要颜色"，和挑色相是两件事。
+  &[data-mono='true'] {
+    box-shadow: inset 0 0 0 1px var(--line-strong), 0 0 0 1px rgba(128, 128, 128, 0.25);
+  }
+}
+
+// 明暗自适应开关：跟在「主题」标题下方，属于主题的说明性选项
+.mode-auto-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+
+  input {
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex: none;
+  }
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 25b. 「自定义」主题卡片
+// -----------------------------------------------------------------------------
+//
+// 它是主题网格里的第 7 个选项（见 App.tsx）：预置色板和自定义色板在这里并列
+// 呈现，而不是"上面选主题、下面另挂一个自定义"。选中后调色面板才展开。
+.theme-card-preview-custom {
+  // 自定义色没有固定的色相条，用一小段彩环暗示"随便挑"
+  background-image: conic-gradient(
+    from 0deg,
+    #ef4444, #f59e0b, #84cc16, #10b981, #06b6d4, #6366f1, #a855f7, #ec4899, #ef4444
+  );
+  background-size: 11px 11px;
+  background-position: right 3px top 3px;
+  background-repeat: no-repeat;
+}
+
+// -----------------------------------------------------------------------------
+// 26. 关于页的动作分组
+// -----------------------------------------------------------------------------
+//
+// `.setting-row` 是两列 grid；把三个按钮直接放进去会各自占一个网格单元，
+// 「更新日志」被甩到第二行 —— 用户报的"位置不对"就是这个。包一层 flex 容器后
+// 它们回到同一列，并且随窗口变窄自动换行。
+.setting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 // -----------------------------------------------------------------------------

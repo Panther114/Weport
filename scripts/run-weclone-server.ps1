@@ -7,7 +7,7 @@
 #
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/run-weclone-server.ps1 [-Restart]
 
-param([switch]$Restart)
+param([switch]$Restart, [string]$Port = '8099')
 
 $ErrorActionPreference = 'Stop'
 $pidFile = Join-Path $env:TEMP 'weclone-server.pid'
@@ -17,7 +17,9 @@ if ($Restart -and (Test-Path $pidFile)) {
   Start-Sleep -Seconds 2
 }
 
-$env:PORT = '8099'
+# 端口可由调用方指定（应用内自动拉起时会带上配置里的端口）；
+# 已经通过环境变量传进来的话以环境变量为准。
+if (-not $env:PORT) { $env:PORT = $Port }
 $env:HOST = '127.0.0.1'
 $env:WECLONE_DATA_DIR = 'D:\Devs\Weflow\weport\weclone-server\data'
 $env:WECLONE_LLM_API_KEY = 'sk-qCluV5o9ldutuuxtQPkhaFxqEi5d6uTE6SqLxugxtN6RDtoALWPJxxsArxZmRizO'
