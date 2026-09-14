@@ -1254,6 +1254,17 @@ textarea,
   // 固定行高：内容（会话名/计数/取消按钮）怎么变都不改这一行的高度
   min-height: 34px;
   box-sizing: border-box;
+
+  // 无进度时：占位但看不见。
+  //
+  // 这一行如果**不存在**，导出一开始吸顶块就从"只有页头"变成"页头 + 进度行"，
+  // 下面的 .export-layout 被整体推下去一次 —— 浏览器判定为布局偏移（实测 CLS
+  // 0.0158，正是用户看到的"偶尔抖一下"）。所以永远保留这一行的高度，
+  // 用 visibility 隐藏而不是 display（后者高度归零，等于没占位）。
+  &[data-idle='true'] {
+    visibility: hidden;
+    pointer-events: none;
+  }
 }
 
 .exp-progress-bar .progress-track {

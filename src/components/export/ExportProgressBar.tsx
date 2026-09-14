@@ -121,11 +121,21 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
     void api.cancelTask(taskId)
   }, [api, taskId])
 
-  if (!progress) return null
-
-  const total = Number(progress.total || 0)
-  const current = Number(progress.current || 0)
-  const phase = progress.phase || 'running'
+  /**
+   * 没有进度时**仍然占位**，只是把内容藏起来。
+   *
+   * 这是"偶尔抖一下"的真正来源：进度条原来在无进度时 `return null`，于是导出
+   * 一开始，吸顶块从"只有页头"变成"页头 + 进度行"，高度多了 30px —— 它下面的
+   * 整个 `.export-layout` 被整体推下去一次。浏览器把这个判定为布局偏移，实测
+   * CLS 0.0158（`PerformanceObserver` 抓到的唯一一条真实偏移）。
+   *
+   * 保留一个固定高度的空行就没有这次位移。空行本身用 visibility 隐藏（不是
+   * display: none —— 那会让高度归零，等于没占位）。
+   */
+  const idle = progress === null
+  const total = Number(progress?.total || 0)
+  const current = Number(progress?.current || 0)
+  const phase = progress?.phase || 'running'
   // 完成态认两个信号：显式的 phase，以及"计数已满"。后者是兜底 —— 某些格式的
   // 收尾路径不一定带 phase=complete，但 current 到 total 是**事实**。只看 phase
   // 会留下一条永远停在 99% 的进度条。
@@ -134,10 +144,16 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
   const indeterminate = phase === 'preparing' || (!total && !complete)
   // 完成态不显示会话名：那一步已经没有"正在导出的会话"了，留着只会显示上一条
   // 会话名或占位文案。失败/取消走 phase 分支，同样不留旧文案。
-  const sessionLabel = complete ? '导出完成' : progress.currentSession || '准备中…'
+  const sessionLabel = complete ? '导出完成' : (progress?.currentSession || '准备中…')
 
   return (
-    <div className={`exp-progress-bar phase-${complete ? 'complete' : phase}`}>
+    <div
+      className={`exp-progress-bar phase-${complete ? 'complete' : phase}`}
+      // idle：占位但不可见。`visibility` 而不是 `display` —— 后者高度归零，
+      // 吸顶块照样会变高，等于没占位。
+      data-idle={idle ? 'true' : undefined}
+      aria-hidden={idle || undefined}
+    >
       {/* 只播报阶段变化的读屏专用区域（见上面的注释） */}
       <span className="sr-only" role="status" aria-live="polite">
         {announcement}
@@ -145,7 +161,7 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
       <div className="progress-track">
         <div className={`progress-fill${indeterminate ? ' indeterminate' : ''}`} style={total ? { width: `${pct}%` } : undefined} />
       </div>
-      <span className="exp-progress-session" title={progress.currentSession || ''}>
+      <span className="exp-progress-session" title={progress?.currentSession || ''}>
         {sessionLabel}
       </span>
       {/* 计数始终占位：total 未知时留空而不是消失，否则右侧「取消导出」会左右横跳 */}

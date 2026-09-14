@@ -1996,17 +1996,25 @@ button:disabled {
   box-shadow: 0 0 8px rgba(255, 255, 255, 0.18);
 }
 
+/* 不确定进度：动 `transform` 而不是 `margin-left`。
+ *
+ * 原来用 margin-left 做扫过动画 —— 那是**布局属性**，1.4s 一个循环，每帧都会
+ * 让进度轨道的布局失效。浏览器把它记成 layout shift（实测每次 0.00002，导出期
+ * 间累计 116 次、CLS 0.003）：数值上很小，但它意味着这个动画每秒都在触发重排。
+ * transform 只走合成，不参与布局，因此不产生 layout shift，也不重排。
+ * 起点用 translateX(-100%)（自身宽度 40% 的 -250% = 轨道宽度的 -100%）。*/
 .progress-fill.indeterminate {
   width: 40% !important;
   animation: indeterminate 1.4s ease-in-out infinite;
+  will-change: transform;
 }
 
 @keyframes indeterminate {
   0% {
-    margin-left: -40%;
+    transform: translateX(-250%);
   }
   100% {
-    margin-left: 100%;
+    transform: translateX(250%);
   }
 }
 

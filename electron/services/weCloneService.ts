@@ -859,7 +859,6 @@ export class WeCloneService {
   private async runSecondPassFilter(
     providers: ProviderProfile[],
     mds: WeCloneMds,
-    jsonlPath: string,
     signal: AbortSignal | undefined,
     onProgress: (message: string, pct: number) => void
   ): Promise<{ mds: WeCloneMds; chunkPatches: Map<string, string>; hits: number }> {
@@ -894,33 +893,18 @@ export class WeCloneService {
       }
     }
 
-    // 3) 抽样 5% 语料做 LLM 二审；命中只记录补丁（上传时应用），不重写 JSONL
+    // 3) 语料二次审查 —— v1.0 起**不再逐块调用模型**。
+    //
+    // 这里原来按 5% 抽样（16,038 块 → 约 800 次调用）逐块做 LLM 审查，把命中的
+    // 改写记成 chunkPatches。但那批补丁**唯一的消费者是上传路径**（上传时把补丁
+    // 应用进 payload）—— v1.0 不再上传，语料只在本机参与检索，于是这 800 次调用
+    // 变成了完全没有产出的死功夫：实测它让一次生成从 ~2 分钟拖到小时级（跑满
+    // 25 分钟轮询上限都没结束），而用户拿不到任何好处。
+    //
+    // 语料的隐私并不因此失去保障：入库时已经做过本地正则脱敏（见 scanAllSessions
+    // 的 redactSensitiveText），二审查要保的是"没人能看到你的语料"——而语料现在
+    // 根本不出本机，这一层在本地是冗余的。MD 的全量审查保留（那是要给模型看的）。
     const chunkPatches = new Map<string, string>()
-    try {
-      const counted = await this.sampleChunksFromJsonl(jsonlPath, 0, 0)
-      const sampleCount = Math.max(20, Math.ceil(counted.total * 0.05))
-      const { sampled } = await this.sampleChunksFromJsonl(jsonlPath, sampleCount, 0)
-      for (const chunk of sampled) {
-        this.ensureNotAborted(signal)
-        try {
-          const response = await this.callLlmWithFallback(providers, '你是严格的隐私审查器，只输出 JSON。', WECLONE_FILTER_PROMPT.replace('{content}', chunk.text), signal)
-          const spans = this.parseFilterResponse(response)
-          if (spans.length > 0) {
-            const applied = this.applyLlmSpans(chunk.text, spans)
-            if (applied.text !== chunk.text) {
-              chunkPatches.set(chunk.id, applied.text)
-              hits += applied.applied
-            }
-          }
-        } catch (e) {
-          if ((e as Error)?.name === 'WeCloneAbortedError') throw e
-          break // 采样审查失败即停止该阶段，不阻塞主流程
-        }
-      }
-    } catch (e) {
-      if ((e as Error)?.name === 'WeCloneAbortedError') throw e
-      console.warn('[WeClone] 语料抽样二审失败:', e)
-    }
 
     return { mds: filteredMds, chunkPatches, hits }
   }
@@ -956,10 +940,22 @@ export class WeCloneService {
 
     const wxid = this.getMyWxid()
     const dir = this.getStagingDir(wxid)
-    const jsonlFinal = join(dir, 'chunks.jsonl')
+    /**
+     * 在**临时目录**里生成，全部成功后再原子换上去。
+     *
+     * 为什么不能直接写 dir：生成要几分钟，中途失败（网络断、模型报错、用户取消）
+     * 时 dir 里会留下"新 MD + 旧 metadata"或"半数 MD"的混合体，用户下次打开看到
+     * 的是一个说不清是哪个版本的分身。实测就撞上过这种状态。
+     * 现在失败时 dir 完全没被碰过，旧克隆仍然可用。
+     */
+    const stageDir = `${dir}.building`
+    const jsonlFinal = join(stageDir, 'chunks.jsonl')
     const jsonlPart = `${jsonlFinal}.part`
 
     try {
+      // 上一次失败留下的残留先清掉
+      try { rmSync(stageDir, { recursive: true, force: true }) } catch { /* noop */ }
+
       // ---- 0. 前置检查 -----------------------------------------------------
       report('scan', 0, '正在检查配置…')
       // 候选服务列表（首选 + 默认），每次调用按顺序重试
@@ -976,7 +972,6 @@ export class WeCloneService {
       if (ids.length === 0) throw new Error('没有可用的聊天会话')
 
       // ---- 2. 游标扫描 → 脱敏 → 分块 → JSONL -------------------------------
-      try { rmSync(jsonlPart, { force: true }) } catch { /* noop */ }
       report('scan', 4, `开始扫描 ${ids.length} 个会话…`, { sessions: ids.length })
       const stats = await this.scanAllSessions(ids, jsonlPart, signal, (completed, total, messages) => {
         report('scan', 4 + (completed / Math.max(1, total)) * 46, `扫描会话 ${completed}/${total}（${messages.toLocaleString()} 条消息）`, { completed, total, messages })
@@ -1000,7 +995,6 @@ export class WeCloneService {
         const cleaned = content.trim().slice(0, MD_CHAR_LIMIT)
         if (!cleaned) throw new Error(`${key}.md 生成结果为空`)
         mds[key] = cleaned
-        this.atomicWriteFile(join(dir, `${key}.md`), cleaned)
       }
       const fullMds: WeCloneMds = {
         profile: mds.profile || '',
@@ -1012,10 +1006,11 @@ export class WeCloneService {
 
       // ---- 4. 第二阶段 PII 审查 --------------------------------------------
       report('filter', 84, '正在进行二次隐私审查…')
-      const filterResult = await this.runSecondPassFilter(providers, fullMds, jsonlFinal, signal, (message) => {
+      const filterResult = await this.runSecondPassFilter(providers, fullMds, signal, (message) => {
         report('filter', 85, message)
       })
-      for (const { key, path } of this.mdFilePaths(dir)) {
+      // MD 只在**全部审查通过之后**才落地，写进临时目录
+      for (const { key, path } of this.mdFilePaths(stageDir)) {
         this.atomicWriteFile(path, filterResult.mds[key])
       }
 
@@ -1025,7 +1020,9 @@ export class WeCloneService {
       const meta: WeCloneMeta = {
         id: `wc_${wxid}_${now.getTime().toString(36)}`,
         wxid,
-        displayName: wxid,
+        // 显示名默认「我」而不是 wxid：这是**用户自己**的分身，卡片上写
+        // `wxid_gsnpwh6vh2z012` 既看不懂也不亲切。
+        displayName: '我',
         knowledgeCutoff: stats.cutoffTs
           ? new Date(stats.cutoffTs * 1000).toISOString().slice(0, 10)
           : now.toISOString().slice(0, 10),
@@ -1037,7 +1034,31 @@ export class WeCloneService {
         truncated: stats.truncated,
       }
       meta.chunkCount = (await this.sampleChunksFromJsonl(jsonlFinal, 0, 0)).total
-      this.writeMeta(dir, meta)
+      this.writeMeta(stageDir, meta)
+
+      // ---- 6. 原子换上去 ----------------------------------------------------
+      // 到这里新克隆已经完整。先备份旧的（同名目录），再换名字。
+      // 用 rename 而不是先把旧的删掉：rename 在同一个卷上是原子操作，
+      // 中间任何一步失败都还能回滚到旧克隆。
+      let backupDir: string | null = null
+      if (existsSync(dir)) {
+        backupDir = `${dir}.previous`
+        try { rmSync(backupDir, { recursive: true, force: true }) } catch { /* noop */ }
+        renameSync(dir, backupDir)
+      }
+      try {
+        renameSync(stageDir, dir)
+      } catch (e) {
+        // 换名失败：把旧的放回去，保证用户至少还有一份可用的
+        if (backupDir) {
+          try { renameSync(backupDir, dir) } catch { /* noop */ }
+        }
+        throw e
+      }
+      if (backupDir) {
+        try { rmSync(backupDir, { recursive: true, force: true }) } catch { /* noop */ }
+      }
+
       try { this.configService.set('weCloneLastCutoff', meta.knowledgeCutoff) } catch { /* noop */ }
 
       report('done', 100, '克隆已在本地生成', { local: true })
@@ -1046,11 +1067,12 @@ export class WeCloneService {
       const aborted = (e as Error)?.name === 'WeCloneAbortedError' || signal.aborted
       const message = aborted ? '已取消' : String((e as Error)?.message || e)
       console.warn('[WeClone] 生成失败:', e)
+      // 失败的临时目录直接清掉：旧克隆没被碰过，用户手上的档案仍然是完整的
+      try { rmSync(stageDir, { recursive: true, force: true }) } catch { /* noop */ }
       if (!aborted) report('done', 100, `生成失败：${message}`)
       return { success: false, aborted, error: message }
     } finally {
       this.runningController = null
-      try { rmSync(jsonlPart, { force: true }) } catch { /* noop */ }
     }
   }
 
