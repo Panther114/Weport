@@ -89,3 +89,7 @@ electron/*.js
 
 # tsc 从 vite.config.mts 落下的影子配置（真正的配置是 .mts）
 vite.config.mjs
+
+# 提交信息草稿（写完即删，不留在仓库里）
+commit-msg-*.txt
+release-commit-msg.txt
