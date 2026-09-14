@@ -53,29 +53,24 @@
         min-width: 0;
         position: relative; // 时间锚定在文本块内，贴右缘
 
-        // 文字后方局部可读性纱层：alpha 由自适应引擎按"最不利背景"求解
-        // （见 useNotificationAdaptiveTheme 的 scrimFor）。整卡纱层被压到近乎
-        // 全透之后，可读性集中在这里 —— 所以这一块必须有底色，否则文字直接
-        // 落在桌面像素上。
+        // 文字后方的一层**实色**可读性底（一次成型，不再逐帧求解）。
         //
-        // 浓度沿宽度线性衰减到 0（而不是"实底 + 一刀切"）：后者会在收尾处留下
-        // 一条可见的竖向边界，玻璃上凭空多出一个方块。起点用引擎给的加浓值
-        // （--noti-text-scrim-strong）补偿衰减，保证文字起始处仍达到目标浓度。
-        // 两个色标都由引擎算好 —— 不在 CSS 里用 color-mix 现算：那会把
-        // color-mix 嵌套进另一个 color-mix，Chromium 下整条声明作废。
+        // 这里原来是一条沿宽度衰减到透明的渐变，起点用 --noti-text-scrim-strong
+        // 加浓补偿。问题有两个：
+        //   1. 观感上会在玻璃里留下一个可见的浅色方块，用户报的"文字后面有奇怪的
+        //      白边"就是它 —— 渐变是为了遮住"一刀切"的硬边，但代价是整块底色被看见；
+        //   2. 渐变里同时引用两个 CSS 变量，两者都随自适应改写 → 每次采样要重绘整条
+        //      渐变（实测 9 次/8 秒），是自适应里最贵的一条属性。
+        //
+        // 现在是一块贴合文字块的圆角实底：边界由圆角承担，不需要渐变去藏，也不会
+        // 出现色带或方块。alpha 仍由引擎按"最不利背景"求解，只是**只算一次**。
         &::before {
             content: '';
             position: absolute;
             inset: -5px -9px -4px -7px;
             border-radius: 9px;
-            background: linear-gradient(
-                90deg,
-                var(--noti-text-scrim-strong, rgba(10, 10, 14, 0.24)) 0%,
-                var(--noti-text-scrim, rgba(10, 10, 14, 0.2)) 55%,
-                transparent 100%
-            );
+            background: var(--noti-text-scrim, transparent);
             pointer-events: none;
-            transition: background 0.08s linear;
         }
 
         // 内容抬到纱层之上

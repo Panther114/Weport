@@ -5,17 +5,26 @@ import { ConfigService } from "../services/config";
 
 // 原生液态玻璃（Windows 专用）：DXGI 零拷贝采集 + D3D11 玻璃管线 + DComp 直接上屏，
 // 感知滞后中位 ~6ms（Chromium 流方案 ~77ms），渲染完全不经过 Electron 进程。
-// 默认关闭：原生面板在部分 GPU/驱动组合下会把折射区域画成黑块（弹窗背后出现
-// 黑色矩形）。需要时用 WEPORT_NATIVE_GLASS=1 显式开启，回退路径为 Chromium 桌面流。
+//
+// **默认开启**（win32 + `isSupported()` 通过）。为什么改默认值：
+// Chromium 那条路在本机**全灭** —— `getUserMedia(chromeMediaSource: 'desktop')`
+// 报 NotReadableError、`getDisplayMedia` 报 NotSupportedError，只剩主进程定帧推送；
+// 而 `desktopCapturer.getSources` 的耗时由**枚举**决定而非像素（实测 0.1/0.25/0.5/1.0
+// 四档缩放都是 ~300ms），所以那条路的物理上限就是 ~3fps。3fps 的"实时玻璃"是假的。
+// 原生面板没有这个上限：它由 DWM 合成，跟着显示器刷新率走。
+//
+// 之所以曾经默认关闭：早期版本在部分 GPU/驱动组合下把折射区画成黑块。当前的
+// `isSupported()` 已经把这些组合挡掉，本机实测也正常（卡片亮度 236.7 / std 18.8，
+// 读的就是桌面本身）。保留 `WEPORT_NATIVE_GLASS=0` 作为现场排障开关 —— 关掉即回到
+// Chromium 回退管线，不需要重新打包。
 // 仅 win32 加载：模块本身是 Windows 原生实现（DXGI/D3D11），macOS/Linux 一律走回退。
 type NativeGlassModule = typeof import("@hicccc77/electron-liquid-glass");
 let nativeGlass: NativeGlassModule | null = null;
 try {
   const mod: NativeGlassModule = require("@hicccc77/electron-liquid-glass");
+  const explicitlyDisabled = process.env.WEPORT_NATIVE_GLASS === "0";
   nativeGlass =
-    process.platform === "win32" && process.env.WEPORT_NATIVE_GLASS === "1" && mod.isSupported()
-      ? mod
-      : null;
+    process.platform === "win32" && !explicitlyDisabled && mod.isSupported() ? mod : null;
 } catch {
   nativeGlass = null;
 }

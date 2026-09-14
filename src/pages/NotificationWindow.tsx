@@ -1,11 +1,12 @@
-import { useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useState, useRef } from 'react'
 import { NotificationToast, type NotificationData } from '../components/NotificationToast'
 import type { LiquidGlassBackdropImage } from '../components/LiquidGlass'
 import {
-    useNotificationAdaptiveTheme,
-    useNotificationNativeAdaptiveTheme,
     getLayoutRect,
-    NATIVE_BAND_IDS
+    NATIVE_BAND_IDS,
+    useNotificationNativeAdaptiveTheme,
+    useNotificationSnapshotTheme,
+    type CardLayoutRect
 } from './useNotificationAdaptiveTheme'
 import '../components/NotificationToast.scss'
 import './NotificationWindow.scss'
@@ -125,6 +126,13 @@ export default function NotificationWindow() {
     //
     // 两条路都只在弹窗可见期间运行：隐藏即停 track / 主进程停循环。
     const visible = Boolean(notification || prevNotification)
+    /**
+     * 只在**原生面板不可用**时才去试 Chromium 采集。
+     *
+     * 原生面板（Windows 默认开启）自己合成桌面，渲染层再开一路 getUserMedia 纯属
+     * 白费：本机实测 `chromeMediaSource: 'desktop'` 必然 NotReadableError，而每次
+     * 通知都要付一次失败尝试 + 一条 console.warn。原生可用时直接跳过。
+     */
     useEffect(() => {
         if (!visible || nativeBackdrop) return
         const sourceId = sourceIdRef.current
@@ -196,11 +204,32 @@ export default function NotificationWindow() {
         })
     }, [nativeBackdrop])
 
-    // 分区无级自适应：整卡驱动玻璃纱层方向与浓度，标题行/正文按各自背后区域的
-    // 实际对比度连续取色。有实时流时逐帧采样（桌面动，文字颜色跟着动），
-    // 没有则退回单帧采样
-    useNotificationAdaptiveTheme(backdropStream, backdrop)
-    useNotificationNativeAdaptiveTheme(nativeBackdrop)
+    /**
+     * 文字色 / 纱层**一次成型**：采样一次、算一次、写一次，然后完全静止。
+     *
+     * 旧实现是逐帧自适应（桌面每出一帧就重算十几个 CSS 变量）。实测代价
+     * （.ui-probe/measure-var-writes.mjs）：定帧回退路径 6 次变量写入/秒；每次写入
+     * 都让整窗重算样式。而通知只显示 3 秒 —— 为它跑一条常驻管线不值得，观感上还
+     * 会因为采样率被玻璃帧率绑住而一顿一顿。
+     *
+     * 现在只在「首批样本稳定」或「卡片几何变化」时解析一次。可读性由
+     * 整卡纱层 + 文字色/光晕 + 文字后实色底共同保证。
+     */
+    const cardLayout = useCallback((): CardLayoutRect[] => {
+        const host = document.getElementById('notification-current')
+        const glassEl = host?.querySelector<HTMLElement>('.liquid-glass')
+        const card = glassEl ? getLayoutRect(glassEl) : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+        const header = host?.querySelector<HTMLElement>('.notification-header')
+        const body = host?.querySelector<HTMLElement>('.notification-body')
+        return [
+            card,
+            header ? getLayoutRect(header) : card,
+            body ? getLayoutRect(body) : card
+        ]
+    }, [])
+
+    useNotificationNativeAdaptiveTheme(nativeBackdrop, cardLayout)
+    useNotificationSnapshotTheme(backdrop, cardLayout)
 
     // 折射管线状态挂在 <html data-glass> 上：截图 QA 据此断言"弹窗真的是实时
     // 玻璃"，而不是只在代码里以为接上了（采集失败会静默退回静态快照）。
