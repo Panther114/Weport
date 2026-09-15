@@ -389,6 +389,12 @@ written down rather than rediscovered.
 
 ## Renderer Probes — Test Hygiene
 
+- **A probe that verifies the *shipped product* takes `--installed`** and resolves
+  `%LOCALAPPDATA%\Programs\Weport\Weport.exe`; the default target is
+  `release/win-unpacked/Weport.exe`. Passing the flag from PowerShell needs an explicit
+  array — `function Run($name, $args)` **swallows the flag** (`$args` is an automatic
+  variable), so a run that "included `--installed`" silently measured the dev build. Check
+  the probe's own `target:` line before believing the result.
 - **Always pass a private `--user-data-dir`.** `app.requestSingleInstanceLock()` is keyed
   on it, so a probe that reuses the default collides with the Weport already running in the
   tray and exits immediately (`firstWindow` times out). `.ui-probe/userData` and
@@ -448,6 +454,15 @@ background was "all black". Everything below follows from that one requirement.
   backdrop, even closing and re-showing the popup, never changed it). Samples are taken
   **outside the window rect** (`offsetSampleOutsideWindow`, needs `winW`/`winH` in the
   backdrop payload).
+- **A bright backdrop is the mirror case, and it is *not* a white veil.** The engine starts
+  from a white veil on `luma >= 110`, then the `MIN_CARD_DELTA_LUMA` rule flips it: white on a
+  bright desktop cannot make the card visible, so you get **dark text + a very thin dark
+  scrim**. Measured on the installed build (`WEPORT_PROBE_BACKDROP=bright`, backdrop
+  `#d9d7d5`): `--noti-tint: rgba(22, 20, 18, 0.07)`, `--noti-title-color: rgb(10, 10, 10)`,
+  card centre composited `202,200,198` → **Δluma 15.1** (visible, still nearly transparent).
+  Assert the *result* (dark text, veil ≤ 0.25, `4 ≤ Δluma ≤ 45`), not the direction you
+  assumed — the first version of this probe asserted "white veil on a bright backdrop" and
+  failed against a correct implementation.
 
 **Do not reintroduce:**
 
