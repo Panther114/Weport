@@ -329,7 +329,21 @@ written down rather than rediscovered.
   timestamps are **microseconds** (an early version reported 3.6 million "ms").
   Measured 朋友圈: `(program)` (browser internals) dominates, JS ~420 ms in the App chunk,
   229 author rows + 164 avatar images; the virtualized feed holds only 2 posts — the cost is
-  the **author sidebar**, not the feed.
+  the **author sidebar**, not the feed. It is now virtualized too (229 rows → 18 rendered,
+  `.ui-probe/diagnose-sns-sidebar.mjs`).
+- **A virtualized list needs a definite height — and this sidebar is content-hugging.**
+  `.sns-sidebar { align-self: start; max-height: 100% }` is deliberate (v09.scss: with five
+  authors a full-height card looks like it is still loading), but Virtuoso collapsed to
+  **4 px** inside it: absolutely-positioned items give the scroller no intrinsic content
+  height, so the grow block fell from 292 px to 83 px and the list was invisible. The fix is
+  to compute the height from the data (`rows × 38 px + 4`) and cap it with the space actually
+  available (measured against `.sns-main`'s row height minus the other blocks): short lists
+  still hug, long ones cap and scroll. `smoke-installed.mjs` now asserts the list height is
+  > 120 px and that scrolling changes the first rendered row — the old build fails both.
+- **Frame numbers from this machine are not A/B evidence.** Three sessions share the CPU;
+  the same build measured 朋友圈 long tasks of 217 ms and 303 ms on consecutive runs, which
+  is larger than the effect being measured. Claim DOM/geometry facts (row counts, element
+  positions, CLS) or nothing.
 - `transition-property` defaults to `all`. `transition-duration: 0.15s` alone therefore
   transitions every animatable property — name the properties explicitly.
 - Images: `loading="lazy"` does not move decode off the critical path; `decoding="async"`
