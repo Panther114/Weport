@@ -369,10 +369,18 @@
 .sns-side-block:last-child {
   border-bottom: none;
 }
+/**
+ * 发布者侧栏的「生长块」不再自己滚动，也不再自己撑高：里面的虚拟滚动列表由
+ * JS 按数据算出高度（短列表收缩、长列表封顶），这里只负责不裁掉它。
+ *
+ * 原来的 `overflow-y: auto` 配 `.sns-author-list` 的百分比高度会塌：(1) 百分比高度
+ * 落在内容高度的父盒上解析不出确定值，Virtuoso 拿到 4px；(2) 就算给了确定值，
+ * 两层滚动容器也会互相打架。一个滚动容器就够。
+ */
 .sns-side-block-grow {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
 }
 .sns-side-label {
@@ -562,12 +570,25 @@
   color: var(--text);
 }
 .sns-author-list {
-  flex: 1;
+  /* Virtuoso 滚动盒：高度由 JS 按行数给出（内联 style），这里只兜底不发散 */
+  flex: 0 0 auto;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0 0 4px;
+}
+/* 加载/空状态分支保持原来的行为（占满剩余空间、纵向堆叠），那一条不是虚拟滚动 */
+.sns-author-list-state {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+/**
+ * 虚拟滚动里每行的行距**不能用 margin**：Virtuoso 量的是元素自身的盒子高度，
+ * margin 不计入，量出来会比实际矮 2px，行与行会叠在一起。用内层 padding 承载。
+ */
+.sns-author-row {
+  padding-bottom: 2px;
 }
 .sns-author {
   display: flex;

@@ -719,10 +719,52 @@ export default function SnsPage() {
     return () => document.removeEventListener('mousedown', onDown)
   }, [showJumpPopover])
 
+  /**
+   * 发布者列表改成虚拟滚动（实测这里是本页最大的一笔开销：229 行 + 164 张头像
+   * 一次性挂上去，切页那一帧 212.7ms、3 个 long task 共 413ms）。
+   *
+   * 但侧栏是**按内容收缩**的（`.sns-sidebar { align-self: start; max-height: 100% }`，
+   * 见 v09.scss：只有 5 个发布者时不该顶出一大片空卡片）。虚拟滚动的滚动盒必须要
+   * 一个**确定的高度**，而虚拟滚动下"内容高度"读不出来 —— 行是绝对定位的，容器会
+   * 自己塌成 4px（实测过）。所以这里按数据算想要的高度，再用实测的可用空间封顶：
+   * 短列表照旧收缩，长列表封顶后自己滚。
+   */
+  const SNS_AUTHOR_ROW_STRIDE = 38 // .sns-author 36px + .sns-author-row 的 2px 行距
+  const sidebarRef = useRef<HTMLElement | null>(null)
+  const [authorListHeight, setAuthorListHeight] = useState<number | null>(null)
+
+  useLayoutEffect(() => {
+    const aside = sidebarRef.current
+    if (!aside || authorsLoading || visibleAuthors.length === 0) return
+    const measure = () => {
+      const rowH = aside.parentElement?.clientHeight ?? 0
+      if (rowH <= 0) return
+      let used = 0
+      for (const child of Array.from(aside.children)) {
+        if (child.classList.contains('sns-side-block-grow')) continue
+        used += (child as HTMLElement).offsetHeight
+      }
+      const cs = getComputedStyle(aside)
+      const chrome =
+        parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+      const gaps = 6 * Math.max(0, aside.children.length - 1) // .sns-side-block 的 gap
+      const cap = Math.max(160, Math.floor(rowH - used - chrome - gaps))
+      const wanted = Math.ceil(visibleAuthors.length * SNS_AUTHOR_ROW_STRIDE) + 4
+      setAuthorListHeight(Math.min(wanted, cap))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    if (aside.parentElement) ro.observe(aside.parentElement)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [authorsLoading, visibleAuthors.length])
+
   const selectAllAuthors = () => {
     setSelected(new Set(authors.map((a) => a.username)))
   }
-
   // Virtuoso 头尾部件
   const snsVirtuosoComponents = useMemo(
     () => ({
@@ -873,7 +915,7 @@ export default function SnsPage() {
       <div className="sns-main">
         {/* 筛选侧栏：搜索 / 日期 / 发布者 三段，每段一条小标题。之前三段连着排，
             看起来像一坨输入框，用户分不清哪个框管什么。 */}
-        <aside className="sns-sidebar">
+        <aside className="sns-sidebar" ref={sidebarRef}>
           <div className="sns-side-block">
             <div className="sns-side-label">
               <Search size={12} />
@@ -1022,25 +1064,44 @@ export default function SnsPage() {
               )}
             </div>
 
-            <div className="sns-author-list">
-              {authorsLoading && <div className="wp-loading">加载发布者…</div>}
-              {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
-              {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
-                <div className="wp-empty">无匹配发布者</div>
-              )}
-              {visibleAuthors.map((a) => (
-                <button
-                  key={a.username}
-                  type="button"
-                  className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
-                  onClick={() => toggleAuthor(a.username)}
-                >
-                  <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
-                  <span className="sns-author-name">{a.displayName}</span>
-                  <span className="sns-author-count">{a.postCount ?? ''}</span>
-                </button>
-              ))}
-            </div>
+            {authorsLoading || visibleAuthors.length === 0 ? (
+              <div className="sns-author-list sns-author-list-state">
+                {authorsLoading && <div className="wp-loading">加载发布者…</div>}
+                {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
+                {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
+                  <div className="wp-empty">无匹配发布者</div>
+                )}
+              </div>
+            ) : (
+              /**
+               * 发布者列表必须虚拟滚动：实测这个侧栏是「朋友圈」切页最大的一笔开销
+               * （229 行 + 164 张头像一次性挂上去，单帧 212.7ms、3 个 long task 共 413ms）。
+               * 动态流早在用 Virtuoso，侧栏却一直全量渲染 —— 行数完全由朋友圈历史决定，
+               * 越用越卡。虚拟滚动不改变交互（搜索、全选、单选、滚动位置都照旧），
+               * 只是不再把 200+ 行同时留在 DOM 里。
+               */
+              <Virtuoso
+                className="sns-author-list"
+                style={authorListHeight ? { height: `${authorListHeight}px` } : undefined}
+                data={visibleAuthors}
+                computeItemKey={(_, a) => a.username}
+                defaultItemHeight={38}
+                increaseViewportBy={{ top: 200, bottom: 400 }}
+                itemContent={(_, a) => (
+                  <div className="sns-author-row">
+                    <button
+                      type="button"
+                      className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
+                      onClick={() => toggleAuthor(a.username)}
+                    >
+                      <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
+                      <span className="sns-author-name">{a.displayName}</span>
+                      <span className="sns-author-count">{a.postCount ?? ''}</span>
+                    </button>
+                  </div>
+                )}
+              />
+            )}
           </div>
         </aside>
 
