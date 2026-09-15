@@ -3000,6 +3000,31 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weCloneService.cancel()
     return { success: true }
   })
+  // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
+  // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
+  ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))
+  ipcMain.handle('weclone:getChat', (_e, cloneId: string, chatId: string) =>
+    weCloneService.getChat(String(cloneId || ''), String(chatId || ''))
+  )
+  ipcMain.handle(
+    'weclone:saveChat',
+    (
+      _e,
+      payload: { cloneId: string; chatId?: string; turns: Array<{ role: 'user' | 'assistant'; content: string; at?: number }>; title?: string }
+    ) =>
+      weCloneService.saveChat({
+        cloneId: String(payload?.cloneId || ''),
+        chatId: payload?.chatId ? String(payload.chatId) : undefined,
+        turns: (payload?.turns || []).map((t) => ({ role: t.role, content: String(t.content || ''), at: Number(t.at) || Date.now() })),
+        title: payload?.title,
+      })
+  )
+  ipcMain.handle('weclone:renameChat', (_e, cloneId: string, chatId: string, title: string) =>
+    weCloneService.renameChat(String(cloneId || ''), String(chatId || ''), String(title || ''))
+  )
+  ipcMain.handle('weclone:deleteChat', (_e, cloneId: string, chatId: string) =>
+    weCloneService.deleteChat(String(cloneId || ''), String(chatId || ''))
+  )
   // v1.0：`weclone:getForcedProviderStatus` / `weclone:ensureProvider` /
   // `weclone:setForcedApiKey` 三个通道已删除 —— 人格克隆不再有自己的服务，
   // 它用「设置 → AI 服务」里用户配的那一个（默认 DeepSeek）。

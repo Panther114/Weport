@@ -31,98 +31,211 @@
   line-height: 1.35;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   提供商区（v1.0.1 重排）
+   ─────────────────────────────────────────────────────────────────────────────
+   原来是「窄列表 + 更窄编辑器」两栏网格（`minmax(260px,.85fr) minmax(360px,1.15fr)`）：
+   在 777px 宽的设置面板里，左栏每张卡只有 ~330px，用户名和模型名双双折行，操作按钮
+   被挤成一列竖排 —— 加上这些样式只在 WeportAiPanel 的 chunk 里被引入（见
+   AiSettingsModal 顶部的注释），从「设置 → AI 服务」直接进来时干脆完全没有样式。
+   现在：一张卡一条配置的**卡片网格** + 下面整宽的编辑器，纵向单列，字段两栏。
+   ──────────────────────────────────────────────────────────────────────────── */
 .ai-profile-layout {
-  display: grid;
-  grid-template-columns: minmax(260px, 0.85fr) minmax(360px, 1.15fr);
-  gap: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin: 8px 0;
 }
 
-.ai-profile-list,
-.ai-profile-editor {
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm, 8px);
-  background: color-mix(in srgb, var(--panel) 82%, transparent);
+.ai-provider-block {
+  gap: 8px;
 }
 
-.ai-profile-row {
-  margin-top: 6px;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--bg-raised);
+.ai-sec-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
 }
 
-.ai-profile-row.active {
-  border-color: color-mix(in srgb, var(--ok) 55%, var(--line));
+.ai-sec-action {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  font-size: 11.5px;
 }
 
-.ai-profile-main {
+.ai-profile-cards {
   display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 8px;
+}
+
+.ai-profile-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.ai-profile-card:hover {
+  border-color: var(--line-strong);
+}
+
+.ai-profile-card.active {
+  border-color: color-mix(in srgb, var(--ok) 50%, var(--line));
+}
+
+.ai-profile-card.editing {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.ai-profile-card-main {
+  display: block;
   width: 100%;
-  gap: 3px;
   padding: 0;
-  color: var(--text);
-  text-align: left;
-  background: transparent;
   border: 0;
+  background: transparent;
+  text-align: left;
   cursor: pointer;
+  color: inherit;
 }
 
-.ai-profile-main span,
-.ai-profile-main small {
-  color: var(--text-dim);
-  font-size: 11px;
+.ai-profile-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+
+  strong {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
-.ai-profile-main em,
-.ai-profile-discovery-error,
-.ai-profile-error {
-  color: var(--danger, #e5484d);
-  font-size: 11px;
-  font-style: normal;
-  overflow-wrap: anywhere;
+/* 键值行：标签定宽，值占满剩余并截断 —— 模型名很长时不再把卡片撑破 */
+.ai-profile-card-meta {
+  display: grid;
+  gap: 3px;
 }
 
-.ai-profile-actions,
-.ai-profile-discovery {
+.ai-kv {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+
+  i {
+    font-style: normal;
+    font-size: 10.5px;
+    color: var(--text-faint);
+  }
+
+  b {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-dim);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+  }
+
+  b.warn {
+    color: var(--warn, #e0a03c);
+  }
+}
+
+.ai-profile-card-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  margin-top: 7px;
+  gap: 5px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
 }
 
-.ai-profile-actions .ghost-btn {
-  padding: 4px 7px;
+.ai-profile-card-actions .ghost-btn {
+  padding: 3px 8px;
   font-size: 11px;
 }
 
-.ai-profile-badge {
-  padding: 3px 7px;
-  color: var(--ok);
-  font-size: 11px;
-  border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
-  border-radius: 999px;
+.ai-profile-badge.editing {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 
-.ai-profile-add {
-  width: 100%;
-  margin-top: 7px;
-  justify-content: center;
+/* ── 编辑器（整宽，字段两栏）── */
+.ai-profile-editor {
+  gap: 9px;
 }
 
-.ai-profile-editor .ai-settings-grid {
+.ai-profile-editor .ai-provider-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px 12px;
+}
+
+.ai-profile-editor-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  margin-top: 7px;
+  padding-top: 9px;
+  margin-top: 2px;
+  border-top: 1px solid var(--line);
 }
 
-.ai-profile-editor .ai-settings-section {
-  gap: 7px;
-  margin-top: 9px;
-  padding-top: 8px;
+.ai-profile-editor-foot .ai-profile-discovery {
+  margin-top: 0;
+}
+
+.ai-profile-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 各设置分块统一成一张卡：标签与说明压在一致的底上，壁纸再花也读得清。
+   底用 `--bg`（不透明色）而不是 `--panel`：`--panel` 在"有背景图"时本身只有
+   0.54 不透明度，再乘一个百分比只剩 ~42%，字段标签和工具名（`list_sessions`）
+   压在亮壁纸上根本看不清。设置页要的是"整齐"，玻璃感留给面板外框。 */
+.ai-provider-inline .ai-settings-section {
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+}
+
+.ai-provider-inline .ai-settings-section .field label,
+.ai-provider-inline .ai-settings-section .hint {
+  color: var(--text-dim);
+}
+
+.ai-provider-inline .ai-settings-section .ai-prompt-textarea {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+.ai-profile-card {
+  /* 同上：卡片也是内容底，不是玻璃 */
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+
+.ai-settings-footer {
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .ai-profile-error {
@@ -131,6 +244,33 @@
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
   border-radius: 6px;
   background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.ai-profile-badge {
+  padding: 2px 7px;
+  color: var(--ok);
+  font-size: 10.5px;
+  font-style: normal;
+  border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.ai-profile-discovery-error,
+.ai-profile-error,
+.ai-profile-card .ai-profile-discovery-error {
+  color: var(--danger, #e5484d);
+  font-size: 11px;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.ai-profile-discovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
 }
 
 .ai-editor-empty {

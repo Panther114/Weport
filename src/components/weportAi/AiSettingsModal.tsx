@@ -22,6 +22,17 @@ import {
   Zap,
 } from 'lucide-react'
 import type { AiAction, ProviderCatalogEntry, ProviderModelMetadata, ProviderProfileSummary, ProviderProtocol, SetupInfo } from './aiPanelTypes'
+/**
+ * 这份样式**必须由本组件自己引入**。
+ *
+ * 它原来只被 `WeportAiPanel.tsx` 引入，而两个组件都是 `React.lazy` 的独立 chunk：
+ * 用户从「设置 → AI 服务」直接进来（没先进过 WeportAI 页）时，`providerProfiles.css`
+ * 根本没被加载 —— `.ai-profile-layout` 的栅格、`.ai-add-*` 弹层、表单行全部失效，
+ * 面板塌成一堆没排版的输入框，弹窗掉到页面最下面（实测：`position:fixed` 缺失时
+ * 一个 780×906 的 dialog 落在 y=650 处，正好在视口之外）。用户报的「AI 提供商 UI 坏掉」
+ * 就是这个。谁用这些类名，谁就负责把它拉进来（重复 import 由打包器去重）。
+ */
+import './providerProfiles.css'
 
 export const TOOL_LABELS: Array<[string, string]> = [
   ['list_sessions', '会话列表'],
@@ -484,37 +495,112 @@ export default function AiSettingsModal({
       {error && <div className="ai-profile-error">{error}</div>}
 
         <div className="ai-profile-layout">
-          <section className="ai-profile-list" aria-label="AI 服务列表">
-            <div className="ai-settings-sec-head"><KeyRound size={13} /> AI 提供商</div>
-            {profiles.map((profile) => (
-              <div key={profile.id} className={`ai-profile-row${profile.id === activeProfileId ? ' active' : ''}`}>
-                <button type="button" className="ai-profile-main" onClick={() => startEdit(profile)}>
-                  <strong>{profile.name}</strong>
-                  <span>{profile.providerId} · {profile.model}</span>
-                  <small>{profile.hasApiKey ? `密钥 ${profile.apiKeyHint}` : '未配置密钥'} · {profile.protocol}</small>
-                  {profile.discovery?.error && <em className="ai-profile-discovery-error">{profile.discovery.error}</em>}
-                </button>
-                <div className="ai-profile-actions">
-                  {profile.id === activeProfileId ? <span className="ai-profile-badge">当前</span> : <button type="button" className="ghost-btn" onClick={() => void activate(profile.id)}>启用</button>}
-                  <button type="button" className="ghost-btn" onClick={() => void discover(profile.id)} disabled={discovering === profile.id}><RefreshCw size={12} /> {discovering === profile.id ? '读取中' : '发现模型'}</button>
-                  <button type="button" className="ghost-btn danger-text" onClick={() => void removeProfile(profile.id)}>{confirmDelete === profile.id ? '再次确认删除' : '删除'}</button>
-                </div>
-              </div>
-            ))}
-            <button type="button" className="secondary-btn ai-profile-add" onClick={startAdd}><Plus size={13} /> 添加新提供商</button>
-          </section>
+          <section className="ai-settings-section ai-provider-block" aria-label="AI 服务列表">
+            <div className="ai-settings-sec-head">
+              <KeyRound size={13} /> AI 提供商
+              <span className="ai-sec-hint">
+                {profiles.length > 0 ? `${profiles.length} 个服务 · 密钥只存本机` : '还没有配置'}
+              </span>
+              <button type="button" className="secondary-btn ai-sec-action" onClick={startAdd}>
+                <Plus size={13} /> 添加
+              </button>
+            </div>
 
-          <section className="ai-profile-editor">
-            <div className="ai-settings-sec-head"><Settings2 size={13} /> {editingId ? '编辑服务' : profiles.length === 0 ? '暂无服务' : '选择服务'}</div>
-            {profiles.length === 0 && !editingId ? (
+            {profiles.length === 0 ? (
               <div className="ai-editor-empty">
                 <p>还没有配置任何 AI 提供商。</p>
-                <button type="button" className="primary-btn" onClick={openAddDialog}><Plus size={13} /> 添加第一个提供商</button>
+                <button type="button" className="primary-btn" onClick={openAddDialog}>
+                  <Plus size={13} /> 添加第一个提供商
+                </button>
               </div>
-            ) : !editingId && profiles.length > 0 ? (
+            ) : (
+              /* 卡片网格：一张卡 = 一条可用配置（当前哪个、哪个模型、密钥有没有），
+                 点卡片进编辑。原来是「窄列表 + 更窄的编辑器」两栏，字段标签被挤成
+                 一条缝，用户看到的就是"乱七八糟"。 */
+              <div className="ai-profile-cards">
+                {profiles.map((profile) => {
+                  const active = profile.id === activeProfileId
+                  const editing = profile.id === editingId
+                  return (
+                    <article
+                      key={profile.id}
+                      className={`ai-profile-card${active ? ' active' : ''}${editing ? ' editing' : ''}`}
+                    >
+                      <button type="button" className="ai-profile-card-main" onClick={() => startEdit(profile)}>
+                        <span className="ai-profile-card-head">
+                          <strong>{profile.name}</strong>
+                          {active ? <em className="ai-profile-badge">当前</em> : null}
+                          {editing ? <em className="ai-profile-badge editing">编辑中</em> : null}
+                        </span>
+                        <span className="ai-profile-card-meta">
+                          <span className="ai-kv">
+                            <i>模型</i>
+                            <b>{profile.model || '未选择'}</b>
+                          </span>
+                          <span className="ai-kv">
+                            <i>提供商</i>
+                            <b>{profile.providerId}</b>
+                          </span>
+                          <span className="ai-kv">
+                            <i>密钥</i>
+                            <b className={profile.hasApiKey ? '' : 'warn'}>{profile.hasApiKey ? profile.apiKeyHint || '已配置' : '未配置'}</b>
+                          </span>
+                          <span className="ai-kv">
+                            <i>协议</i>
+                            <b>{profile.protocol}</b>
+                          </span>
+                        </span>
+                      </button>
+                      {profile.discovery?.error ? <p className="ai-profile-discovery-error">{profile.discovery.error}</p> : null}
+                      <div className="ai-profile-card-actions">
+                        {active ? null : (
+                          <button type="button" className="ghost-btn" onClick={() => void activate(profile.id)}>
+                            启用
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="ghost-btn"
+                          onClick={() => void discover(profile.id)}
+                          disabled={discovering === profile.id}
+                        >
+                          <RefreshCw size={12} /> {discovering === profile.id ? '读取中' : '发现模型'}
+                        </button>
+                        <button type="button" className="ghost-btn danger-text" onClick={() => void removeProfile(profile.id)}>
+                          {confirmDelete === profile.id ? '再次确认删除' : '删除'}
+                        </button>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="ai-settings-section ai-profile-editor" aria-label="编辑服务">
+            <div className="ai-settings-sec-head">
+              <Settings2 size={13} /> {editingId ? '编辑服务' : '服务详情'}
+              <span className="ai-sec-hint">
+                {editingId
+                  ? profiles.find((p) => p.id === editingId)?.name || ''
+                  : '从上面选一张卡片编辑，或点「添加」新建一个'}
+              </span>
+            </div>
+            {!editingId ? (
               <div className="ai-editor-empty">
-                <p>从左侧选择一个服务进行编辑，或添加新的提供商。</p>
-                <button type="button" className="secondary-btn" onClick={() => profiles[0] && startEdit(profiles[0])}>编辑 “{profiles[0].name}”</button>
+                <p>
+                  {profiles.length === 0
+                    ? '先添加一个提供商：选服务 → 填密钥 → 获取模型 → 保存。'
+                    : '选一张卡片开始编辑，或者「添加」一个新的提供商。'}
+                </p>
+                {profiles.length > 0 ? (
+                  <button type="button" className="secondary-btn" onClick={() => profiles[0] && startEdit(profiles[0])}>
+                    编辑 “{profiles[0].name}”
+                  </button>
+                ) : null}
+                <button type="button" className="secondary-btn" onClick={startAdd}>
+                  <Plus size={13} /> 添加新提供商
+                </button>
               </div>
             ) : (
               <>
@@ -523,9 +609,11 @@ export default function AiSettingsModal({
                   <div className="field"><label htmlFor="aiProvider">Provider</label><select id="aiProvider" className="path-input" value={draft.providerId} onChange={(e) => selectProvider(e.target.value)}>{catalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></div>
                   <div className="field"><label htmlFor="aiApiKey">API key</label><input id="aiApiKey" className="path-input ai-input-wide" type="password" value={draft.apiKey} placeholder={editingId ? `已保存 ${profiles.find((p) => p.id === editingId)?.apiKeyHint || '密钥'}；留空保持不变` : (selectedCatalog?.apiKeyOptional ? '本地服务可留空' : '输入 API key')} onChange={(e) => { setDraft({ ...draft, apiKey: e.target.value }); setModelDiscoveryDone(false) }} autoComplete="off" spellCheck={false} /></div>
                   <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{modelOptionLabel(model)}</option>)}</select></div>
+                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
+                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
                   {/* 选中模型的价格明细。列表里只有 `in/out` 两个数，这里给出完整
                       分项 + 来源，用户才能判断该不该信这个数字。 */}
-                  {draft.model && (
+                  {draft.model ? (
                     <div className="ai-cost-detail">
                       {(() => {
                         const c = setup?.modelCosts?.[draft.model]
@@ -552,16 +640,19 @@ export default function AiSettingsModal({
                         )
                       })()}
                     </div>
-                  )}
-                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
-                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
+                  ) : null}
                 </div>
-                <div className="ai-profile-discovery">
-                  <button type="button" className="ghost-btn" onClick={() => void fetchDraftModels()} disabled={saving || fetchingModels || Boolean(discovering)}><RefreshCw size={12} /> {fetchingModels || discovering ? '正在获取模型…' : '获取模型列表'}</button>
-                  <span className="ai-profile-discovery-hint">{modelDiscoveryDone ? `已获取 ${fetchedModels.length} 个模型` : '验证 API key 并读取可用模型'}</span>
-                  {editingId && profiles.find((p) => p.id === editingId)?.discovery?.error && <span className="ai-profile-discovery-error">{profiles.find((p) => p.id === editingId)?.discovery?.error}</span>}
+                <div className="ai-profile-editor-foot">
+                  <div className="ai-profile-discovery">
+                    <button type="button" className="ghost-btn" onClick={() => void fetchDraftModels()} disabled={saving || fetchingModels || Boolean(discovering)}><RefreshCw size={12} /> {fetchingModels || discovering ? '正在获取模型…' : '获取模型列表'}</button>
+                    <span className="ai-profile-discovery-hint">{modelDiscoveryDone ? `已获取 ${fetchedModels.length} 个模型` : '验证 API key 并读取可用模型'}</span>
+                    {editingId && profiles.find((p) => p.id === editingId)?.discovery?.error && <span className="ai-profile-discovery-error">{profiles.find((p) => p.id === editingId)?.discovery?.error}</span>}
+                  </div>
+                  <div className="ai-profile-editor-actions">
+                    <button type="button" className="ghost-btn" onClick={() => setEditingId(null)} disabled={saving}>取消</button>
+                    <button type="button" className="primary-btn" disabled={saving || (!editingId && !modelDiscoveryDone)} onClick={() => void saveProfile()}>{saving ? '保存中…' : '保存 profile'}</button>
+                  </div>
                 </div>
-                <div className="btn-row"><button type="button" className="primary-btn" disabled={saving || (!editingId && !modelDiscoveryDone)} onClick={() => void saveProfile()}>{saving ? '保存中…' : '保存 profile'}</button></div>
               </>
             )}
           </section>
@@ -571,7 +662,7 @@ export default function AiSettingsModal({
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><FilePenLine size={13} /> 提示词</div><textarea id="aiCustomPrompt" className="ai-prompt-textarea" value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} rows={4} spellCheck={false} /></div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Zap size={13} /> 快捷动作</div>{actions.map((a) => <div className="ai-action-edit" key={a.id}><input className="path-input ai-action-name" value={a.name} onChange={(e) => updateAction(a.id, { name: e.target.value })} /><textarea className="ai-prompt-textarea ai-action-prompt" value={a.prompt} onChange={(e) => updateAction(a.id, { prompt: e.target.value })} rows={2} /><button type="button" className="ghost-btn danger-text" onClick={() => setActions((prev) => prev.filter((item) => item.id !== a.id))}><Trash2 size={12} /></button></div>)}<button type="button" className="ghost-btn" onClick={() => setActions((prev) => [...prev, { id: `action-${Date.now()}`, name: '新动作', prompt: '' }])}><Plus size={12} /> 添加动作</button></div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Settings2 size={13} /> 工具开关</div><div className="ai-tool-toggles">{TOOL_LABELS.map(([name, label]) => <label key={name} className={`ai-tool-toggle${disabledTools.has(name) ? ' off' : ''}`}><input type="checkbox" checked={!disabledTools.has(name)} onChange={() => toggleTool(name)} /><span>{label}</span><code>{name}</code></label>)}</div></div>
-        <div className="modal-actions">{!inline && <button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button>}<button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
+        <div className="modal-actions ai-settings-footer">{!inline && <button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button>}<button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
     </>
   )
 

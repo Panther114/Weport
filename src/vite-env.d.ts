@@ -81,6 +81,30 @@ interface WeCloneMetaInfo {
   piiHits?: number
   truncated?: boolean
 }
+/** 一条克隆对话里的单轮消息（v1.0.1，本机持久化） */
+interface WeCloneChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+  at: number
+  error?: boolean
+  hint?: string
+}
+/** 一条克隆对话（一个话题）：可回看、可改标题、可删除 */
+interface WeCloneChat {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  turns: WeCloneChatTurn[]
+}
+interface WeCloneChatSummary {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  turnCount: number
+  preview: string
+}
 /**
  * Connector types (v1.0). Mirrors electron/services/connectors/types.ts — the main
  * process is the source of truth; these declarations exist so the settings panel
@@ -539,6 +563,8 @@ interface ElectronApi {
         /** 实际回答的模型 / 提供商：界面上要显示"是哪个服务答的"。 */
         model: string
         providerId: string
+        /** 本轮判定出来的对方语言：回复应当跟着它走 */
+        replyLanguage?: 'zh' | 'en' | 'mixed'
       }
     }>
     generate: () => Promise<{
@@ -561,6 +587,20 @@ interface ElectronApi {
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     cancel: () => Promise<{ success: boolean }>
     onProgress: (callback: (payload: { stage: 'scan' | 'generate' | 'filter' | 'done'; progress: number; message: string; detail?: any }) => void) => () => void
+    /**
+     * 对话历史（v1.0.1，本机文件 `{userData}/weclone-chats/<cloneId>.json`）。
+     * 有了它才谈得上回看、改标题、删除 —— 以前关掉抽屉就什么都不剩。
+     */
+    listChats: (cloneId: string) => Promise<{ success: boolean; chats: WeCloneChatSummary[] }>
+    getChat: (cloneId: string, chatId: string) => Promise<{ success: boolean; chat?: WeCloneChat; error?: string }>
+    saveChat: (payload: {
+      cloneId: string
+      chatId?: string
+      turns: Array<{ role: 'user' | 'assistant'; content: string; at?: number }>
+      title?: string
+    }) => Promise<{ success: boolean; chatId?: string; title?: string; error?: string }>
+    renameChat: (cloneId: string, chatId: string, title: string) => Promise<{ success: boolean; title?: string; error?: string }>
+    deleteChat: (cloneId: string, chatId: string) => Promise<{ success: boolean; error?: string }>
   }
   process: {
     platform: string

@@ -88,6 +88,75 @@ export interface WeCloneMeta {
   truncated?: boolean
 }
 
+/** 一条对话里的一轮 */
+export interface WeCloneChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+  at: number
+  /** 出错的那一轮也存下来（用户能看到"上次是怎么失败的"），但不再进 model history */
+  error?: boolean
+  hint?: string
+}
+
+/**
+ * 一条对话（一个话题）。
+ *
+ * 人格克隆以前关掉抽屉就什么都不剩：换一个话题等于把上一个话题丢掉。这里按
+ * "对话"分组保存，标题可改、可删、可回看 —— 和微信/DSH 的会话列表同一套习惯。
+ */
+export interface WeCloneChat {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  turns: WeCloneChatTurn[]
+}
+
+export interface WeCloneChatSummary {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  turnCount: number
+  preview: string
+}
+
+/** 标题：取第一条用户消息，压掉换行、超长截断 */
+function autoTitleFromTurns(turns: WeCloneChatTurn[]): string {
+  const first = turns.find((t) => t.role === 'user' && t.content.trim())
+  const raw = (first?.content || '新对话').replace(/\s+/g, ' ').trim()
+  return raw.length > 24 ? `${raw.slice(0, 24)}…` : raw || '新对话'
+}
+
+function previewOfChat(chat: WeCloneChat): string {
+  const last = [...chat.turns].reverse().find((t) => t.content.trim())
+  const raw = (last?.content || '').replace(/\s+/g, ' ').trim()
+  return raw.length > 48 ? `${raw.slice(0, 48)}…` : raw
+}
+
+/**
+ * 极简语言探测：只分「中文 / 英文 / 混合」，看的是**字符构成**而不是词典。
+ *
+ * 为什么要它：人格克隆的 system prompt 一直是中文写的，模型于是永远用中文回答 ——
+ * 哪怕用户的语料大半是英文。这里只用来给 prompt 一个默认值，真正的规则是
+ * 「跟着对方这条消息的语言走」（见 WECLONE_CHAT_SYSTEM_PROMPT）。
+ */
+export function detectLanguage(text: string): 'zh' | 'en' | 'mixed' {
+  const s = String(text || '')
+  const cjk = (s.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length
+  const latin = (s.match(/[A-Za-z]/g) || []).length
+  if (cjk === 0 && latin === 0) return 'mixed'
+  if (cjk >= latin * 0.6) return 'zh'
+  if (latin >= cjk * 2) return 'en'
+  return 'mixed'
+}
+
+const LANGUAGE_LABEL: Record<'zh' | 'en' | 'mixed', string> = {
+  zh: '中文',
+  en: '英文',
+  mixed: '中英混合',
+}
+
 /**
  * 列表项。
  *
@@ -143,6 +212,8 @@ export interface LocalChatResult {
      */
     model: string
     providerId: string
+    /** 本轮判定出来的对方语言（zh/en/mixed）—— 回复应当跟着它走 */
+    replyLanguage?: 'zh' | 'en' | 'mixed'
   }
 }
 
@@ -1059,6 +1130,132 @@ export class WeCloneService {
     } catch (e) {
       return { success: false, error: `删除失败：${String((e as Error)?.message || e)}` }
     }
+    // 对话历史跟着克隆一起消失：它们只对这个克隆有意义，留着就是一堆孤儿数据。
+    try {
+      rmSync(this.chatFile(id), { force: true })
+    } catch {
+      /* 历史文件删不掉不影响删除克隆本身 */
+    }
+    return { success: true }
+  }
+
+  // -------------------------------------------------------------------------
+  // 对话历史（v1.0.1）
+  //
+  // 以前抽屉关掉就没了：用户看不到"上次聊到哪"，也没法留一个话题第二天接着问。
+  // 每个克隆一个 JSON 文件（`{userData}/weclone-chats/<cloneId>.json`），整份重写 +
+  // 原子替换 —— 聊天记录不大，用不着数据库。
+  // -------------------------------------------------------------------------
+
+  private chatRoot(): string {
+    return join(app.getPath('userData'), 'weclone-chats')
+  }
+
+  /** 文件名只允许安全字符：cloneId 里有 UUID，但别赌它永远干净 */
+  private chatFile(cloneId: string): string {
+    const safe = String(cloneId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 96)
+    return join(this.chatRoot(), `${safe}.json`)
+  }
+
+  private readChatStore(cloneId: string): WeCloneChat[] {
+    const file = this.chatFile(cloneId)
+    if (!existsSync(file)) return []
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { chats?: WeCloneChat[] }
+      const chats = Array.isArray(parsed?.chats) ? parsed.chats : []
+      return chats.filter((c) => c && typeof c.id === 'string' && Array.isArray(c.turns))
+    } catch {
+      // 坏文件不该让整个抽屉打不开：当作空历史，下一次写入会覆盖它。
+      return []
+    }
+  }
+
+  private writeChatStore(cloneId: string, chats: WeCloneChat[]): void {
+    this.atomicWriteFile(this.chatFile(cloneId), JSON.stringify({ version: 1, chats }, null, 1))
+  }
+
+  /** 列表（不含正文，只给标题/时间/条数/最后一句预览） */
+  listChats(cloneId: string): { success: boolean; chats: WeCloneChatSummary[] } {
+    const chats = this.readChatStore(cloneId)
+      .map((c) => ({
+        id: c.id,
+        title: c.title,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        turnCount: c.turns.length,
+        preview: previewOfChat(c),
+      }))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+    return { success: true, chats }
+  }
+
+  getChat(cloneId: string, chatId: string): { success: boolean; chat?: WeCloneChat; error?: string } {
+    const chat = this.readChatStore(cloneId).find((c) => c.id === chatId)
+    if (!chat) return { success: false, error: '这条对话已不存在' }
+    return { success: true, chat }
+  }
+
+  /**
+   * 新增/覆盖一条对话。
+   *
+   * 抽屉每轮回答后调用一次（整段 turns 一起写），所以不需要增量 diff：一轮对话
+   * 最多几十条消息，整份重写的成本可以忽略，而"整份写"不会出现半条消息。
+   */
+  saveChat(input: {
+    cloneId: string
+    chatId?: string
+    turns: WeCloneChatTurn[]
+    title?: string
+  }): { success: boolean; chatId?: string; title?: string; error?: string } {
+    const cloneId = String(input.cloneId || '')
+    if (!cloneId) return { success: false, error: '缺少克隆 id' }
+    const turns = (Array.isArray(input.turns) ? input.turns : [])
+      .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content.trim())
+      .map((t) => ({ role: t.role, content: t.content, at: Number(t.at) || Date.now() }))
+    if (turns.length === 0) return { success: false, error: '没有内容可保存' }
+
+    const chats = this.readChatStore(cloneId)
+    const now = Date.now()
+    const existing = input.chatId ? chats.find((c) => c.id === input.chatId) : undefined
+    // 标题：用户改过就用用户的；否则用第一条用户消息（等同于微信/DSH 的习惯）
+    const auto = autoTitleFromTurns(turns)
+    if (existing) {
+      existing.turns = turns
+      existing.updatedAt = now
+      if (input.title !== undefined && input.title.trim()) existing.title = input.title.trim().slice(0, 60)
+      else if (!existing.title) existing.title = auto
+      this.writeChatStore(cloneId, chats)
+      return { success: true, chatId: existing.id, title: existing.title }
+    }
+    const chat: WeCloneChat = {
+      id: `chat-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      title: (input.title || '').trim().slice(0, 60) || auto,
+      createdAt: now,
+      updatedAt: now,
+      turns,
+    }
+    chats.unshift(chat)
+    // 只留最近 200 条，避免这个文件无限长（本地历史，不是归档）
+    this.writeChatStore(cloneId, chats.slice(0, 200))
+    return { success: true, chatId: chat.id, title: chat.title }
+  }
+
+  renameChat(cloneId: string, chatId: string, title: string): { success: boolean; title?: string; error?: string } {
+    const clean = String(title || '').trim().slice(0, 60)
+    if (!clean) return { success: false, error: '标题不能为空' }
+    const chats = this.readChatStore(cloneId)
+    const chat = chats.find((c) => c.id === chatId)
+    if (!chat) return { success: false, error: '这条对话已不存在' }
+    chat.title = clean
+    this.writeChatStore(cloneId, chats)
+    return { success: true, title: clean }
+  }
+
+  deleteChat(cloneId: string, chatId: string): { success: boolean; error?: string } {
+    const chats = this.readChatStore(cloneId)
+    const next = chats.filter((c) => c.id !== chatId)
+    if (next.length === chats.length) return { success: false, error: '这条对话已不存在' }
+    this.writeChatStore(cloneId, next)
     return { success: true }
   }
 
@@ -1128,14 +1325,26 @@ export class WeCloneService {
       knowledgeCutoff: meta.knowledgeCutoff,
       mds,
       retrievedChunks: retrieved,
+      // 默认语言取**语料里本人逐字发言**的语言（language.md 就是那些原句）。
+      // profile/knowledge 这些是模型写的中文描述，拿它们探测只会永远得到"中文"。
+      corpusLanguage: LANGUAGE_LABEL[
+        detectLanguage(mds.language && mds.language.trim() ? mds.language : retrieved.join('\n'))
+      ],
     })
 
     const history = Array.isArray(input.history)
       ? input.history.filter((h) => h && typeof h.content === 'string' && h.content.trim()).slice(-CHAT_HISTORY_LIMIT)
       : []
+    /**
+     * 转写里的说话人标签跟着语言走：对方用英文时把 `对方：`/`名字：` 换成 `Them:`/`Me:`，
+     * 否则光是标签就足以把模型拉回中文（这是实测过的一种"越改越中文"的来源）。
+     */
+    const english = detectLanguage(message) === 'en'
+    const selfLabel = english ? 'Me' : meta.displayName || meta.wxid
+    const otherLabel = english ? 'Them' : '对方'
     const transcript = history.length
-      ? `${history.map((h) => `${h.role === 'assistant' ? meta.displayName : '对方'}：${h.content}`).join('\n')}\n对方：${message}`
-      : message
+      ? `${history.map((h) => `${h.role === 'assistant' ? selfLabel : otherLabel}: ${h.content}`).join('\n')}\n${otherLabel}: ${message}`
+      : `${otherLabel}: ${message}`
 
     const startedAt = Date.now()
     /**
@@ -1190,6 +1399,7 @@ export class WeCloneService {
             retrieveCostMs,
             model: attempt.profile.model,
             providerId: attempt.profile.providerId,
+            replyLanguage: detectLanguage(message),
           },
         }
       } catch (e) {

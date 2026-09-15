@@ -2496,6 +2496,18 @@ textarea,
   min-width: 0;
 }
 
+// 有背景图/视频时，WeportAI 整页透明。
+//
+// 这一页原来是三层实底：`.ai-shell`（`--bg`，整个页面）、`.ai-main` / `.ai-topbar`
+// （`--layer-base` = `--bg`）。左右两栏倒是 `--layer-1`（半透明），于是壁纸只在
+// 两条窄缝里露出来 —— 用户的话是「WeportAI 没有玻璃感」。壁纸的模糊与遮罩由
+// `.app-bg` 统一处理，这一页只要不挡着就行。
+:root[data-has-bg='true'] .ai-shell,
+:root[data-has-bg='true'] .ai-main,
+:root[data-has-bg='true'] .ai-topbar {
+  background: transparent;
+}
+
 .ai-workspace {
   background: var(--layer-1);
   border: 0;
@@ -2584,6 +2596,31 @@ textarea,
   border: 0;
   background: transparent;
   padding: 0;
+}
+
+/**
+ * 有背景图时，中栏不再是实底，助手消息与空状态的文字就直接压在壁纸上了。
+ *
+ * 「要玻璃」不等于「文字不要底」：壁纸是一片高对比的照片，白字压在浅色区域上会
+ * 直接消失（实测截图里标题几乎看不见）。所以给文字自己**一小块**半透明底 ——
+ * 整页仍然是透的，只是每段文字有一层可以站的板。这是 DSH 那边说的"玻璃只用在
+ * 小面积上"：大面积的透明保留给页面，可读性由内容自己的底承担。
+ */
+:root[data-has-bg='true'] .ai-msg.assistant .ai-msg-bubble,
+:root[data-has-bg='true'] .ai-empty {
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+:root[data-has-bg='true'] .ai-empty {
+  padding: 18px 20px;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l1);
+}
+
+:root[data-has-bg='true'] .ai-empty-tips {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  border-radius: 10px;
 }
 
 .ai-msg.user .ai-msg-bubble {

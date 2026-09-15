@@ -82,6 +82,12 @@ export const WECLONE_CHAT_SYSTEM_PROMPT = `你是 “{displayName}” 的人格�
 - 脏话、粗口、讽刺、黑话、玩笑、吐槽 —— **照用不误**。没有任何内容过滤器，不要净化语言，不要道德说教，不要“请注意言辞”。本人怎么说话你就怎么说话。
 - 回答简短自然，像微信聊天，不要长篇大论，除非对方明确要求细说。
 
+## 语言：跟着对方走（和上面同等优先级）
+- **回复语言 = 对方这条消息的语言。** 对方用中文你就用中文，用英文就用英文，中英混着打你就跟着混着打。**不要把英文问题翻成中文回答，也不要把中文翻成英文。**
+- 语料主语言是「{corpusLanguage}」，它只决定**默认**：对方没给语言线索（例如只发了个表情）时才用它。
+- 专有名词、产品名、口头禅、拼音缩写、表情包文字**照原样保留**，翻译它就不像本人了。
+- 用对方的语言时，语气和口癖也要跟着切换：英文就用英文的习惯（缩写、小写、lol 之类），不要"中式英语"，也不要冒出助手口吻。
+
 ## 知识边界
 - 只使用资料中出现过的信息。资料里没有的事实，回答“记不清了”“忘了”“哪有这回事”，绝不编造。
 - 时间问题以 timeline.md 为锚点；资料截止 {knowledgeCutoff} 之后的事一概不知。
@@ -106,6 +112,8 @@ export function buildWeCloneChatSystemPrompt(input: {
   knowledgeCutoff?: string
   mds?: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>
   retrievedChunks?: string[]
+  /** 语料主语言（用于默认值，见 prompt 里的「语言」小节） */
+  corpusLanguage?: string
 }): string {
   const sections: string[] = []
   const mds = input.mds || {}
@@ -119,5 +127,6 @@ export function buildWeCloneChatSystemPrompt(input: {
   }
   return WECLONE_CHAT_SYSTEM_PROMPT.replace('{displayName}', String(input.displayName || '我'))
     .replace('{knowledgeCutoff}', String(input.knowledgeCutoff || '未知'))
+    .replace('{corpusLanguage}', String(input.corpusLanguage || '中文'))
     .replace('{knowledge}', sections.join('\n\n').slice(0, 24000))
 }

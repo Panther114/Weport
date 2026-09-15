@@ -321,6 +321,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
       ipcRenderer.invoke('weclone:chat', cloneId, message, history),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),
+    // 对话历史（本机文件）：回看 / 改标题 / 删除都走这几个通道
+    listChats: (cloneId: string) => ipcRenderer.invoke('weclone:listChats', cloneId),
+    getChat: (cloneId: string, chatId: string) => ipcRenderer.invoke('weclone:getChat', cloneId, chatId),
+    saveChat: (payload: { cloneId: string; chatId?: string; turns: Array<{ role: 'user' | 'assistant'; content: string; at?: number }>; title?: string }) =>
+      ipcRenderer.invoke('weclone:saveChat', payload),
+    renameChat: (cloneId: string, chatId: string, title: string) => ipcRenderer.invoke('weclone:renameChat', cloneId, chatId, title),
+    deleteChat: (cloneId: string, chatId: string) => ipcRenderer.invoke('weclone:deleteChat', cloneId, chatId),
     onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
   },
 

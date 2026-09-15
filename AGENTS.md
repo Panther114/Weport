@@ -188,6 +188,34 @@ user's own configured model API.
 - `weclone-server/` is **not part of the product** any more. Do not reintroduce a client
   path, a server-status surface, or a visibility/share concept.
 
+### WeClone Chat History & Language — v1.0.1
+
+- **Chats are persisted, one JSON file per clone** (`{userData}/weclone-chats/<cloneId>.json`,
+  whole-file atomic write; the id is sanitised for the filename). The drawer writes the
+  *entire* turn list after every answer — a turn list is tens of messages, and "write it all"
+  cannot leave half a message behind. `deleteClone()` deletes the file too: history without
+  its clone is orphan data. Renaming keeps the user's title; a chat with no title gets the
+  first user message (truncated to 24 chars), same habit as WeChat.
+- **Every history assertion goes to disk, not to the screen.** "The list looks right" cannot
+  distinguish an in-memory array from a file, and rename/delete are exactly the operations
+  that get implemented as React state only. `.ui-probe/verify-weclone-history.mjs` re-reads
+  the JSON after each step (new chat / revisit / rename / delete / reopen) — 14 assertions.
+- **The clone now mirrors the other side's language.** The system prompt was entirely Chinese,
+  so the model answered in Chinese no matter what the corpus looked like. Three parts to the
+  fix, and all three matter: a hard rule in `WECLONE_CHAT_SYSTEM_PROMPT` ("回复语言 = 对方这条
+  消息的语言"), a **default** derived from `language.md` (the person's *verbatim* lines —
+  `profile.md` etc. are model-written Chinese and always detect as 中文), and transcript
+  labels that follow the message (`Them:`/`Me:` in English instead of `对方：`, which by itself
+  pulls the model back to Chinese). `detectLanguage()` is a character-composition check
+  (`zh`/`en`/`mixed`) — no dictionary.
+- Verification split on purpose: `verify-weclone-e2e.mjs` (local OpenAI-compatible mock)
+  asserts **what is fed to the model** — prompt rule present, corpus language injected,
+  `Them:` label for an English turn, `meta.replyLanguage` — and
+  `.ui-probe/check-clone-language-live.mjs` asserts **what the model answers** against the
+  real corpus (measured: English in → `yo, mostly grinding on gonopoly …` out, cjkRatio 0.00;
+  Chinese in → cjkRatio 0.51, i.e. Chinese with English tech words, exactly the user's own
+  register).
+
 ## Video Background (`electron/services/backgroundVideoService.ts`) — v1.0
 
 A video wallpaper is decoded on every frame for as long as the window is visible. A 4K
@@ -250,6 +278,17 @@ Two separate "the background is white" bugs, both from getting the *layer* wrong
   variant) as literal `rgba()` — **not** `color-mix(… calc(…))`, whose percentage slot
   resolves inconsistently across Chromium versions and silently invalidates the whole
   declaration, leaving every panel fully transparent.
+- **Check the page shell, not just the panels.** WeportAI had *three* stacked opaque plates
+  (`.ai-shell` and `.ai-main` / `.ai-topbar` all `var(--bg)`); the left/right panes were
+  translucent glass, so the wallpaper only showed in two narrow gaps and the page read as
+  "no glass at all". `:root[data-has-bg='true']` now clears all three. Verify by walking the
+  ancestor chain of the page container and printing `backgroundColor` for each level —
+  computed style, not source lines.
+- Transparent does not mean unreadable: with the middle column transparent, the WeportAI
+  hero and the assistant bubbles sit directly on the wallpaper, and white text on a bright
+  photo disappears. Those two carry a **local** scrim (`color-mix(in srgb, var(--bg) 62%,
+  transparent)`), which keeps the page glass while giving the text something to stand on.
+  Same rule as the settings panel: glass for the surface, a plate for the content.
 
 Popup glass (`NotificationToast.scss` + `useNotificationAdaptiveTheme.ts`):
 
@@ -403,12 +442,25 @@ written down rather than rediscovered.
 
 ## Renderer Probes — Test Hygiene
 
+- **A CSS file imported by only one of two lazy chunks is missing for the other.** `react`
+  `lazy()` splits CSS per chunk: `providerProfiles.css` was imported **only** by
+  `WeportAiPanel.tsx`, so opening 设置 → AI 服务 without ever visiting the WeportAI page
+  rendered the provider panel with **no styles at all** (the user's "AI 提供商 UI 是坏的").
+  A grid layout with no grid, and — the giveaway — a `position: fixed` dialog that ends up
+  laid out in normal flow *below the viewport* (measured: a 780×906 dialog at `y=650` in a
+  650 px-tall viewport). Each component that uses those class names imports the file itself;
+  the bundler dedupes.
 - **A probe that verifies the *shipped product* takes `--installed`** and resolves
   `%LOCALAPPDATA%\Programs\Weport\Weport.exe`; the default target is
   `release/win-unpacked/Weport.exe`. Passing the flag from PowerShell needs an explicit
   array — `function Run($name, $args)` **swallows the flag** (`$args` is an automatic
   variable), so a run that "included `--installed`" silently measured the dev build. Check
   the probe's own `target:` line before believing the result.
+- **Copy `Local State` when you copy a config into a probe `--user-data-dir`.** On Windows
+  Chromium keeps its Safe Storage AES key (DPAPI-wrapped) in `Local State`; without it
+  Electron generates a **new** key, the copied `safe:` values cannot be decrypted, and the
+  provider list renders empty ("还没有配置任何 AI 提供商") even though the blob is right
+  there.
 - **Always pass a private `--user-data-dir`.** `app.requestSingleInstanceLock()` is keyed
   on it, so a probe that reuses the default collides with the Weport already running in the
   tray and exits immediately (`firstWindow` times out). `.ui-probe/userData` and
@@ -721,6 +773,23 @@ macOS packaging requires restoring the exec bit on the key helpers first
 (Git does not track file modes): `chmod +x resources/key/macos/universal/*`
 and `resources/welive/macos/arm64/welive` — CI workflows already do this.
 Linux packaging likewise: `chmod +x resources/key/linux/x64/xkey_helper_linux`.
+
+**When GitHub is unreachable, electron-builder still fails with a warm cache.** It
+verifies the cached Electron zip against `SHASUMS256.txt` on github.com, so a blocked
+network kills `npm run build` (`⨯ connect ETIMEDOUT 20.205.243.166:443`) *after* vite
+has already written `dist/`. Point it at the locally installed Electron instead:
+
+```sh
+npx electron-builder --publish never "--config.electronDist=node_modules/electron/dist"
+```
+
+Use the long `--config.electronDist=…` form: `-c.electronDist=…` is parsed as the
+config-file short flag and dies with `ENOENT …/.electronDist=…`. This is a CLI
+workaround, not a `package.json` change — CI has network and must keep the default.
+
+**`electron-builder --dir` does not run vite.** Repackaging after a source edit without
+`vite build` first silently ships the previous bundle (this cost a round trip: the
+`.ai-shell` transparency rule was "verified" against a stale `dist/`).
 
 `capture-ui.ps1` launches the app in `WEPORT_SCREENSHOT_POPUP` mode (the app
 captures its own window via `capturePage`), then asserts all captures are

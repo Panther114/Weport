@@ -68,7 +68,7 @@ export const ACCENT_OPTIONS: Array<{ id: AccentId; label: string; swatch: string
   { id: 'teal', label: '青绿', swatch: '#2fb8a6' },
   { id: 'rose', label: '玫红', swatch: '#f2678f' },
   { id: 'amber', label: '琥珀', swatch: '#e0a03c' },
-  { id: 'graphite', label: '石墨（黑白）', swatch: '#9a9aa4' },
+  { id: 'graphite', label: '石墨', swatch: '#9a9aa4' },
 ]
 
 /** 界面里可选的强调色（不含 custom，它的色值来自 customAccent）。 */
