@@ -165,24 +165,28 @@ connector.
   `connectorsAllowAgent`. The tool table is frozen per run, so connecting or disconnecting in
   settings takes effect on the next turn — never mid-epoch.
 
-## WeClone (`electron/services/weCloneService.ts`) — v1.0
+## WeClone (`electron/services/weCloneService.ts`) — v1.0 (local-only)
 
-Cloning yourself and talking to the clone. The clone's knowledge base lives on a
-**separate server** (`weclone-server/`); Weport is only a client. v1.0.0 ships no hosted
-server — it talks to a local one (default `http://127.0.0.1:8099`).
+Cloning yourself and talking to the clone. **Data never leaves the device.** There is no
+server, no upload, and no cloud path — the boundary is hard. The only outbound call is the
+user's own configured model API.
 
 - `chatWithClone()` is the one entry point, reached from the card's 开始对话 button
   (`weCloneService` → IPC `weclone:chat` → the chat drawer) and from `weclone.chat` in the
   CLI/TUI. Do not add a second chat path.
-- **Server ids are not local ids.** `getClones()` synthesises `remote_<uuid>` for
-  server-only rows; the prefix must be stripped (or the local record's `serverId` used)
-  before building the request URL, or the server answers `clone not found`. This is the
-  first thing that happens when you click 开始对话 on a remote-only clone.
-- Failure has to carry a next step: `chatWithClone` returns `hint` alongside `error`
-  (server not configured / not reachable / clone missing). A bare "failed" leaves the user
-  with no idea that the server has to be running.
-- Generation runs locally (`generateClone`), then uploads. `uploadToServer` gzip-caps the
-  chunk payload; chunks are capped at 1200 chars each by the server.
+- Retrieval is **local BM25** over `chunks.jsonl` (`ai/localRetrieval.ts`) — no embedding
+  model, no vector service. The persona MDs plus the retrieved snippets become the system
+  prompt (measured: 24.7 k characters for the real clone).
+- Failure has to carry a next step: `chatWithClone` returns `hint` alongside `error`. A bare
+  "failed" leaves the user with no idea what to do.
+- Generation is transactional: write to `${dir}.building`, rename the old clone to
+  `${dir}.previous`, move the staged one in, delete the backup. A crash never leaves a
+  half-written clone in place.
+- Generation used to run a second, 5 %-sampled corpus pass (~800 model calls) whose output
+  was only consumed by the deleted upload path. There is no such pass; generation is minutes,
+  not hours.
+- `weclone-server/` is **not part of the product** any more. Do not reintroduce a client
+  path, a server-status surface, or a visibility/share concept.
 
 ## Video Background (`electron/services/backgroundVideoService.ts`) — v1.0
 
@@ -236,8 +240,9 @@ Two separate "the background is white" bugs, both from getting the *layer* wrong
 
 - **`背景遮罩` must never be tinted with `var(--bg)`.** It was, and in light mode
   `--bg` is `#f4f5f9` — so the "dim" layer painted a **white film** over the wallpaper,
-  and turning it up made the picture greyer rather than darker. It is a fixed dark
-  `#06060a` now. Anything whose job is to *darken* must not be a theme colour.
+  and turning it up made the picture greyer rather than darker. The colour now comes from
+  `--app-bg-scrim`, which flips with `data-mode` (see "Background Mask — v1.0.1" below): a
+  scrim is a *contrast* layer, so it must move away from the theme, not use a theme colour.
 - **`data-has-bg` shell.** `.shell` carries two blue radial glows which used to stay on
   top of the wallpaper in image mode (the old override only handled `data-bg-kind`), so
   `遮罩 0%` was never actually clear. They are dropped whenever a background exists.
@@ -300,6 +305,88 @@ Two failure modes, both seen in the export page:
   announce each update. Put a `.sr-only` `role="status"` node next to it and write to that
   only on phase changes.
 
+## Performance — v1.0 (measured, do not "optimise" by intuition)
+
+Numbers below are from `.ui-probe/measure-app-perf.mjs` and
+`.ui-probe/measure-cv-ab.mjs`. Two of them cost a wasted round trip each, so they are
+written down rather than rediscovered.
+
+- **The entry bundle was 1751 KB; page-level `React.lazy` took it to 181 KB.** ECharts
+  (only 分析), html2canvas (only 年度报告), react-markdown (only AI panel + changelog) and
+  every non-core page were in the startup graph. Measured effect: FCP 2312 → 712 ms,
+  DCL 1196 → 242 ms. `src/main.tsx` also imported `pages/NotificationWindow` statically for
+  a dead `#/notification-window` branch — that pulled the whole popup bundle (glass
+  pipeline, 230 KB) into the main window's startup graph; it is a dynamic import now.
+- **`content-visibility: auto` made scrolling 3× worse — do not put it back on these
+  lists.** Controlled A/B in one process, 192-row 防撤回 list, alternating the property at
+  runtime: `auto` p95 **107.8 ms** / 28 of 41 frames dropped / 106 ms long task; `visible`
+  p95 **34.8 ms** / 5 of 57 dropped / 0 ms long task; mount cost identical (16.7 vs 16.6 ms
+  median). The trade is "skip layout at mount" for "lay out on demand while scrolling", and
+  a 192-row list mounts once while scrolling happens every day. Long lists want **virtual
+  scrolling** (react-virtuoso, already used by the SNS feed), not this property.
+- **Never guess which page is costly — profile it.** `.ui-probe/profile-page-switch.mjs`
+  uses the CDP `Profiler` domain and aggregates **self time** per function. Note CDP
+  timestamps are **microseconds** (an early version reported 3.6 million "ms").
+  Measured 朋友圈: `(program)` (browser internals) dominates, JS ~420 ms in the App chunk,
+  229 author rows + 164 avatar images; the virtualized feed holds only 2 posts — the cost is
+  the **author sidebar**, not the feed.
+- `transition-property` defaults to `all`. `transition-duration: 0.15s` alone therefore
+  transitions every animatable property — name the properties explicitly.
+- Images: `loading="lazy"` does not move decode off the critical path; `decoding="async"`
+  does. Applied to avatars, SNS media thumbnails, link-card thumbnails and the lightbox.
+- Splitting the bundle is only safe because dynamic `import()` works under `file://` in
+  packaged Electron. It does — `.ui-probe/check-dynamic-import.mjs` asserts it against the
+  installed `app.asar` (13 exports resolved). A blocked dynamic import shows up as a
+  permanent Suspense fallback, not as a build error.
+
+## WeClone Provider — v1.0.1 (local-only, no forced service)
+
+- **WeClone has no service of its own.** It resolves through
+  `ProviderProfileService.getForConsumer('weclone')`, which falls back to the default, so it
+  uses whatever the user configured (DeepSeek on this machine). The old
+  `ensureForcedProvider()` locked it to `opencode-go / muse-spark-1.2-contributor` and created
+  a profile the user never asked for; that gateway is geo-blocked here, so WeClone could only
+  ever answer "Internal server error" while a working service sat configured next to it.
+  Removed end to end: IPC channels, `src/components/weclone/WeCloneForcedKey.tsx`, the
+  `WECLONE_FORCED_*` constants in `config.ts`. `LEGACY_FORCED_PROVIDER_ID` /
+  `LEGACY_FORCED_MODEL` still exist in `weCloneService.ts` **for the one-time cleanup only**
+  (`purgeLegacyForcedProfile()` deletes that profile and the consumer assignment on startup).
+  `muse-spark` still appears in `electron/assets/models/models-dev-snapshot.json` — that is
+  the models.dev catalog (the provider really serves it), not a forced choice.
+- **A profile can exist with no API key, forever.** `migrateLegacyProfile()` writes a profile
+  even when `weportAiApiKey` is empty at that moment, and once a valid store exists `read()`
+  never migrates again — so a key added later never reached the profile. On this machine that
+  produced a keyless DeepSeek profile and "未配置 AI API Key" with a perfectly decryptable
+  35-character key sitting in the legacy field. `healKeylessProfile()` repairs exactly that
+  state (only when exactly one profile lacks a key, and provider/baseUrl agree).
+- A request sent without a key comes back as `Authentication Fails`, which reads like "your key
+  is wrong". Filter candidates by `apiKey` (or `apiKeyOptional`) **before** calling, and say
+  "this service has no API key" instead.
+- `chatWithClone` returns the answering `model` / `providerId` in `meta`; the drawer prints it.
+  Verification: `.ui-probe/verify-weclone-e2e.mjs` drives the real UI against a local
+  OpenAI-compatible mock (SSE), so the chain is proven independently of the user's key.
+
+## Background Mask — v1.0.1 (polarity)
+
+- **The scrim must follow the theme's polarity**, not a fixed dark colour. Its job is to push
+  the backdrop away from the body text: light theme → white scrim, dark theme → near-black.
+  A fixed dark scrim at 100 % in light mode is dark text on black — nothing readable. This is
+  the opposite complaint from the v1.0 note above (that one was `var(--bg)` making a light
+  theme *grey*); both were "the scrim is the wrong colour", and the fix now names the
+  mechanism: `--app-bg-scrim` flips with `data-mode`.
+- Image and video share one composited layer (`.app-bg`, `contain: strict`, `z-index: -1`)
+  with the scrim inside it. Before, the image was `.shell`'s `background-image`, which meant
+  `filter: blur()` never applied — the 背景模糊 slider did nothing in image mode while being
+  shown for it.
+- `:root[data-mode='light'] .shell { background: var(--bg) }` was a **shorthand**: it reset
+  `background-image` to `none`. `theme.scss` loads after `v1.scss` and both selectors have the
+  same specificity, so in light mode the wallpaper was erased entirely. One `.shell` rule now
+  owns the background; the glow is a variable (`--app-glow`) that either mode can turn off.
+- Verification: `.ui-probe/verify-bg-mask.mjs` captures the **main** window (not the popup —
+  picking the first `window` webContents measures a 516×171 transparent toast and reports
+  pure black) and asserts average luma moves the right way: dark 0.221 → 0.076, light
+  0.460 → **0.944**. Both endpoints are asserted, not just the direction.
+
 ## Renderer Probes — Test Hygiene
 
 - **Always pass a private `--user-data-dir`.** `app.requestSingleInstanceLock()` is keyed
@@ -315,6 +402,11 @@ Two failure modes, both seen in the export page:
 - CSS-nesting blocks (`:root[data-x] { :is(...) { … } }`) are dropped wholesale by the
   engine when malformed, and neither `tsc` nor `vite build` complains. Assert **computed
   styles** (`.ui-probe/verify-accent-strength.mjs`), not the presence of source lines.
+- **`npx @electron/asar extract-file <asar> <path>` writes the extracted file into the
+  current working directory.** Running it from the repo root to inspect the packaged
+  `package.json` silently **overwrote the real one** with electron-builder's stripped stub
+  (scripts, devDependencies and the whole `build` block gone). Extract into a temp directory,
+  or just read the asar as bytes/strings.
 
 ## Notification Popup (Permanent — Do Not Change)
 

@@ -536,6 +536,9 @@ interface ElectronApi {
         retrievedChunks: number
         corpusHits: number
         retrieveCostMs: number
+        /** 实际回答的模型 / 提供商：界面上要显示"是哪个服务答的"。 */
+        model: string
+        providerId: string
       }
     }>
     generate: () => Promise<{
@@ -557,63 +560,7 @@ interface ElectronApi {
     }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
     cancel: () => Promise<{ success: boolean }>
-    getForcedProviderStatus: () => Promise<{
-      providerId: string
-      baseUrl: string
-      model: string
-      hasApiKey: boolean
-      isForced: boolean
-      activeProfileSummary?: {
-        id: string
-        name: string
-        providerId: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        apiKeyHint: string
-      }
-    }>
-    ensureProvider: (payload?: { apiKey?: string }) => Promise<{
-      success: boolean
-      status?: {
-        providerId: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        isForced: boolean
-        activeProfileSummary?: {
-          id: string
-          name: string
-          providerId: string
-          baseUrl: string
-          model: string
-          hasApiKey: boolean
-          apiKeyHint: string
-        }
-      }
-      error?: string
-    }>
-    setForcedApiKey: (payload: { apiKey: string }) => Promise<{
-      success: boolean
-      status?: {
-        providerId: string
-        baseUrl: string
-        model: string
-        hasApiKey: boolean
-        isForced: boolean
-        activeProfileSummary?: {
-          id: string
-          name: string
-          providerId: string
-          baseUrl: string
-          model: string
-          hasApiKey: boolean
-          apiKeyHint: string
-        }
-      }
-      error?: string
-    }>
-    onProgress: (callback: (payload: { stage: 'scan' | 'generate' | 'filter' | 'upload' | 'done'; progress: number; message: string; detail?: any }) => void) => () => void
+    onProgress: (callback: (payload: { stage: 'scan' | 'generate' | 'filter' | 'done'; progress: number; message: string; detail?: any }) => void) => () => void
   }
   process: {
     platform: string

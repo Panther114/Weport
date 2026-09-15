@@ -61,10 +61,14 @@ export default function WeCloneChatDrawer({
         setElapsed(typeof res.elapsedMs === 'number' ? res.elapsedMs : null)
         // 把本地检索的命中情况显示出来：这是唯一会悄悄退化的环节，
         // 看不到数字就没法判断"它答得敷衍"是模型问题还是根本没检索到东西。
+        //
+        // 同时报出**是哪个模型答的**：这一面曾经被强制绑到一个本机连不通的网关上，
+        // 用户只能看到一句 "Internal server error"。把服务名摆出来，用户一眼就能
+        // 确认它用的正是自己在设置里配的那个（本机是 DeepSeek）。
         const m = res.meta
         setLastStats(
           m
-            ? `本地检索命中 ${m.corpusHits} 段 · 用时 ${m.retrieveCostMs}ms`
+            ? `${m.model} · 本地检索命中 ${m.corpusHits} 段 · 用时 ${m.retrieveCostMs}ms`
             : null
         )
       } else {

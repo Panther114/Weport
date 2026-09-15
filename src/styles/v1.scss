@@ -521,6 +521,11 @@ input[type='range'] {
 }
 
 // 交互控件统一节拍：按钮/输入/行/卡片的颜色与位移变化都用同一条曲线。
+//
+// **必须写清楚 transition-property**。`transition-property` 的初始值是 `all`，
+// 所以只写 duration/timing-function 等于"所有可动画属性都参与过渡" —— 这不只是
+// 规范上的坏味道：它让每个交互元素在 hover 时都要被合成器盯着一整套属性，
+// 而且会带来意外延迟（例如 transform 与 box-shadow 混在同一个 all 里）。
 button,
 input,
 select,
@@ -529,63 +534,129 @@ textarea,
 .rail-item,
 .account-item,
 .notify-row {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
   transition-duration: 0.15s;
   transition-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+// 按下反馈。
+//
+// 只给"点一下会立刻发生什么"的小控件：0.96 是能感觉到的最小值，再小就夸张。
+// 大块卡片（.format-chip / .theme-card / .layout-chip）不加 —— 它们的面积大，
+// 同比例缩放看起来是"整页在动"而不是"按钮被按下"。
+:is(
+  .primary-btn,
+  .secondary-btn,
+  .ghost-btn,
+  .danger-btn,
+  .icon-btn-sm,
+  .chip:not(.format-chip):not(.layout-chip),
+  .segmented-item,
+  .rail-item
+):active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+// -----------------------------------------------------------------------------
+// 长列表：**不要**用 content-visibility
+// -----------------------------------------------------------------------------
+//
+// 一度在这里给 `.anti-revoke-list .account-item` 等重复行加了
+// `content-visibility: auto`（跳过离屏子树的样式与布局）。受控 A/B 实测**它是亏的**：
+// 同一个进程里交替切换这一条，滚动 192 行的列表 ——
+//
+//   auto    : p95 107.8ms、28/41 帧掉帧、long task 106ms
+//   visible : p95  34.8ms、 5/57 帧掉帧、long task   0ms
+//   挂载成本：16.7ms vs 16.6ms（没有差别）
+//
+// 原因很清楚：`auto` 是拿"挂载时少排版"换"滚动时按需排版"。短列表的挂载本来只
+// 发生一次，而滚动是天天在做的动作；于是省下的 0ms 换来了 3 倍的滚动延迟。
+// 列表要长到上万行这个交换才划算 —— 那种场景的正确解法是虚拟滚动
+// （朋友圈动态流用的 react-virtuoso 就是它），不是这个属性。
+//
+// 结论：这条路不要再走一遍。要治长列表，先量"挂载 vs 滚动"哪一头贵。
+
+// 懒加载页面的占位（见 App.tsx 的 LazyFallback）。保持 .panel 的骨架，所以从占位
+// 换成真页面时外边距不变，不会多出一次布局偏移。
+.lazy-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.lazy-page-hint {
+  opacity: 0.75;
+  animation: wp-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wp-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .workspace > *,
   .modal,
   .modal-backdrop,
-  .toast {
+  .toast,
+  .lazy-page-hint {
     animation: none;
+  }
+
+  /* 全局关掉过渡而不是逐个列表：减少动态偏好是"别动"的强指令。 */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
   }
 }
 
 // -----------------------------------------------------------------------------
-// 7. 用户背景图
+// 7. 用户背景图 / 视频
 // -----------------------------------------------------------------------------
 //
-// 背景图是**用户上传的任意图片**，所以必须有对比度保护：一层可调的遮罩压在
-// 图片上，面板底色随之变半透明并加背景模糊。任何图片下正文都要保持可读，
-// 这是这个功能能不能用的前提，不是可选项。
+// 背景是**用户上传的任意图片或视频**，所以必须有对比度保护：一层可调的遮罩压在
+// 媒体上，面板底色随之变半透明。任何图片下正文都要保持可读。媒体本身与遮罩都在
+// theme.scss 的 `.app-bg` 合成层里（图片和视频同一条路径）。
+//
+// 外壳这边只剩两件事：没有背景时的底色与光晕。
+
+// 没有用户背景时，外壳自带两层极淡的蓝色光晕。
+:root {
+  --app-glow:
+    radial-gradient(900px 520px at 18% -10%, rgba(91, 142, 255, 0.07), transparent 58%),
+    radial-gradient(700px 460px at 86% 0%, rgba(91, 142, 255, 0.045), transparent 62%);
+}
+
+// 浅色主题下这两层蓝色会变成一层脏灰；有用户背景时它们压在壁纸上，会让
+// 「遮罩 0%」也压着一层去不掉的暗色 —— 用户要的"0% 就是完全透明"正是被它们毁掉的。
+//
+// 用变量而不是再写一条 `:root[...] .shell` 去覆盖：**同特异性规则的胜负取决于
+// 打包顺序**，而顺序由打包器决定（theme.scss 加载在 v1.scss 之后，那条
+// `.shell { background: var(--bg) }` 简写连 background-image 一起重置过，浅色主题
+// 下壁纸因此根本不显示）。收敛成一个变量后，`.shell` 只在一处声明背景，不存在
+// "谁覆盖谁"的赌局。
+:root[data-mode='light'],
+:root[data-has-bg='true'] {
+  --app-glow: none;
+}
 
 .shell {
   background-color: var(--bg);
-  background-image:
-    linear-gradient(rgba(6, 6, 8, var(--app-bg-dim, 0)), rgba(6, 6, 8, var(--app-bg-dim, 0))),
-    var(--app-bg-url, none),
-    radial-gradient(900px 520px at 18% -10%, rgba(91, 142, 255, 0.07), transparent 58%),
-    radial-gradient(700px 460px at 86% 0%, rgba(91, 142, 255, 0.045), transparent 62%);
-  background-size: cover, cover, auto, auto;
-  background-position: center, center, center, center;
+  background-image: var(--app-glow);
+  background-position: center, center;
   background-repeat: no-repeat;
 }
 
-// 有背景（图片 / 视频）时，.shell 上**只**保留用户自己的那张图和遮罩。
-//
-// 之前只有 type.scss 里一条 `data-bg-kind='video'` 的覆盖去让开底色，图片模式
-// 没有对应处理，而两层蓝色径向光晕在两种模式下都一直在 —— 于是「遮罩 0%」也
-// 压着一层去不掉的暗色和蓝晕，怎么调都还是不够透明。收敛到只剩「图 + 遮罩」
-// 之后，0% 就是真的一点都不压。
-:root[data-has-bg='true'] .shell {
-  background-image:
-    linear-gradient(rgba(6, 6, 8, var(--app-bg-dim, 0)), rgba(6, 6, 8, var(--app-bg-dim, 0))),
-    var(--app-bg-url, none);
-}
-
-// 视频模式再把纯色底也让开：视频是独立的 <video> 图层（不在 background 里），
-// 纯色底会盖住它。
-:root[data-bg-kind='video'] .shell {
-  background-color: transparent;
-}
-
-// 有背景（图 / 视频）时把面板变成半透明玻璃，否则不透明的面板会把背景完全
+// 有背景（图片 / 视频）时把面板变成半透明玻璃，否则不透明的面板会把背景完全
 // 盖住，用户上传的图等于白传。
 //
 // 透明度**不在这里定义**：面板底色是主题级变量，浅色/深色两套值统一在
 // theme.scss 的 `data-has-bg` 规则里给出。这里只负责给 rail/topbar 加背景模糊
-// ——静态图片的模糊结果可以复用，所以这条在图片模式下是安全的。
+// ——媒体是静态的话模糊结果可以复用，所以图片模式下这条是安全的。
 :root[data-has-bg='true'] {
   .rail,
   .topbar {

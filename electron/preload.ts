@@ -321,9 +321,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
       ipcRenderer.invoke('weclone:chat', cloneId, message, history),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),
-    getForcedProviderStatus: () => ipcRenderer.invoke('weclone:getForcedProviderStatus'),
-    ensureProvider: (payload?: { apiKey?: string }) => ipcRenderer.invoke('weclone:ensureProvider', payload),
-    setForcedApiKey: (payload: { apiKey: string }) => ipcRenderer.invoke('weclone:setForcedApiKey', payload),
     onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
   },
 

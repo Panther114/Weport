@@ -161,7 +161,12 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
       <div className="progress-track">
         <div className={`progress-fill${indeterminate ? ' indeterminate' : ''}`} style={total ? { width: `${pct}%` } : undefined} />
       </div>
-      <span className="exp-progress-session" title={progress?.currentSession || ''}>
+      {/* 会话名**不带 title**。
+          它每 400ms 换一次，而 `title` 一变，Chromium 的原生提示框就会重新弹出
+          （鼠标恰好停在进度行上时尤其明显）—— 表现是"偶尔抖一下"的另一个来源。
+          名字本身在主进程侧已经封顶（见 appMain 的 boundProgressSessionLabel），
+          要看全名请到「选择会话」列表里看，那里是完整且稳定的。 */}
+      <span className="exp-progress-session">
         {sessionLabel}
       </span>
       {/* 计数始终占位：total 未知时留空而不是消失，否则右侧「取消导出」会左右横跳 */}

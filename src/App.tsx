@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Plug,
   PlugZap,
@@ -60,18 +60,52 @@ import {
   Settings2 as SettingsIcon,
 } from 'lucide-react'
 
-import WeportAiPanel from './components/weportAi/WeportAiPanel'
-import AiSettingsModal from './components/weportAi/AiSettingsModal'
-import ConnectorsPanel from './components/settings/ConnectorsPanel'
 import type { SetupInfo } from './components/weportAi/aiPanelTypes'
-import WeBotModule from './pages/WeBotModule'
-import WeClonePage from './pages/WeClonePage'
-import AiMarkdown from './components/weportAi/AiMarkdown'
+import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
-import SnsPage from './pages/SnsPage'
-import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
+
+/**
+ * 页面级代码分割。
+ *
+ * 打包成一个入口时实测 `dist/assets/index-*.js` 是 **1751 KB**：里面塞着 ECharts
+ * （只被「分析」用）、html2canvas（只被年度报告用）、react-markdown（只被 AI 面板与
+ * 更新日志用）以及几个大页面。这些字节必须在**启动时**解析并执行一遍，代价直接
+ * 体现在首屏上（实测 FCP 2.3s、DCL 1.2s，中间那 1.1s 就是解析 + 首次渲染）。
+ *
+ * 拆出去之后启动只剩外壳与「连接微信 / 导出数据」两个核心页；其余页面第一次打开
+ * 时才加载（本地文件，几十毫秒），这块开销从"每次启动都付"变成"用到才付"。
+ *
+ * 为什么必须先验证 `file://` 下能不能 dynamic import：Chromium 对 file 协议的模块
+ * 加载有额外限制，一旦被挡住，分割出来的 chunk 会永远停在 fallback 上（等于白屏），
+ * 而 typecheck 和 vite build 都不会报错。`.ui-probe/check-dynamic-import.mjs` 在
+ * 打包后的 app.asar 里实测过：可用（13 个导出正常拿到）。
+ *
+ * 类型导入保持静态：`import type` 会被完全擦除，不产生 chunk。
+ */
+const WeportAiPanel = lazy(() => import('./components/weportAi/WeportAiPanel'))
+const AiSettingsModal = lazy(() => import('./components/weportAi/AiSettingsModal'))
+const ConnectorsPanel = lazy(() => import('./components/settings/ConnectorsPanel'))
+const WeBotModule = lazy(() => import('./pages/WeBotModule'))
+const WeClonePage = lazy(() => import('./pages/WeClonePage'))
+const AiMarkdown = lazy(() => import('./components/weportAi/AiMarkdown'))
+const SnsPage = lazy(() => import('./pages/SnsPage'))
+const AnalyticsModule = lazy(() => import('./pages/analytics/AnalyticsModule'))
+
+/**
+ * 懒加载页面的占位。
+ *
+ * 刻意不放转圈：本地 chunk 几十毫秒就位，一个 spinner 反而比空白更刺眼。占位保持
+ * `.panel` 的骨架，所以从占位切到真页面时外边距不变，不会多出一次布局偏移。
+ */
+function LazyFallback({ label }: { label: string }) {
+  return (
+    <section className="panel panel-fill lazy-page" aria-busy="true" aria-label={`${label}加载中`}>
+      <span className="lazy-page-hint">{label}…</span>
+    </section>
+  )
+}
 import {
   ACCENT_OPTIONS,
   ACCENT_STRENGTH_OPTIONS,
@@ -1764,27 +1798,38 @@ export default function App() {
 
   return (
     <div className="shell">
-      {/* 视频背景：图片背景是 .shell 上的 background-image，视频必须是真实的
-          <video> 元素（而且要 muted + playsInline 才允许自动播放）。窗口在前台
-          时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃 GPU 和电，
-          而后台窗口没有人看。 */}
-      {backgroundKind === 'video' ? (
+      {/* 背景层：图片与视频共用同一个合成层（见 theme.scss 的 `.app-bg`）。
+          视频必须是真实的 <video>（而且要 muted + playsInline 才允许自动播放），
+          窗口在前台时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃
+          GPU 和电，而后台窗口没有人看。图片走 <img>：只有它是<img>才能吃到
+          「背景模糊」，也才能一次光栅化后不再重绘。 */}
+      {backgroundKind === 'none' ? null : (
         <div className="app-bg" aria-hidden="true">
-          <video
-            ref={backgroundVideoRef}
-            src={backgroundProtocolUrl(appearance.backgroundPath)}
-            autoPlay
-            loop
-            muted
-            playsInline
-            preload="auto"
-            // 出帧后按背景亮度自动定明暗（用户手动选过就不再干预）。
-            // 挂在 loadeddata 而不是 mount：视频没解码完时读不到像素。
-            onLoadedData={() => void adoptModeFromBackground()}
-          />
+          {backgroundKind === 'video' ? (
+            <video
+              ref={backgroundVideoRef}
+              src={backgroundProtocolUrl(appearance.backgroundPath)}
+              autoPlay
+              loop
+              muted
+              playsInline
+              preload="auto"
+              // 出帧后按背景亮度自动定明暗（用户手动选过就不再干预）。
+              // 挂在 loadeddata 而不是 mount：视频没解码完时读不到像素。
+              onLoadedData={() => void adoptModeFromBackground()}
+            />
+          ) : (
+            // 同一条亮度自适应：探针与设置页都靠它决定「跟随背景」的明暗。
+            <img
+              src={backgroundProtocolUrl(appearance.backgroundPath)}
+              alt=""
+              draggable={false}
+              onLoad={() => void adoptModeFromBackground()}
+            />
+          )}
           <div className="app-bg-dim" />
         </div>
-      ) : null}
+      )}
       <aside className="rail" aria-label="主导航">
         <div
           className="rail-brand"
@@ -1875,7 +1920,9 @@ export default function App() {
             <h2>发现新版本 v{updateInfo.version}</h2>
             {updateInfo.body ? (
               <div className="update-banner-notes">
-                <AiMarkdown text={updateInfo.body} />
+                <Suspense fallback={null}>
+                  <AiMarkdown text={updateInfo.body} />
+                </Suspense>
               </div>
             ) : (
               <p className="hint" style={{ marginTop: 4 }}>建议更新以获得修复与改进。</p>
@@ -2592,17 +2639,35 @@ export default function App() {
         )}
 
         {tab === 'ai' && (
-          <WeportAiPanel
-            onOpenSettings={() => {
-              setSettingsSection('ai')
-              switchTab('settings')
-            }}
-          />
+          <Suspense fallback={<LazyFallback label="WeportAI" />}>
+            <WeportAiPanel
+              onOpenSettings={() => {
+                setSettingsSection('ai')
+                switchTab('settings')
+              }}
+            />
+          </Suspense>
         )}
-        {tab === 'weclone' && <WeClonePage />}
-        {(tab === 'webot' || tab === 'webot-notes') && <WeBotModule section={tab === 'webot-notes' ? 'notes' : 'tasks'} />}
-        {tab === 'sns' && <SnsPage />}
-        {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
+        {tab === 'weclone' && (
+          <Suspense fallback={<LazyFallback label="人格克隆" />}>
+            <WeClonePage />
+          </Suspense>
+        )}
+        {(tab === 'webot' || tab === 'webot-notes') && (
+          <Suspense fallback={<LazyFallback label={tab === 'webot-notes' ? 'WeBot 笔记' : 'WeBot'} />}>
+            <WeBotModule section={tab === 'webot-notes' ? 'notes' : 'tasks'} />
+          </Suspense>
+        )}
+        {tab === 'sns' && (
+          <Suspense fallback={<LazyFallback label="朋友圈" />}>
+            <SnsPage />
+          </Suspense>
+        )}
+        {tab === 'analytics' && (
+          <Suspense fallback={<LazyFallback label="分析" />}>
+            <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />
+          </Suspense>
+        )}
 
         {tab === 'antirecall' && (
           /* 重排：原来第一屏是三行解释 + 一个复选框 + 三个按钮 + 一长条会话列表，
@@ -3410,14 +3475,16 @@ export default function App() {
                   </div>
 
                   {aiSetup ? (
-                    <AiSettingsModal
-                      inline
-                      setup={aiSetup}
-                      onSaved={(next) => {
-                        setAiSetup(next)
-                        void refreshAiAssignments()
-                      }}
-                    />
+                    <Suspense fallback={<div className="wp-loading">正在加载 AI 服务面板…</div>}>
+                      <AiSettingsModal
+                        inline
+                        setup={aiSetup}
+                        onSaved={(next) => {
+                          setAiSetup(next)
+                          void refreshAiAssignments()
+                        }}
+                      />
+                    </Suspense>
                   ) : (
                     <div className="wp-loading">正在读取 AI 服务配置…</div>
                   )}
@@ -3524,7 +3591,11 @@ export default function App() {
                 </section>
               )}
 
-              {settingsSection === 'connectors' && <ConnectorsPanel />}
+              {settingsSection === 'connectors' && (
+                <Suspense fallback={<div className="wp-loading">正在加载连接器…</div>}>
+                  <ConnectorsPanel />
+                </Suspense>
+              )}
 
               {settingsSection === 'data' && (
                 <section className="panel">
@@ -3771,7 +3842,9 @@ export default function App() {
               <div className="changelog-new">
                 <span className="changelog-new-tag">新版本 v{updateInfo.version}</span>
                 {updateInfo.body ? (
-                  <AiMarkdown text={updateInfo.body} />
+                  <Suspense fallback={null}>
+                    <AiMarkdown text={updateInfo.body} />
+                  </Suspense>
                 ) : (
                   <p className="hint" style={{ margin: '6px 0 0' }}>暂无该版本的更新说明。</p>
                 )}
@@ -3781,7 +3854,9 @@ export default function App() {
               {changelogLoading ? (
                 <div className="empty">正在加载更新日志…</div>
               ) : changelogContent ? (
-                <AiMarkdown text={changelogContent} />
+                <Suspense fallback={<div className="empty">正在排版更新日志…</div>}>
+                  <AiMarkdown text={changelogContent} />
+                </Suspense>
               ) : (
                 <div className="empty">暂无更新日志</div>
               )}

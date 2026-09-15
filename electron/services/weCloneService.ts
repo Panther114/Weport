@@ -31,9 +31,6 @@ import {
 import { createInterface } from 'readline'
 import {
   ConfigService,
-  WECLONE_FORCED_PROVIDER_ID,
-  WECLONE_FORCED_BASE_URL,
-  WECLONE_FORCED_MODEL,
 } from './config'
 import { chatService } from './chatService'
 import { wcdbService } from './wcdbService'
@@ -137,27 +134,24 @@ export interface LocalChatResult {
     retrievedChunks: number
     corpusHits: number
     retrieveCostMs: number
-  }
-}
-
-/** 强制 provider 状态（渲染侧安全，不含明文 key） */
-export interface WeCloneForcedProviderStatus {
-  providerId: string
-  baseUrl: string
-  model: string
-  hasApiKey: boolean
-  isForced: boolean
-  activeProfileSummary?: {
-    id: string
-    name: string
-    providerId: string
-    baseUrl: string
+    /**
+     * 实际回答的这个模型与它的 provider。
+     *
+     * 为什么要回传：这一面曾经被**强制**绑到一个本机连不通的网关上，用户看到的是
+     * 一句 "Internal server error"，无从判断到底是密钥、网络还是模型选错了。把
+     * "谁答的"摆到界面上，用户一眼就能确认它用的就是自己在设置里配的那个服务。
+     */
     model: string
-    hasApiKey: boolean
-    apiKeyHint: string
+    providerId: string
   }
 }
 
+// 历史「强制 provider」的标识（v1.0 之前的 `WECLONE_FORCED_*`）。
+//
+// 现在**只**用于一次性清理：把当年代码自己创建的那个服务项从配置里删掉。
+// 没有任何功能再引用它们，也不要再用它们去创建服务。
+const LEGACY_FORCED_PROVIDER_ID = 'opencode-go'
+const LEGACY_FORCED_MODEL = 'muse-spark-1.2-contributor'
 class WeCloneAbortedError extends Error {
   constructor() {
     super('已取消')
@@ -215,6 +209,8 @@ export class WeCloneService {
   constructor() {
     this.configService = ConfigService.getInstance()
     this.providerProfiles = new ProviderProfileService(this.configService)
+    // 启动即清理历史「强制 provider」（幂等，见 purgeLegacyForcedProfile）。
+    this.purgeLegacyForcedProfile()
   }
 
   // -------------------------------------------------------------------------
@@ -591,99 +587,51 @@ export class WeCloneService {
   // LLM 调用（复用 weportAiService 的 provider 配置）
   // -------------------------------------------------------------------------
 
+  /**
+   * 人格克隆该用哪个服务。
+   *
+   * `getForConsumer('weclone')` 在**没有单独指定**时回落到默认服务 —— 也就是顶栏
+   * 那个模型（本机是 DeepSeek）。默认行为就是"用户配了什么就用什么"。
+   *
+   * v1.0 之前这里有一段 `ensureForcedProvider()`：它把人格克隆**锁死**在
+   * `opencode-go / muse-spark-1.2-contributor` 上，还顺手往「设置 → AI 服务」里
+   * 塞了一个用户从没加过的 "OpenCode Go · 人格克隆"。那个网关在本机按地区拒绝
+   * （`This model is not available in your country.`），于是人格克隆的观感是
+   * "永远 Internal server error"，而用户明明配好了可用的 DeepSeek —— 用户的原话
+   * 是"为什么这里会有 muse spark 这个模型"。整段强制逻辑已删除。
+   */
   private getActiveProfile(): ProviderProfile | null {
-    // WeClone 有自己的服务指向（默认跟随「默认服务」）。v1.0.1 之前它读的是全局
-    // active —— 而它自己又会 activate 一个强制 profile，于是"打开一次人格克隆"
-    // 就把 WeportAI 的服务换掉了。
     return this.providerProfiles.getForConsumer('weclone')
   }
 
-  // -------------------------------------------------------------------------
-  // 强制 provider（opencode-go / muse-spark-1.2-contributor，与 WeportAI 同款配置）
-  // -------------------------------------------------------------------------
-
-  /** 当前激活 profile 是否已满足强制配置（provider + baseUrl + model + apiKey 全匹配） */
-  private isForcedProfile(profile: ProviderProfile | null): boolean {
-    return Boolean(
-      profile &&
-      profile.providerId === WECLONE_FORCED_PROVIDER_ID &&
-      profile.baseUrl === WECLONE_FORCED_BASE_URL &&
-      profile.model === WECLONE_FORCED_MODEL &&
-      profile.apiKey
-    )
-  }
-
   /**
-   * 锁定 WeClone 生成到 opencode-go / muse-spark-1.2-contributor。
-   * 复用 ProviderProfileService（加密存储 weportAiProfilesBlob），绝不直接读写
-   * legacy weportAiApiKey。apiKeyInput 为空时沿用现有 key；两者皆空则抛错。
+   * 一次性清理历史强制 provider。
+   *
+   * 只删**代码自己造出来的那一个**：providerId 与 model 都精确匹配历史常量。
+   * 理由不是洁癖 —— 那个 profile 会出现在「设置 → AI 服务」里，是一个永远连不上
+   * 的服务项；而且 `consumerProfiles.weclone` 还指着它，不清理的话删掉强制代码
+   * 之后人格克隆仍然在用它。`remove()` 会顺手清掉指向它的功能面指定（见
+   * providerProfiles.remove），因此清理之后 weclone 自动回到"跟随默认"。
+   *
+   * 幂等：跑完就没东西可删了；用户自己加的服务一律不碰。
    */
-  async ensureForcedProvider(apiKeyInput?: string): Promise<ProviderProfile> {
-    const active = this.getActiveProfile()
-    if (!apiKeyInput && this.isForcedProfile(active)) {
-      console.debug(`[WeClone] 强制 provider 已就绪: ${WECLONE_FORCED_PROVIDER_ID}/${WECLONE_FORCED_MODEL} (profile=${active?.id})`)
-      return active as ProviderProfile
-    }
-
-    const catalog = getProviderCatalogEntry(WECLONE_FORCED_PROVIDER_ID)
-    const apiKey = String(apiKeyInput || '').trim() || String(active?.apiKey || '').trim()
-    if (!apiKey) {
-      throw new Error('请在人格克隆设置内填入 OpenCode Go API Key (muse-spark-1.2-contributor)')
-    }
-
-    // 同 provider+model 的既有 profile 原地更新，否则用目录骨架新建
-    const existing = this.providerProfiles.list().find(
-      (p) => p.providerId === WECLONE_FORCED_PROVIDER_ID && p.model === WECLONE_FORCED_MODEL
-    )
-    const skeleton = makeDefaultProfile({
-      providerId: WECLONE_FORCED_PROVIDER_ID,
-      name: catalog?.name || 'OpenCode Go',
-      baseUrl: WECLONE_FORCED_BASE_URL,
-      model: WECLONE_FORCED_MODEL,
-    })
-    const saved = this.providerProfiles.save({
-      id: existing?.id || skeleton.id,
-      name: `${catalog?.name || 'OpenCode Go'} · 人格克隆`,
-      providerId: skeleton.providerId,
-      protocol: skeleton.protocol,
-      baseUrl: skeleton.baseUrl,
-      model: skeleton.model,
-      apiKey,
-    })
-    // 只把**人格克隆**指向这个 profile，不再抢占全局默认服务：默认服务是
-    // WeportAI 与 WeBot 共用的，改它等于替用户改了另外两处。
-    this.providerProfiles.assign('weclone', saved.id)
-    console.log(
-      `[WeClone] 已锁定强制 provider ${WECLONE_FORCED_PROVIDER_ID}/${WECLONE_FORCED_MODEL} ` +
-      `(profile=${saved.id}, ${existing ? 'updated' : 'created'})`
-    )
-    const profile = this.providerProfiles.getById(saved.id)
-    if (!profile) throw new Error('强制 provider 配置写入失败')
-    return profile
-  }
-
-  /** 渲染侧安全状态（不含明文 key） */
-  getForcedProviderStatus(): WeCloneForcedProviderStatus {
-    const active = this.getActiveProfile()
-    return {
-      providerId: WECLONE_FORCED_PROVIDER_ID,
-      baseUrl: WECLONE_FORCED_BASE_URL,
-      model: WECLONE_FORCED_MODEL,
-      hasApiKey: Boolean(active?.apiKey),
-      isForced: this.isForcedProfile(active),
-      activeProfileSummary: active
-        ? {
-            id: active.id,
-            name: active.name,
-            providerId: active.providerId,
-            baseUrl: active.baseUrl,
-            model: active.model,
-            hasApiKey: Boolean(active.apiKey),
-            apiKeyHint: active.apiKey.length <= 8
-              ? `${active.apiKey.slice(0, 2)}•••`
-              : `${active.apiKey.slice(0, 4)}•••${active.apiKey.slice(-4)}`,
-          }
-        : undefined,
+  private purgeLegacyForcedProfile(): void {
+    try {
+      const stale = this.providerProfiles
+        .list()
+        .filter(
+          (profile) =>
+            String(profile.providerId || '') === LEGACY_FORCED_PROVIDER_ID &&
+            String(profile.model || '') === LEGACY_FORCED_MODEL
+        )
+      for (const profile of stale) {
+        if (this.providerProfiles.remove(profile.id)) {
+          console.log(`[WeClone] 已清理历史强制服务 ${profile.providerId}/${profile.model}（profile=${profile.id}）`)
+        }
+      }
+    } catch (error) {
+      // 清理失败不能影响启动：最坏情况只是多留一个用不上的服务项。
+      console.warn('[WeClone] 清理历史强制服务失败:', error)
     }
   }
 
@@ -794,22 +742,22 @@ export class WeCloneService {
   }
 
   /**
-   * 生成时可用的服务列表：首选人格克隆指定的服务，其次是默认（聊天）服务。
+   * 生成时可用的服务列表：首选人格克隆这一面指定的服务，其次是聊天（默认）服务。
    *
-   * `ensureForcedProvider` 在没有强制 key 时会抛 —— 那种情况不该让整条生成
-   * 流程失败，直接用默认服务即可。
+   * 两个都拿不到才是真没配置。以前这里首选的是**强制**的 OpenCode Go，于是每次
+   * 生成都会先去撞一次地区限制、白等一轮超时，再回落到真正可用的服务。
+   * 现在没有强制项，首选就是用户自己配的那个（默认 DeepSeek）。
    */
-  private async resolveGenerationProviders(): Promise<ProviderProfile[]> {
+  private resolveGenerationProviders(): ProviderProfile[] {
     const out: ProviderProfile[] = []
-    try {
-      const primary = await this.ensureForcedProvider()
-      this.assertProfileReady(primary)
-      out.push(primary)
-    } catch (e) {
-      console.warn('[WeClone] 首选生成服务不可用，使用默认服务:', String((e as Error)?.message || e))
+    const push = (profile: ProviderProfile | null) => {
+      if (!profile) return
+      if (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional) return
+      if (out.some((p) => p.id === profile.id)) return
+      out.push(profile)
     }
-    const fallback = this.providerProfiles.getForConsumer('chat')
-    if (fallback && !out.some((p) => p.id === fallback.id)) out.push(fallback)
+    push(this.getActiveProfile())
+    push(this.providerProfiles.getForConsumer('chat'))
     if (out.length === 0) {
       throw new Error('没有可用的 AI 服务：请到「设置 → AI 服务」添加提供商与密钥')
     }
@@ -959,7 +907,7 @@ export class WeCloneService {
       // ---- 0. 前置检查 -----------------------------------------------------
       report('scan', 0, '正在检查配置…')
       // 候选服务列表（首选 + 默认），每次调用按顺序重试
-      const providers = await this.resolveGenerationProviders()
+      const providers = this.resolveGenerationProviders()
 
       const connectResult = await chatService.connect()
       if (!connectResult.success) {
@@ -1191,44 +1139,31 @@ export class WeCloneService {
 
     const startedAt = Date.now()
     /**
-     * 依次尝试的模型。
+     * 依次尝试的服务。
      *
-     * 首选是「人格克隆」这一面被指定的服务（默认就是 OpenCode Go）；但如果它是
-     * 因为**服务方不可用**而失败，就回落到用户的一般默认服务重试一次。
-     *
-     * 为什么必须这样：实测 OpenCode Go 会按地区拒绝 ——
-     * `This model is not available in your country.`。那种情况下把错误直接抛给
-     * 用户等于"人格克隆永远用不了"，而用户明明已经配好了另一个可用的服务
-     * （顶栏那个模型）。这里只在**可用性**错误上回落，密钥错、配额错之类照旧
-     * 原样上报 —— 那些换服务也解决不了，沉默重试只会掩盖真实原因。
+     * 首选就是**用户自己在「设置 → AI 服务」里配的那一个**（本机是 DeepSeek），
+     * 它同时也是 WeportAI 与 WeBot 用的那一个 —— 人格克隆不再有自己的一套服务。
+     * 只有首选因为**服务方不可用**（地区限制 / 网关 5xx / 网络不通）失败时，才换
+     * 下一个候选重试一次；密钥错、配额超限之类照旧原样上报，换服务也解决不了。
      */
     const attempts: Array<{ profile: ProviderProfile; label: string }> = []
-    /**
-     * 首选「人格克隆」被指定的服务。
-     *
-     * `ensureForcedProvider` 在**没有强制 key**时会抛（它的提示文案是"请在人格
-     * 克隆设置内填入 OpenCode Go API Key"）。这里不能让它把整个流程带走 ——
-     * 那会跳过回落，用户明明配好了可用服务却看到"两个服务都不可用"。
-     * 拿不到首选就只试回落。
-     */
-    try {
-      const primary = await this.ensureForcedProvider()
-      this.assertProfileReady(primary)
-      attempts.push({ profile: primary, label: '人格克隆服务' })
-    } catch (e) {
-      console.warn('[WeClone] 首选服务不可用，直接使用默认服务:', String((e as Error)?.message || e))
+    const pushIfUsable = (profile: ProviderProfile | null, label: string) => {
+      if (!profile) return
+      // 没有密钥就**不要**发请求：那样发出去的是一份空 Authorization，服务方回的是
+      // "Authentication Fails"，用户会以为密钥写错了，而其实是根本没有密钥。
+      // 真正的下一步是"去设置里填一个"，所以这里直接给出那句话。
+      if (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional) return
+      if (attempts.some((a) => a.profile.id === profile.id)) return
+      attempts.push({ profile, label })
     }
-    // 回落用「聊天」这一面的服务（没单独指定时就是默认服务）。刻意不用
-    // 'weclone'：那已经被强制 profile 占了，回落等于重试同一个东西。
-    const fallback = this.providerProfiles.getForConsumer('chat')
-    if (fallback && !attempts.some((a) => a.profile.id === fallback.id)) {
-      attempts.push({ profile: fallback, label: '默认服务' })
-    }
+    pushIfUsable(this.getActiveProfile(), 'AI 服务')
+    pushIfUsable(this.providerProfiles.getForConsumer('chat'), '默认服务')
     if (attempts.length === 0) {
+      const resolved = this.getActiveProfile()
       return {
         success: false,
-        error: '没有可用的 AI 服务',
-        hint: '到「设置 → AI 服务」添加一个提供商与密钥后重试。人格克隆和 WeportAI 共用这份配置。',
+        error: resolved ? `服务「${resolved.name}」（${resolved.providerId}/${resolved.model}）没有可用的 API Key` : '没有可用的 AI 服务',
+        hint: '到「设置 → AI 服务」填好提供商与密钥后重试。人格克隆和 WeportAI 共用这一份配置。',
       }
     }
 
@@ -1253,6 +1188,8 @@ export class WeCloneService {
             retrievedChunks: retrieved.length,
             corpusHits,
             retrieveCostMs,
+            model: attempt.profile.model,
+            providerId: attempt.profile.providerId,
           },
         }
       } catch (e) {

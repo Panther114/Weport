@@ -235,6 +235,8 @@ export const SnsPreviewLightbox: React.FC<SnsPreviewLightboxProps> = ({ items, i
             alt=""
             className="lightbox-media"
             draggable={false}
+            // 大图预览是最重的一张图，异步解码尤其重要。
+            decoding="async"
             style={{
               transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
               transformOrigin: '0 0',

@@ -697,6 +697,26 @@ function formatLocalTime(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/**
+ * 进度事件里会话名的长度上限。
+ *
+ * 为什么要封顶：会话名来自 `sessionInfo.displayName`，**群聊名可以很长**（真实库里
+ * 就有 35 字符的英文群名，微信本身的上限还更高），而进度事件是高频的（每 400ms
+ * 一条、一次导出 189 条）。无界字符串进高频通道有两个代价：一是渲染层每次都要对
+ * 一行超长文本做整形与省略号计算；二是这类内容在界面上"一个接一个地闪"，越长的
+ * 名字越显得在抖。
+ *
+ * 40 字符是按渲染侧那格 260px 的容量取的：等宽拉丁字母约 42 个、汉字约 21 个，
+ * 因此 40 已经超过它能显示的极限 —— 截断只影响**根本显示不出来**的部分，画面
+ * 一个字都不会变，但通道里的负载从此有界。
+ */
+const PROGRESS_SESSION_LABEL_MAX = 40
+function boundProgressSessionLabel(value: unknown): string {
+  const name = String(value ?? '').replace(/\s+/g, ' ').trim()
+  if (!name) return ''
+  return name.length > PROGRESS_SESSION_LABEL_MAX ? `${name.slice(0, PROGRESS_SESSION_LABEL_MAX)}…` : name
+}
+
 function parseExportLog(path: string): { txt?: string; json?: string } {
   let txt: string | undefined
   let json: string | undefined
@@ -2303,7 +2323,16 @@ function registerIpcHandlers() {
     const control = exportTaskControlService.createControl(taskId, outDir)
     const progressEmitter = (progress: any) => {
       // 进度事件携带 taskId：渲染层靠它执行 export:cancelTask
-      mainWindow?.webContents.send('export:progress', { ...progress, taskId })
+      //
+      // 会话名在这里**截断**（见 boundProgressSessionLabel）：进度事件全程 189 条、
+      // 每 400ms 一条，而群聊名可以很长。把无界字符串塞进高频事件里，渲染层每帧都
+      // 要把一行超长文本交给文本整形 + 省略号计算，观感就是"名字在抖"。三个消费方
+      // （进度条 / CLI 日志 / TUI）都从这里取数，所以在最上游收敛一次即可。
+      mainWindow?.webContents.send('export:progress', {
+        ...progress,
+        currentSession: boundProgressSessionLabel(progress?.currentSession),
+        taskId,
+      })
     }
 
     // Weport 默认值（与旧版 TXT/JSON 行为一致），用户选项优先
@@ -2971,25 +3000,9 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weCloneService.cancel()
     return { success: true }
   })
-  ipcMain.handle('weclone:getForcedProviderStatus', () => weCloneService.getForcedProviderStatus())
-  ipcMain.handle('weclone:ensureProvider', async (_e, payload?: { apiKey?: string }) => {
-    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
-    try {
-      await weCloneService.ensureForcedProvider(apiKey || undefined)
-      return { success: true, status: weCloneService.getForcedProviderStatus() }
-    } catch (e) {
-      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
-    }
-  })
-  ipcMain.handle('weclone:setForcedApiKey', async (_e, payload?: { apiKey?: string }) => {
-    const apiKey = payload && typeof payload === 'object' ? String(payload.apiKey || '').trim() : ''
-    try {
-      await weCloneService.ensureForcedProvider(apiKey || undefined)
-      return { success: true, status: weCloneService.getForcedProviderStatus() }
-    } catch (e) {
-      return { success: false, error: String((e as Error)?.message || e), status: weCloneService.getForcedProviderStatus() }
-    }
-  })
+  // v1.0：`weclone:getForcedProviderStatus` / `weclone:ensureProvider` /
+  // `weclone:setForcedApiKey` 三个通道已删除 —— 人格克隆不再有自己的服务，
+  // 它用「设置 → AI 服务」里用户配的那一个（默认 DeepSeek）。
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
   // 真实 README 截图模式读取隔离副本，不安装这些 IPC 覆盖。
@@ -3404,13 +3417,6 @@ function installScreenshotDemoHandlers() {
   }
   override('weclone:list', () => ({ success: true, clones: [{ ...demoClone, source: 'local' as const }] }))
   override('weclone:get', () => ({ success: true, clone: demoClone, mds: { profile: '# 演示画像\n\n这是脱敏的演示内容。' } }))
-  override('weclone:getForcedProviderStatus', () => ({
-    providerId: 'opencode-go',
-    baseUrl: 'https://opencode.ai/zen/go/v1',
-    model: 'muse-spark-1.2-contributor',
-    hasApiKey: false,
-    isForced: false,
-  }))
   override('weclone:cancel', () => ({ success: true }))
   override('weclone:delete', () => ({ success: true }))
   override('weclone:generate', () => ({ success: false, error: '演示模式不执行克隆生成' }))

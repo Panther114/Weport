@@ -415,6 +415,10 @@ const MediaItem = memo(
             src={thumbSrc}
             className="media-image"
             loading="lazy"
+            // 异步解码：缩略图是 720px 的原图缩到网格尺寸，解码放在渲染关键路径上
+            // 会直接变成切页/滚动时的掉帧（实测朋友圈切页的 (program) 自持时间
+            // 1.7s 里很大一块就是图像解码与缩放）。
+            decoding="async"
             onError={() => {
               if (!loading && !isVideo) imageRetryOrFail()
             }}

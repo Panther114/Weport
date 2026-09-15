@@ -151,9 +151,10 @@ function applyDom(appearance: Appearance): void {
   const root = document.documentElement
   const kind = backgroundKindOf(appearance.backgroundPath)
 
-  // 图片与视频用两个变量：视频背景的 <video> 元素是 React 渲染的，CSS 只需要
-  // 知道"有没有背景、要不要压暗"，不需要 url()。
-  root.style.setProperty('--app-bg-url', kind === 'image' ? `url("${backgroundProtocolUrl(appearance.backgroundPath)}")` : 'none')
+  // 图片与视频都由 `.app-bg` 图层渲染（见 theme.scss），所以这里不再喂 url()：
+  // CSS 只需要知道"要不要压暗"和"模糊多少"。之前图片是 .shell 的
+  // background-image，而 `filter: blur()` 对背景图无效 —— 同一个滑块在图片模式
+  // 下是坏的。两个媒体类型走同一条路径之后不会再有这种分叉。
   // 没有背景时遮罩强度必须是 0：否则纯色界面会被叠上一层 72% 的黑，默认观感
   // 会被这个功能悄悄改掉。
   root.style.setProperty('--app-bg-dim', kind === 'none' ? '0' : String(Math.min(0.95, Math.max(0, appearance.backgroundDim / 100))))

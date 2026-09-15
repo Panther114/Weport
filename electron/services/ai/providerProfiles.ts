@@ -131,6 +131,8 @@ export class ProviderProfileService {
         this.write(store)
       }
     }
+    // 自愈：迁移出来的 profile 可能**没有密钥**（见 healKeylessProfile），补一次。
+    if (this.healKeylessProfile(store)) this.write(store)
     if (store.activeProfileId && !store.profiles.some((profile) => profile.id === store.activeProfileId)) store.activeProfileId = store.profiles[0]?.id || ''
     if (!store.activeProfileId && store.profiles[0]) {
       store.activeProfileId = store.profiles[0].id
@@ -179,6 +181,38 @@ export class ProviderProfileService {
       apiKey,
     })
     return { ...profile, id: `profile-legacy-${randomUUID().slice(0, 8)}` }
+  }
+
+  /**
+   * 自愈：profile 里没有密钥，而 legacy 配置里有 —— 补进去。
+   *
+   * 修的是一个**真实出现过**的坏状态（本机 2026-09 的诊断就撞上了）：`migrateLegacyProfile()`
+   * 在 `weportAiApiKey` 还是空的时候照样会把一个没有密钥的 profile 落盘；而它一旦落盘，
+   * `read()` 就再也不走迁移分支（`hasValidProfileStore` 已经为真）。用户后来在旧版设置里
+   * 填的密钥因此永远进不了 profile，所有 AI 调用都报"未配置 AI API Key"，而配置里明明
+   * 躺着一个能解开的密钥（实测 35 字符，safeStorage 正常）。
+   *
+   * 只在**能确定是同一个服务**时才补，绝不猜：
+   *   - 恰好只有一个没有密钥的 profile（多个就说不清该给谁）；
+   *   - 它的 providerId 与 legacy baseUrl/model 推出的 provider 一致；
+   *   - baseUrl 一致（或它自己没有 baseUrl）。
+   * 用户手动添加的服务、以及已经带密钥的 profile 一律不碰。
+   */
+  private healKeylessProfile(store: ProviderProfileStore): boolean {
+    const legacyKey = String(this.config.get('weportAiApiKey') || '').trim()
+    if (!legacyKey) return false
+    const keyless = store.profiles.filter((profile) => !String(profile.apiKey || '').trim())
+    if (keyless.length !== 1) return false
+    const legacyBaseUrl = String(this.config.get('weportAiBaseUrl') || '').trim().replace(/\/+$/, '')
+    const legacyModel = String(this.config.get('weportAiModel') || '').trim()
+    const legacyProviderId = /deepseek/i.test(legacyBaseUrl) || /^deepseek/i.test(legacyModel) ? 'deepseek' : 'custom'
+    const target = keyless[0]
+    if (target.providerId !== legacyProviderId) return false
+    if (legacyBaseUrl && target.baseUrl && target.baseUrl !== legacyBaseUrl) return false
+    target.apiKey = legacyKey
+    target.updatedAt = Date.now()
+    console.log(`[WeportAI] 自愈：把 legacy weportAiApiKey 补进服务「${target.name}」（${target.providerId}/${target.model}）`)
+    return true
   }
 
   private write(store: ProviderProfileStore): void {

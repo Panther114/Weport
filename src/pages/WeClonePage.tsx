@@ -17,7 +17,7 @@ import {
 import { EmptyState } from '../components/EmptyState'
 import WeCloneProgress from '../components/weclone/WeCloneProgress'
 import WeCloneCard from '../components/weclone/WeCloneCard'
-import WeCloneForcedKey from '../components/weclone/WeCloneForcedKey'
+import WeCloneModelCard from '../components/weclone/WeCloneModelCard'
 import WeCloneChatDrawer from '../components/weclone/WeCloneChatDrawer'
 import type { WeCloneListItem, WeCloneProgressInfo } from '../types/weclone'
 
@@ -438,13 +438,13 @@ export default function WeClonePage() {
           <span className="v09-sub">用哪个 AI 把聊天记录提炼成人格档案</span>
         </div>
 
-        <WeCloneForcedKey notify={pushToast} />
+        <WeCloneModelCard />
 
         <p className="weclone-exp-sub" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <ShieldCheck size={12} />
           <span>
             你的聊天记录、生成出的档案与语料<strong>只保存在本机</strong>
-            ：不上传、不经过任何 Weport 服务器。对话时只会把它们交给你在这里配置的模型。
+            ：不上传、不经过任何 Weport 服务器。对话时只会把它们交给你配置的那个模型。
           </span>
         </p>
       </div>

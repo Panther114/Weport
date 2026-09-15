@@ -1245,62 +1245,18 @@ export class ConfigService {
 // WeClone（人格克隆）
 // ===========================================================================
 
-// === 强制 provider（与 WeportAI 共用 weportAiProfilesBlob 加密存储）===
+// === 强制 provider 已移除（v1.0）===
 //
-// 注意：这是**历史设计**。它把 WeClone 绑定到某个特定网关与模型上；v1.0 的
-// provider 层已经能按模型选择协议、并且 OpenCode Go 是一等公民，因此这里保留
-// 只是为了兼容既有界面与配置，新的使用方式应当直接复用 ProviderProfileService。
-
-export const WECLONE_FORCED_PROVIDER_ID = 'opencode-go'
-export const WECLONE_FORCED_BASE_URL = 'https://opencode.ai/zen/go/v1'
-export const WECLONE_FORCED_MODEL = 'muse-spark-1.2-contributor'
-
-export interface WeCloneForcedProviderInfo {
-  providerId: string
-  baseUrl: string
-  model: string
-  hasApiKey: boolean
-  /** 当前激活 profile 是否已满足强制配置（provider+baseUrl+model+apiKey 全匹配） */
-  isForced: boolean
-}
-
-/**
- * 轻量读取强制 provider 状态：直接解析 weportAiProfilesBlob（get 时已由
- * safeStorage 解密），不引入 ProviderProfileService 依赖（避免 config ↔ ai 循环导入）。
- */
-export function getWeCloneForcedProviderStatus(): WeCloneForcedProviderInfo {
-  const fallback: WeCloneForcedProviderInfo = {
-    providerId: WECLONE_FORCED_PROVIDER_ID,
-    baseUrl: WECLONE_FORCED_BASE_URL,
-    model: WECLONE_FORCED_MODEL,
-    hasApiKey: false,
-    isForced: false,
-  }
-  try {
-    const raw = String(ConfigService.getInstance().get('weportAiProfilesBlob') || '').trim()
-    if (!raw) return fallback
-    const parsed = JSON.parse(raw) as {
-      activeProfileId?: string
-      profiles?: Array<{ id?: string; providerId?: unknown; baseUrl?: unknown; model?: unknown; apiKey?: unknown }>
-    }
-    const profiles = Array.isArray(parsed?.profiles) ? parsed.profiles : []
-    const active = profiles.find((p) => p.id && p.id === parsed.activeProfileId) || profiles[0]
-    if (!active) return fallback
-    return {
-      providerId: WECLONE_FORCED_PROVIDER_ID,
-      baseUrl: WECLONE_FORCED_BASE_URL,
-      model: WECLONE_FORCED_MODEL,
-      hasApiKey: Boolean(String(active.apiKey || '').trim()),
-      isForced:
-        String(active.providerId || '') === WECLONE_FORCED_PROVIDER_ID &&
-        String(active.baseUrl || '').replace(/\/+$/, '') === WECLONE_FORCED_BASE_URL &&
-        String(active.model || '') === WECLONE_FORCED_MODEL &&
-        Boolean(String(active.apiKey || '').trim()),
-    }
-  } catch {
-    return fallback
-  }
-}
+// 这里原来有 WECLONE_FORCED_PROVIDER_ID / _BASE_URL / _MODEL 三个常量，用来把人格
+// 克隆锁死在 `opencode-go / muse-spark-1.2-contributor` 上，以及一个轻读状态的
+// getWeCloneForcedProviderStatus()。整套逻辑都是错的方向：人格克隆没有任何理由
+// 用一个和 WeportAI 不同的服务，而被锁定的那个网关在用户本机是按地区拒绝的，于是
+// 人格克隆的唯一表现是 "Internal server error"。
+//
+// 现在人格克隆直接用 ProviderProfileService 解析出来的服务（`weclone` 这一面没
+// 单独指定时就是默认服务）。清理当年被创建出来的那个服务项由
+// weCloneService.purgeLegacyForcedProfile() 负责（它内部保留了历史标识符常量，
+// 那是**清理用**的，不要再用它们创建服务）。
 
 // === WeClone 私有服务配置已移除（v1.0） ===
 //
