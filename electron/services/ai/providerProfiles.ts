@@ -98,7 +98,41 @@ export class ProviderProfileService {
     this.config = config
   }
 
+  /**
+   * 现有配置是否"已加密但当前进程解不开"（拿不到系统密钥存储）。
+   *
+   * 抽成方法有三个理由：要在 read / write / save 三处判断；**必须容忍实现缺失**
+   * （单元测试用的是轻量假 ConfigService，没有这个方法，把它当"可读"处理，测试才
+   * 不会被这条与它无关的守卫绊倒）；以及不让"配置对象长得像什么"泄漏到调用点。
+   */
+  private isBlobUnreadable(): boolean {
+    const inspect = (this.config as unknown as { isValueUnreadable?: (key: string) => boolean }).isValueUnreadable
+    if (typeof inspect !== 'function') return false
+    try {
+      return inspect.call(this.config, 'weportAiProfilesBlob') === true
+    } catch {
+      return false
+    }
+  }
+
   private read(): ProviderProfileStore {
+    /**
+     * 先判"磁盘上有值但当前进程解不开"，再决定要不要读。
+     *
+     * 这一步守的是一个**会抹掉用户配置**的严重缺陷：CLI/TUI 宿主进程拿不到
+     * safeStorage 时，`config.get('weportAiProfilesBlob')` 会把加密值解成空串，
+     * 下面的代码就会认定"用户从来没有配置过服务"，于是走迁移分支新建一个空
+     * profile 并**写回磁盘** —— 磁盘上原本的所有服务项与密钥一起消失（实测发生过
+     * 多次，用户看到的就是"密钥明明填过又没了"）。同时因为 `safeEncrypt` 的降级
+     * 路径，那把密钥还会被明文写回。
+     *
+     * 读不出来时的正确行为是**只读、不写**：返回空视图，让调用方报"未配置"而不是
+     * 把别人的配置改成没配置。
+     */
+    if (this.isBlobUnreadable()) {
+      console.warn('[WeportAI] provider 配置已加密但当前进程无法解密（拿不到系统密钥存储），本次只读不写')
+      return cloneStore(EMPTY_STORE)
+    }
     const raw = String(this.config.get('weportAiProfilesBlob') || '').trim()
     let store: ProviderProfileStore = cloneStore(EMPTY_STORE)
     let hasValidProfileStore = false
@@ -216,6 +250,12 @@ export class ProviderProfileService {
   }
 
   private write(store: ProviderProfileStore): void {
+    // 双保险：read() 已经挡过一次，写入路径自己再挡一次 —— 少写一次只是功能不可用，
+    // 误写一次是用户配置全丢。
+    if (this.isBlobUnreadable()) {
+      console.warn('[WeportAI] 拒绝写入 provider 配置：现有配置无法解密，覆盖会丢失全部服务项')
+      return
+    }
     this.config.set('weportAiProfilesBlob', JSON.stringify(store))
   }
 
@@ -281,6 +321,10 @@ export class ProviderProfileService {
   }
 
   save(input: ProviderProfileInput): ProviderProfileSummary {
+    // 写不进去就直接说清楚，别让上层以为保存成功了（CLI/TUI 宿主进程会遇到）。
+    if (this.isBlobUnreadable()) {
+      throw new Error('当前进程无法访问系统密钥存储，无法保存 AI 服务配置（请在 Weport 界面里配置）')
+    }
     const store = this.read()
     const existing = input.id ? store.profiles.find((profile) => profile.id === input.id) : undefined
     const catalog = getProviderCatalogEntry(input.providerId)

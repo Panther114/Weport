@@ -552,6 +552,29 @@ export class ConfigService {
 
   // === 加密/解密工具 ===
 
+  /**
+   * 磁盘上**有值，但当前进程读不出来**（值是 `safe:` 加密的，而这个进程拿不到
+   * 系统密钥存储）。
+   *
+   * 为什么必须能问出这个问题：`get()` 在解密失败时返回空串，于是"解密失败"和
+   * "用户根本没配置"长得一模一样。调用方（provider profile 的 store）据此走了
+   * "用户还没配过 → 迁移旧字段"的分支，**把一个新建的空配置写回磁盘**，用户原有的
+   * 全部服务项与密钥就没了 —— 实测在 CLI/TUI 宿主进程里连续发生过（safeStorage 在
+   * 那个进程里不可用），并且因为 `safeEncrypt` 的降级路径，密钥还会被明文写回。
+   *
+   * `safeEncrypt('')` 写的是空串而不是 `safe:`，所以 `safe:` 开头的值一旦能解开就
+   * 一定非空 —— 用 `safeDecrypt() === ''` 判断"读不出来"是准确的。
+   */
+  isValueUnreadable(key: string): boolean {
+    try {
+      const raw: unknown = this.store.get(key as never)
+      if (typeof raw !== 'string' || !raw.startsWith(SAFE_PREFIX)) return false
+      return this.safeDecrypt(raw) === ''
+    } catch {
+      return false
+    }
+  }
+
   private safeEncrypt(plaintext: string): string {
     if (!plaintext) return ''
     if (plaintext.startsWith(SAFE_PREFIX)) return plaintext

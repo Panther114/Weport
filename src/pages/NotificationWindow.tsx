@@ -83,6 +83,10 @@ export default function NotificationWindow() {
                     height: data.backdrop.height,
                     screenX: data.backdrop.winX,
                     screenY: data.backdrop.winY,
+                    // 窗口自身尺寸：采样必须挪到窗口**外面**，否则抓帧里读到的就是弹窗
+                    // 自己那张卡片（自指 → 主题被第一次采样锁死）
+                    winW: data.backdrop.winW ?? undefined,
+                    winH: data.backdrop.winH ?? undefined,
                     dataUrl: data.backdrop.dataUrl ?? null
                 })
                 setNativeBackdrop(Boolean(data.backdrop.native))
@@ -197,6 +201,9 @@ export default function NotificationWindow() {
                 height: frame.height,
                 screenX: frame.winX,
                 screenY: frame.winY,
+                // 窗口尺寸按上一份沿用：定帧推送里不带它，但采样要靠它把取样点挪出窗口
+                winW: prev?.winW,
+                winH: prev?.winH,
                 dataUrl: frame.dataUrl
             }))
             // 收到真实帧才算"动起来了"；在此之前 data-glass 保持 snapshot
@@ -374,7 +381,6 @@ export default function NotificationWindow() {
                             data={prevNotification}
                             onClose={() => { }} // No-op for background item
                             initialVisible={true}
-                            backdropImage={backdrop}
                             backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
                             duration={prevNotification.notificationDuration}
@@ -403,7 +409,6 @@ export default function NotificationWindow() {
                             data={notification}
                             onClose={handleClose}
                             initialVisible={true}
-                            backdropImage={backdrop}
                             backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
                             duration={notification.notificationDuration}

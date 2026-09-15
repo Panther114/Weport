@@ -6,25 +6,31 @@ import { ConfigService } from "../services/config";
 // 原生液态玻璃（Windows 专用）：DXGI 零拷贝采集 + D3D11 玻璃管线 + DComp 直接上屏，
 // 感知滞后中位 ~6ms（Chromium 流方案 ~77ms），渲染完全不经过 Electron 进程。
 //
-// **默认开启**（win32 + `isSupported()` 通过）。为什么改默认值：
-// Chromium 那条路在本机**全灭** —— `getUserMedia(chromeMediaSource: 'desktop')`
-// 报 NotReadableError、`getDisplayMedia` 报 NotSupportedError，只剩主进程定帧推送；
-// 而 `desktopCapturer.getSources` 的耗时由**枚举**决定而非像素（实测 0.1/0.25/0.5/1.0
-// 四档缩放都是 ~300ms），所以那条路的物理上限就是 ~3fps。3fps 的"实时玻璃"是假的。
-// 原生面板没有这个上限：它由 DWM 合成，跟着显示器刷新率走。
+// **默认关闭，`WEPORT_NATIVE_GLASS=1` 才启用。**
 //
-// 之所以曾经默认关闭：早期版本在部分 GPU/驱动组合下把折射区画成黑块。当前的
-// `isSupported()` 已经把这些组合挡掉，本机实测也正常（卡片亮度 236.7 / std 18.8，
-// 读的就是桌面本身）。保留 `WEPORT_NATIVE_GLASS=0` 作为现场排障开关 —— 关掉即回到
-// Chromium 回退管线，不需要重新打包。
+// 为什么又关回去了（这次有现场证据）：v1.0.0-preview 的安装版把默认值改成了开，
+// 随后用户报「弹窗通知的背景全黑」。这正是本文件很久以前就记下的那个失败模式 ——
+// 「早期版本在部分 GPU/驱动组合下把折射区画成黑块」：面板是一个独立原生窗口，当它
+// 拿不到/画不出桌面纹理时，屏幕上出现的就是**一块黑色矩形**，而它在渲染层的
+// `data-glass` 仍然写着 `native`（所以探针会以为一切正常）。
+//
+// 对比度与透明度的账也要算清：`isSupported()` 只能判断"这套组合是否被支持"，判断不了
+// "此刻是否真的画出了桌面"。既然如此，就不该让默认值赌在这上面 —— 玻璃的意义就是
+// **看得见桌面**，画不出桌面时它是负资产。
+//
+// 回退（Chromium 定帧）在本机虽然只有 ~1.5Hz，但它是**把桌面快照合成进卡片内部**：
+// 最差情况是没有快照、只剩一层近乎全透明的纱层 —— 仍然是"透明玻璃"，永远不会变成
+// 一块黑板。这才是可接受的默认行为。
+//
+// 需要 60fps 折射的机器可以显式打开：`WEPORT_NATIVE_GLASS=1`。
 // 仅 win32 加载：模块本身是 Windows 原生实现（DXGI/D3D11），macOS/Linux 一律走回退。
 type NativeGlassModule = typeof import("@hicccc77/electron-liquid-glass");
 let nativeGlass: NativeGlassModule | null = null;
 try {
   const mod: NativeGlassModule = require("@hicccc77/electron-liquid-glass");
-  const explicitlyDisabled = process.env.WEPORT_NATIVE_GLASS === "0";
+  const explicitlyEnabled = process.env.WEPORT_NATIVE_GLASS === "1";
   nativeGlass =
-    process.platform === "win32" && !explicitlyDisabled && mod.isSupported() ? mod : null;
+    process.platform === "win32" && explicitlyEnabled && mod.isSupported() ? mod : null;
 } catch {
   nativeGlass = null;
 }
@@ -591,6 +597,8 @@ async function showAndSend(win: BrowserWindow, data: any) {
 
   const winX = Math.floor(x);
   const winY = Math.floor(y);
+  // 窗口的**当前实际**尺寸（DIP）：主题采样要靠它把取样点挪出窗口，见下面的 winW/winH
+  const [currentWinW, currentWinH] = win.getSize();
 
   // 弹窗弹出路径上**不做任何采集**：一次桌面抓取在本机实测 ~105ms，放在这里
   // 就是每条通知都晚出现一小截。首帧交给下面的折射循环，弹窗先出现。
@@ -608,6 +616,15 @@ async function showAndSend(win: BrowserWindow, data: any) {
       winY,
       width: display.size.width,
       height: display.size.height,
+      /**
+       * 窗口自身的尺寸（DIP）。
+       *
+       * 渲染层解主题时要按它把取样点挪到窗口**外面**：抓帧抓的是整屏，窗口自己就在
+       * 屏幕上，直接采样卡片那一片等于拿弹窗自己的像素去决定弹窗的主题 —— 自指闭环，
+       * 第一次采到亮色就永远选深色文字（实测换背景、甚至关掉重弹都不会变）。
+       */
+      winW: currentWinW,
+      winH: currentWinH,
     },
   };
   lastNotificationData = payload;

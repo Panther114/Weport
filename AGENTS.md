@@ -419,6 +419,48 @@ when hidden). Renderer: `src/pages/NotificationWindow.tsx` +
 the native glass panel is **Windows-only** — on macOS only the Chromium
 fallback path runs).
 
+**The card must be (almost) fully transparent.** The user's words were "ensure the
+glass is fully (or almost) transparent", after reporting that the notification
+background was "all black". Everything below follows from that one requirement.
+
+- **The native D3D11 panel is opt-in: `WEPORT_NATIVE_GLASS=1`.** Default off. It is a
+  separate native window *underneath* the popup, and on some GPU/driver combos it paints
+  the refraction area as a **black block** (this file warned about exactly that before the
+  default was briefly flipped to on — the flip shipped, and the user got a black
+  notification background). `isSupported()` cannot tell "this combo works" from "the panel
+  has a desktop texture right now", so the default must not bet on it. The Chromium path
+  composites the desktop *inside* the card and degrades to "no snapshot at all", never to a
+  black plate.
+- **The card does not draw an opaque backdrop snapshot.** It used to pass the captured
+  desktop image into `LiquidGlass`, which made the composite **76 % opaque** with an opaque
+  card fill — over a dark app that is a dark rectangle. The window is `transparent: true`,
+  so the real desktop already shows through; the fill stays at `--noti-tint` ≤ 0.05 and the
+  boundary is a **1px inset ring** (`CARD_ON_DARK_BACKDROP` / `CARD_ON_LIGHT_BACKDROP`).
+  Verified composite after the change: avgAlpha 199 → **49/255**, card centre alpha
+  **15/255**, opaque-dark pixels **0 %** (`.ui-probe/verify-popup-transparency.mjs`).
+- **Legibility is carried by the text itself**, since a transparent card has no fill to
+  help: `--noti-halo-both` (light core + dark edge) is emitted unconditionally, with the
+  solved polarity only deciding which layer is stronger. A *wrong or stale* polarity then
+  costs a little polish, not readability.
+- **Never sample the backdrop under the card.** The capture is the whole screen and the
+  popup is on it, so sampling the card's own rect reads **the popup's own pixels** — a
+  self-referential loop that locks the theme to whatever it saw first (measured: swapping the
+  backdrop, even closing and re-showing the popup, never changed it). Samples are taken
+  **outside the window rect** (`offsetSampleOutsideWindow`, needs `winW`/`winH` in the
+  backdrop payload).
+
+**Do not reintroduce:**
+
+- Any GDI/native Win32 popup renderer (the v0.6.x `toast_win` failure mode).
+- An opaque or near-opaque fill anywhere in the popup: `html`/`body` stay transparent
+  (asserted), and no element may have `alpha ≥ 0.12` with `luma < 45` (asserted).
+- `setContentProtection` removal — it exists to stop the glass filming itself.
+  **QA harness note:** content protection blanks `webContents.capturePage` on
+  Windows; `appMain.ts::runScreenshotMode` temporarily disables it before
+  capturing (test-only path). Note it does **not** reliably exclude the popup from
+  `desktopCapturer` here — that is why the sampler offsets outside the window instead of
+  trusting protection.
+
 **v0.9.3+: slim entry.** The popup loads `dist/popup.html` →
 `src/popup-main.tsx` (a dedicated vite input), NOT `index.html#/notification-window`
 — it renders only `NotificationWindow` and its deps (no App/ECharts parse in the

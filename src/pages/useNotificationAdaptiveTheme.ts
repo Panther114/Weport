@@ -61,6 +61,28 @@ const DARK_VEIL_ALPHA: readonly [number, number] = [0.07, 0.2]
  * 真正的可读性由「文字色 + 文字后方 scrim + 光晕」负责。
  */
 const VEIL_CONTRAST_BUDGET = 2.0
+/**
+ * 卡片与背景至少要差多少亮度（0-255）才算"看得见这张卡片"。
+ *
+ * 只有对比度预算是不够的：背景越暗，白字的对比度越宽裕，纱层就越薄，薄到 7% 时
+ * 卡片与近黑背景糊成一片。
+ *
+ * 但**不能靠加浓度来解决** —— 用户要的是"玻璃几乎全透明"，一块实色面板同样不是
+ * 玻璃。所以这个下限刻意压得很小（12 ≈ 屏幕亮度的 4.7%，只够让面板"若隐若现"），
+ * 卡片真正被看见靠的是**边缘**：一圈 1px 的内描边 + 阴影（见 SHADOW_ON_*），
+ * 那是"玻璃的边界"，而不是"玻璃的填充"。
+ */
+const MIN_CARD_DELTA_LUMA = 12
+/**
+ * 为了让卡片显形，浓度允许越过"薄纱"上界的倍数。
+ *
+ * 中灰背景（亮度 ~128）是个死角：深色纱层薄了压不出差、白了又提不出差，而"薄纱"
+ * 区间（白 0.16 / 深 0.2）在那一档最多只能给出约 21 的亮度差 —— 差得不多但确实
+ * 不够。与其把整个区间调厚（那会把最常见的情况一起变厚，回到"塑料卡片"），不如
+ * 只在**这一条要求**上放宽 30%：常规情况仍落在原区间（求解会给出很小的 alpha），
+ * 只有死角才吃到 0.26。
+ */
+const VEIL_VISIBILITY_STRETCH = 1.3
 
 const PRIMARY_TEXT: { dark: TextAnchor; light: TextAnchor } = {
     dark: { relaxed: [44, 44, 44], strong: [10, 10, 10] },
@@ -79,8 +101,16 @@ const ANCHORS: Record<'title' | 'body' | 'tertiary', { dark: TextAnchor; light: 
     }
 }
 
-const SHADOW_ON_LIGHT = '0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22)'
-const SHADOW_ON_DARK = '0 0 0 1px rgba(255, 255, 255, 0.06), 0 4px 12px rgba(0, 0, 0, 0.4)'
+/**
+ * 卡片边界（1px 内描边 + 阴影）。
+ *
+ * 这是"玻璃"能被看见的主要来源：填充几乎是全透明的，如果连边界都没有，一块 5%
+ * 的纱层压在深色界面上就跟没有卡片一样（用户报的"弹窗背景全黑"就是这个观感）。
+ * 描边颜色按**文字极性**取，与填充方向一致 —— 白字配白边、黑字配黑边，方向反了
+ * 会在玻璃里画出一圈脏线。
+ */
+const CARD_ON_DARK_BACKDROP = 'inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 6px 18px rgba(0, 0, 0, 0.45)'
+const CARD_ON_LIGHT_BACKDROP = 'inset 0 0 0 1px rgba(0, 0, 0, 0.12), 0 6px 18px rgba(0, 0, 0, 0.22)'
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
 const lerpRgb = (a: RGB, b: RGB, t: number): RGB => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
@@ -137,6 +167,17 @@ function solveVeilAlpha(
     target: number
 ): number {
     if (contrastRatio(anchorColor, bg) >= target) return range[0]
+    /**
+     * 方向不对就别硬顶到上界。
+     *
+     * 纱层是**朝文字反方向**推的：白纱配深色文字、深纱配浅色文字。当调用方拿反了
+     * （例如"白纱 + 深色文字"压在纯黑背景上），加浓度只会让对比度越来越差 —— 此时
+     * 二分永远不会命中，老实现会落到 `range[1]`，等于"把填充顶到最厚来满足一条根本
+     * 满足不了的预算"。这正是填充被顶到 0.16/0.2 的原因之一。
+     */
+    const atFloor = contrastRatio(anchorColor, compositeVeil(veil, range[0], bg))
+    const atCeil = contrastRatio(anchorColor, compositeVeil(veil, range[1], bg))
+    if (atCeil < target && atCeil <= atFloor) return range[0]
     let lo = 0
     let hi = 1
     for (let i = 0; i < 8; i++) {
@@ -145,6 +186,37 @@ function solveVeilAlpha(
         else lo = mid
     }
     return Math.min(range[1], Math.max(range[0], lo))
+}
+
+/**
+ * 求解让**卡片看得出来**的纱层 alpha。
+ *
+ * 纱层原本只按"文字对比度预算"求解，结果是在深色背景上永远落在区间下界
+ * （实测 `rgba(22,20,18,0.07)`）—— 一张 7% 的近黑卡片压在近黑的应用界面上，观感
+ * 就是**一块纯黑**（用户报的"通知背景全黑"）。对比度达标并不等于卡片可见：压在
+ * 深色底上的深色卡片既压不下去、也提不起来，只剩下"没有卡片"。
+ *
+ * 这里按"合成后的卡片亮度与背景至少差 targetDelta"反解 alpha，在给定区间内取值。
+ * 返回该极性在这条要求下能做到的最优解（可能仍然不够，由调用方在两极之间选）。
+ */
+function solveVeilAlphaForDelta(
+    veil: RGB,
+    range: readonly [number, number],
+    bg: RGB,
+    targetDelta: number
+): number {
+    const bgLuma = gammaLuma(bg)
+    const deltaAt = (alpha: number) => Math.abs(gammaLuma(compositeVeil(veil, alpha, bg)) - bgLuma)
+    if (deltaAt(range[0]) >= targetDelta) return range[0]
+    if (deltaAt(range[1]) <= targetDelta) return range[1]
+    let lo = range[0]
+    let hi = range[1]
+    for (let i = 0; i < 10; i++) {
+        const mid = (lo + hi) / 2
+        if (deltaAt(mid) >= targetDelta) hi = mid
+        else lo = mid
+    }
+    return hi
 }
 
 export interface BandTone {
@@ -191,7 +263,7 @@ export function resolveNotificationTheme(raw: {
     if (veilPolarity === 'dark' && bestWithDark < TARGET_CONTRAST && bestWithWhite > bestWithDark + 0.5) {
         veilPolarity = 'white'
     }
-    const veil =
+    let veil =
         veilPolarity === 'white'
             ? {
                   color: WHITE_VEIL,
@@ -201,6 +273,47 @@ export function resolveNotificationTheme(raw: {
                   color: DARK_VEIL,
                   alpha: solveVeilAlpha(DARK_VEIL, DARK_VEIL_ALPHA, cardBg, ANCHORS.body.light.relaxed, VEIL_CONTRAST_BUDGET)
               }
+
+    /**
+     * 可见性下限：卡片必须与背景**看得出差别**。
+     *
+     * 对比度预算只管"文字读不读得清"，不管"卡片在不在"。深色背景上选深色纱层时，
+     * 两者会分道扬镳：文字已经够白了（对比度早就超过预算），于是纱层停在下界
+     * 0.07，卡片与背景糊成一块 —— 用户看到的"通知背景全黑"就是这个。
+     *
+     * 规则：当前极性能靠加浓度达到 `MIN_CARD_DELTA_LUMA` 就加浓度；做不到（近黑背景
+     * 上继续加深只会更黑）就换相反极性 —— 白色纱层在近黑背景上是唯一能"提亮一点点、
+     * 让面板显形"的方向。取更能显形的那一个，浓度上限仍然很克制（白 0.16 / 深 0.2，
+     * 远不到当年那种"塑料卡片"的 0.42-0.58）。
+     */
+    const deltaOf = (candidate: { color: RGB; alpha: number }) =>
+        Math.abs(gammaLuma(compositeVeil(candidate.color, candidate.alpha, cardBg)) - gammaLuma(cardBg))
+    const resolveVisible = (polarity: 'white' | 'dark', opts?: { contrastBudget?: boolean }) => {
+        const color = polarity === 'white' ? WHITE_VEIL : DARK_VEIL
+        const range = polarity === 'white' ? WHITE_VEIL_ALPHA : DARK_VEIL_ALPHA
+        const anchor = polarity === 'white' ? ANCHORS.body.dark.relaxed : ANCHORS.body.light.relaxed
+        const stretched: readonly [number, number] = [range[0], range[1] * VEIL_VISIBILITY_STRETCH]
+        const forVisible = solveVeilAlphaForDelta(color, stretched, cardBg, MIN_CARD_DELTA_LUMA)
+        /**
+         * 翻转极性时**只看可见性**，不再叠加对比度预算。
+         *
+         * 因为翻转本身就是为了"让卡片显形"：如果同时让对比度预算参与取大值，它会按
+         * 另一套文字锚点把浓度一路顶上去（实测中灰背景上被顶到 0.145，卡片直接变成
+         * 浅色板 + 深色字 —— 与"玻璃近乎全透明"正好相反）。文字色会随后按**合成后的
+         * 卡片**重新求解，所以不叠加预算也不会牺牲可读性。
+         */
+        const alpha = opts?.contrastBudget === false
+            ? forVisible
+            : Math.max(solveVeilAlpha(color, range, cardBg, anchor, VEIL_CONTRAST_BUDGET), forVisible)
+        return { color, alpha }
+    }
+    if (deltaOf(veil) < MIN_CARD_DELTA_LUMA) {
+        // 先在同一极性内加浓度；加不动（背景与纱层同向，越加越糊）才换极性
+        const same = resolveVisible(veilPolarity)
+        const flipped = resolveVisible(veilPolarity === 'white' ? 'dark' : 'white', { contrastBudget: false })
+        const best = deltaOf(same) >= deltaOf(flipped) ? same : flipped
+        if (deltaOf(best) > deltaOf(veil)) veil = best
+    }
 
     /* ---- 单块区域的文字色 + scrim ---- */
     const resolveBand = (key: 'title' | 'body', sample: BandSample): { tone: BandTone; scrim: { alpha: number; css: string } } => {
@@ -246,10 +359,20 @@ export function resolveNotificationTheme(raw: {
     const title = resolveBand('title', titleSample)
     const body = resolveBand('body', bodySample)
 
+    /**
+     * 光晕**恒定双极性**：亮核 + 暗边，极性只决定哪一层更强。
+     *
+     * 因为玻璃是完全透明的（卡片填充 ≤0.1），文字背后没有实色可以垫 —— 可读性只能由
+     * 文字自己承担。单极性光晕有个致命前提：极性判断必须对。而采样是有可能错的/过期的
+     * （实测：弹窗复用时沿用了上一条通知的采样，深色背景下仍是深色字），那时单极性光晕
+     * 一点忙都帮不上，屏幕上就是"黑底黑字"。
+     *
+     * 两层同时加以后，极性判断错了也只是"更难看一点"，不会变成读不出来。
+     */
     const haloFor = (tone: BandTone) =>
         tone.polarity === 'dark'
-            ? `0 0 2px rgba(255, 255, 255, ${(0.35 + 0.55 * tone.deficit).toFixed(2)})`
-            : `0 1px 3px rgba(0, 0, 0, ${(0.4 + 0.4 * tone.deficit).toFixed(2)})`
+            ? `0 0 2px rgba(255, 255, 255, ${(0.35 + 0.55 * tone.deficit).toFixed(2)}), 0 1px 3px rgba(0, 0, 0, 0.55)`
+            : `0 1px 3px rgba(0, 0, 0, ${(0.4 + 0.4 * tone.deficit).toFixed(2)}), 0 0 2px rgba(255, 255, 255, 0.45)`
 
     const tertiaryAnchor = ANCHORS.tertiary[title.tone.polarity]
 
@@ -259,7 +382,7 @@ export function resolveNotificationTheme(raw: {
 
     const vars: Record<string, string> = {
         '--noti-tint': cssRgba(veil.color, veil.alpha),
-        '--noti-shadow': veil.color === WHITE_VEIL ? SHADOW_ON_LIGHT : SHADOW_ON_DARK,
+        '--noti-shadow': veil.color === WHITE_VEIL ? CARD_ON_DARK_BACKDROP : CARD_ON_LIGHT_BACKDROP,
         '--noti-title-color': cssRgb(title.tone.color),
         '--noti-title-halo': haloFor(title.tone),
         '--noti-title-tertiary': cssRgb(lerpRgb(tertiaryAnchor.relaxed, tertiaryAnchor.strong, title.tone.t)),
@@ -477,13 +600,51 @@ export function useNotificationNativeAdaptiveTheme(enabled: boolean, layout: () 
 }
 
 /**
+ * 把"卡片所在的矩形"挪到弹窗**外面**去采样。
+ *
+ * 为什么必须挪：桌面抓帧抓的是**整屏**，而弹窗自己就在屏幕上 —— 抓到的帧里
+ * 卡片那一片是**弹窗自己**。拿它去解主题就成了自指：卡片亮 → 采样到亮 → 选深色文字
+ * → 卡片继续保持亮……第一次采到什么颜色就锁死在什么颜色上（实测把背景从亮换成暗、
+ * 甚至关掉弹窗重新弹，主题依然停在最初那一次；导出的抓帧图里能直接看到卡片那一块被
+ * 自己画了出来）。
+ *
+ * 弹窗是**完全透明**的，所以它周围那片桌面与它底下那片基本是同一个背景，用它来决定
+ * 文字极性既准确又不会自指。窗口左右都放不下时退回窗口下方，再不行就用原位（宁可
+ * 偶尔不准，也不能越界导致读不出任何像素）。
+ */
+function offsetSampleOutsideWindow(
+    rect: CardLayoutRect,
+    backdrop: { width: number; height: number; screenX: number; screenY: number; winW?: number; winH?: number }
+): CardLayoutRect {
+    const winW = Number(backdrop.winW) || 0
+    const winH = Number(backdrop.winH) || 0
+    if (!winW || !winH) return rect
+    const gap = 12
+    const screenRight = backdrop.screenX + winW
+    // 右侧放得下就放右边：弹窗默认贴在右上角，右边通常是屏外，所以先试左边
+    if (backdrop.screenX - gap - rect.width >= 0) {
+        return { ...rect, left: -gap - rect.width }
+    }
+    if (screenRight + gap + rect.width <= backdrop.width) {
+        return { ...rect, left: winW + gap }
+    }
+    if (backdrop.screenY + winH + gap + rect.height <= backdrop.height) {
+        return { ...rect, top: winH + gap }
+    }
+    if (backdrop.screenY - gap - rect.height >= 0) {
+        return { ...rect, top: -gap - rect.height }
+    }
+    return rect
+}
+
+/**
  * 定帧回退路径：加载完成后采样一次（等两拍让布局落定），然后彻底停下。
  *
  * 回退路径的背板本身只有 ~1.5Hz（`desktopCapturer.getSources` 的耗时由枚举决定，
  * 与缩放无关），跟着它做"自适应"只会让文字色一顿一顿地变。取一次就够。
  */
 export function useNotificationSnapshotTheme(
-    backdrop: { width: number; height: number; screenX: number; screenY: number; dataUrl?: string | null } | undefined,
+    backdrop: { width: number; height: number; screenX: number; screenY: number; winW?: number; winH?: number; dataUrl?: string | null } | undefined,
     layout: () => CardLayoutRect[]
 ) {
     const resolverRef = useRef<ReturnType<typeof createOneShotThemeResolver> | null>(null)
@@ -502,15 +663,17 @@ export function useNotificationSnapshotTheme(
             if (disposed || !ctx) return
             const sourceW = img.naturalWidth || backdrop.width
             const sourceH = img.naturalHeight || backdrop.height
-            const read = (r: CardLayoutRect) =>
-                readBandFromImage(ctx, img, sourceW, sourceH, backdrop, r.left, r.top, r.width, r.height)
+            const read = (r: CardLayoutRect) => {
+                const sample = offsetSampleOutsideWindow(r, backdrop)
+                return readBandFromImage(ctx, img, sourceW, sourceH, backdrop, sample.left, sample.top, sample.width, sample.height)
+            }
             const rects = layout()
             const raw = {
                 card: rects[0] ? read(rects[0]) : null,
                 title: rects[1] ? read(rects[1]) : null,
                 body: rects[2] ? read(rects[2]) : null
             }
-            resolver.settle(raw, rects, window.devicePixelRatio || 1)
+            resolver.settle(raw, rects.map((r) => ({ ...r })), window.devicePixelRatio || 1)
         }
         img.src = backdrop.dataUrl
         return () => {

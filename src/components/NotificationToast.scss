@@ -29,6 +29,11 @@
         }
     }
 
+    // 双极性光晕：亮核 + 暗边。玻璃是**完全透明**的，文字背后没有一张实色卡可以"垫"，
+    // 于是可读性只能由文字自己承担 —— 只加暗影会在暗背景上糊掉、只加亮晕会在亮背景上糊掉，
+    // 两层同时加就与背景极性无关。自适应引擎解出确定结论时仍会用它的单极性光晕覆盖这里。
+    --noti-halo-both: 0 0 2px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.6);
+
     // 玻璃材质与文字颜色均由 useNotificationAdaptiveTheme 按桌面背景的实际对比度
     // 无级计算后写入 <html> 的 --noti-* 变量（纱层方向/浓度、分区连续文字色、光晕强度）；
     // 此处提供采样失败/过亮背景下的安全默认值：白字 + 深色文字纱层，任何背景下都可读
@@ -88,7 +93,7 @@
                 font-weight: 600;
                 font-size: 14px;
                 color: var(--noti-title-color, #ffffff);
-                text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
+                text-shadow: var(--noti-title-halo, var(--noti-halo-both));
                 transition: color 0.08s linear, text-shadow 0.08s linear;
                 // 单行 + 硬截断（不显示省略号）：超出宽度就在该处直接切断，
                 // 绝不与右上角时间重叠
@@ -104,7 +109,7 @@
             .notification-time {
                 font-size: 12px;
                 color: var(--noti-title-tertiary, rgba(255, 255, 255, 0.9));
-                text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
+                text-shadow: var(--noti-title-halo, var(--noti-halo-both));
                 transition: color 0.08s linear;
                 position: absolute;
                 top: 2px; // 与标题文字对齐（标题行内文字约占上 2px 起）
@@ -116,7 +121,7 @@
             font-size: 13px;
             // 与标题同色（近黑），层级靠字重区分：标题 600、正文默认 400
             color: var(--noti-body-color, #ffffff);
-            text-shadow: var(--noti-body-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
+            text-shadow: var(--noti-body-halo, var(--noti-halo-both));
             transition: color 0.08s linear, text-shadow 0.08s linear;
             line-height: 1.4;
             display: -webkit-box;
