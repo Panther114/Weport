@@ -30,27 +30,7 @@ Platform split lives in `process.platform` branches (same tree, no fork):
 
 ## Linux Packaging (v0.9.10)
 
-- `npm run build:linux` → AppImage + tar.gz x64 (`build.linux` in
-  package.json; artifactName `Weport-${version}-${arch}.${ext}` — do NOT let
-  it inherit the top-level `-Setup.` name). CI: `release.yml` `build-linux`
-  job on ubuntu-latest; must `chmod +x resources/key/linux/x64/xkey_helper_linux`
-  before packaging (Git-on-Windows loses the exec bit).
-- Native artifacts ship from `resources/{wcdb,key,wedecrypt}/linux/x64/`
-  via per-platform `extraResources`. `welive` is NOT shipped on Linux
-  (no runtime consumer). koffi's platform binary comes from the optional dep
-  `@koromix/koffi-linux-x64`, installed automatically when npm runs ON Linux;
-  `asarUnpack` includes `node_modules/@koromix/**/*`.
-- Read-only install dirs (AppImage squashfs, `/opt`, `/usr/bin`): hardlink
-  creation next to the exe fails, so `wcdbHostClient.resolveHostExe()` falls
-  back to COPYING the Electron binary to `{userData}/wcdb-host/WeFlow`
-  (mtime-aligned for reuse detection) and adds both the copy dir and the real
-  Electron dist dir to `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
-- The `-1006` name check for `libwcdb_api.so` under a host named `WeFlow` is
-  unverified on real Linux hardware (upstream ships its own exe as lowercase
-  `weflow`, suggesting the check may be looser there); treat first-boot DB
-  connect on Linux as the acceptance test.
-- safeStorage on headless Linux often has no backend: config falls back to
-  plaintext secrets (existing graceful degradation, unchanged).
+已移至 [`docs/agents/platform.md`](docs/agents/platform.md)。
 
 ## v0.9.11 Notification / Platform Constraints
 
@@ -119,102 +99,15 @@ engine in a **subprocess**:
 
 ## Weport TUI (`packages/weport-tui`) — v1.0
 
-`weport` in a terminal opens a full TUI; `weport <command>` runs one command.
-**The TUI is a client of the main process, not a port of the renderer**: it spawns
-`Weport.exe --cli` (dev: `release/win-unpacked/Weport.exe`) and speaks JSON-RPC over
-the **Node IPC channel** — never over stdin/stdout, because Windows reads EOF on the
-main process's stdin immediately (same trap as the WCDB host transport). The engine
-side is `appMain.ts::runCliHost` + `services/weportCommands.ts` (registry) +
-`services/cliCommands.ts` (the command set, delegating to the same services the IPC
-handlers use). Add a command there and it reaches the terminal, the command palette
-and (later) MCP at once; do not add a parallel code path.
-
-Rules:
-
-- The handshake is a one-shot token (`--weport-token` + `WEPORT_CLI_TOKEN`); a client
-  that fails it gets an error and the engine exits. Do not weaken this to make a
-  debugging client work.
-- The engine exits on `process.on('disconnect')` and stops MCP/HTTP/WCDB on shutdown.
-  Keep that: an orphaned engine holds the WeChat database and keeps pushing popups.
-- `--dump <dir>` renders one frame per section to text files. It is the only way to
-  verify layout outside a real terminal, so it is a product feature, not debug
-  residue: `npm run qa:tui` asserts frame width, non-blankness and key content, and
-  `scripts/verify-tui-engine.mjs` asserts the protocol against real data. `build`,
-  `build:dir`, `build:mac` and `build:linux` run `build:tui` first so the shipped app
-  and the TUI never disagree about the command surface.
+已移至 [`docs/agents/platform.md`](docs/agents/platform.md)。
 
 ## Connectors (`electron/services/connectors/`) — v1.0
 
-Third-party tools Weport writes to (Todoist first). A connector is a transport + capability
-list; `connectorsService` owns credentials and is the only thing that may hand a token to a
-connector.
-
-- Credentials live in **one** safeStorage-encrypted config value (`weportConnectorsBlob`), like
-  provider profiles. The renderer only ever receives a mask (`····9f2c`) — never add an IPC
-  path that returns the token.
-- `connect` verifies before it stores: a saved-but-unverified credential shows a green
-  "connected" badge on a broken integration, so a failed check must store nothing.
-- Todoist specifics that cost real debugging time: `POST /api/v1/tasks` answers **308** to a
-  newer API version and Node's `fetch` will not replay a body across it (the connector follows
-  the `Location` header itself — without that the live call reports a bare "fetch failed");
-  priority is **inverted** between the REST body (1 = normal … 4 = urgent) and Todoist's own
-  Quick Add syntax (`p1` = urgent); an omitted `project_id` means the Inbox, so "no target" is
-  a valid request. Chunked uploads to `weclone-server` cap at 1200 chars per chunk.
-- The agent reaches a connector only through `list_connector_targets` /
-  `create_connector_task`, which appear **only when a connector is connected** and are gated by
-  `connectorsAllowAgent`. The tool table is frozen per run, so connecting or disconnecting in
-  settings takes effect on the next turn — never mid-epoch.
+已移至 [`docs/agents/platform.md`](docs/agents/platform.md)。
 
 ## WeClone (`electron/services/weCloneService.ts`) — v1.0 (local-only)
 
-Cloning yourself and talking to the clone. **Data never leaves the device.** There is no
-server, no upload, and no cloud path — the boundary is hard. The only outbound call is the
-user's own configured model API.
-
-- `chatWithClone()` is the one entry point, reached from the card's 开始对话 button
-  (`weCloneService` → IPC `weclone:chat` → the chat drawer) and from `weclone.chat` in the
-  CLI/TUI. Do not add a second chat path.
-- Retrieval is **local BM25** over `chunks.jsonl` (`ai/localRetrieval.ts`) — no embedding
-  model, no vector service. The persona MDs plus the retrieved snippets become the system
-  prompt (measured: 24.7 k characters for the real clone).
-- Failure has to carry a next step: `chatWithClone` returns `hint` alongside `error`. A bare
-  "failed" leaves the user with no idea what to do.
-- Generation is transactional: write to `${dir}.building`, rename the old clone to
-  `${dir}.previous`, move the staged one in, delete the backup. A crash never leaves a
-  half-written clone in place.
-- Generation used to run a second, 5 %-sampled corpus pass (~800 model calls) whose output
-  was only consumed by the deleted upload path. There is no such pass; generation is minutes,
-  not hours.
-- `weclone-server/` is **not part of the product** any more. Do not reintroduce a client
-  path, a server-status surface, or a visibility/share concept.
-
-### WeClone Chat History & Language — v1.0.1
-
-- **Chats are persisted, one JSON file per clone** (`{userData}/weclone-chats/<cloneId>.json`,
-  whole-file atomic write; the id is sanitised for the filename). The drawer writes the
-  *entire* turn list after every answer — a turn list is tens of messages, and "write it all"
-  cannot leave half a message behind. `deleteClone()` deletes the file too: history without
-  its clone is orphan data. Renaming keeps the user's title; a chat with no title gets the
-  first user message (truncated to 24 chars), same habit as WeChat.
-- **Every history assertion goes to disk, not to the screen.** "The list looks right" cannot
-  distinguish an in-memory array from a file, and rename/delete are exactly the operations
-  that get implemented as React state only. `.ui-probe/verify-weclone-history.mjs` re-reads
-  the JSON after each step (new chat / revisit / rename / delete / reopen) — 14 assertions.
-- **The clone now mirrors the other side's language.** The system prompt was entirely Chinese,
-  so the model answered in Chinese no matter what the corpus looked like. Three parts to the
-  fix, and all three matter: a hard rule in `WECLONE_CHAT_SYSTEM_PROMPT` ("回复语言 = 对方这条
-  消息的语言"), a **default** derived from `language.md` (the person's *verbatim* lines —
-  `profile.md` etc. are model-written Chinese and always detect as 中文), and transcript
-  labels that follow the message (`Them:`/`Me:` in English instead of `对方：`, which by itself
-  pulls the model back to Chinese). `detectLanguage()` is a character-composition check
-  (`zh`/`en`/`mixed`) — no dictionary.
-- Verification split on purpose: `verify-weclone-e2e.mjs` (local OpenAI-compatible mock)
-  asserts **what is fed to the model** — prompt rule present, corpus language injected,
-  `Them:` label for an English turn, `meta.replyLanguage` — and
-  `.ui-probe/check-clone-language-live.mjs` asserts **what the model answers** against the
-  real corpus (measured: English in → `yo, mostly grinding on gonopoly …` out, cjkRatio 0.00;
-  Chinese in → cjkRatio 0.51, i.e. Chinese with English tech words, exactly the user's own
-  register).
+已移至 [`docs/agents/weclone.md`](docs/agents/weclone.md)。
 
 ## Video Background (`electron/services/backgroundVideoService.ts`) — v1.0
 
@@ -540,30 +433,7 @@ written down rather than rediscovered.
 
 ## WeClone Provider — v1.0.1 (local-only, no forced service)
 
-- **WeClone has no service of its own.** It resolves through
-  `ProviderProfileService.getForConsumer('weclone')`, which falls back to the default, so it
-  uses whatever the user configured (DeepSeek on this machine). The old
-  `ensureForcedProvider()` locked it to `opencode-go / muse-spark-1.2-contributor` and created
-  a profile the user never asked for; that gateway is geo-blocked here, so WeClone could only
-  ever answer "Internal server error" while a working service sat configured next to it.
-  Removed end to end: IPC channels, `src/components/weclone/WeCloneForcedKey.tsx`, the
-  `WECLONE_FORCED_*` constants in `config.ts`. `LEGACY_FORCED_PROVIDER_ID` /
-  `LEGACY_FORCED_MODEL` still exist in `weCloneService.ts` **for the one-time cleanup only**
-  (`purgeLegacyForcedProfile()` deletes that profile and the consumer assignment on startup).
-  `muse-spark` still appears in `electron/assets/models/models-dev-snapshot.json` — that is
-  the models.dev catalog (the provider really serves it), not a forced choice.
-- **A profile can exist with no API key, forever.** `migrateLegacyProfile()` writes a profile
-  even when `weportAiApiKey` is empty at that moment, and once a valid store exists `read()`
-  never migrates again — so a key added later never reached the profile. On this machine that
-  produced a keyless DeepSeek profile and "未配置 AI API Key" with a perfectly decryptable
-  35-character key sitting in the legacy field. `healKeylessProfile()` repairs exactly that
-  state (only when exactly one profile lacks a key, and provider/baseUrl agree).
-- A request sent without a key comes back as `Authentication Fails`, which reads like "your key
-  is wrong". Filter candidates by `apiKey` (or `apiKeyOptional`) **before** calling, and say
-  "this service has no API key" instead.
-- `chatWithClone` returns the answering `model` / `providerId` in `meta`; the drawer prints it.
-  Verification: `.ui-probe/verify-weclone-e2e.mjs` drives the real UI against a local
-  OpenAI-compatible mock (SSE), so the chain is proven independently of the user's key.
+已移至 [`docs/agents/weclone.md`](docs/agents/weclone.md)。
 
 ## Background Mask — v1.0.1 (polarity)
 
@@ -816,166 +686,19 @@ in `pushSessionMessages`/`buildPayload`. Keep that intact.
 
 ## v0.9 Modules — 朋友圈 (SNS) / 分析 (Analytics)
 
-The engine layer (native FFI in `wcdbCore.ts` + `wcdbHost.ts` commands +
-`wcdbService.ts` proxies) was already present for SNS/analytics/group/annual
-report before v0.9; the v0.9 work added the service + IPC + UI layers.
-
-**Main process (near-verbatim WeFlow ports, adapted to WePort):**
-- `electron/services/snsService.ts` (timeline parse, media fetch/decrypt via
-  ISAAC64 keystream, exports, anti-delete triggers, cache migration),
-  `analyticsService.ts`, `groupAnalyticsService.ts`,
-  `annualReportService.ts` + `electron/annualReportWorker.ts`,
-  `electron/services/isaac64.ts` + `wasmService.ts` (SNS video/image keystream
-  XOR; pure-TS fallback if wasm missing).
-- **Keystream wasm packaging (do not regress):** `electron/assets/wasm/` MUST
-  ship on Windows too — `package.json` `files` includes it (asar) AND
-  `win.extraResources` copies it to `resources/assets/wasm` (macOS has the
-  extraResources entry). `wasmService` resolves resources first, asar second.
-  The pure-TS `isaac64.ts` output is byte-different from the wasm (verified)
-  — never "fall back" to it for decryption (garbage → 加载失败); `snsService`
-  fails fast with a clear message instead.
-- **Avatar head-image locator (do not regress):** `avatarCacheService` keeps a
-  persistent `headImages.json` (username → local avatar file, negative-cache
-  24h TTL). Group member panels / rankings / SNS authors / session lists all
-  resolve avatars through it FIRST (zero host calls on hit); only misses query
-  `getHeadImageBuffers` (batch ≤ 60) and record back via `recordHeadAvatar`.
-  Without it, every group open re-reads head_image.db for every member.
-- IPC registration lives in `appMain.ts::registerIpcHandlers` (channels
-  `sns:*`, `analytics:*`, `groupAnalytics:*`, `annualReport:*`), plus helpers
-  `collectLegacySnsCacheMigrationPlan` / `runLegacySnsCacheMigration` and a
-  lean in-memory years-load task book (no disk snapshot persistence, unlike
-  WeFlow). Preload namespaces: `src` side typed in `src/vite-env.d.ts`
-  (`ElectronApi`) — **keep preload.ts and vite-env.d.ts in sync**.
-- WeFlow never typechecks its electron folder; its code carries latent strict
-  errors. When copying WeFlow services, run `npm run typecheck` and fix
-  strict-mode issues (e.g. filter predicates, `configService.get` casts).
-
-**Renderer (original WePort design, not a copy):**
-- 朋友圈: `src/pages/SnsPage.tsx` + `src/components/sns/*` — B/W theme,
-  sidebar author/keyword/date filters (hero block merges page header + stats +
-  actions), media grid with in-app lightbox (`SnsPreviewLightbox`), author
-  timeline dialog, export dialog (`SnsExportDialog`), anti-delete toggle,
-  legacy-cache migration banner. Media loads as 720px grid thumbnails
-  (main-process `nativeImage` resize in `snsService.makeGridThumbnail`); the
-  lightbox/download read the full cached file via `weport-media://`.
-- 分析: `src/pages/analytics/AnalyticsModule.tsx` (hub with two always
-  side-by-side cards 全局分析 / 群聊分析 — light blue vs deep blue),
-  `GlobalAnalytics.tsx`, `GroupAnalytics.tsx`, `AnnualReportView.tsx`. Charts
-  via ECharts (`echarts-for-react`) with the shared theme in
-  `src/utils/echartsTheme.ts` (blue stack `blueRamp()` colors bars by value;
-  `blueVerticalGradient()` for areas). Annual report image export uses
-  `html2canvas` (added dep; do not remove without replacing it).
-- New styles live in `src/styles/v09.scss` (imported once from `App.tsx`).
-
-**Color themes:** `src/utils/colorMode.ts` — `colorful` (default; single
-light-blue accent family, numbers stay white, icons/charts/outlines
-colored) / `mono` (gray fallback). Config key `colorMode`, applied via
-`document.documentElement.dataset.theme`, charts rebuild via `useColorMode`.
-ECharts palettes and ramps switch with the theme.
-
-**Media protocol:** `weport-media://local/<encodeURIComponent(绝对路径)>` serves
-decrypted local media + cached avatars to the renderer (`appMain.ts`,
-registered via `registerSchemesAsPrivileged` before ready + `protocol.handle`
-after ready). Renderer helper: `snsMediaProtocolUrl()` in
-`src/utils/snsParse.ts`. **Never put the drive letter in the host**
-(`weport-media://C:/…` breaks — Chromium normalizes `C:` to host `c` by
-treating the colon as a port separator). Do not switch to `webSecurity: false`.
-
-**Avatar pipeline (do not regress):** `electron/services/avatarCacheService.ts`
-persists all avatars to `{cacheBasePath}/avatars/{sha1(url)}.jpg` and returns
-`weport-media://` URLs. `chatService` prefers `head_image.db` buffers over CDN
-URLs (local, offline, never expires) and persists the protocol URL into the
-contact cache; cache hits validate file existence (`isResolvable`) and
-re-resolve when the file is gone. `snsService` / `groupAnalyticsService` /
-`messagePushService` / `analyticsService.getContactRankings` (via
-`chatService.enrichSessionsContactInfo`) localize avatar URLs through the same
-service. The head-image batch size is 60 (larger IPC responses truncate →
-silent CDN fallback). Renderer `AvatarLoadQueue` is 8-concurrent with a 2ms
-gap; local protocol URLs skip the queue entirely (`Avatar.tsx`).
-
-**QA harness:** `WEPORT_V09_DUMP=1` drives all v0.9 pages with demo data
-(see `installV09DemoHandlers` + `runV09DumpMode` in appMain.ts), asserts key
-DOM nodes per page, counts renderer console errors, resizes the window to
-probe responsive layouts (`.sns-main` must keep 2 columns down to the window
-min width), exits non-zero on failure. Demo data is deterministic and never
-persisted (config:set is swallowed) — keep it personal-info free.
-`WEPORT_SCREENSHOT_POPUP` (capture-ui.ps1) now also captures the 6 v0.9
-screens (sns / analytics-hub / analytics-global / annual-report /
-analytics-group / settings) — 12 captures total, all asserted non-blank.
+已移至 [`docs/agents/modules.md`](docs/agents/modules.md)。
 
 ## v0.9.5 Modules — MCP 服务 / 分析新图表
 
-**MCP server (`electron/services/mcpService.ts`, do not regress):**
-- Streamable HTTP on `127.0.0.1:{mcpPort}` (default 5032, HTTP API is 5031),
-  Bearer auth via `mcpToken` (auto-generated 32-hex, safeStorage-encrypted,
-  fallback `httpApiToken`). 13 read-only tools proxying existing read-only
-  services (`chatService` / `snsService` / `analyticsService` /
-  `groupAnalyticsService`); no write/send/delete capability.
-- **Per-session `McpServer` instance is mandatory** — `Protocol.connect()`
-  throws "Already connected" after the first transport, so a single shared
-  server cannot serve two sessions. `createSession()` builds a fresh
-  `McpServer` + `StreamableHTTPServerTransport` per session and registers it in
-  the sessions map from the transport's `onsessioninitialized` callback (the
-  session id is generated lazily inside the first `handleRequest` — inserting
-  into the map earlier stores key `undefined` and silently loses the session).
-- `transport.handleRequest(req, res, body)` expects `parsedBody` to be an
-  **already-JSON-parsed object** (body-parser semantics), not a raw string —
-  passing a string yields `-32700 Parse error` from the SDK.
-- `client.request(request, resultSchema)` (bridge side) requires a real
-  `resultSchema` — undefined crashes with `Cannot read properties of undefined
-  (reading '_zod')` inside the SDK's response validation. The bridge passes
-  `z.any()` to forward arbitrary methods transparently.
-- Config keys (in `ConfigSchema` + defaults + `ENCRYPTED_STRING_KEYS` for
-  token): `mcpEnabled` (default true), `mcpPort` 5032, `mcpHost` 127.0.0.1,
-  `mcpToken` (''). IPC `mcp:getStatus`; `mcpService.stop()` in
-  `shutdownAppServices`; auto-start next to the httpService block in
-  `startApp`.
-- **stdio bridge packaging (do not regress):** `scripts/mcp-stdio-bridge.mjs`
-  (dev) is bundled by `scripts/prepare-mcp-bundle.cjs` (esbuild, CJS,
-  `--target=node18`) to `resources/mcp/mcp-stdio-bridge.cjs` — the AI host runs
-  it under its **own system Node**, so the SDK/zod deps must be inside the
-  single-file bundle, no NODE_PATH/ESM reliance. The prep script runs in
-  `build` / `build:dir` / `build:mac` / `package` before electron-builder, and
-  `resources/mcp → mcp` must stay in BOTH win and mac `extraResources`. The
-  shebang is prepended manually after the build (`--banner:js` puts it on line
-  2 → SyntaxError).
-- Claude Desktop config: `{"mcpServers": {"weport": {"command": "<install>/resources/mcp/mcp-stdio-bridge.cjs", "args": ["--port", "5032", "--token", "<mcpToken>"]}}}`; token is in the settings store (safeStorage-encrypted on disk) or via the settings UI when exposed.
-
-**v0.9.5 analytics charts (do not regress):**
-- Global: 交流画像 radar (6 dims incl. 深夜活跃 23:00–05:59), 活跃日历 calendar
-  (rolling ≤12 months, visualMap), 高频词云 wordCloud (`echarts-wordcloud@2.1.0`
-  — verified compatible with ECharts 6.1.0, registers on `echarts/lib/echarts`).
-- Group: 画像 tab (member radar + 24×7 heatmap), member dialog word cloud
-  (Top 40). Data: `analyticsService.getDailyActivity(force)` /
-  `getWordFrequency(limit, force)` (150k scanned-text cap, 10-min cache) /
-  `groupAnalyticsService.getGroupActivityHeatmap(...)` (7×24, 5-min cache +
-  in-flight dedup); tokenizer/stopwords shared in
-  `electron/services/wordFrequency.ts`.
-- Demo/QA: `demoAnalyticsData`/`demoGroupData` gained `dailyActivity` /
-  `wordFrequency` / `activityHeatmap` / member `wordCloud`; dump probes
-  `globalV095` (charts ≥ 7), `profileV095` (radar+heatmap), `memberWordCloudV095`.
-  Installed with `--legacy-peer-deps` (`echarts-wordcloud` peers `echarts ^5`).
+已移至 [`docs/agents/modules.md`](docs/agents/modules.md)。
 
 ## Export Layout
 
-GUI export (`appMain.ts` `export:exportSessions`) writes to `{out}/{FMT}/`
-(FMT = TXT / JSON / HTML / XLSX / MARKDOWN / CHATLAB / CHATLAB-JSONL /
-ARKME-JSON / WECLONE / SQL) with `群聊_`/`私聊_` prefixes. Defaults: 目录结构 A
-(exportWriteLayout A + sessionLayout `shared`, text flat at root), conflict
-`overwrite`, `sessionNameWithTypePrefix: true`; layout C maps to
-`sessionLayout: per-session` (text-only exports honor it too —
-`ExportOrchestrator` respects an explicit sessionLayout). Media export
-auto-switches to per-session dirs. `export_log.txt` is only updated for TXT
-and JSON runs (legacy v0.6.x format: `TXT: <time> · success=N fail=N` lines);
-清空导出库 clears every format folder + the log.
+已移至 [`docs/agents/modules.md`](docs/agents/modules.md)。
 
 ## Contact Name Warmup
 
-`appMain.ts::warmupContactNames()` preloads the first 600 sessions' display
-names/avatars into the persisted contact cache at startup (and after
-dbPath/decryptKey/myWxid config changes). Do not remove it: popups, export
-progress, and the 会话过滤 picker all rely on the warmed cache to show real
-nicknames instead of raw wxid codes.
+已移至 [`docs/agents/modules.md`](docs/agents/modules.md)。
 
 ## Build & Test
 
@@ -1113,34 +836,8 @@ Consequences — requirements, not style preferences:
 
 ## Reference Repos (on-disk only, never shipped)
 
-All reference clones live under `reference-projects/` (git-ignored, see
-`reference-projects/README.md` for the index and per-repo notes):
-
-- `reference-projects/WeFlow/` — the upstream Electron app (source of the
-  notification stack; ported service layer)
-- `reference-projects/Reasonix/` — DeepSeek-Reasonix (Go coding agent engine;
-  source of the cache-aware context maintenance pattern in
-  `weportAiService.ts`)
-- `reference-projects/RevokeMsgPatcher/` — reference for the old v0.6.x
-  Weixin.dll patching (superseded by per-session WCDB anti-revoke triggers)
-- `reference-projects/wechattweak/` — reference for macOS WeChat binary
-  patching (sunnyyoung, AGPL-3.0); not merged — the WCDB trigger approach
-  covers macOS too (`libwcdb_api.dylib` exports the anti-revoke API)
-- `reference-projects/<others>/` — third-party WeChat tools cloned for study
-  (chat history exporters, moments/朋友圈 analyzers, bots/auto-repliers, …);
-  read-only, never shipped, never imported by the build
+已移至 [`docs/agents/platform.md`](docs/agents/platform.md)。
 
 ## v0.9.6 Reference-Study Policy
 
-Every requirement marked `***` in the v0.9.6 implementation brief MUST be
-implemented only after carefully studying the relevant read-only projects under
-`reference-projects/`. Each implementation handoff must record:
-
-- references studied;
-- patterns adopted;
-- patterns rejected; and
-- Weport-specific deviations and why they are necessary.
-
-Reference code and assets are evidence and design input only. They must never
-be copied or shipped blindly, and must not bypass Weport's WCDB host,
-packaging, security, or platform constraints.
+已移至 [`docs/agents/platform.md`](docs/agents/platform.md)。
