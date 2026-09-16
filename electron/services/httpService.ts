@@ -9,6 +9,12 @@
  * - GET /api/group-members?chatroom=      群成员
  * - GET /api/sns/timeline?limit=&offset=  朋友圈时间线
  * - GET /api/sns/stats                    朋友圈统计
+ * - GET /api/bot/tasks                    WeBot 任务列表
+ * - GET /api/bot/runs?task=&limit=        WeBot 运行历史
+ * - GET /api/bot/notes?task=&unread=1&limit=  WeBot 笔记
+ * - GET /api/bot/notes/get?id=            单条 WeBot 笔记
+ *
+ * WeBot 接口与其余接口一样是**只读**的：不支持创建任务或触发运行。
  *
  * 认证：config httpApiToken 非空时要求 `Authorization: Bearer <token>`。
  * 服务仅监听 127.0.0.1（config httpApiHost/httpApiPort 可配置）。
@@ -18,6 +24,7 @@ import { ConfigService } from './config'
 import { chatService } from './chatService'
 import { snsService } from './snsService'
 import { groupAnalyticsService } from './groupAnalyticsService'
+import { getWeBotService } from './weBotRegistry'
 
 class HttpService {
   private server: http.Server | null = null
@@ -57,8 +64,67 @@ class HttpService {
     try {
       switch (path) {
         case '/health':
-          send({ success: true, version: '0.9.11', running: this.running })
+          send({ success: true, version: '1.0.0', running: this.running })
           return
+
+        // ------------------------------------------------------------------
+        // WeBot（v1.0）：只读暴露 —— 与既有的 MCP 工具口径一致，
+        // 不提供创建任务或触发运行的能力。
+        // ------------------------------------------------------------------
+        case '/bot/tasks': {
+          const service = getWeBotService()
+          if (!service) {
+            send({ success: false, error: 'WeBot 服务未启动' }, 503)
+            return
+          }
+          send({ success: true, data: service.listTasks() })
+          return
+        }
+
+        case '/bot/runs': {
+          const service = getWeBotService()
+          if (!service) {
+            send({ success: false, error: 'WeBot 服务未启动' }, 503)
+            return
+          }
+          const taskId = String(url.searchParams.get('task') || '').trim()
+          const limit = this.parseNumber(url.searchParams.get('limit'), 100, 1, 500)
+          send({ success: true, data: service.listRuns(taskId || undefined, limit) })
+          return
+        }
+
+        case '/bot/notes': {
+          const service = getWeBotService()
+          if (!service) {
+            send({ success: false, error: 'WeBot 服务未启动' }, 503)
+            return
+          }
+          const taskId = String(url.searchParams.get('task') || '').trim()
+          const limit = this.parseNumber(url.searchParams.get('limit'), 200, 1, 500)
+          const unreadOnly = String(url.searchParams.get('unread') || '') === '1'
+          send({ success: true, data: service.listNotes({ taskId: taskId || undefined, unreadOnly, limit }) })
+          return
+        }
+
+        case '/bot/notes/get': {
+          const service = getWeBotService()
+          if (!service) {
+            send({ success: false, error: 'WeBot 服务未启动' }, 503)
+            return
+          }
+          const id = String(url.searchParams.get('id') || '').trim()
+          if (!id) {
+            send({ success: false, error: '缺少 id 参数' }, 400)
+            return
+          }
+          const note = service.getNote(id)
+          if (!note) {
+            send({ success: false, error: '笔记不存在' }, 404)
+            return
+          }
+          send({ success: true, data: note })
+          return
+        }
 
         case '/sessions': {
           const r = await chatService.getSessions()

@@ -1,0 +1,2908 @@
+// =============================================================================
+// v1.0 shell — 左侧导航栏 + 全局状态 + 设计令牌
+// =============================================================================
+//
+// 为什么单独一个文件而不是改 styles.css：
+//   styles.css(81KB) + v09.scss(78KB) 已经没有任何分层，任何改动都要在一堆
+//   互相覆盖的规则里猜优先级。新表面从这里开始，按「令牌 → 外壳 → 组件」
+//   自下而上写，不再往旧文件里叠。旧规则仍然生效（本文件在其后加载，
+//   同优先级下后者胜出），因此不需要一次性重写。
+//
+// 本文件只负责外壳与令牌，不碰任何页面内部布局。
+//
+// 0. 强调色的铺开
+// ---------------
+// 六个色板此前几乎只影响"选中项那一块"：主按钮是固定的白底黑字（v0.9 黑白
+// 主题的遗留），统计数字、进度条、段落序号全是素色。这里把强调色推到几个
+// 高频、低风险的表面（主按钮 / 数值 / 序号 / 焦点环 / 进度 / 复选框），
+// 浓度由 --accent-fill / --tint-* 控制（见 styles/theme.scss）。
+// =============================================================================
+
+.primary-btn {
+  // 两层：background-color 给对比度审计读（渐变它看不见），background-image 才是
+  // 实际观感。两者同色系，所以视觉上就是一块带微渐变的强调色。
+  background-color: var(--accent-fill-color);
+  background-image: var(--accent-fill);
+  color: var(--accent-fill-text);
+  border-color: var(--accent-fill-border);
+}
+
+// 选中态从"纯白底黑字"改成强调色底。
+//
+// 白底黑字是 v0.9 黑白主题的遗留：在一个几乎全黑的界面里它比主按钮还亮，于是
+// 导出的格式卡、目录结构卡、页签全都抢同一份注意力；而且白色和 6 个色板毫无
+// 关系 —— 换了强调色，这些卡片依然是白的（"配色只体现在选中高亮"）。
+.chip[data-active='true'],
+.tab[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent-raw) 16%, transparent);
+}
+
+.chip[data-active='true'] svg,
+.tab[data-active='true'] svg,
+.format-chip[data-active='true'] .fmt-head svg {
+  color: var(--accent);
+}
+
+.chip[data-active='true'] strong {
+  color: var(--accent);
+}
+
+// 分段控件（媒体路径 / 同名文件 / 命名方式 / 并发数）同样的白底黑字问题。
+.seg button[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+// `.chip-active` 是另一种"选中"写法（朋友圈筛选摘要、导出对话框、分析页）。
+// 深色下它同样是纯白底黑字，和 .chip[data-active] 的规则并行存在 —— 两条都
+// 改成强调色，否则同一个界面里会出现两种不同的"选中"外观。
+.chip.chip-active {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent-raw) 16%, transparent);
+}
+
+.chip.chip-active:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+// 禁止合成加粗。
+//
+// Weport 用的是仓耳渔阳体 W03，字体文件里**只有 Regular 一档**（OS/2 fsSelection
+// 只有 REGULAR，name 表里也只有 "Regular"），而且不含 GSUB/GPOS 特性表。于是任何
+// `font-weight: 600+` 都只能由 Chromium 描边合成：小字号 CJK 上表现为笔画边缘发
+// 毛、横竖粗细不均，看起来就像"字体坏了"（朋友圈的统计标签、列表标题最明显）。
+//
+// 关掉合成之后所有粗体回到真正的 Regular 字形，层级靠字号与颜色表达：
+// --text / --text-dim / --text-faint 三档本来就承担了大部分层次。
+:root {
+  font-synthesis-weight: none;
+}
+
+.primary-btn:hover:not(:disabled) {
+  opacity: 1;
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--accent-raw) 34%, transparent);
+}
+
+button,
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+// 数值与序号用强调色：它们是每页最先被读到的信息，而此前全是纯白/纯灰。
+.v09-stat b,
+.exp-num,
+.status-bar strong,
+.analytics-hub-card b {
+  color: var(--accent);
+}
+
+.panel-head h2 svg,
+.exp-sec-head svg,
+.v09-toolbar-title svg {
+  color: var(--accent);
+}
+
+.progress-fill {
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent-raw) 70%, #ffffff));
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent-raw) 45%, var(--line-strong));
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+/* 表格/列表的斑马纹与悬停也走强调色，浓淡随 --accent-softer 变。 */
+.table-row:hover,
+.setting-row:hover {
+  background: var(--accent-softer);
+}
+
+// -----------------------------------------------------------------------------
+// 1. 设计令牌
+// -----------------------------------------------------------------------------
+
+:root {
+  // 间距刻度：4 的倍数。旧样式里到处是 6/7/9/11/13/14 这种一次性数值，
+  // 这是"看着还行但就是不舒服"的主要来源之一。
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  // 圆角：同心圆角（outer = inner + padding）需要两档以上，旧样式只有一档 10px。
+  --radius-lg: 14px;
+  --radius: 10px;
+  --radius-sm: 7px;
+
+  // 高度刻度：交互控件只有三种高度，别再无级变化。
+  --control-h: 34px;
+  --control-h-lg: 40px;
+
+  // 排版刻度
+  --fs-page-title: 15px;
+  --fs-page-hint: 12px;
+  --fs-nav: 13px;
+  --fs-nav-label: 10.5px;
+
+  --rail-w: 212px;
+
+  // 分层阴影（用透明阴影表达高度，而不是用边框假装）
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --elev-2: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+// -----------------------------------------------------------------------------
+// 2. 外壳：顶栏 → 左侧栏
+// -----------------------------------------------------------------------------
+//
+// 用 grid 而不是再包一层 flex 容器：页面 JSX 是三兄弟（topbar / 更新横幅 /
+// workspace），用显式 grid-area 归位就不必改动它们的嵌套关系，弹窗本身是
+// position:fixed 也不受影响。
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: 100vh;
+}
+
+.rail {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-3);
+  background: var(--bg-raised);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  user-select: none;
+}
+
+.topbar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.update-banner {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.workspace {
+  grid-column: 2;
+  grid-row: 3;
+  min-height: 0;
+}
+
+// -----------------------------------------------------------------------------
+// 3. 品牌区
+// -----------------------------------------------------------------------------
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--elevated);
+  }
+}
+
+.rail-brand-text {
+  min-width: 0;
+
+  h1 {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    line-height: 1.2;
+  }
+
+  // 版本号从「微信工具箱 · v0.9.11 · 正在导出…」这种句子里拆出来：
+  // 运行状态属于顶栏，不属于品牌区。
+  p {
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 4. 导航
+// -----------------------------------------------------------------------------
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1;
+}
+
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail-group-label {
+  padding: 0 var(--space-2) var(--space-1);
+  font-size: var(--fs-nav-label);
+  font-weight: 600;
+  letter-spacing: 0.9px;
+  color: var(--text-faint);
+}
+
+.rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: var(--fs-nav);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+
+  svg {
+    flex-shrink: 0;
+  }
+
+  // 图标跟着文字颜色走（一个 currentColor 图标应付所有状态，不做多份资源）
+  &:hover:not(:disabled) {
+    background: var(--elevated);
+    color: var(--text);
+  }
+
+  // 选中态：不是"又一个白色药丸"。旧版里白色同时表示活动页签、选中账号行和
+  // 主按钮，于是没有任何东西是真正的主操作。这里选中态用 accent 的柔和底
+  // + 左侧 2px 强调条，白色留给主按钮。
+  &[data-active='true'] {
+    background: var(--accent-soft);
+    color: var(--text);
+    font-weight: 600;
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 50%;
+      translate: 0 -50%;
+      width: 2px;
+      height: 16px;
+      border-radius: 1px;
+      background: var(--accent);
+    }
+
+    svg {
+      color: var(--accent-2);
+    }
+  }
+
+  &:active:not(:disabled) {
+    scale: 0.98;
+  }
+
+  &:disabled {
+    color: var(--text-faint);
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 5. 全局状态
+// -----------------------------------------------------------------------------
+
+.rail-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  border-top: 1px solid var(--line);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+
+  &[data-state='warn'] {
+    color: var(--warn);
+  }
+}
+
+.status-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+
+  .status-chip[data-state='warn'] & {
+    background: var(--warn);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6. 顶栏（页面标题 + 运行状态）
+// -----------------------------------------------------------------------------
+//
+// 旧版每个页面里都要自己写一遍 H1，标题和页签文字完全重复；卡片头里还要再
+// 用灰字复述一次标题。标题现在只在顶栏出现一次，页面内部不再重复。
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  height: 56px;
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+.topbar-title {
+  min-width: 0;
+
+  h2 {
+    font-size: var(--fs-page-title);
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  p {
+    font-size: var(--fs-page-hint);
+    color: var(--text-faint);
+    line-height: 1.4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.status-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-dim);
+
+  &::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: weport-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes weport-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+// 窄窗口：把左侧栏压成纯图标，避免把内容挤没。
+//
+// 阈值取 900 而不是常见的 1180：Windows 的显示缩放会让 CSS 视口远小于截图
+// 像素（例如 150% 缩放下 1600px 的窗口只有约 1066 CSS px），阈值定高了会在
+// 正常窗口宽度下就把标签藏起来 —— 那等于把这个导航最大的改进（看得懂）
+// 白白扔掉。
+@media (max-width: 900px) {
+  :root {
+    --rail-w: 64px;
+  }
+
+  .rail-group-label,
+  .rail-item span,
+  .rail-brand-text,
+  .rail-foot {
+    display: none;
+  }
+
+  .rail-item {
+    justify-content: center;
+    padding: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-item,
+  .rail-brand,
+  .status-busy::before {
+    transition: none;
+    animation: none;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6b. 全局过渡层
+// -----------------------------------------------------------------------------
+//
+// 之前只有少数几个页面自己写了入场动画（朋友圈卡片、分析卡片），切页、开弹窗、
+// 弹 toast 都是"瞬间出现"。这里补一条统一的、克制的动效：
+//   - 切页：内容淡入 + 上移 6px，180ms，让人知道"换页了"；
+//   - 弹层：遮罩淡入 + 面板轻微放大弹入（与 DSH 的 layer 弹层一致）；
+//   - 交互控件：hover/active 统一 150ms，不再各自为政。
+// 时长全部 ≤200ms：再长就会让高频操作（切页、开设置）显得迟钝。
+
+@keyframes wp-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes wp-veil {
+  from {
+    opacity: 0;
+  }
+}
+
+.workspace > .panel,
+.workspace > .page-stack,
+.workspace > .single-col,
+.workspace > .two-col,
+.workspace > .page {
+  animation: wp-enter 0.18s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.modal-backdrop {
+  animation: wp-veil 0.14s ease both;
+}
+
+.modal {
+  animation: wp-enter 0.18s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.modal-backdrop:has(.ai-add-dialog),
+.modal-backdrop:has(.ai-provider-modal) {
+  animation-duration: 0.12s;
+}
+
+// 交互控件统一节拍：按钮/输入/行/卡片的颜色与位移变化都用同一条曲线。
+//
+// **必须写清楚 transition-property**。`transition-property` 的初始值是 `all`，
+// 所以只写 duration/timing-function 等于"所有可动画属性都参与过渡" —— 这不只是
+// 规范上的坏味道：它让每个交互元素在 hover 时都要被合成器盯着一整套属性，
+// 而且会带来意外延迟（例如 transform 与 box-shadow 混在同一个 all 里）。
+button,
+input,
+select,
+textarea,
+.setting-row,
+.rail-item,
+.account-item,
+.notify-row {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+  transition-duration: 0.15s;
+  transition-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+// 按下反馈。
+//
+// 只给"点一下会立刻发生什么"的小控件：0.96 是能感觉到的最小值，再小就夸张。
+// 大块卡片（.format-chip / .theme-card / .layout-chip）不加 —— 它们的面积大，
+// 同比例缩放看起来是"整页在动"而不是"按钮被按下"。
+:is(
+  .primary-btn,
+  .secondary-btn,
+  .ghost-btn,
+  .danger-btn,
+  .icon-btn-sm,
+  .chip:not(.format-chip):not(.layout-chip),
+  .segmented-item,
+  .rail-item
+):active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+// -----------------------------------------------------------------------------
+// 长列表：**不要**用 content-visibility
+// -----------------------------------------------------------------------------
+//
+// 一度在这里给 `.anti-revoke-list .account-item` 等重复行加了
+// `content-visibility: auto`（跳过离屏子树的样式与布局）。受控 A/B 实测**它是亏的**：
+// 同一个进程里交替切换这一条，滚动 192 行的列表 ——
+//
+//   auto    : p95 107.8ms、28/41 帧掉帧、long task 106ms
+//   visible : p95  34.8ms、 5/57 帧掉帧、long task   0ms
+//   挂载成本：16.7ms vs 16.6ms（没有差别）
+//
+// 原因很清楚：`auto` 是拿"挂载时少排版"换"滚动时按需排版"。短列表的挂载本来只
+// 发生一次，而滚动是天天在做的动作；于是省下的 0ms 换来了 3 倍的滚动延迟。
+// 列表要长到上万行这个交换才划算 —— 那种场景的正确解法是虚拟滚动
+// （朋友圈动态流用的 react-virtuoso 就是它），不是这个属性。
+//
+// 结论：这条路不要再走一遍。要治长列表，先量"挂载 vs 滚动"哪一头贵。
+
+// 懒加载页面的占位（见 App.tsx 的 LazyFallback）。保持 .panel 的骨架，所以从占位
+// 换成真页面时外边距不变，不会多出一次布局偏移。
+.lazy-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.lazy-page-hint {
+  opacity: 0.75;
+  animation: wp-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wp-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace > *,
+  .modal,
+  .modal-backdrop,
+  .toast,
+  .lazy-page-hint {
+    animation: none;
+  }
+
+  /* 全局关掉过渡而不是逐个列表：减少动态偏好是"别动"的强指令。 */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 7. 用户背景图 / 视频
+// -----------------------------------------------------------------------------
+//
+// 背景是**用户上传的任意图片或视频**，所以必须有对比度保护：一层可调的遮罩压在
+// 媒体上，面板底色随之变半透明。任何图片下正文都要保持可读。媒体本身与遮罩都在
+// theme.scss 的 `.app-bg` 合成层里（图片和视频同一条路径）。
+//
+// 外壳这边只剩两件事：没有背景时的底色与光晕。
+
+// 没有用户背景时，外壳自带两层极淡的蓝色光晕。
+:root {
+  --app-glow:
+    radial-gradient(900px 520px at 18% -10%, rgba(91, 142, 255, 0.07), transparent 58%),
+    radial-gradient(700px 460px at 86% 0%, rgba(91, 142, 255, 0.045), transparent 62%);
+}
+
+// 浅色主题下这两层蓝色会变成一层脏灰；有用户背景时它们压在壁纸上，会让
+// 「遮罩 0%」也压着一层去不掉的暗色 —— 用户要的"0% 就是完全透明"正是被它们毁掉的。
+//
+// 用变量而不是再写一条 `:root[...] .shell` 去覆盖：**同特异性规则的胜负取决于
+// 打包顺序**，而顺序由打包器决定（theme.scss 加载在 v1.scss 之后，那条
+// `.shell { background: var(--bg) }` 简写连 background-image 一起重置过，浅色主题
+// 下壁纸因此根本不显示）。收敛成一个变量后，`.shell` 只在一处声明背景，不存在
+// "谁覆盖谁"的赌局。
+:root[data-mode='light'],
+:root[data-has-bg='true'] {
+  --app-glow: none;
+}
+
+.shell {
+  background-color: var(--bg);
+  background-image: var(--app-glow);
+  background-position: center, center;
+  background-repeat: no-repeat;
+}
+
+// 有背景（图片 / 视频）时把面板变成半透明玻璃，否则不透明的面板会把背景完全
+// 盖住，用户上传的图等于白传。
+//
+// 透明度**不在这里定义**：面板底色是主题级变量，浅色/深色两套值统一在
+// theme.scss 的 `data-has-bg` 规则里给出。这里只负责给 rail/topbar 加背景模糊
+// ——媒体是静态的话模糊结果可以复用，所以图片模式下这条是安全的。
+:root[data-has-bg='true'] {
+  .rail,
+  .topbar {
+    backdrop-filter: blur(14px);
+  }
+}
+
+// 视频背景例外：逐帧 backdrop-filter 是视频背景卡顿的主因（静态图片的结果可以
+// 复用，播放中的视频不能）。theme.scss 会把这两条覆盖成不透明面板。
+:root[data-bg-kind='video'] {
+  .rail,
+  .topbar {
+    backdrop-filter: none;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 8. 强调色
+// -----------------------------------------------------------------------------
+//
+// `data-accent` 只提供色相，不改明度关系：每一档都保持同一套
+// (accent / accent-2 / accent-soft / accent-glow) 结构，页面里已有的
+// 用法不需要为某个色相单独适配。
+//
+// 黑白主题（`data-theme="mono"`）优先：用户显式选了黑白，色相就不该再插手。
+
+:root[data-accent='violet']:not([data-theme='mono']) {
+  --accent: #9b7bff;
+  --accent-2: #b39dff;
+  --accent-3: #c7b7ff;
+  --accent-4: #6f4bff;
+  --accent-5: #a98bff;
+  --accent-6: #cdbcff;
+  --accent-strong: #9b7bff;
+  --accent-deep: #6f4bff;
+  --accent-soft: rgba(155, 123, 255, 0.16);
+  --accent-softer: rgba(155, 123, 255, 0.09);
+  --accent-glow: rgba(155, 123, 255, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(155, 123, 255, 0.24), rgba(155, 123, 255, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(155, 123, 255, 0.36), rgba(111, 75, 255, 0.12));
+}
+
+:root[data-accent='teal']:not([data-theme='mono']) {
+  --accent: #3fbfae;
+  --accent-2: #5fd3c3;
+  --accent-3: #85e0d3;
+  --accent-4: #1c8f81;
+  --accent-5: #59cbba;
+  --accent-6: #9ae7dc;
+  --accent-strong: #3fbfae;
+  --accent-deep: #1c8f81;
+  --accent-soft: rgba(63, 191, 174, 0.16);
+  --accent-softer: rgba(63, 191, 174, 0.09);
+  --accent-glow: rgba(63, 191, 174, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(63, 191, 174, 0.24), rgba(63, 191, 174, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(63, 191, 174, 0.36), rgba(28, 143, 129, 0.12));
+}
+
+:root[data-accent='rose']:not([data-theme='mono']) {
+  --accent: #f2678f;
+  --accent-2: #f78aa8;
+  --accent-3: #fbacc2;
+  --accent-4: #c93a63;
+  --accent-5: #f4839f;
+  --accent-6: #fdb6c8;
+  --accent-strong: #f2678f;
+  --accent-deep: #c93a63;
+  --accent-soft: rgba(242, 103, 143, 0.16);
+  --accent-softer: rgba(242, 103, 143, 0.09);
+  --accent-glow: rgba(242, 103, 143, 0.28);
+  --accent-grad: linear-gradient(165deg, rgba(242, 103, 143, 0.24), rgba(242, 103, 143, 0.04));
+  --accent-grad-strong: linear-gradient(165deg, rgba(242, 103, 143, 0.36), rgba(201, 58, 99, 0.12));
+}
+
+// -----------------------------------------------------------------------------
+// 9. 密度
+// -----------------------------------------------------------------------------
+//
+// 只收紧外壳与常用控件的度量，**不动字号**：缩小字号会连带影响中文可读性，
+// 那是"紧"而不是"密"，用户要的是后者。
+
+:root[data-density='compact'] {
+  --control-h: 30px;
+  --control-h-lg: 36px;
+  --space-5: 18px;
+  --space-6: 22px;
+
+  .rail {
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .rail-nav {
+    gap: var(--space-3);
+  }
+
+  .topbar {
+    height: 48px;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 10. 外观设置控件
+// -----------------------------------------------------------------------------
+
+.appearance-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.appearance-slider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+
+  input[type='range'] {
+    width: 180px;
+    accent-color: var(--accent);
+  }
+}
+
+.appearance-slider-value {
+  min-width: 38px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.appearance-swatches {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.appearance-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  transition: scale 0.14s ease, box-shadow 0.14s ease;
+
+  // 选中用外圈而不是内勾：色块本身已经是"颜色证据"，再加一个图标会糊掉。
+  &[data-active='true'] {
+    box-shadow: 0 0 0 2px var(--bg-raised), 0 0 0 4px currentColor;
+  }
+
+  &:hover {
+    scale: 1.06;
+  }
+
+  &:active {
+    scale: 0.96;
+  }
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.segmented-item {
+  height: calc(var(--control-h) - 8px);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+
+  &:hover:not([data-active='true']) {
+    color: var(--text);
+  }
+
+  &[data-active='true'] {
+    background: var(--accent-soft);
+    color: var(--text);
+    font-weight: 600;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 11. `@` 会话选择器
+// -----------------------------------------------------------------------------
+
+.ref-picker {
+  width: 380px;
+  max-width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--elevated);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ref-picker-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  height: 30px;
+  border-bottom: 1px solid var(--line);
+
+  input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+
+    &:focus {
+      outline: none;
+    }
+
+    &::placeholder {
+      color: var(--text-faint);
+    }
+  }
+}
+
+.ref-picker-at {
+  color: var(--accent-2);
+  font-weight: 700;
+}
+
+.ref-picker-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.ref-picker-list {
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ref-picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+
+  // 键盘与鼠标共用一个选中态：两者混用时用户不应该看到两个高亮。
+  &[data-active='true'] {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+.ref-picker-avatar {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.ref-picker-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ref-picker-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ref-picker-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ref-picker-kind {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--text-faint);
+
+  &[data-kind='group'] {
+    border-color: var(--accent-soft);
+    color: var(--accent-2);
+  }
+}
+
+.ref-picker-empty {
+  padding: var(--space-4) var(--space-2);
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+// WeportAI 输入框上方的引用区：chips 紧贴输入框，选择器向上弹出（输入框在
+// 页面底部，向下弹出会被视口裁掉）。
+.ai-ref-chips {
+  padding: 0 var(--space-3) var(--space-2);
+}
+
+.ai-ref-kind {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.ai-ref-picker {
+  position: relative;
+  padding: 0 var(--space-3) var(--space-2);
+
+  .ref-picker {
+    position: absolute;
+    bottom: 0;
+    left: var(--space-3);
+    z-index: 60;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 12. 弹窗层与右下角内容的碰撞
+// -----------------------------------------------------------------------------
+//
+// .toast-stack 是固定在右下角的（right/bottom 16px）。而 WeportAI 的右栏在
+// 同一位置放着一张**常驻**卡片（上下文/缓存/费用），于是每次弹窗都会盖住它，
+// 而且会反复发生（截图里就能看到）。
+//
+// 不去改弹窗的位置或层级（那是全局的东西，动它会影响所有界面），而是让 AI
+// 右栏在底部留出弹窗的高度：常驻内容让位给瞬时层，代价只是一点空白。
+
+.ai-workspace {
+  padding-bottom: 104px;
+}
+
+// -----------------------------------------------------------------------------
+// 13. macOS 兼容性检查
+// -----------------------------------------------------------------------------
+//
+// 检查结果用「圆点 + 文字」表达，而不是只靠颜色：状态词本身写在小标题里，
+// 色觉障碍用户与黑白截图都不会丢信息。
+
+.diag-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.diag-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+
+  strong {
+    display: block;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .hint {
+    display: block;
+    margin-top: 2px;
+    line-height: 1.7;
+  }
+}
+
+.diag-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.diag-item[data-state='ok'] .diag-dot {
+  background: var(--ok);
+}
+
+.diag-item[data-state='warn'] .diag-dot {
+  background: var(--warn);
+}
+
+.diag-item[data-state='fail'] .diag-dot {
+  background: var(--danger);
+}
+
+.diag-item[data-state='fail'] {
+  border-color: rgba(229, 72, 77, 0.35);
+}
+
+// =============================================================================
+// 14. 页面布局统一（v1.0 页面重排）
+// =============================================================================
+//
+// 旧的页面布局有三个具体问题，全部来自「没有统一的页面容器」：
+//
+//  1. **只给设置页限了宽**（.single-col 860px）。其余页面在 1600px 窗口下被
+//     拉满，标签在左、控件在右，中间近千像素空档 —— 视线要跑完全屏才能配对，
+//     这是"乱"最直观的来源。
+//  2. `.setting-row` 用 flex + space-between，控件位置取决于标签文字长度，
+//     于是每一行的开关都在不同的横坐标上跳动。
+//  3. 每个卡片头都复述一次页面标题，再配一句等于没说的灰字。
+//
+// 这里不改页面 JSX 就能修好前两条：统一容器宽度 + 把设置行改成固定控件列的
+// 网格。第三条必须改 JSX（见各页面）。
+
+// 统一内容宽度。刻意同时覆盖三种容器，因为它们在不同页面里各自扮演"页面根"。
+.workspace > .panel,
+.workspace > .single-col,
+.workspace > .two-col,
+.workspace > .page {
+  width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
+}
+
+// 设置行：标签左、控件右，**控件列固定**，因此所有开关/输入框垂直对齐。
+// minmax 下限保证窄窗口下控件不会被压扁，上限防止超宽屏上控件离标签太远。
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 320px);
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+
+  > :last-child {
+    justify-self: end;
+  }
+
+  // 标签里的图标与文字要对齐到同一基线；旧版图标 margin-top:2px 在单行标签
+  // 上会显得偏上，多行时又刚好 —— 这里统一按第一行居中。
+  .setting-label {
+    align-items: center;
+
+    > svg {
+      margin-top: 0;
+    }
+  }
+}
+
+// 卡片补充说明（旧版每个卡片头右侧都有一句复述标题的灰字）现在统一收敛到
+// 小节标题下方，字号更小、位置固定，不再各自飘在卡片右上角。
+.card-sub {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+// 面板头：标题与操作对齐方式统一为 center（旧版用 baseline，与右侧按钮
+// 高度不一致时会产生几像素的错位）。
+.panel-head {
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+
+.panel {
+  padding: var(--space-4);
+}
+
+// 窄窗口：控件列收窄并允许换行，避免标签被挤成一列一个字。
+@media (max-width: 760px) {
+  .setting-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+
+    > :last-child {
+      justify-self: start;
+    }
+  }
+}
+
+// =============================================================================
+// 15. 折叠式说明（连接页「如何获取密钥？」）
+// =============================================================================
+//
+// 连接页原来把四段编号说明直接摊在卡片顶部，用户必须先读完才能看到「提取密钥」
+// 按钮 —— 一张要人动手的卡片，顺序却是「说明书在前、按钮在后」。现在说明收进
+// details，默认折叠，控件在前。
+
+// 按钮 —— 一张要人动手的卡片，顺序却是「说明书在前、按钮在后」。现在控件在前，
+// 说明跟在下面。
+//
+// 说明**不做成可折叠**：用户在连接页最想知道的就是"密钥怎么来"，折叠一次之后就
+// 再也不会被打开，遇到问题只能猜。代价是卡片长一点，换来的是不用点开也能读。
+
+.steps-details {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+
+  .steps-details-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+
+    &::before {
+      content: '';
+      width: 0;
+      height: 0;
+      border-left: 5px solid currentColor;
+      border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent;
+      rotate: 90deg;
+    }
+  }
+
+  .steps {
+    margin-top: var(--space-3);
+  }
+}
+
+// =============================================================================
+// 16. 选中态不再用纯白
+// =============================================================================
+//
+// `.account-item[data-active]` 原本是 #fff 底 + #000 字。在一个几乎全黑的界面里
+// 它比页面上的主按钮还亮，于是「账号已选中」看起来像"这是当前最重要的操作"。
+// 加上活动页签、开关和主按钮也都在用白色，白色实际上同时表示四件事，
+// 结果没有任何一样是真正突出的。
+//
+// 选中态改用与左侧导航相同的语言：accent 淡底 + accent 细边 + 加粗。白色从
+// 此只保留给主操作（导出、提取密钥、创建任务……）。
+
+.account-item[data-active='true'] {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong));
+  color: var(--text);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.account-item[data-active='true']:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: none;
+  transform: none;
+}
+
+.account-item[data-active='true'] span {
+  color: var(--text-dim);
+}
+
+// 选中项左侧加一条 2px 强调条，与导航栏的选中标记保持一致。
+.account-item[data-active='true'] {
+  position: relative;
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    translate: 0 -50%;
+    width: 2px;
+    height: 60%;
+    border-radius: 0 1px 1px 0;
+    background: var(--accent);
+  }
+}
+
+// =============================================================================
+// 17. 导出页：主操作常驻可见
+// =============================================================================
+//
+// 「导出」是这一页存在的唯一理由，但它原本位于约 400 行内容的最底部。
+//
+// 第一版用底部悬浮条解决，结果它**盖住**了内容：sticky 元素在到达自身正常位置
+// 之前会一直浮在视口底部，而它上方仍有内容在滚动 —— 无论加渐变还是加 padding，
+// 用户看到的都是「按钮压住了勾选框」。
+//
+// 改成吸顶页头：主按钮放在页头右端，页头吸顶。动作**始终可见**，而且它在正常
+// 流里的位置就在顶部，永远不会和下方内容争位置。
+
+// 页头与进度合成一个 sticky 块：块整体滚到顶部就停住，页头和进度永远是紧邻的
+// 两行，不需要硬编码页头高度去算偏移。块内的页头必须去掉自己的 sticky ——
+// sticky 在 sticky 里只会贴着父盒粘，不会贴着滚动容器。
+.panel.export-page > .exp-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+}
+
+.panel.export-page > .exp-sticky > .panel-head {
+  position: static;
+  background: var(--panel);
+  margin-inline: calc(var(--space-4) * -1);
+  padding-inline: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+// 进度条并入吸顶块后没有自己的背景，滚上去会露出下面的内容，所以给底色。
+//
+// 这一行**尺寸必须恒定**：它是吸顶块的一行，高度一变就把下面整页内容顶上去、
+// 再放下来 —— 导出期间每秒多次进度更新，观感就是"所有东西在互相推挤"。
+// 因此高度固定、会话名占固定基准宽度（只负责溢出省略），计数列始终占位。
+// 进度条组件本身也做了隔离重渲染，见 src/components/export/ExportProgressBar.tsx。
+.exp-progress-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-inline: calc(var(--space-4) * -1);
+  padding: var(--space-2) var(--space-4);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  // 固定行高：内容（会话名/计数/取消按钮）怎么变都不改这一行的高度
+  min-height: 34px;
+  box-sizing: border-box;
+
+  // 无进度时：占位但看不见。
+  //
+  // 这一行如果**不存在**，导出一开始吸顶块就从"只有页头"变成"页头 + 进度行"，
+  // 下面的 .export-layout 被整体推下去一次 —— 浏览器判定为布局偏移（实测 CLS
+  // 0.0158，正是用户看到的"偶尔抖一下"）。所以永远保留这一行的高度，
+  // 用 visibility 隐藏而不是 display（后者高度归零，等于没占位）。
+  &[data-idle='true'] {
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
+
+.exp-progress-bar .progress-track {
+  flex: 1;
+  min-width: 120px;
+}
+
+// 会话名占固定基准宽度，再靠 flex-shrink 让出空间。
+// 不用 `flex: 0 1 auto`：那样宽度跟着文字走，右侧轨道与「取消导出」会随每条
+// 进度事件左右横跳 —— 这正是用户报的抖动之一。
+.exp-progress-session {
+  flex: 0 1 260px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+// 计数列固定宽度 + 等宽数字：`9 / 189` → `189 / 189` 不会改变自己的宽度
+.exp-progress-count {
+  flex: 0 0 auto;
+  min-width: 66px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.exp-progress-cancel {
+  flex: 0 0 auto;
+}
+
+// 页头里的操作排成一行，主操作在最右
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+// 导出过程中的取消按钮：只在有进度时出现，空的时候不占位。
+.export-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.export-actions:empty {
+  display: none;
+}
+
+// -----------------------------------------------------------------------------
+// 导出页两栏
+// -----------------------------------------------------------------------------
+//
+// 五段纵向堆叠时整页约三屏高：会话列表要看，配置要回去翻，进度和取消按钮在
+// 最底部。宽窗口下改成「左边配置 + 会话，右边常驻动作与状态」。
+//
+// 断点用 min-width 而不是 max-width：应用默认窗口只有约 1060 CSS px（Windows
+// 150% 缩放下 1599 物理 px），此时两栏会把正文压到 400px 宽 —— 单栏才是对的。
+// 只有真正拉宽（>=1280）才并排。
+
+.export-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.export-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.export-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+@media (min-width: 1280px) {
+  .export-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: var(--space-5);
+  }
+
+  .export-side {
+    position: sticky;
+    top: var(--space-3);
+  }
+}
+
+.exp-side-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: var(--hairline) solid var(--stroke-l1);
+  border-radius: var(--radius);
+  background: var(--layer-2);
+}
+
+.exp-side-card .exp-sec-head {
+  padding: 0;
+  border: 0;
+}
+
+// 页头左侧的三枚状态徽标（格式 / 目录结构 / 范围）。
+.exp-head-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.exp-head-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-softer);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.exp-head-chip svg {
+  color: var(--accent);
+}
+
+// 高级选项：标签与控件贴在一起。原来是 space-between，标签在左、单选组被推到
+// 最右边，中间空出 700px —— 窄窗口下读一行要在屏幕上横跳一次。
+.opt-row {
+  display: grid;
+  grid-template-columns: minmax(0, 120px) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.opt-row .seg {
+  justify-self: start;
+  flex-wrap: wrap;
+}
+
+.opt-panel {
+  padding: var(--space-3);
+}
+
+// 路径输入不再横跨整栏：默认窗口只有约 1060 CSS px，整宽输入框会把「浏览」
+// 甩到屏幕另一头，而路径本身通常二十来个字符就够读。
+.export-main .path-row {
+  max-width: 560px;
+}
+
+// 格式卡在窄窗口里仍要排 3-4 列，不能再靠固定宽度。
+.export-main .format-grid {
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+}
+
+// 数字序号在配置段里代表"第几步"，字号要比正文大一点才读得出次序。
+.exp-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+// 连接页的每个编号分区右上角带一个完成状态：整页因此同时是一张进度清单。
+// 右侧那组（数量 + 状态）整体靠右，而不是每个元素各抢一次 auto 边距 ——
+// 两个 margin-left:auto 会把中间的空隙对半分，两个标就散在两头。
+.exp-sec-meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+// =============================================================================
+// 18. WeportAI 三栏重排
+// =============================================================================
+//
+// 截图暴露的问题：
+//
+//  1. **右栏太窄（250px）**。文件卡里「名字 + 大小 + 日期」被迫折成两行，
+//     看起来拥挤且难以扫读；而右栏本该是最容易一眼看完的一列。
+//  2. **统计卡被裁掉**。我上一轮为了避开右下角弹窗，把 padding-bottom 加在了
+//     `.ai-workspace`（一个 overflow:hidden 的横向 flex 容器）上 —— 那只会
+//     压缩整个栏的内容区，而不是给弹窗让位。正确的落点是栏内**可滚动**的
+//     正文容器。
+//  3. **左栏「新建对话」是一个占满整行的大方块**，视觉重量和主操作相当，
+//     但它只是一个高频的小动作。
+
+// 三栏重新配比：左栏窄一点，右栏宽一点（文件元数据需要横向空间）。
+//
+// 断点必须写在这里，而不是 styles.css：那边同样有 `.ai-shell` 的媒体查询，但
+// v1.scss 后加载、优先级相同，整条规则被这里覆盖 —— 结果是 styles.css 里
+// 1100px / 940px 两个断点从未生效过。
+//
+// 本机的 CSS 视口比窗口像素小得多（1600px 的窗口只有约 1066 CSS px），所以
+// 原来的 1100 断点几乎永远命中，而 940 又太低：两条都白写。下面的阶梯按实际
+// 量到的内容宽度分档（默认窗口 854px、窄窗口 774px、最小窗口约 690px）。
+.ai-shell {
+  grid-template-columns: 220px minmax(0, 1fr) 288px;
+}
+
+// 854px 内容宽：右栏收到 250px，中间一栏从 346px 回到 396px。
+@media (max-width: 1220px) {
+  .ai-shell {
+    grid-template-columns: 208px minmax(0, 1fr) 250px;
+  }
+
+  .ai-shell.ws-hidden {
+    grid-template-columns: 208px minmax(0, 1fr) 0px;
+  }
+}
+
+// 774px 内容宽（窄窗口截图档）：两侧再各收一档，中间保住约 340px。
+@media (max-width: 1040px) {
+  .ai-shell {
+    grid-template-columns: 196px minmax(0, 1fr) 216px;
+  }
+
+  .ai-shell.ws-hidden {
+    grid-template-columns: 196px minmax(0, 1fr) 0px;
+  }
+}
+
+// 三栏在最小窗口（约 920px 窗口 / 690px 内容）下真的放不下，右栏交回给组件
+// 自己的「记忆/笔记」开关（.ws-hidden），这里只保证不留下一条空轨。
+@media (max-width: 940px) {
+  .ai-shell,
+  .ai-shell.ws-hidden {
+    grid-template-columns: 190px minmax(0, 1fr) 190px;
+  }
+}
+
+// 滚动的正文容器留出弹窗高度 —— 这才是上一轮该改的地方。
+.ai-ws-body {
+  padding-bottom: 108px;
+}
+
+// 去掉上一轮加错的 padding（它裁掉了统计卡）。
+.ai-workspace {
+  padding-bottom: 0;
+}
+
+// 左栏：新建对话改为紧凑按钮，不再与主操作争视觉重量。
+.ai-new-chat {
+  margin: var(--space-3) var(--space-3) var(--space-2);
+  padding: 8px var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  background: transparent;
+  justify-content: flex-start;
+  gap: 8px;
+
+  &:hover {
+    background: var(--elevated);
+    border-color: var(--accent);
+  }
+}
+
+// 文件卡：原来「名字」与「大小 · 日期」是上下两行，在 250px 的窄栏里经常
+// 折成三行。改成一行 —— 名字靠左并省略，元数据靠右且不折行。右栏本来就该是
+// 一眼扫完的一列。
+.ai-ws-note-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1;
+
+  > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-width: 0;
+    flex: 1;
+  }
+
+  strong {
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  span {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+}
+
+// 右栏里那行被截断的原始工作区路径：它是给用户看的噪音，收成一行小字并
+// 允许悬停查看完整路径（title 属性已在 JSX 里）。
+.ai-ws-path {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// 统计卡的三个读数：标签左、数值右，数字用等宽字体对齐比较。
+.ai-ws-stats {
+  .ai-stat-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: 11.5px;
+
+    strong {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text);
+    }
+  }
+}
+// =============================================================================
+// 19. 密度与行内一致性（重排的核心）
+// =============================================================================
+//
+// 截图暴露的两个问题：
+//
+//  1. **行太高**。设置行约 110px，而内容只有一行标题 + 一行说明（≈36px）。
+//     多出来的都是内边距叠加：.panel 16px + .setting-row 12px + 旧规则 12px。
+//     结果是「三个开关」占掉 390px —— 面板看起来松散、不紧凑。
+//  2. **标签排版不一致**。有的行是 <div><strong/><span/></div>（上下两行），
+//     有的是 <strong/><span/> 直接并列（挤在同一行）。同一张卡片里两种排法，
+//     这正是"奇怪"的来源。这里统一按上下两行处理，并顺带修 JSX
+//     （外观卡片的行改成同样的嵌套结构）。
+
+.panel {
+  padding: var(--space-4);
+
+  // 卡片标题更紧凑：标题与第一条内容之间不需要三段留白。
+  > .panel-head {
+    margin-bottom: var(--space-2);
+    padding-bottom: var(--space-2);
+  }
+}
+
+.setting-row {
+  padding: 10px var(--space-2);
+  gap: var(--space-4);
+}
+
+.setting-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+
+  // 内层文本块：标题与说明上下两行，行高收紧。
+  > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .hint {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-faint);
+  }
+}
+
+// 开关本身也偏大（34x20 的轨道配 16px 圆点），在紧凑行里显得笨重。
+.switch .track,
+.webot-switch span {
+  scale: 0.92;
+  transform-origin: right center;
+}
+
+// 导出页：目录结构与格式选项原本是大盒子（A/B/C 每格 ≈120px 高，只放两行字，
+// 十个格式选项再占两行），因此「配置怎么导」这一件事就吃掉一整屏。收紧到内容
+// 真正需要的尺寸，让「配置 → 选范围 → 导出」能在一屏里读完。
+.layout-row,
+.format-grid {
+  gap: var(--space-2);
+}
+
+.layout-chip,
+.format-chip {
+  padding: 9px var(--space-3);
+  min-height: 0;
+  gap: 2px;
+
+  strong {
+    font-size: 12.5px;
+  }
+
+  .layout-tree,
+  span {
+    font-size: 11px;
+    line-height: 1.45;
+  }
+}
+
+.layout-tree {
+  margin-top: 2px;
+}
+
+// 引用 chip：显示名是人类可读的，id 只作为数据随请求发出。
+.ref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 6px 0 var(--space-2);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 12px;
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+
+    &:hover {
+      background: var(--accent-softer);
+      color: var(--text);
+    }
+  }
+}
+
+// =============================================================================
+// 20. 设置页：左侧分类 + 右侧内容
+// =============================================================================
+//
+// 旧版是六块**等权重**的面板竖着排成一条长滚动（启动 / 外观 / 备份 / HTTP API /
+// 色彩主题 / 关于）。窗口高度只有约 635 CSS px，因此一屏放不下两块面板 —— 想改
+// 「界面密度」得先滚过整个「启动与后台行为」，而且滚到哪儿了、后面还有什么，页
+// 面上没有任何线索。
+//
+// 现在分成五个分类，左侧常驻，右侧一次只渲染一个分类。分类行带一句说明，是为
+// 了让人不必逐个点开就知道每一类装着什么。
+//
+// 分类列不随窗口变窄而折叠成横向胶囊：内容区最窄也有约 600px（窗口最小宽度
+// 920px 减去 212px 侧栏与内边距），减掉 186px 分类列还剩 400px 以上，足够放
+// 标签 + 控件的两列行（`.setting-row` 在 760px 以下本来就会改单列）。
+
+.settings-page {
+  display: grid;
+  grid-template-columns: 186px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  // 分类跟着内容滚：设置面板可能很长，但"我在哪一类"始终要看得见。
+  position: sticky;
+  top: 0;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 9px var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+
+  > svg {
+    flex-shrink: 0;
+  }
+
+  > span {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  em {
+    font-style: normal;
+    font-size: 11px;
+    color: var(--text-faint);
+    // 说明文字只允许一行：换行会把导航项撑成两行高，一列里就出现参差不齐的
+    // 打卡片（「服务分配」的说明最长，最容易触发）。
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &:hover {
+    background: var(--elevated);
+  }
+
+  &[data-active='true'] {
+    background: var(--accent-soft);
+
+    strong,
+    > svg {
+      color: var(--accent);
+    }
+
+    // 选中项的说明压在强调色淡底上时 --text-faint 只有 4.05，提一档
+    em {
+      color: var(--text-dim);
+    }
+  }
+}
+
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+// 「外观 → 色彩主题」这类整行内容：标签在上、控件占满整行。放在设置行的网格里
+// 会被压成 178px 宽的控件列，两张主题卡片就变成竖条。
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: 10px var(--space-2);
+}
+
+// 设置页的行控件列收窄到 260px：这里最"宽"的控件也就是两个按钮（选择图片… /
+// 移除），而 320px 会把标签列压到 224px，中文标题和说明都得折成两行。
+.settings-pane .setting-row {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+}
+
+.setting-note {
+  margin-top: var(--space-2);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+}
+
+// 连接页：第 1、2 步并排。两者各自只有一个输入框/一个短列表，铺满整宽时中间
+// 全是空白；第 3 步（密钥 + 折叠说明）仍独占一行。
+.connect-steps {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-5);
+
+  // 两栏之间给一条发丝分隔线，而不是让它们看起来是同一段内容。
+  > .exp-section + .exp-section {
+    border-top: 0;
+    padding-left: var(--space-5);
+    border-left: var(--hairline) solid var(--stroke-l1);
+  }
+}
+
+@media (max-width: 900px) {
+  .connect-steps {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+
+    > .exp-section + .exp-section {
+      padding-left: 0;
+      border-top: 1px solid var(--line);
+    }
+  }
+}
+
+// =============================================================================
+// 21. 页面级状态条与面板动作行
+// =============================================================================
+//
+// 「消息通知」「防撤回」这类页面原来把三件事同权地堆在一张面板里：功能开没开、
+// 它长什么样、收谁的。用户每读一行都要重新判断这一行属于哪一类。状态条把第一
+// 类单独拎出来放在最上面（一个点 + 一句话 + 总开关），下面再按主题分卡片。
+//
+// 状态条同时是三张卡片之间唯一的视觉锚点，所以它比卡片略高、略亮。
+
+.page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
+}
+
+// 分析页（全局 / 群聊）沿用同一套状态条与卡片，因此它也要有统一的纵向节奏。
+.analytics-global,
+.group-analytics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  flex-wrap: wrap;
+
+  // 「正在生效」时给一条强调色边：同一条状态条在开/关两种情况下要能一眼分开。
+  &[data-live='true'] {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  }
+
+  > svg {
+    flex-shrink: 0;
+    color: var(--accent);
+  }
+}
+
+.status-bar-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+
+  strong {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .hint {
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+}
+
+// 旧的 .status-dot 只有 .listening 一种配色，关闭状态下它是个**看不见**的
+// 8px 占位（连带 6px 右边距），状态条左端于是莫名空一块。这里补上底色。
+.status-bar .status-dot {
+  flex-shrink: 0;
+  margin-right: 0;
+  background: var(--text-faint);
+
+  &.listening {
+    background: var(--ok);
+  }
+}
+
+// 状态条里的折叠说明（防撤回那三行解释就是塞在这里的）
+// 防撤回说明：整条说明直接展开在状态条下面，不做折叠（折叠后没人会点开，
+// 而"装在微信侧、无需常驻"恰恰是用户最需要知道的一句）。
+.status-bar-note {
+  flex-basis: 100%;
+  order: 9;
+  margin: var(--space-2) 0 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+.status-bar-details {
+  flex-basis: 100%;
+  order: 9;
+  font-size: 11.5px;
+  color: var(--text-faint);
+
+  summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    width: fit-content;
+  }
+
+  p {
+    margin: var(--space-2) 0 0;
+    line-height: 1.7;
+  }
+}
+
+.status-warn {
+  padding: 10px var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  font-size: 12px;
+  color: var(--text);
+}
+
+// 面板里的动作行：左边一句「现在显示了多少」，右边批量操作。
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+
+  .hint {
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+}
+
+.panel-actions-buttons {
+  display: flex;
+  gap: var(--space-2);
+}
+
+// 面板头里的搜索框：宽度固定，不用因为标签长短而伸缩。
+.filter-input {
+  width: 200px;
+  padding: 6px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+
+  &::placeholder {
+    color: var(--text-faint);
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+}
+
+// 一个设置行里放多个控件（按钮 + 开关），它们应当成组靠右，而不是各自占据
+// 控件列、被推到两头。
+.setting-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+// -----------------------------------------------------------------------------
+// 22. 免打扰自检对话框
+// -----------------------------------------------------------------------------
+
+.mute-report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.mute-report-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+
+  span {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  b {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  &[data-state='ok'] b {
+    color: var(--ok);
+  }
+
+  &[data-state='warn'] b {
+    color: var(--warn);
+  }
+
+  &[data-state='fail'] b {
+    color: var(--danger);
+  }
+}
+
+.mute-report-note {
+  margin: 0 0 var(--space-3);
+  padding: 8px var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+
+  &.fail {
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    color: var(--text);
+  }
+
+  &.warn {
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+    color: var(--text);
+  }
+}
+
+.mute-report-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+
+  .empty {
+    padding: var(--space-4);
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+}
+
+.mute-report-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px var(--space-3);
+
+  & + & {
+    border-top: 1px solid var(--line);
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.mute-report-id {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// -----------------------------------------------------------------------------
+// 23. 设置 → AI 服务
+// -----------------------------------------------------------------------------
+
+.ai-profile-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.ai-profile-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px var(--space-3);
+
+  & + & {
+    border-top: 1px solid var(--line);
+  }
+
+  // 默认服务左侧加一道强调条，和导航选中态同一套语言。
+  &[data-active='true'] {
+    background: var(--accent-softer);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  strong {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+}
+
+.ai-profile-model {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// -----------------------------------------------------------------------------
+// 25. 自定义强调色
+// -----------------------------------------------------------------------------
+
+.accent-custom {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: var(--hairline) solid var(--stroke-l1);
+}
+
+.accent-custom-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.accent-color-input {
+  width: 40px;
+  height: 28px;
+  padding: 0;
+  border: var(--hairline) solid var(--stroke-l2);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+
+  &::-webkit-color-swatch-wrapper {
+    padding: 2px;
+  }
+
+  &::-webkit-color-swatch {
+    border: 0;
+    border-radius: 6px;
+  }
+}
+
+.accent-hex-input {
+  width: 84px;
+  padding: 5px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-transform: lowercase;
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+}
+
+.accent-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.accent-swatch-mini {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+
+  &:hover {
+    transform: translateY(-1px) scale(1.06);
+  }
+
+  &[data-active='true'] {
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px currentColor;
+    color: inherit;
+  }
+
+  // 无彩色近路（纯黑 / 灰 / 纯白）：用内描边和色相板区分开，避免被看成一排
+  // 普通色块 —— 它们代表的是"不要颜色"，和挑色相是两件事。
+  &[data-mono='true'] {
+    box-shadow: inset 0 0 0 1px var(--line-strong), 0 0 0 1px rgba(128, 128, 128, 0.25);
+  }
+}
+
+// 明暗自适应开关：跟在「主题」标题下方，属于主题的说明性选项
+.mode-auto-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+
+  // 行内变体：和「深浅」分段排在同一行，不再各占一行
+  &.inline {
+    margin: 0;
+    flex: none;
+  }
+
+  input {
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex: none;
+  }
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 25b. 「自定义」主题卡片
+// -----------------------------------------------------------------------------
+//
+// 它是主题网格里的第 7 个选项（见 App.tsx）：预置色板和自定义色板在这里并列
+// 呈现，而不是"上面选主题、下面另挂一个自定义"。选中后调色面板才展开。
+.theme-card-preview-custom {
+  // 自定义色没有固定的色相条，用一小段彩环暗示"随便挑"
+  background-image: conic-gradient(
+    from 0deg,
+    #ef4444, #f59e0b, #84cc16, #10b981, #06b6d4, #6366f1, #a855f7, #ec4899, #ef4444
+  );
+  background-size: 11px 11px;
+  background-position: right 3px top 3px;
+  background-repeat: no-repeat;
+}
+
+// -----------------------------------------------------------------------------
+// 26. 关于页的动作分组
+// -----------------------------------------------------------------------------
+//
+// `.setting-row` 是两列 grid；把三个按钮直接放进去会各自占一个网格单元，
+// 「更新日志」被甩到第二行 —— 用户报的"位置不对"就是这个。包一层 flex 容器后
+// 它们回到同一列，并且随窗口变窄自动换行。
+.setting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+// -----------------------------------------------------------------------------
+// 25. 防撤回会话行的类型图标
+// -----------------------------------------------------------------------------
+//
+// 行高压缩：图标槽位 22px → 18px。注意 **SVG 仍是 12px** —— 用户明确要求
+// "图标大小与字号都不动，只压掉多余的垂直空间"，所以缩小的是装着图标的盒子，
+// 不是图标本身。真正的行高来自 `.anti-revoke-list .account-item` 的内边距。
+.ar-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  background: var(--accent-softer);
+  color: var(--accent-3);
+
+  svg {
+    // 图标尺寸档位收敛到 12 / 14 / 16，别再出现 11/13 这种一次性数值。
+    width: 12px;
+    height: 12px;
+  }
+}
+
+
+// =============================================================================
+// 24. WeportAI 页面重做（借用 DSH Web GUI 的表面与抬升模型）
+// =============================================================================
+//
+// 参考：docs/superpowers/specs/2026-09-13-ai-page-redesign.md
+//
+// 三件事：
+//  1. **表面分三层**（base / layer-1 / layer-2），栏与卡片只在需要时抬升，
+//     不再每张卡片画一圈 1px 灰边。
+//  2. **抬升用发丝线 + 双层柔影**，卡片 border: 0 —— 这是"卡片一多就成一叠框"
+//     的直接解法。
+//  3. **玻璃只留在输入条**，6px，不再是 14px 全屏模糊。
+
+.ai-side {
+  background: var(--layer-1);
+  border: 0;
+  border-right: var(--hairline) solid var(--stroke-l1);
+}
+
+.ai-main {
+  background: var(--layer-base);
+  min-width: 0;
+}
+
+// 有背景图/视频时，WeportAI 整页透明。
+//
+// 这一页原来是三层实底：`.ai-shell`（`--bg`，整个页面）、`.ai-main` / `.ai-topbar`
+// （`--layer-base` = `--bg`）。左右两栏倒是 `--layer-1`（半透明），于是壁纸只在
+// 两条窄缝里露出来 —— 用户的话是「WeportAI 没有玻璃感」。壁纸的模糊与遮罩由
+// `.app-bg` 统一处理，这一页只要不挡着就行。
+:root[data-has-bg='true'] .ai-shell,
+:root[data-has-bg='true'] .ai-main,
+:root[data-has-bg='true'] .ai-topbar {
+  background: transparent;
+}
+
+.ai-workspace {
+  background: var(--layer-1);
+  border: 0;
+  border-left: var(--hairline) solid var(--stroke-l1);
+}
+
+// 中栏顶部工具栏：会话标题在左，模型与用量在右。原来主栏没有头，
+// 模型名塞在左栏底部，用户看不出"我现在用的是哪个模型"。
+.ai-topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px var(--space-5);
+  border-bottom: var(--hairline) solid var(--stroke-l1);
+  background: var(--layer-base);
+
+  h1 {
+    // flex: 1 1 auto 而不是默认的 0 1 auto，并且让 meta 用固定的 margin-left：
+    // 默认 flex 下标题按内容取宽，再叠加 `margin-left: auto` 的 meta，会让标题
+    // 在还有空间时就先被压窄（实测截成「和家人…」）。
+    flex: 1 1 auto;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.ai-topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+// 中栏在默认窗口只有 ~400px 宽，三个胶囊占掉 286px，标题只剩 50px（截成
+// 「和家人…」）。窄下来时把胶囊的说明文字收掉，只留图标 + 数值 —— 悬浮提示里
+// 仍有完整说明，标题则拿回 150px。
+@media (max-width: 1240px) {
+  .ai-meter-label {
+    display: none;
+  }
+
+  .ai-meter-model b {
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+// 用量胶囊：标签 + 数值，等宽数字。比原来右栏那张三行统计卡更容易扫。
+.ai-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--layer-2);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+
+  b {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  &[data-tone='ok'] b {
+    color: var(--ok);
+  }
+
+  &[data-tone='warn'] b {
+    color: var(--warn);
+  }
+}
+
+// 消息：助手消息不加边框，靠留白分隔；用户气泡是唯一的强调块。
+.ai-msg.assistant {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+/**
+ * 有背景图时，中栏不再是实底，助手消息与空状态的文字就直接压在壁纸上了。
+ *
+ * 「要玻璃」不等于「文字不要底」：壁纸是一片高对比的照片，白字压在浅色区域上会
+ * 直接消失（实测截图里标题几乎看不见）。所以给文字自己**一小块**半透明底 ——
+ * 整页仍然是透的，只是每段文字有一层可以站的板。这是 DSH 那边说的"玻璃只用在
+ * 小面积上"：大面积的透明保留给页面，可读性由内容自己的底承担。
+ */
+:root[data-has-bg='true'] .ai-msg.assistant .ai-msg-bubble,
+:root[data-has-bg='true'] .ai-empty {
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+:root[data-has-bg='true'] .ai-empty {
+  padding: 18px 20px;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l1);
+}
+
+:root[data-has-bg='true'] .ai-empty-tips {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  border-radius: 10px;
+}
+
+.ai-msg.user .ai-msg-bubble {
+  border: 0;
+  background: var(--accent-soft);
+  box-shadow: none;
+  border-radius: 14px;
+}
+
+// 工具调用块：抬升的 layer-2 卡片（发丝线，无实边框）。
+.ai-step {
+  background: var(--layer-2);
+  border: 0;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l1);
+  border-radius: var(--radius);
+}
+
+// 输入条：整页唯一用玻璃的地方，且只 6px。
+.ai-composer {
+  align-items: flex-end;
+  gap: var(--space-2);
+  margin: 0 var(--space-5) var(--space-4);
+  padding: var(--space-2);
+  background: color-mix(in srgb, var(--layer-2) 82%, transparent);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 0;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2), var(--elev-panel);
+  border-radius: 16px;
+}
+
+.ai-input {
+  background: transparent;
+  border: 0;
+  padding: 8px 10px;
+  max-height: 220px;
+
+  &:focus {
+    border: 0;
+    outline: none;
+  }
+}
+
+// 右侧文件行：一行式（名字 + 大小/时间右对齐），不再折行。
+.ai-ws-note {
+  border: 0;
+  border-radius: var(--radius-sm);
+
+  &:hover {
+    background: var(--layer-2);
+  }
+}
+
+// 弹层用 layer-3 + 抬升柔影。
+.ai-actions-menu {
+  background: var(--layer-3);
+  border: 0;
+  box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2), var(--elev-prominent);
+}
+
+// ---------------------------------------------------------------------------
+// 连接器面板（v1.0）
+//
+// 每张卡片就是一次完整的「连接」流程：状态 → 步骤 → 令牌 → 结果。样式沿用设置页
+// 既有的 layer / hairline 体系，只有状态色（ok / error）走语义 token，所以
+// 换强调色或切换深浅色时这里不需要单独维护。
+// ---------------------------------------------------------------------------
+.connectors-panel {
+  .connector-card {
+    border: 0;
+    box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2);
+    border-radius: var(--radius-md);
+    background: var(--layer-2);
+    padding: 14px 16px;
+    margin-bottom: 12px;
+
+    &[data-connected='true'] {
+      background: var(--layer-1);
+      box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l3);
+    }
+  }
+
+  .connector-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    strong {
+      font-size: 14px;
+      letter-spacing: 0.01em;
+    }
+  }
+
+  // 状态胶囊：未连接是中性灰，已连接走成功色，失效走危险色。
+  .connector-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: var(--text-dim);
+    background: var(--layer-3);
+    font-variant-numeric: tabular-nums;
+
+    &[data-state='ok'] {
+      color: var(--ok);
+      background: color-mix(in srgb, var(--ok) 14%, transparent);
+    }
+
+    &[data-state='error'] {
+      color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 14%, transparent);
+    }
+  }
+
+  .connector-desc {
+    margin: 6px 0 0;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+
+  .connector-help {
+    margin: 10px 0 10px 18px;
+    padding: 0;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .connector-field {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+
+    input {
+      flex: 1 1 260px;
+      min-width: 200px;
+      height: 34px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: var(--radius-sm);
+      background: var(--layer-3);
+      color: var(--text-strong);
+      box-shadow: inset 0 0 0 var(--hairline) var(--stroke-l2);
+
+      &::placeholder {
+        color: var(--text-faint);
+      }
+
+      &:focus {
+        outline: none;
+        box-shadow: inset 0 0 0 1px var(--accent);
+      }
+    }
+  }
+
+  .connector-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+
+    .secondary-btn.danger {
+      color: var(--danger);
+    }
+  }
+
+  .link-btn {
+    margin-top: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font-size: 12.5px;
+    cursor: pointer;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  .connector-targets {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--layer-3);
+    max-height: 200px;
+    overflow: auto;
+    font-size: 12.5px;
+
+    li {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 3px 0;
+
+      em {
+        color: var(--text-faint);
+        font-style: normal;
+        font-size: 11px;
+      }
+    }
+  }
+
+  .connector-error,
+  .connector-message {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 10px 0 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  .connector-error,
+  .connector-message[data-kind='error'] {
+    color: var(--danger);
+  }
+
+  .connector-message[data-kind='ok'] {
+    color: var(--ok);
+  }
+
+  .connector-agent-row {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 0;
+    box-shadow: inset 0 var(--hairline) 0 var(--stroke-l2);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 27. 行内链接按钮
+// -----------------------------------------------------------------------------
+//
+// 「关于」里的仓库地址要可点，但按钮样式（边框、内边距）会让它在一行说明文字里
+// 显得很突兀。这里做成"看起来是链接、可点、可聚焦"的行内按钮：没有边框和内边距，
+// 只保留强调色与下划线，键盘 Tab 到它时仍有可见的 focus ring。
+.link-inline {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-3);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+
+  &:hover {
+    color: var(--accent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent-line);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+}
+// -----------------------------------------------------------------------------
+// 28. 主题两轴：深浅 / 强调色
+// -----------------------------------------------------------------------------
+//
+// 「深浅」是一个分段控件 + 可选的"跟随背景"复选，排在主题卡组之前。它是独立
+// 的一行，不再和强调色绑成 12 张组合卡片 —— 点颜色不会顺手把深浅翻过去。
+
+.theme-axis {
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+// 主题卡组：7 张（6 预设色 + 自定义）。列宽比原来宽一点（少了明暗前缀文字），
+// 窄窗口下自动折行，不会横向溢出。
+.setting-block .theme-picker {
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+}

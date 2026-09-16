@@ -156,6 +156,10 @@ export const Avatar = React.memo(function Avatar({
                             setShouldLoad(false)
                         }}
                         loading={lazy ? "lazy" : "eager"}
+                        // decoding="async"：头像是一屏几十个的小图，同步解码会把
+                        // 解码放进渲染的关键路径（滚动时表现为掉帧）。异步解码把
+                        // 它挪出主线程，画面最多晚上一帧出现。
+                        decoding="async"
                         referrerPolicy="no-referrer"
                     />
                 </>

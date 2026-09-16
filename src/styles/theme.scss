@@ -1,0 +1,628 @@
+// =============================================================================
+// v1.0 主题系统
+// =============================================================================
+//
+// 为什么需要这个文件
+// ----------------
+// v1.0 之前「主题」是两个互不相干的系统：
+//
+//   1. `colorMode`（设置页的「色彩主题」卡片）：colorful / mono，写成
+//      `:root[data-theme="mono"]`，覆盖 --accent 家族为灰阶。
+//   2. `appearance.accent`（设置页的「强调色」色块）：把 `data-accent="blue"`
+//      写在 <html> 上 —— 但**没有任何 CSS 读取这个属性**。四个色块点下去
+//      什么都不会发生。用户看到的"强调色和色彩主题不是一个东西"是准确的：
+//      一个真的改颜色，另一个只是个装饰。
+//
+// 现在合成一个模型：
+//
+//   data-mode   = dark | light          （明暗）
+//   data-accent = blue | violet | teal | rose | amber | graphite（强调色）
+//
+// 6 种强调色 × 明暗两档 = 12 套主题，都由同一组令牌驱动，页面组件只使用令牌，
+// 因此不需要逐个页面适配。旧的 `graphite` 就是原来的「黑白」。
+//
+// 令牌用 color-mix 从 --accent-raw 推导，而不是逐色写死十来个变量：写死的话
+// 每加一种强调色就要复制一整块，必然会漏掉某一个（原来的 --accent-6 就只在
+// 少数几处用到，很容易被忘掉）。明暗两档只需要换混色的方向。
+
+// -----------------------------------------------------------------------------
+// 强调色（6 种）
+// -----------------------------------------------------------------------------
+
+:root,
+:root[data-accent='blue'] {
+  --accent-raw: #5b8eff;
+}
+
+:root[data-accent='violet'] {
+  --accent-raw: #9b7bff;
+}
+
+:root[data-accent='teal'] {
+  --accent-raw: #2fb8a6;
+}
+
+:root[data-accent='rose'] {
+  --accent-raw: #f2678f;
+}
+
+:root[data-accent='amber'] {
+  --accent-raw: #e0a03c;
+}
+
+// graphite = 原来的「黑白」主题：强调色退化为中性灰阶。
+:root[data-accent='graphite'] {
+  --accent-raw: #9a9aa4;
+}
+
+// -----------------------------------------------------------------------------
+// 派生令牌
+// -----------------------------------------------------------------------------
+//
+// `--mix-light` / `--mix-dark` 是混色方向：深色主题下"更亮"的一档要向白混，
+// 浅色主题下必须向黑混，否则浅底上的浅色强调色会直接看不见。
+
+:root {
+  --mix-light: #ffffff;
+  --mix-dark: #000000;
+
+  --accent: var(--accent-raw);
+  --accent-strong: var(--accent-raw);
+  --accent-2: color-mix(in srgb, var(--accent-raw) 84%, var(--mix-light));
+  --accent-3: color-mix(in srgb, var(--accent-raw) 68%, var(--mix-light));
+  --accent-5: color-mix(in srgb, var(--accent-raw) 62%, var(--mix-light));
+  --accent-6: color-mix(in srgb, var(--accent-raw) 46%, var(--mix-light));
+  --accent-4: color-mix(in srgb, var(--accent-raw) 74%, var(--mix-dark));
+  --accent-deep: color-mix(in srgb, var(--accent-raw) 62%, var(--mix-dark));
+
+  --accent-glow: color-mix(in srgb, var(--accent-raw) 30%, transparent);
+  --accent-grad: linear-gradient(165deg, color-mix(in srgb, var(--accent-raw) 24%, transparent), color-mix(in srgb, var(--accent-raw) 4%, transparent));
+  --accent-grad-strong: linear-gradient(165deg, color-mix(in srgb, var(--accent-raw) 36%, transparent), color-mix(in srgb, var(--accent-raw) 12%, transparent));
+}
+
+// -----------------------------------------------------------------------------
+// 强调色浓度（设置 → 外观）
+// -----------------------------------------------------------------------------
+//
+// 只有色相可选的话，六个色板除了"选中项那一块"几乎看不出差别 —— 用户的反馈
+// 是"很多配色只体现在选中高亮上"。浓度轴把强调色的**用量**也交出来：
+// --accent-soft/-softer 这两档半透明底色是所有卡片/导航/表的着色源，缩放它们
+// 就等于整体调浓淡，而不必给每个组件写一份覆盖。
+
+:root,
+:root[data-accent-strength='standard'] {
+  --tint-soft: 16%;
+  --tint-softer: 9%;
+  --tint-line: 34%;
+}
+
+:root[data-accent-strength='soft'] {
+  --tint-soft: 9%;
+  --tint-softer: 5%;
+  --tint-line: 24%;
+
+  --accent-soft: color-mix(in srgb, var(--accent-raw) var(--tint-soft), transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) var(--tint-softer), transparent);
+  // 淡雅档：主按钮不用实色填充，避免整屏到处是色块。
+  --accent-fill: var(--elevated);
+  --accent-fill-color: var(--elevated);
+  --accent-fill-text: var(--text);
+  --accent-fill-border: var(--line-strong);
+}
+
+:root[data-accent-strength='vivid'] {
+  --tint-soft: 24%;
+  --tint-softer: 14%;
+  --tint-line: 46%;
+}
+
+// -----------------------------------------------------------------------------
+// 强调色浓度：浓郁档的**应用范围**
+// -----------------------------------------------------------------------------
+//
+// 只把 --tint-* 调高是不够的：那三档半透明底色只覆盖"已经用了强调色的地方"，
+// 而页面骨架（卡片、页头、导航、字段、表头、行分隔）本来全是中性灰 —— 于是
+// 用户选了「浓郁用色」却发现"看起来和标准差不多"。
+//
+// 所以浓郁档额外做两件事：
+//  1. 给原本中性的**容器**加上淡色底 / 有色描边（accent-softer / accent-line）；
+//  2. 让页头、导航、图标这些"身份位"真正带色（文字与图标取 accent-3/-4）。
+//
+// 全部只改颜色与背景图像，不引入 blur/shadow/filter —— 这些规则会命中大量元素，
+// 任何一项复合效果都会变成滚动与重绘的负担。
+
+:root[data-accent-strength='vivid'] {
+  // 骨架容器：统一的淡色底 + 有色描边
+  :is(.panel, .v09-panel, .exp-side-card, .weclone-card, .stat-cards > *, .sns-post-item, .v09-card) {
+    background-image: var(--accent-grad);
+    border-color: var(--accent-line);
+  }
+
+  // 页头 / 分区标题：身份位带色，浓度一眼可见
+  :is(.panel-head, .exp-sec-head, .v09-panel-head, .ai-topbar, .sns-topbar) {
+    background-image: var(--accent-grad);
+  }
+
+  :is(.panel-head h2, .exp-sec-head, .v09-panel-head h3, .panel-head h2 svg, .exp-sec-head svg, .v09-panel-head h3 svg) {
+    color: var(--accent-3);
+  }
+
+  // 左侧导航：未选中项也带一点色，选中项更明显
+  .rail-item {
+    color: color-mix(in srgb, var(--accent-3) 62%, var(--text-dim));
+
+    svg {
+      color: var(--accent-4);
+      opacity: 0.85;
+    }
+
+    &[data-active='true'] {
+      background: var(--accent-soft);
+      border-color: var(--accent-line);
+    }
+  }
+
+  .rail-group-title {
+    color: var(--accent-4);
+  }
+
+  // 表单与列表：让"能操作的东西"整体偏色，而不是只有选中的那一个
+  :is(.setting-row, .account-item, .notify-row, .sns-author, .media-check) {
+    border-color: color-mix(in srgb, var(--accent-raw) 18%, var(--line));
+  }
+
+  :is(.path-input, .filter-input, select, textarea) {
+    border-color: color-mix(in srgb, var(--accent-raw) 26%, var(--line));
+  }
+
+  :is(.chip, .ghost-btn, .secondary-btn) {
+    border-color: color-mix(in srgb, var(--accent-raw) 32%, var(--line));
+    color: color-mix(in srgb, var(--accent-3) 70%, var(--text));
+  }
+
+  // 进度条 / 分隔线：这类细线用浓一档的颜色，观感提升明显而成本为零
+  :is(.progress-fill, .ai-bar-fill) {
+    background: linear-gradient(90deg, var(--accent), var(--accent-3));
+  }
+
+  .exp-head-chip,
+  .badge {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+  }
+}
+
+:root {
+  --accent-soft: color-mix(in srgb, var(--accent-raw) var(--tint-soft), transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) var(--tint-softer), transparent);
+  --accent-line: color-mix(in srgb, var(--accent-raw) var(--tint-line), transparent);
+  // 主按钮底色：把原色向**黑**压 28%（而不是向 --mix-dark —— 那在浅色模式里是
+  // 白色，会把按钮调亮，白字对比度掉到 3.2 以下）。压深后六种色相都是 4.2-5.8，
+  // 白字在任何主题下都够读，而且按钮颜色仍然明显属于当前色板。
+  //
+  // 同时给 background-color：对比度审计读的是 background-color，只看 background-image
+  // 的渐变它会当作透明，然后拿白色面板去算白字（浅色模式下必然误报 1.0）。
+  --accent-fill-color: color-mix(in srgb, var(--accent-raw) 72%, #000000);
+  --accent-fill: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent-raw) 80%, #000000) 0%,
+    color-mix(in srgb, var(--accent-raw) 72%, #000000) 100%
+  );
+  --accent-fill-text: #ffffff;
+  --accent-fill-border: color-mix(in srgb, var(--accent-raw) 60%, #000000);
+}
+
+// graphite 是灰阶：软色底和渐变要更淡，否则一行行灰块看起来像禁用态。
+:root[data-accent='graphite'] {
+  --accent-soft: color-mix(in srgb, var(--accent-raw) 12%, transparent);
+  --accent-softer: color-mix(in srgb, var(--accent-raw) 6%, transparent);
+}
+
+// -----------------------------------------------------------------------------
+// 浅色模式
+// -----------------------------------------------------------------------------
+
+:root[data-mode='light'] {
+  --mix-light: #000000;
+  --mix-dark: #ffffff;
+
+  // 强调色当**文字**用在浅底上时，原始色相太亮：浅蓝 #5b8eff 在 #f4f5f9 上只有
+  // 2.85 对比度（设置页分类名、双人报告里的名字都栽在这里，是对比度审计抓出来
+  // 的）。浅色模式下把基准色压深 28%，于是所有直接使用 var(--accent) 的文字
+  // 一起变可读；--accent-soft/-softer 仍是半透明色底，不受影响。
+  //
+  // 这里写死六个压深后的色值，而不是写 `color-mix(... var(--accent-raw) ...)`：
+  // Chromium 不支持 color-mix() 里再嵌一个 color-mix()，而 --accent 会被塞进
+  // 二十多处 `color-mix(in srgb, var(--accent) N%, …)`。一旦 --accent 本身是
+  // color-mix，那些声明在浅色模式下全部变成非法值 —— 主按钮因此没有底色（白字
+  // 落在白面板上，对比度 1.0），卡片描边、选中态也一起丢掉。所以 --accent 必须
+  // 始终是**字面色值**。自定义强调色由 appearance.ts 在运行时算好同样的 0.72。
+  // 具体色值见文件下方 `:root[data-mode='light'][data-accent=…]` 一组。
+
+  // --accent-4 / --accent-deep 原本向 `--mix-dark` 混色，而浅色模式下 `--mix-dark`
+  // 是白色 —— 于是这两档在浅底上变成浅色。它们被当作**文字/图标**颜色用（分析
+  // 卡片箭头、词云、排行序号、.chip-active 的文字），浅色下直接掉到 1.5-2.3 对比度
+  // （浅色模式的对比度审计抓出来的）。这里改成向黑混，保留"深色端"的语义。
+  --accent-4: color-mix(in srgb, var(--accent-raw) 74%, #000000);
+  --accent-deep: color-mix(in srgb, var(--accent-raw) 62%, #000000);
+
+  --bg: #f4f5f9;
+  --bg-raised: #ffffff;
+  --panel: #ffffff;
+  --elevated: #eef0f6;
+  --line: #e3e5ee;
+  --line-strong: #c8ccda;
+
+  --text: #16171d;
+  --text-dim: #4c4e5b;
+  /* 最淡一档在浅底上同样要压深：原来的 #7c7f8d 压在白面板上只有 4.0。 */
+  --text-faint: #6a6d7b;
+
+  // 语义色在浅底上要压深，原来的 #9fe8a8 在白色上几乎看不清。
+  --ok: #17803d;
+  --warn: #9a6400;
+  --danger: #cf2f36;
+
+  --shadow-pop: 0 8px 28px rgba(24, 28, 48, 0.16);
+  --shadow-modal: 0 24px 64px rgba(24, 28, 48, 0.22);
+  --elev-1: 0 1px 2px rgba(24, 28, 48, 0.08);
+  --elev-2: 0 4px 14px rgba(24, 28, 48, 0.12);
+
+  color-scheme: light;
+}
+
+// 浅色模式下每种强调色的"文字/描边"用色：原始色相 × 0.72（压深 28%）。
+// 放在下面单独一组，因为它们要按 data-accent 分别命中。
+:root[data-mode='light'] {
+  --accent: #4166b8;
+  --accent-strong: #4166b8;
+}
+
+:root[data-mode='light'][data-accent='violet'] {
+  --accent: #7059b8;
+  --accent-strong: #7059b8;
+}
+
+:root[data-mode='light'][data-accent='teal'] {
+  --accent: #228477;
+  --accent-strong: #228477;
+}
+
+:root[data-mode='light'][data-accent='rose'] {
+  --accent: #ae4a67;
+  --accent-strong: #ae4a67;
+}
+
+:root[data-mode='light'][data-accent='amber'] {
+  --accent: #a1732b;
+  --accent-strong: #a1732b;
+}
+
+:root[data-mode='light'][data-accent='graphite'] {
+  --accent: #6f6f76;
+  --accent-strong: #6f6f76;
+}
+
+:root[data-mode='light'][data-accent='custom'] {
+  // 自定义色由 appearance.ts 覆写为运行时算出的同比例压深值；这里给一个兜底，
+  // 免得 JS 还没来得及写入时按钮落到"未定义"。
+  --accent: var(--accent-raw);
+  --accent-strong: var(--accent-raw);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+// 外壳的径向光晕在浅色下会变成一层脏灰 —— 由 v1.scss 的 `--app-glow` 统一关掉。
+//
+// 这里原来是 `:root[data-mode='light'] .shell { background: var(--bg) }`。`background`
+// 是**简写**，它把 background-image 一并重置成 none；而 theme.scss 在 v1.scss 之后
+// 加载、两条规则特异性又相同，于是浅色主题下壁纸的 background-image 被整条抹掉 ——
+// 表现就是"浅色 + 背景图 = 看不到图"。简写只在确实想清空整组属性时用，这里不是。
+
+// 浅色下"选中态"用的纯白 chip（黑白主题里的白底黑字）会消失在白色卡片上。
+// 统一改成强调色底 + 强调色文字。
+:root[data-mode='light'] .chip.chip-active {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  border-color: color-mix(in srgb, var(--accent-raw) 42%, transparent);
+}
+
+// -----------------------------------------------------------------------------
+// 背景层（图片与视频共用）
+// -----------------------------------------------------------------------------
+//
+// 图片和视频走**同一个**合成层：固定定位 + `contain: strict`，媒体本身只光栅化
+// 一次，之后任何布局 / 重绘都不再碰它。层级用 z-index: -1：它必须落在面板之下，
+// 而面板本身是普通流内容。
+//
+// 以前图片是 `.shell` 上的 `background-image`，两个后果：
+//   1. `filter: blur()` 对它无效 —— 「背景模糊」滑块在图片模式下**完全没作用**
+//      （只有视频那条规则带 filter），而滑块对两种媒体都显示；
+//   2. 它是外壳背景，外壳每次重绘都要重新光栅化一张全屏图，做不到"一次光栅化"。
+// 收敛成一层之后，模糊 / 遮罩 / 性能策略对两种媒体是同一条路径。
+
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  // 独立合成层：否则整屏都在变的图层会把同层的其它元素一起卷进重绘。
+  contain: strict;
+}
+
+.app-bg img,
+.app-bg video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+  // 模糊量由设置页控制；0 时浏览器不会为 0px 建立滤镜层，开销可忽略。
+  filter: blur(var(--app-bg-blur, 0px));
+  transform: scale(1.04); // 模糊会在边缘露出底色，放大一点点补掉
+  // 让合成器自己持有这一层，不要每帧回到主线程布局。
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+/**
+ * 背景遮罩的颜色：**必须与主题极性一致**，深色主题压暗、浅色主题提亮。
+ *
+ * 遮罩的职责是"把背景推远、把正文顶出来"，所以它要往**正文的反方向**走：
+ * 浅色主题的正文是深色，遮罩要是黑的，拉到 100% 就是"深色文字压在全黑上" ——
+ * 什么都看不见。反过来深色主题的正文是浅色，遮罩必须是黑的。用户报的就是这个。
+ *
+ * 也刻意**不用 `var(--bg)`**：那看着像"跟主题一致"，实际是把两个语义混成一个 ——
+ * `--bg` 是"没有背景时的窗口底色"，遮罩是"背景之上的一层对比度薄膜"。浅色那档
+ * 取的是浅色 `--bg` 的字面值（走 `data-mode` 而不是引用变量），深色那档则比
+ * `--bg` 更暗一点：遮罩要压得下去。
+ */
+:root {
+  --app-bg-scrim: #06060a;
+}
+
+:root[data-mode='light'] {
+  --app-bg-scrim: #f4f5f9;
+}
+
+.app-bg-dim {
+  position: absolute;
+  inset: 0;
+  background: var(--app-bg-scrim);
+  opacity: var(--app-bg-dim, 0);
+  // 只过渡**颜色**，不过渡不透明度：拖「背景遮罩」滑块时画面必须直接跟手，
+  // 给不透明度加过渡反而让滑杆和画面脱节。颜色只在切深浅时变，那一下淡入
+  // 才是想要的。
+  transition: background-color 200ms ease-out;
+}
+
+// 有背景时 .shell 的底色与径向光晕都要让开，否则压在 z-index:-1 的背景层上面。
+// 两个条件（视频 / 图片）合成一条：以前只有视频那条，图片模式靠 v1.scss 的另一条
+// 规则顶掉，两条同特异性规则的胜负取决于打包顺序 —— 正是下面那个浅色 bug 的温床。
+:root[data-has-bg='true'] .shell {
+  background-color: transparent;
+  background-image: none;
+}
+
+// -----------------------------------------------------------------------------
+// 表面层级（借用 DSH Web GUI 的令牌结构）
+// -----------------------------------------------------------------------------
+//
+// DSH 把颜色分三层：static 色板 → alias 语义（bg-base / bg-layer-1..3 /
+// bg-overlay / bg-mask-* / border-l1..l4）→ 组件级。组件只读别名，明暗两套只是
+// **同一批别名换值**。Weport 之前是 --bg / --panel / --elevated 三个名字被各页面
+// 各写一套半透明 rgba，所以卡片一多就"不成体系"。
+//
+// 这里补上缺失的层级与遮罩，并给弹层一张 layer-3。旧名字保留（大量规则在用），
+// 只是从现在起有明确含义：base = 窗口底，layer-1 = 栏/卡片，layer-2 = 卡内块。
+
+:root {
+  --layer-base: var(--bg);
+  --layer-1: var(--panel);
+  --layer-2: var(--elevated);
+  --layer-3: #22222b;
+  --overlay: rgba(4, 4, 6, 0.62);
+  --mask-1: rgba(0, 0, 0, 0.24);
+  --mask-2: rgba(0, 0, 0, 0.12);
+  --mask-3: rgba(0, 0, 0, 0.48);
+
+  // 抬升用"发丝线 + 两层极淡柔影"，而不是 1px 实边框：边框会在每张卡片上画出
+  // 一圈等权重的灰线，卡片一多就变成一叠框。DSH 的抬升表面 border: 0。
+  --hairline: 0.5px;
+  --stroke-l1: rgba(255, 255, 255, 0.07);
+  --stroke-l2: rgba(255, 255, 255, 0.1);
+  --elev-soft: 0 1px 2px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.14);
+  --elev-panel: 0 1px 2px rgba(0, 0, 0, 0.24), 0 8px 24px rgba(0, 0, 0, 0.28);
+  --elev-prominent: 0 2px 6px rgba(0, 0, 0, 0.3), 0 18px 48px rgba(0, 0, 0, 0.42);
+
+  // 玻璃只用在小面积浮层上。14px 那种全屏模糊在视频背景上每帧都要重算。
+  --glass-blur: 6px;
+}
+
+:root[data-mode='light'] {
+  --layer-3: #ffffff;
+  --overlay: rgba(24, 28, 48, 0.34);
+  --mask-1: rgba(24, 28, 48, 0.08);
+  --mask-2: rgba(24, 28, 48, 0.04);
+  --mask-3: rgba(24, 28, 48, 0.18);
+  --stroke-l1: rgba(24, 28, 48, 0.08);
+  --stroke-l2: rgba(24, 28, 48, 0.12);
+  --elev-soft: 0 1px 2px rgba(24, 28, 48, 0.06), 0 2px 8px rgba(24, 28, 48, 0.06);
+  --elev-panel: 0 1px 2px rgba(24, 28, 48, 0.08), 0 8px 24px rgba(24, 28, 48, 0.1);
+  --elev-prominent: 0 2px 6px rgba(24, 28, 48, 0.1), 0 18px 48px rgba(24, 28, 48, 0.16);
+}
+
+// 苹果风格 squircle 圆角：支持的引擎上把圆角从"圆弧"变成超椭圆，视觉上更顺。
+// `border-radius: 50%` 的圆形与胶囊必须显式退回 `round`，否则会被压变形。
+@supports (corner-shape: superellipse(1.5)) {
+  .panel,
+  .ai-composer,
+  .ai-side,
+  .ai-workspace,
+  .ai-actions-menu,
+  .modal,
+  .toast,
+  .theme-card,
+  .v09-panel,
+  .status-bar {
+    corner-shape: superellipse(1.5);
+  }
+
+  .account-avatar,
+  .account-avatar.fallback,
+  .ai-empty-mark,
+  .status-dot,
+  .exp-num,
+  .rail-item {
+    corner-shape: round;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 视频背景的性能取舍
+// -----------------------------------------------------------------------------
+//
+// 卡顿的主因不是视频解码，而是 `backdrop-filter`：v1.scss 给 .rail / .topbar
+// 加了 `backdrop-filter: blur(14px)`，浏览器必须**每帧**重新模糊它们背后的内容。
+// 静态图片时这个结果可以复用，播放中的视频则不能 —— 于是每帧都在做一次全屏
+// 模糊，CPU/GPU 都被吃满。
+//
+// 视频模式下改成不透明面板：省掉逐帧模糊，同时保证文字对比度（面板越透明，
+// 视频越亮的地方越容易让文字糊掉）。
+
+:root[data-bg-kind='video'] .rail,
+:root[data-bg-kind='video'] .topbar {
+  backdrop-filter: none;
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+}
+
+// 视频背景用的面板底色。
+//
+// 注意不能写成 `--bg-raised: color-mix(..., var(--bg-raised), ...)` —— 自定义
+// 属性引用自己会构成环，computed value 直接失效，于是面板底色变成透明的，
+// 视频反而把文字压没了。所以先定义一组**不带 modifer 的中性底色**，再由它派生。
+:root {
+  --surface-raised: #111116;
+  --surface-panel: #17171d;
+  --surface-elevated: #1e1e26;
+}
+
+:root[data-mode='light'] {
+  --surface-raised: #ffffff;
+  --surface-panel: #ffffff;
+  --surface-elevated: #eef0f6;
+}
+
+/**
+ * 面板"有多透"。视频/图片背景存在的整个意义就是能看见桌面，所以面板必须真的
+ * 半透明 —— 原来 94%/90% 接近不透明，浅色模式下更是一片纯白，用户看到的
+ * 就是"某些地方底是白的"。
+ *
+ * 写成字面 rgba 而不是 `color-mix(... calc(...) ...)`：calc 出现在 color-mix 的
+ * 百分比槽位在不同 Chromium 版本上解析不一致，一旦解析失败整条声明作废、
+ * 面板底色直接变成全透明（比不透明更难查）。
+ *
+ * 这里**不做逐帧 backdrop-filter**：那是视频背景卡顿的主因（每帧一次全屏模糊，
+ * 结果无法复用）。玻璃观感改由"单层半透明 + 用户可调的整体背景模糊
+ * (--app-bg-blur)"提供，而不是让每个面板自己做毛玻璃。
+ */
+:root[data-has-bg='true'] {
+  --bg-raised: rgba(17, 17, 22, 0.6);
+  --panel: rgba(23, 23, 29, 0.54);
+  --elevated: rgba(30, 30, 38, 0.66);
+}
+
+// 浅色模式的半透明面板要给得更实：白底叠在浅色壁纸上时，低透明度的白会把背景
+// 糊成一片雾。0.72 仍然透得出壁纸，而文字稳。
+:root[data-mode='light'][data-has-bg='true'] {
+  --bg-raised: rgba(255, 255, 255, 0.72);
+  --panel: rgba(255, 255, 255, 0.66);
+  --elevated: rgba(238, 240, 246, 0.78);
+}
+
+// -----------------------------------------------------------------------------
+// 主题一览卡片
+// -----------------------------------------------------------------------------
+
+.theme-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+// 小预览块：左边一条强调色，右边两条"文字行"，直接画出这套主题的观感。
+.theme-card-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 30px;
+  height: 22px;
+  padding: 3px 4px;
+  border: 1px solid;
+  border-radius: 5px;
+  flex-shrink: 0;
+
+  i {
+    display: block;
+    height: 3px;
+    border-radius: 2px;
+
+    &:first-child {
+      width: 60%;
+    }
+
+    &:last-child {
+      width: 100%;
+    }
+  }
+}
+
+.theme-card-check {
+  margin-left: auto;
+}
+
+// -----------------------------------------------------------------------------
+// 占位符字体跟控件走
+// -----------------------------------------------------------------------------
+//
+// 各处的 `input::placeholder` 只设了 color，没设 font —— 而 **placeholder 不继承
+// 宿主元素的 font**，它用的是 UA 默认字体（Windows 上是 Arial）。于是同一个输入框
+// 输入前和输入后是两套字形、两套字宽：AI 服务里的「自定义接口地址」空着时看着比
+// 旁边的标签窄一档，用户报的"输入框空白处字体和别处不同步"就是这个。
+//
+// `font: inherit` 让占位符与宿主控件完全同源，因此空态与填写态必然一致，且以后
+// 无论谁给某个输入框改字体都不需要再补一条占位符规则。
+//
+// 放在 theme.scss（最后加载）而不是 styles.css：那里已有的 ::placeholder 规则只
+// 管颜色，这里的简写若被它后面的同名简写覆盖就白写了 —— 颜色是独立属性，两者不冲突。
+input::placeholder,
+textarea::placeholder {
+  font: inherit;
+}
+
+// -----------------------------------------------------------------------------
+// 读屏专用文本
+// -----------------------------------------------------------------------------
+//
+// 高频更新的进度类界面**不能**把 aria-live 挂在会变的可见文字上：导出期间每秒
+// 2-3 条进度事件，读屏会把每一条都念出来。正确做法是另起一个视觉上不可见、
+// 只在阶段变化时改动的 role="status" 节点（见 ExportProgressBar）。
+// 用 1px + clip 而不是 display:none —— 后者会让节点从无障碍树里消失。
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+

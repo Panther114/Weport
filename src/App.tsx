@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Plug,
   PlugZap,
   Download,
   ShieldCheck,
@@ -23,13 +24,16 @@ import {
   FolderOpen,
   KeyRound,
   Users,
+  UserRound,
   RefreshCw,
   Trash2,
   RotateCcw,
   Paperclip,
   FileType,
-  ListChecks,
+  // ListChecks 已不再导入：v1.0 移除了通知页的「前置条件」清单，
+  // 它与左侧栏的全局状态栏重复表达同一件事。
   Filter,
+  Search,
   BellRing,
   ShieldPlus,
   Undo2,
@@ -46,19 +50,109 @@ import {
   Contrast,
   MapPin,
   Timer,
+  CalendarClock,
+  Pin,
+  Fingerprint,
+  Copy,
+  GitPullRequest,
+  Loader2,
+  Server,
   Settings2 as SettingsIcon,
 } from 'lucide-react'
 
-import WeportAiPanel from './components/weportAi/WeportAiPanel'
-import AiMarkdown from './components/weportAi/AiMarkdown'
+import type { SetupInfo } from './components/weportAi/aiPanelTypes'
+import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
+import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
-import SnsPage from './pages/SnsPage'
-import AnalyticsModule, { type AnalyticsSection } from './pages/analytics/AnalyticsModule'
-import { initColorMode, setColorMode, useColorMode } from './utils/colorMode'
-import './styles/v09.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'sns' | 'analytics' | 'settings'
+/**
+ * 页面级代码分割。
+ *
+ * 打包成一个入口时实测 `dist/assets/index-*.js` 是 **1751 KB**：里面塞着 ECharts
+ * （只被「分析」用）、html2canvas（只被年度报告用）、react-markdown（只被 AI 面板与
+ * 更新日志用）以及几个大页面。这些字节必须在**启动时**解析并执行一遍，代价直接
+ * 体现在首屏上（实测 FCP 2.3s、DCL 1.2s，中间那 1.1s 就是解析 + 首次渲染）。
+ *
+ * 拆出去之后启动只剩外壳与「连接微信 / 导出数据」两个核心页；其余页面第一次打开
+ * 时才加载（本地文件，几十毫秒），这块开销从"每次启动都付"变成"用到才付"。
+ *
+ * 为什么必须先验证 `file://` 下能不能 dynamic import：Chromium 对 file 协议的模块
+ * 加载有额外限制，一旦被挡住，分割出来的 chunk 会永远停在 fallback 上（等于白屏），
+ * 而 typecheck 和 vite build 都不会报错。`.ui-probe/check-dynamic-import.mjs` 在
+ * 打包后的 app.asar 里实测过：可用（13 个导出正常拿到）。
+ *
+ * 类型导入保持静态：`import type` 会被完全擦除，不产生 chunk。
+ */
+const WeportAiPanel = lazy(() => import('./components/weportAi/WeportAiPanel'))
+const AiSettingsModal = lazy(() => import('./components/weportAi/AiSettingsModal'))
+const ConnectorsPanel = lazy(() => import('./components/settings/ConnectorsPanel'))
+// 液态玻璃导航层（v1.0.4）：用本项目自己的折射引擎（lensDisplacementMap + GlassFilter）。
+// 静态引入 —— 左侧导航首屏就在，没法 lazy。刻意不用 @samasante/liquid-glass：
+// 那个库在本项目的内部尺寸测量恒为 0，材质从不生效（证据见 .ui-probe/diagnose-glass-errors.mjs）。
+import { GlassSurface } from './components/LiquidGlass/GlassSurface'
+// 通知玻璃设置面板：内部用的是真弹窗组件（NotificationToast + LiquidGlass，~230KB），
+// 必须 lazy —— 静态引入会把它拉进主窗口的启动图，正是 AGENTS.md 记过的那个坑。
+const NotificationGlassPanel = lazy(() =>
+  import('./components/settings/NotificationGlassPanel').then((m) => ({ default: m.NotificationGlassPanel }))
+)
+const WeBotModule = lazy(() => import('./pages/WeBotModule'))
+const WeClonePage = lazy(() => import('./pages/WeClonePage'))
+const AiMarkdown = lazy(() => import('./components/weportAi/AiMarkdown'))
+const SnsPage = lazy(() => import('./pages/SnsPage'))
+const AnalyticsModule = lazy(() => import('./pages/analytics/AnalyticsModule'))
+
+/**
+ * 懒加载页面的占位。
+ *
+ * 刻意不放转圈：本地 chunk 几十毫秒就位，一个 spinner 反而比空白更刺眼。占位保持
+ * `.panel` 的骨架，所以从占位切到真页面时外边距不变，不会多出一次布局偏移。
+ */
+function LazyFallback({ label }: { label: string }) {
+  return (
+    <section className="panel panel-fill lazy-page" aria-busy="true" aria-label={`${label}加载中`}>
+      <span className="lazy-page-hint">{label}…</span>
+    </section>
+  )
+}
+import {
+  ACCENT_OPTIONS,
+  ACCENT_STRENGTH_OPTIONS,
+  BLUR_FORCES_BALANCED_PX,
+  DENSITY_OPTIONS,
+  MODE_OPTIONS,
+  PRESET_ACCENTS,
+  VIDEO_QUALITY_OPTIONS,
+  backgroundKindOf,
+  backgroundProtocolUrl,
+  initAppearance,
+  normalizeHexColor,
+  probeBackground,
+  adoptModeFromBackground,
+  refreshVideoQualityInfo,
+  setAccent,
+  setAccentStrength,
+  setBackgroundBlur,
+  setBackgroundDim,
+  setBackgroundPath,
+  setCustomAccent,
+  setDensity,
+  setMode,
+  setModeAuto,
+  setVideoQuality,
+  useAppearance,
+} from './utils/appearance'
+import './styles/v09.scss'
+// WeClone（人格克隆）自带样式表 —— 从 9669dcb 恢复，勿删。
+import './styles/weclone.scss'
+// v1.0 外壳（左侧导航 + 全局状态 + 设计令牌）。必须在 v09.scss 之后加载：
+// 同优先级下它负责覆盖 .shell / .topbar 的旧规则。
+import './styles/v1.scss'
+// 主题令牌（强调色 × 明暗）。必须最后加载：它要在 styles.css 写死的浅蓝家族
+// 和 v1.scss 之后生效。
+import './styles/theme.scss'
+
+type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'analytics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -183,15 +277,38 @@ const EXPORT_DEFAULTS = {
   concurrency: 3,
 }
 
-const TABS: Array<{ id: Tab; label: string; icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }> }> = [
-  { id: 'connect', label: '连接微信', icon: PlugZap },
-  { id: 'export', label: '导出数据', icon: Download },
-  { id: 'sns', label: '朋友圈', icon: Images },
-  { id: 'analytics', label: '分析', icon: LineChart },
-  { id: 'antirecall', label: '防撤回', icon: ShieldCheck },
-  { id: 'notifications', label: '消息通知', icon: Bell },
-  { id: 'ai', label: 'WeportAI', icon: Sparkles },
-  { id: 'settings', label: '设置', icon: SettingsIcon },
+/**
+ * 左侧导航分组。
+ *
+ * 旧版是 8 个平级页签挤在顶栏里：没有层级、没有分组，再加 WeBot / 笔记 /
+ * 模型设置就必然溢出。按「我连上了什么 → 我用它做什么 → 我调整什么」分成三组，
+ * 顺序即使用顺序：先连接，再使用，最后才是系统设置。
+ */
+const NAV_GROUPS: Array<{ id: string; label: string }> = [
+  { id: 'wechat', label: '微信' },
+  { id: 'intelligence', label: '智能' },
+  { id: 'system', label: '系统' },
+]
+
+const TABS: Array<{
+  id: Tab
+  label: string
+  icon: React.ComponentType<{ size?: number | string; strokeWidth?: number | string }>
+  group: string
+  /** 页面标题下方的一句话说明——替代原先每个卡片头里重复标题的灰字。 */
+  hint: string
+}> = [
+  { id: 'connect', label: '连接微信', icon: PlugZap, group: 'wechat', hint: '数据目录、账号与解密密钥' },
+  { id: 'export', label: '导出数据', icon: Download, group: 'wechat', hint: '选择会话与格式，导出到本地' },
+  { id: 'sns', label: '朋友圈', icon: Images, group: 'wechat', hint: '浏览与导出朋友圈动态' },
+  { id: 'analytics', label: '分析', icon: LineChart, group: 'wechat', hint: '全局与群聊统计图表' },
+  { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
+  { id: 'notifications', label: '消息通知', icon: Bell, group: 'wechat', hint: '新消息与撤回弹窗提醒' },
+  { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
+  { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
+  { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
+  { id: 'weclone', label: 'WeClone', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
+  { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '启动、外观、AI 服务、数据与接口' },
 ]
 
 const FEATURE_LOCK_TIP = '请先获取解密密钥后再使用'
@@ -200,6 +317,21 @@ function MarkIcon() {
   // 顶栏品牌图标：真实应用图标（唯一来源 assets/branding/weport-icon.jpg
   // → assets/icons/icon.png → public/icon.png）
   return <img className="mark-img" src="icon.png" alt="Weport" draggable={false} />
+}
+
+/**
+ * 导航底部的全局状态点。
+ *
+ * 颜色只表示状态，不表示品牌：ok=绿 / 未就绪=琥珀。文字始终存在，所以颜色
+ * 不是唯一的信息通道（色盲用户与截图都能读懂）。
+ */
+function StatusChip({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className="status-chip" data-state={ok ? 'ok' : 'warn'}>
+      <span className="status-chip-dot" aria-hidden />
+      {label}
+    </span>
+  )
 }
 
 export default function App() {
@@ -217,10 +349,18 @@ export default function App() {
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [imageKeysOk, setImageKeysOk] = useState(false)
   const loadKeySeqRef = useRef(0)
+  /** 缺图片密钥时"再点一次继续"的一次性确认（见 startExport 中的守卫） */
+  const imageKeyAckRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
-  const [progress, setProgress] = useState<any | null>(null)
-  const [exportTaskId, setExportTaskId] = useState<string | null>(null)
+  /**
+   * 导出进度**完全不进 App 的 state**（连 taskId 都不进）：导出期间主进程按
+   * ~400ms 一条的频率推进度，App 是四千多行、含全部页面的组件，任何一条进度
+   * 落到它的 state 上都会重渲染整棵树 —— 那就是用户看到的"所有元素被推来推去"。
+   * 进度条组件（ExportProgressBar）自己订阅、自己保存 taskId，App 只在导出
+   * 结束时通过 ref 让它定格。
+   */
+  const exportProgressRef = useRef<ExportProgressBarHandle | null>(null)
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(false)
   const [notificationPosition, setNotificationPosition] = useState<NotificationPosition>('top-right')
@@ -245,6 +385,18 @@ export default function App() {
   const [httpApiEnabled, setHttpApiEnabled] = useState(false)
   const [httpApiRunning, setHttpApiRunning] = useState(false)
   const [httpApiPort, setHttpApiPort] = useState(5031)
+  // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
+  // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'about'>('general')
+  const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
+  const [mcpCopied, setMcpCopied] = useState(false)
+  // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
+  const [muteReport, setMuteReport] = useState<Awaited<ReturnType<typeof window.electronAPI.notification.getMuteReport>> | null>(null)
+  const [muteReportBusy, setMuteReportBusy] = useState(false)
+  /** 三个功能面各自指向哪个 AI 服务（设置 → AI 服务）。 */
+  const [aiAssignments, setAiAssignments] = useState<Awaited<ReturnType<typeof window.electronAPI.ai.getConsumerAssignments>> | null>(null)
+  // 自定义强调色的输入框草稿：允许用户先打出半截十六进制。
+  const [customAccentDraft, setCustomAccentDraft] = useState('')
   const [clearOpen, setClearOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
@@ -252,12 +404,93 @@ export default function App() {
   const [antiRevokeInstalled, setAntiRevokeInstalled] = useState<Record<string, boolean>>({})
   const [antiRevokeBusy, setAntiRevokeBusy] = useState(false)
   const [antiRevokeNewGroupsEnabled, setAntiRevokeNewGroupsEnabled] = useState(false)
+  const [antiRevokeQuery, setAntiRevokeQuery] = useState('')
+  const [antiRevokeFilter, setAntiRevokeFilter] = useState<'all' | 'installed' | 'pending'>('all')
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
-  const colorMode = useColorMode()
+  const appearance = useAppearance()
+  const backgroundVideoRef = useRef<HTMLVideoElement | null>(null)
+
+  // 视频背景只在窗口处于前台时播放：后台窗口没人看，继续解码只是白烧 GPU。
+  // 焦点事件挂在 window 上（Electron 窗口失焦会同步触发 blur/focus）。
+  //
+  // **试过并被否掉的优化（v1.0.3，别再重做）**：窗口不可见时把解码器整个拆掉
+  // （`removeAttribute('src')` + `load()`），想收回视频留下的 GPU 内存。
+  // 实测无效 —— 托盘态销毁窗口之后，GPU 进程 243MB（改动后）vs 226~237MB（改动前），
+  // 在噪声范围内，没有可测量的收益；原因是那部分内存是 **GPU 进程的资源池**，
+  // 与"当前还在不在解码"无关（对照实验：全程没加载过视频的背景，同一回收流程后
+  // GPU 只有 139MB，即"这个 GPU 进程有没有解过视频"决定了它，而不是"现在解不解"），
+  // Chromium 不重启 GPU 进程就不会把它还回来。
+  // 拆解码器反而给恢复路径多加一次本地重载，所以回退了，只保留"暂停"。
+  useEffect(() => {
+    const sync = () => {
+      const video = backgroundVideoRef.current
+      if (!video) return
+      if (document.hasFocus()) void video.play().catch(() => undefined)
+      else video.pause()
+    }
+    sync()
+    window.addEventListener('focus', sync)
+    window.addEventListener('blur', sync)
+    document.addEventListener('visibilitychange', sync)
+    return () => {
+      window.removeEventListener('focus', sync)
+      window.removeEventListener('blur', sync)
+      document.removeEventListener('visibilitychange', sync)
+    }
+  }, [appearance.backgroundPlaybackPath])
+
+  /**
+   * 明暗自适应：背景变化后让主进程按背景亮度重判一次明暗。
+   *
+   * 渲染层不参与采样 —— 图片与视频都通过 `weport-media://` 加载，把它们画到
+   * canvas 会 taint，`getImageData` 抛 SecurityError（实测）。主进程侧有
+   * nativeImage 解码（图片）与 ffmpeg 抽帧（视频）两条路。
+   *
+   * 视频首次导入时降采样缓存还在后台生成，所以多试几次；每次都会重新核对
+   * 「用户有没有手动选过明暗 / 背景是否又变了」，不会覆盖用户的选择。
+   */
+  useEffect(() => {
+    if (!appearance.backgroundPath) return
+    let cancelled = false
+    const timers = [600, 3500, 9000].map((delay) =>
+      window.setTimeout(() => {
+        if (!cancelled) void adoptModeFromBackground()
+      }, delay)
+    )
+    return () => {
+      cancelled = true
+      timers.forEach((t) => window.clearTimeout(t))
+    }
+  }, [appearance.backgroundPath])
+  /**
+   * macOS 能力诊断结果（仅 darwin 显示）。把「拿不到密钥」的三条独立原因
+   * 逐条测出来 —— 否则用户手上只有一句「失败」，既不能自查也不能反馈。
+   */
+  const [macDiag, setMacDiag] = useState<{
+    checks: Array<{ id: string; label: string; state: 'ok' | 'warn' | 'fail' | 'unknown'; detail: string }>
+    summary: string
+  } | null>(null)
+  const [macDiagBusy, setMacDiagBusy] = useState(false)
+  /** 「设置 → AI 服务」内联的提供商编辑器数据源（provider 配置只在这里可改）。 */
+  const [aiSetup, setAiSetup] = useState<SetupInfo | null>(null)
+
+  async function refreshAiSetup() {
+    try {
+      setAiSetup((await api.ai.getSetup()) as unknown as SetupInfo)
+    } catch {
+      setAiSetup(null)
+    }
+  }
 
   useEffect(() => {
-    void initColorMode()
+    // 主题（强调色 × 明暗）与背景都在 initAppearance 里恢复 —— v1.0 之前
+    // 「色彩主题」是另一个独立的 initColorMode，两个系统各管各的。
+    // 背景是用户上传的任意文件，配置里只存绝对路径 —— 用户可能已经把原文件
+    // 移走或删掉。加载失败时自动清空并回退到纯色，避免留下一块破图。
+    void initAppearance().then(() => probeBackground(() => pushToast('err', '背景已失效', '找不到原来选择的文件，已恢复纯色背景。', 9000)))
+    void refreshAiAssignments()
+    void refreshAiSetup()
   }, [])
 
   // 导出选项（WeFlow 对齐）
@@ -292,6 +525,11 @@ export default function App() {
   const imageKeyRequired = api.process.platform === 'win32'
     || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
+  // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
+  // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
+  const imageKeyHint = api.process.platform === 'win32'
+    ? '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）'
+    : '未配置：导出图片前必须先获取，密钥从微信缓存推导（无需附加微信进程）。若失败：先在微信中打开几张图片大图，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport，再重试。'
 
   useEffect(() => {
     setDurationInput(String(Math.round(notificationDuration / 1000)))
@@ -591,24 +829,30 @@ export default function App() {
     setImageKeyStatus('正在从微信缓存读取图片密钥…')
     try {
       let result = await api.key.autoGetImageKey(dbPath || undefined, selectedWxid)
+      // issue #20：缓存路径的失败原因必须留住。以前它被内存扫描的报错直接覆盖，
+      // 用户只看到"60 秒内未找到 AES 密钥"——而真正的原因（密钥码与这个账号对不上、
+      // 或者两个账号同机时模板取错了账号）就永远不出现在界面上。
+      const cacheError = result.success ? '' : String(result.error || '').trim()
       if (!result.success) {
-        setImageKeyStatus('缓存读取失败，尝试内存扫描（请在微信中打开几张图片大图）…')
+        setImageKeyStatus('缓存读取失败，正在用内存扫描兜底（请先在微信中打开 2-3 张图片大图）…')
         result = await api.key.scanImageKeyFromMemory(dbPath || '')
       }
       if (result.success && typeof result.xorKey === 'number' && result.aesKey) {
         await api.config.updateWxidEntry(selectedWxid, { imageXorKey: result.xorKey, imageAesKey: result.aesKey, updatedAt: Date.now() })
         setImageKeysOk(true)
         if (result.verified === false) {
-          // keyService 未能用 *_t.dat 模板校验密钥归属（如目录里还没有图片缓存），
-          // 密钥可能属于别的账号——明确提示而不是静默当作成功。
-          pushToast('info', '图片密钥已保存（未校验）', '未能确认密钥属于当前账号；若导出图片仍失败，请先在微信中查看几张图片后重新获取', 12000)
+          // keyService 未能用本账号自己的 *_t.dat 模板校验密钥归属（目录里还没有图片
+          // 缓存，或账号目录没定位到）——明确提示而不是静默当作成功。
+          pushToast('info', '图片密钥已保存（未校验）', `未能确认密钥属于账号 ${selectedWxid}；若导出图片仍失败，请用该账号在微信中打开几张图片后重新获取`, 12000)
         } else {
-          pushToast('ok', '图片密钥获取成功', '现在可以导出图片了')
+          pushToast('ok', '图片密钥获取成功', `已按账号 ${selectedWxid} 校验并保存，现在可以导出图片了`)
         }
       } else if (result.success) {
         pushToast('err', '图片密钥不完整', '未取得完整的 XOR/AES 密钥，请重试或使用内存扫描')
       } else {
-        pushToast('err', '图片密钥获取失败', result.error || '请先在微信中查看几张图片后重试', 10000)
+        // 两条路径的说明都带上：缓存路径解释"为什么没推导出来"，内存扫描解释"下一步"。
+        const detail = [cacheError, String(result.error || '').trim()].filter(Boolean).join(' ')
+        pushToast('err', '图片密钥获取失败', detail || '请先在微信中查看几张图片后重试', 20000)
       }
     } catch (e) {
       pushToast('err', '图片密钥获取失败', String(e), 10000)
@@ -673,6 +917,11 @@ export default function App() {
             setHttpApiRunning(status?.running === true)
             if (status?.running) setHttpApiPort(status.port)
           }
+        } catch { /* noop */ }
+        // MCP 服务的状态一直只存在于主进程：v1.0 之前用户既看不到它是否在跑，
+        // 也拿不到那份客户端配置，只能照文档手抄。这里把它读进设置页。
+        try {
+          setMcpStatus(await api.mcp.getStatus())
         } catch { /* noop */ }
         const silent = await api.config.get('silentStartup')
         setSilentStartup(silent === true)
@@ -739,12 +988,6 @@ export default function App() {
       api.key.onImageKeyStatus((payload) => {
         setImageKeyStatus(payload.message)
       }),
-      api.export.onProgress((payload) => {
-        setProgress(payload)
-        // 顶部品牌区不再显示导出进度（避免 `收集消息149,020条·群名` 把页签挤压导致布局跳动），
-        // 导出状态仅在导出面板的进度条上方以固定高度展示当前会话名。
-        if (payload.taskId) setExportTaskId(payload.taskId)
-      }),
       api.app.onUpdateAvailable((info) => {
         setUpdateInfo({ version: info.version, body: info.releaseNotes || undefined })
         pushToast('info', `发现新版本 v${info.version}`, '可在顶部横幅更新')
@@ -779,6 +1022,7 @@ export default function App() {
   const dbReady = dbPath.trim().length > 0
   const accountReady = selectedWxid.length > 0
   const allReady = dbReady && accountReady && keyOk
+  const activeTab = TABS.find((t) => t.id === tab) ?? TABS[0]
 
   useEffect(() => {
     if (tab !== 'export' || !keyOk || exportSessionsLoaded || exportSessionsLoading) return
@@ -925,15 +1169,29 @@ export default function App() {
       return
     }
     // issue #15：微信 4.x 在 Windows/macOS/Linux 均可能使用加密 .dat 图片，
-    // 缺失图片密钥时导出只会得到 [图片] 占位符。提前拦截并指引获取密钥。
+    // 缺失图片密钥时导出只会得到 [图片] 占位符。
+    //
+    // 但**不能直接拒绝导出**：在 macOS 上图片密钥经常拿不到（WeChat 是
+    // 加固签名 + 沙盒进程，task_for_pid 会被系统拒绝），硬拦截会把用户彻底
+    // 卡死 —— 连文字记录都导不出去，比导出占位符糟糕得多。
+    // 因此改为「先警告、再确认」：第一次点击只说明后果，第二次点击照常导出；
+    // 缺密钥的图片会以 [图片] 占位，并在完成提示里给出具体数量。
     if (exportMedia.images && imageKeyRequired && !imageKeysOk) {
-      pushToast('err', '尚未配置图片密钥', '请先点击「获取图片密钥」，否则导出的图片将全部失败', 10000)
-      return
+      if (!imageKeyAckRef.current) {
+        imageKeyAckRef.current = true
+        pushToast(
+          'err',
+          '尚未配置图片密钥',
+          '导出的图片将全部显示为 [图片] 占位符。再次点击「开始导出」仍会继续；建议先点击「获取图片密钥」。',
+          12000
+        )
+        return
+      }
+      imageKeyAckRef.current = false
     }
 
     setBusy(true)
-    setProgress({ current: 0, total: 0, phaseLabel: '准备中' })
-    setExportTaskId(null)
+    exportProgressRef.current?.reset()
     setBusyLabel(exportSelectionMode === 'all'
       ? '开始导出全部会话…'
       : `开始导出 ${selectedExportSessionIds.size} 个会话…`)
@@ -965,29 +1223,22 @@ export default function App() {
     try {
       const result = await api.export.exportSessions(exportPath.trim(), options)
       await refreshExportLog(exportPath.trim())
+      // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
+      const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
+      const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
       if (result.success) {
-        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）`, 7000)
-        setProgress((p: any) => (p ? { ...p, current: p.total || p.current, phaseLabel: '完成', phase: 'complete' } : { current: 1, total: 1, phaseLabel: '完成', phase: 'complete' }))
+        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}`, imageKeyMissing > 0 ? 12000 : 7000)
+        // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
+        // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
+        exportProgressRef.current?.complete()
       } else {
-        pushToast('err', '导出未完全成功', result.error || `成功 ${result.successCount ?? 0} / 失败 ${result.failCount ?? 0}`, 12000)
+        pushToast('err', '导出未完全成功', `${result.error || `成功 ${result.successCount ?? 0} / 失败 ${result.failCount ?? 0}`}${imageKeyWarning}`, 12000)
       }
     } catch (e) {
       pushToast('err', '导出失败', String(e), 12000)
     } finally {
       setBusy(false)
       setBusyLabel('')
-      setExportTaskId(null)
-    }
-  }
-
-  async function cancelExport() {
-    if (!exportTaskId) return
-    const res = await api.export.cancelTask(exportTaskId).catch(() => ({ success: false }))
-    if (!res.success) {
-      pushToast('err', '取消失败', '导出任务不存在或已结束', 6000)
-    } else {
-      pushToast('info', '正在取消导出…', '已写入的部分文件将被清理')
-      setBusyLabel('正在取消导出…')
     }
   }
 
@@ -1137,6 +1388,70 @@ export default function App() {
     }
   }
 
+  /**
+   * 把 MCP 客户端配置整段复制到剪贴板。
+   *
+   * 配置里含有访问令牌，所以整段 JSON 由主进程拼好返回 —— 令牌不出主进程，
+   * 渲染进程只负责写剪贴板。
+   */
+  async function copyMcpClientConfig() {
+    try {
+      const result = await api.mcp.getClientConfig()
+      await navigator.clipboard.writeText(result.json)
+      setMcpStatus({ running: result.running, port: result.port, host: result.host, tokenConfigured: result.tokenConfigured })
+      setMcpCopied(true)
+      window.setTimeout(() => setMcpCopied(false), 2000)
+      pushToast('ok', '已复制 MCP 客户端配置', '粘进 claude_desktop_config.json 后重启宿主', 6000)
+    } catch (e) {
+      pushToast('err', '复制失败', String((e as Error)?.message || e), 8000)
+    }
+  }
+
+  /**
+   * 拉取免打扰自检报告。
+   *
+   * 「跟随微信消息免打扰」跨四层（原生 → wcdbCore → chatService 缓存 → 推送
+   * 过滤），任何一层返回空都只会表现成「通知照发」，不会有任何报错。所以这里
+   * 把每层的中间数字都取回来给用户看，而不是只显示一句「已开启」。
+   */
+  async function openMuteReport() {
+    setMuteReportBusy(true)
+    try {
+      setMuteReport(await api.notification.getMuteReport())
+    } catch (e) {
+      pushToast('err', '自检失败', String((e as Error)?.message || e), 9000)
+    } finally {
+      setMuteReportBusy(false)
+    }
+  }
+
+  /** 读取「设置 → AI 服务」的分配情况。 */
+  async function refreshAiAssignments() {
+    try {
+      setAiAssignments(await api.ai.getConsumerAssignments())
+    } catch {
+      setAiAssignments({ success: false, consumers: [], profiles: [], activeProfileId: '' })
+    }
+  }
+
+  async function assignAiConsumer(consumer: 'chat' | 'weclone' | 'webot', profileId: string) {
+    const result = await api.ai.assignConsumer(consumer, profileId)
+    if (!result.success) {
+      pushToast('err', '设置失败', result.error || '', 8000)
+      return
+    }
+    await refreshAiAssignments()
+  }
+
+  async function activateAiProfile(profileId: string) {
+    const result = await api.ai.activateProfile(profileId)
+    if (!result.success) {
+      pushToast('err', '设置默认服务失败', result.error || '', 8000)
+      return
+    }
+    await refreshAiAssignments()
+  }
+
   async function toggleNotifications(on: boolean) {
     setNotificationsEnabled(on)
     await api.config.set('notificationEnabled', on)
@@ -1243,6 +1558,9 @@ export default function App() {
       const sessionsResult = await api.chat.getAntiRevokeSessions()
       const sessions: AntiRevokeSession[] = sessionsResult.sessions || []
       setAntiRevokeSessions(sessions)
+      // 头像/昵称补全不阻塞列表：`getSessions()` 只回缓存里的联系人信息，未读过的
+      // 会话没有头像，先渲染列表再补齐，避免"打开这一页先白等一秒"。
+      void enrichAntiRevokeContacts(sessions)
       if (sessions.length > 0) {
         const ids = sessions.map((s) => s.username)
         const check = await api.chat.checkAntiRevokeTriggers(ids)
@@ -1258,6 +1576,29 @@ export default function App() {
       pushToast('err', '防撤回状态刷新失败', String(e))
     } finally {
       setAntiRevokeBusy(false)
+    }
+  }
+
+  async function enrichAntiRevokeContacts(sessions: AntiRevokeSession[]) {
+    const missing = sessions.filter((s) => !s.avatarUrl || !s.displayName).map((s) => s.username)
+    if (!missing.length) return
+    try {
+      const enriched = await api.chat.enrichSessionsContactInfo(missing)
+      const contacts = enriched?.contacts
+      if (!contacts) return
+      setAntiRevokeSessions((prev) =>
+        prev.map((s) => {
+          const info = contacts[s.username]
+          if (!info) return s
+          return {
+            ...s,
+            displayName: s.displayName || info.displayName,
+            avatarUrl: s.avatarUrl || info.avatarUrl,
+          }
+        })
+      )
+    } catch {
+      /* 补全失败就用首字母占位，不影响安装/还原 */
     }
   }
 
@@ -1302,14 +1643,48 @@ export default function App() {
     }
   }
 
-  const progressPct = useMemo(() => {
-    if (!progress || !progress.total) return progress?.phase === 'complete' ? 100 : 0
-    return Math.max(0, Math.min(100, (progress.current / progress.total) * 100))
-  }, [progress])
-
   const formatFolder = FORMAT_FOLDERS[format] || 'TXT'
   const installedCount = Object.values(antiRevokeInstalled).filter(Boolean).length
-  const isExporting = busy && tab === 'export' && !!progress && progress.phase !== 'complete'
+
+  // 会话一多，防撤回列表就没法用了 —— 没有搜索，也没法只看「还没装的」。
+  const filteredAntiRevokeSessions = useMemo(() => {
+    const kw = antiRevokeQuery.trim().toLowerCase()
+    return antiRevokeSessions.filter((s) => {
+      const installed = antiRevokeInstalled[s.username] === true
+      if (antiRevokeFilter === 'installed' && !installed) return false
+      if (antiRevokeFilter === 'pending' && installed) return false
+      if (!kw) return true
+      return (s.displayName || '').toLowerCase().includes(kw) || s.username.toLowerCase().includes(kw)
+    })
+  }, [antiRevokeSessions, antiRevokeInstalled, antiRevokeQuery, antiRevokeFilter])
+
+  const antiRevokeActions = () => (
+    <div className="panel-actions">
+      <span className="hint">
+        当前显示 {filteredAntiRevokeSessions.length} / {antiRevokeSessions.length} 个会话
+      </span>
+      <div className="panel-actions-buttons">
+        <button
+          className="secondary-btn"
+          type="button"
+          disabled={!allReady || antiRevokeBusy || antiRevokeSessions.length === 0}
+          onClick={() => void installAntiRevoke(antiRevokeSessions.map((s) => s.username))}
+        >
+          <ShieldPlus size={14} />
+          全部安装
+        </button>
+        <button
+          className="danger-btn"
+          type="button"
+          disabled={!allReady || antiRevokeBusy || installedCount === 0}
+          onClick={() => void uninstallAntiRevoke(Object.keys(antiRevokeInstalled).filter((id) => antiRevokeInstalled[id]))}
+        >
+          <Undo2 size={14} />
+          全部还原
+        </button>
+      </div>
+    </div>
+  )
 
   function switchTab(next: Tab) {
     setTab(next)
@@ -1399,11 +1774,105 @@ export default function App() {
     pushToast('ok', '会话过滤已保存', summary)
   }
 
+  /**
+   * 选择背景图片。
+   *
+   * 只保存绝对路径、不复制文件：渲染层用既有的 `weport-media://` 协议按绝对
+   * 路径读取本地图片（见 utils/appearance.ts 的说明）。这样不新增 IPC、不把
+   * 图片塞进配置文件。
+   */
+  async function pickBackgroundImage(): Promise<void> {
+    try {
+      const selected = await api.dialog.openFile({
+        title: '选择背景（图片或视频）',
+        // 视频背景在 v1.0.1 已经支持，但这里的过滤器还只写着图片 —— 用户根本
+        // 选不到 mp4。第一项是"全部支持的类型"，Windows 的资源管理器会默认选中它。
+        filters: [
+          { name: '图片与视频', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'mp4', 'webm', 'm4v', 'mov', 'ogv'] },
+          { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif'] },
+          { name: '视频', extensions: ['mp4', 'webm', 'm4v', 'mov', 'ogv'] },
+        ],
+      })
+      if (!selected) return
+      setBackgroundPath(selected)
+      // 新选的可能是一段视频：主进程此刻会开始后台转码，实际档位/长边要问它。
+      void refreshVideoQualityInfo()
+    } catch (error) {
+      pushToast('err', '选择背景失败', String((error as Error)?.message || error), 9000)
+    }
+  }
+
+  /** macOS 兼容性检查：把结果直接展示出来，并支持一键复制给维护者。 */
+  async function runMacDiagnostics(): Promise<void> {
+    setMacDiagBusy(true)
+    try {
+      const report = await api.diagnostics.collectMac()
+      if (!report.supported) {
+        pushToast('err', '当前平台不是 macOS', '这个检查只在 macOS 上有意义。', 7000)
+        return
+      }
+      setMacDiag({ checks: report.checks, summary: report.summary })
+    } catch (error) {
+      pushToast('err', '检查失败', String((error as Error)?.message || error), 9000)
+    } finally {
+      setMacDiagBusy(false)
+    }
+  }
+
+  async function copyMacDiagnostics(): Promise<void> {
+    if (!macDiag) return
+    try {
+      await navigator.clipboard.writeText(macDiag.summary)
+      pushToast('ok', '诊断信息已复制', '可以直接粘贴给维护者；内容不含聊天记录与密钥。', 6000)
+    } catch (error) {
+      pushToast('err', '复制失败', String((error as Error)?.message || error), 9000)
+    }
+  }
+
+  const backgroundKind = backgroundKindOf(appearance.backgroundPlaybackPath)
+
   return (
     <div className="shell">
-      <header className="topbar">
+      {/* 背景层：图片与视频共用同一个合成层（见 theme.scss 的 `.app-bg`）。
+          视频必须是真实的 <video>（而且要 muted + playsInline 才允许自动播放），
+          窗口在前台时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃
+          GPU 和电，而后台窗口没有人看。图片走 <img>：只有它是<img>才能吃到
+          「背景模糊」，也才能一次光栅化后不再重绘。 */}
+      {backgroundKind === 'none' ? null : (
+        <div className="app-bg" aria-hidden="true">
+          {backgroundKind === 'video' ? (
+            <video
+              ref={backgroundVideoRef}
+              src={backgroundProtocolUrl(appearance.backgroundPlaybackPath)}
+              autoPlay
+              loop
+              muted
+              playsInline
+              preload="auto"
+              // 出帧后按背景亮度自动定明暗（用户手动选过就不再干预）。
+              // 挂在 loadeddata 而不是 mount：视频没解码完时读不到像素。
+              onLoadedData={() => void adoptModeFromBackground()}
+            />
+          ) : (
+            // 同一条亮度自适应：探针与设置页都靠它决定「跟随背景」的明暗。
+            <img
+              src={backgroundProtocolUrl(appearance.backgroundPlaybackPath)}
+              alt=""
+              draggable={false}
+              onLoad={() => void adoptModeFromBackground()}
+            />
+          )}
+          <div className="app-bg-dim" />
+        </div>
+      )}
+      <GlassSurface
+        className="rail"
+        role="navigation"
+        aria-label="主导航"
+        surfaceId="rail"
+      >
         <div
-          className="brand"
+          className="rail-brand"
           role="button"
           tabIndex={0}
           title="关于与更新"
@@ -1418,45 +1887,71 @@ export default function App() {
           <div className="mark" aria-hidden>
             <MarkIcon />
           </div>
-          <div className="brand-text">
+          <div className="rail-brand-text">
             <h1>Weport</h1>
-            <p title={busy && tab === 'export' ? `v${version}` : `微信工具箱 · v${version}${busyLabel ? ` · ${busyLabel}` : ''}`}>
-              微信工具箱 · v{version}
-              {busy && tab === 'export' ? '' : busyLabel ? ` · ${busyLabel}` : ''}
-            </p>
+            <p>v{version}</p>
           </div>
         </div>
-        <nav className="tabs" role="tablist" aria-label="功能">
-          {TABS.map((t) => {
-            const Icon = t.icon
-            // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
-            const locked = t.id !== 'connect' && !allReady
-            const button = (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === t.id}
-                className="tab"
-                data-active={tab === t.id}
-                disabled={locked}
-                onClick={() => switchTab(t.id)}
-              >
-                <Icon size={15} strokeWidth={1.8} />
-                <span>{t.label}</span>
-              </button>
-            )
-            // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
-            return locked ? (
-              <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
-                {button}
-              </span>
-            ) : (
-              button
-            )
-          })}
+
+        <nav className="rail-nav" role="tablist" aria-label="功能">
+          {NAV_GROUPS.map((group) => (
+            <div className="rail-group" key={group.id}>
+              <div className="rail-group-label">{group.label}</div>
+              {TABS.filter((t) => t.group === group.id).map((t) => {
+                const Icon = t.icon
+                // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
+                const locked = t.id !== 'connect' && !allReady
+                const button = (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === t.id}
+                    className="rail-item"
+                    data-active={tab === t.id}
+                    disabled={locked}
+                    onClick={() => switchTab(t.id)}
+                  >
+                    {/* 描边跟着文字重量走：选中态文字更重，图标也加粗一档 */}
+                    <Icon size={16} strokeWidth={tab === t.id ? 2 : 1.6} />
+                    <span>{t.label}</span>
+                  </button>
+                )
+                // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
+                return locked ? (
+                  <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+                    {button}
+                  </span>
+                ) : (
+                  button
+                )
+              })}
+            </div>
+          ))}
         </nav>
-        <div className="top-actions" />
+
+        {/* 全局状态：旧版把「已连接 / 已就绪 / 1 个」分别写在连接页、通知页和
+            导出页里，用户永远不确定哪一个才是当前真实状态。这里合并成唯一
+            一处真源，各页面里的重复状态随之删掉。 */}
+        <div className="rail-foot" aria-label="连接状态">
+          <StatusChip ok={dbReady} label={dbReady ? '数据目录' : '未连接目录'} />
+          <StatusChip ok={accountReady} label={accountReady ? '账号已选' : '未选账号'} />
+          <StatusChip ok={keyOk} label={keyOk ? '密钥就绪' : '缺少密钥'} />
+        </div>
+      </GlassSurface>
+
+      <header className="topbar">
+        <div className="topbar-title">
+          <h2>{activeTab.label}</h2>
+          <p>{activeTab.hint}</p>
+        </div>
+        <div className="top-actions">
+          {busy && busyLabel ? (
+            <span className="status-busy" role="status">
+              {busyLabel}
+            </span>
+          ) : null}
+        </div>
       </header>
 
       {updateInfo && (
@@ -1465,7 +1960,9 @@ export default function App() {
             <h2>发现新版本 v{updateInfo.version}</h2>
             {updateInfo.body ? (
               <div className="update-banner-notes">
-                <AiMarkdown text={updateInfo.body} />
+                <Suspense fallback={null}>
+                  <AiMarkdown text={updateInfo.body} />
+                </Suspense>
               </div>
             ) : (
               <p className="hint" style={{ marginTop: 4 }}>建议更新以获得修复与改进。</p>
@@ -1494,221 +1991,305 @@ export default function App() {
 
       <div className="workspace" key={tab}>
         {tab === 'connect' && (
-          <div className="two-col">
-            <section className="panel connect-loc">
-              <div className="panel-head">
-                <h2>
-                  <FolderOpen size={15} />
+          /* 重排：原来是「左栏 = 数据位置 + 账号，右栏 = 密钥」的两列排布，读起来
+             是 1 → 3 → 2 —— 密钥排在账号前面，而它实际上必须最后做。现在改成
+             和导出页同一套编号分区，按真正的先后顺序单栏排列，每一步自带完成状态，
+             于是这一页本身也是一张进度清单。 */
+          <div className="page-stack">
+            <section className="panel">
+              {/* 第 1、2 步并排：它们各自只有「一个输入框 + 两个按钮」和「一个账号
+                  列表」，单栏铺满 1040px 时中间全是空白；密钥那一步有输入框和
+                  折叠说明，独占一行。 */}
+              <div className="connect-steps">
+              <div className="exp-section">
+                <div className="exp-sec-head">
+                  <span className="exp-num">1</span>
+                  <FolderOpen size={14} />
                   微信聊天记录数据位置
-                </h2>
-                <span className={dbReady ? 'st-ok' : undefined}>{dbReady ? '已连接' : '未选择'}</span>
-              </div>
-              <div className="field">
-                <label htmlFor="dbPath">微信数据文件夹</label>
-                <div className="path-row">
-                  <input
-                    id="dbPath"
-                    className="path-input"
-                    value={dbPath}
-                    placeholder={DEFAULT_DB_HINT}
-                    onChange={(e) => setDbPath(e.target.value)}
-                    onBlur={() => {
-                      if (dbPath.trim()) void persist({ dbPath: dbPath.trim() })
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && dbPath.trim()) {
-                        void persist({ dbPath: dbPath.trim() })
-                        void refreshAccounts(dbPath.trim())
-                      }
-                    }}
-                    spellCheck={false}
-                  />
-                  <button className="ghost-btn" type="button" onClick={() => void pickDbFolder()} disabled={busy}>
-                    浏览
-                  </button>
-                </div>
-              </div>
-              <div className="btn-row">
-                <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
-                  <RefreshCw size={14} />
-                  重新扫描
-                </button>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => void refreshAccounts(dbPath)}
-                  disabled={busy || !dbPath.trim()}
-                >
-                  <Users size={14} />
-                  刷新账号
-                </button>
-              </div>
-            </section>
-
-            <section className="panel connect-key">
-              <div className="panel-head">
-                <h2>
-                  <KeyRound size={15} />
-                  解密密钥
-                </h2>
-                <span className={keyOk ? 'st-ok' : 'st-warn'}>{keyOk ? '已就绪' : '待提取'}</span>
-              </div>
-              <ol className="steps">
-                <li>
-                  <span className="step-num">1</span>
-                  <span>
-                    打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
-                    然后退出当前登录（或完全退出微信）
+                  <span className="exp-sec-meta">
+                    {dbReady ? <span className="badge ok">已就绪</span> : <span className="badge">待设置</span>}
                   </span>
-                </li>
-                <li>
-                  <span className="step-num">2</span>
-                  <span>
-                    点击下方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
-                    此时 Weport 已挂接微信进程，正在等待登录
-                  </span>
-                </li>
-                <li>
-                  <span className="step-num">3</span>
-                  <span>
-                    用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
-                  </span>
-                </li>
-                <li>
-                  <span className="step-num">4</span>
-                  <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
-                </li>
-              </ol>
-
-              {keyHookReady && busy && (
-                <div className="callout ready" role="status">
-                  Hook 已就绪 — 请现在登录微信，或退出账号后重新登录（可在手机上确认）。
                 </div>
-              )}
-              {keyStatus && (
-                <p className="hint" style={{ marginTop: 8 }}>
-                  {keyStatus}
-                </p>
-              )}
-
-              <div className="field" style={{ marginTop: 12 }}>
-                <label htmlFor="decryptKey">数据库密钥</label>
-                <div className="path-row">
-                  <input
-                    id="decryptKey"
-                    className="path-input"
-                    type={showKey ? 'text' : 'password'}
-                    value={decryptKey}
-                    placeholder="64 位十六进制密钥…"
-                    onChange={(e) => {
-                      const v = e.target.value.trim()
-                      setDecryptKey(v)
-                    }}
-                    spellCheck={false}
-                    autoComplete="off"
-                    disabled={busy}
-                  />
-                  <button
-                    className="ghost-btn icon-btn-sm"
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    disabled={busy}
-                    title={showKey ? '隐藏密钥' : '显示密钥'}
-                    aria-label={showKey ? '隐藏密钥' : '显示密钥'}
-                  >
-                    {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="btn-row">
-                <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
-                  <KeyRound size={14} />
-                  {busy && !progress ? '提取中…' : '提取密钥'}
-                </button>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => void confirmKeyAndConnect()}
-                  disabled={busy || !dbReady || !accountReady || !keyOk}
-                >
-                  <PlugZap size={14} />
-                  确认密钥并连接
-                </button>
-              </div>
-              <p className="hint">
-                {keyOk
-                  ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
-                  : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
-              </p>
-            </section>
-
-            <section className="panel connect-acc">
-              <div className="panel-head">
-                <h2>
-                  <Users size={15} />
-                  微信账号
-                </h2>
-                <span className={accounts.length ? 'st-ok' : undefined}>
-                  {accounts.length ? `${accounts.length} 个` : '未选择'}
-                </span>
-              </div>
-              {accounts.length === 0 ? (
-                <div className="empty">选择或扫描数据目录后显示账号</div>
-              ) : (
-                <div className="account-list account-list-row" role="listbox" aria-label="微信账号">
-                  {accounts.map((account) => (
-                    <button
-                      key={account.wxid}
-                      type="button"
-                      className="account-item"
-                      data-active={account.wxid === selectedWxid}
-                      role="option"
-                      aria-selected={account.wxid === selectedWxid}
-                      onClick={() => selectAccount(account.wxid)}
-                      disabled={busy}
-                    >
-                      {account.avatarUrl ? (
-                        <img
-                          className="account-avatar"
-                          src={account.avatarUrl}
-                          alt=""
-                          loading="lazy"
-                          onError={(e) => {
-                            ;(e.target as HTMLImageElement).style.display = 'none'
-                          }}
-                        />
-                      ) : (
-                        <span className="account-avatar fallback">
-                          {(account.nickname || account.wxid).charAt(0).toUpperCase()}
-                        </span>
-                      )}
-                      <div>
-                        <strong>{account.nickname || account.wxid}</strong>
-                        <span>{account.wxid}</span>
-                      </div>
-                      {account.wxid === selectedWxid ? (
-                        <span className="badge ok">当前</span>
-                      ) : (
-                        <span className="badge">选择</span>
-                      )}
+                <div className="field">
+                  <label htmlFor="dbPath">微信数据文件夹</label>
+                  <div className="path-row">
+                    <input
+                      id="dbPath"
+                      className="path-input"
+                      value={dbPath}
+                      placeholder={DEFAULT_DB_HINT}
+                      onChange={(e) => setDbPath(e.target.value)}
+                      onBlur={() => {
+                        if (dbPath.trim()) void persist({ dbPath: dbPath.trim() })
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && dbPath.trim()) {
+                          void persist({ dbPath: dbPath.trim() })
+                          void refreshAccounts(dbPath.trim())
+                        }
+                      }}
+                      spellCheck={false}
+                    />
+                    <button className="ghost-btn" type="button" onClick={() => void pickDbFolder()} disabled={busy}>
+                      浏览
                     </button>
-                  ))}
+                  </div>
                 </div>
-              )}
+                <div className="btn-row">
+                  <button className="secondary-btn" type="button" onClick={() => void detectDb()} disabled={busy}>
+                    <RefreshCw size={14} />
+                    自动扫描
+                  </button>
+                  <button
+                    className="secondary-btn"
+                    type="button"
+                    onClick={() => void refreshAccounts(dbPath)}
+                    disabled={busy || !dbPath.trim()}
+                  >
+                    <Users size={14} />
+                    刷新账号
+                  </button>
+                </div>
+              </div>
+
+              <div className="exp-section">
+                <div className="exp-sec-head">
+                  <span className="exp-num">2</span>
+                  <Users size={14} />
+                  选择微信账号
+                  <span className="exp-sec-meta">
+                    {accounts.length > 0 ? <span className="card-sub">{accounts.length} 个</span> : null}
+                    {accountReady ? <span className="badge ok">已选择</span> : <span className="badge">待选择</span>}
+                  </span>
+                </div>
+                {accounts.length === 0 ? (
+                  <div className="empty">选择或扫描数据目录后显示账号</div>
+                ) : (
+                  <div className="account-list account-list-row" role="listbox" aria-label="微信账号">
+                    {accounts.map((account) => (
+                      <button
+                        key={account.wxid}
+                        type="button"
+                        className="account-item"
+                        data-active={account.wxid === selectedWxid}
+                        role="option"
+                        aria-selected={account.wxid === selectedWxid}
+                        onClick={() => selectAccount(account.wxid)}
+                        disabled={busy}
+                      >
+                        {account.avatarUrl ? (
+                          <img
+                            className="account-avatar"
+                            src={account.avatarUrl}
+                            alt=""
+                            loading="lazy"
+                            onError={(e) => {
+                              ;(e.target as HTMLImageElement).style.display = 'none'
+                            }}
+                          />
+                        ) : (
+                          <span className="account-avatar fallback">
+                            {(account.nickname || account.wxid).charAt(0).toUpperCase()}
+                          </span>
+                        )}
+                        <div>
+                          <strong>{account.nickname || account.wxid}</strong>
+                          <span>{account.wxid}</span>
+                        </div>
+                        {account.wxid === selectedWxid ? (
+                          <span className="badge ok">当前</span>
+                        ) : (
+                          <span className="badge">选择</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              </div>
+
+              <div className="exp-section">
+                <div className="exp-sec-head">
+                  <span className="exp-num">3</span>
+                  <KeyRound size={14} />
+                  解密密钥
+                  <span className="exp-sec-meta">
+                    {keyOk ? <span className="badge ok">格式正确</span> : <span className="badge">待提取</span>}
+                  </span>
+                </div>
+
+                {/* 顺序即优先级：这是一张「要你做事」的卡片，所以控件在最前，
+                    说明收进折叠区。旧版把四段编号散文放在最上面，用户必须先读完
+                    才能看见按钮在哪。 */}
+                <div className="field">
+                  <label htmlFor="decryptKey">数据库密钥</label>
+                  <div className="path-row">
+                    <input
+                      id="decryptKey"
+                      className="path-input"
+                      type={showKey ? 'text' : 'password'}
+                      value={decryptKey}
+                      placeholder="64 位十六进制密钥…"
+                      onChange={(e) => {
+                        const v = e.target.value.trim()
+                        setDecryptKey(v)
+                      }}
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={busy}
+                    />
+                    <button
+                      className="ghost-btn icon-btn-sm"
+                      type="button"
+                      onClick={() => setShowKey((v) => !v)}
+                      disabled={busy}
+                      title={showKey ? '隐藏密钥' : '显示密钥'}
+                      aria-label={showKey ? '隐藏密钥' : '显示密钥'}
+                    >
+                      {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="btn-row">
+                  <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
+                    <KeyRound size={14} />
+                    {busy ? '提取中…' : '提取密钥'}
+                  </button>
+                  <button
+                    className="secondary-btn"
+                    type="button"
+                    onClick={() => void confirmKeyAndConnect()}
+                    disabled={busy || !dbReady || !accountReady || !keyOk}
+                  >
+                    <PlugZap size={14} />
+                    确认密钥并连接
+                  </button>
+                </div>
+
+                {keyHookReady && busy && (
+                  <div className="callout ready" role="status">
+                    Hook 已就绪 — 请现在登录微信，或退出账号后重新登录（可在手机上确认）。
+                  </div>
+                )}
+                {keyStatus && <p className="hint">{keyStatus}</p>}
+
+                <div className="steps-details">
+                  <div className="steps-details-title">如何获取密钥？</div>
+                  <ol className="steps">
+                    <li>
+                      <span className="step-num">1</span>
+                      <span>
+                        打开微信电脑版，在「设置 → 通用」里<strong>关闭「自动登录」</strong>，
+                        然后退出当前登录（或完全退出微信）
+                      </span>
+                    </li>
+                    <li>
+                      <span className="step-num">2</span>
+                      <span>
+                        点击上方<strong>「提取密钥」</strong>，等待出现「已准备就绪」提示——
+                        此时 Weport 已挂接微信进程，正在等待登录
+                      </span>
+                    </li>
+                    <li>
+                      <span className="step-num">3</span>
+                      <span>
+                        用手机<strong>扫码登录微信</strong>（登录成功的瞬间密钥会被自动捕获并填入）
+                      </span>
+                    </li>
+                    <li>
+                      <span className="step-num">4</span>
+                      <span>也可直接粘贴已有的 64 位十六进制密钥（从旧版本或其他工具获取）</span>
+                    </li>
+                  </ol>
+                  <p className="hint">
+                    {keyOk
+                      ? '密钥格式正确，请点击「确认密钥并连接」验证当前账号数据库。'
+                      : '密钥在登录瞬间捕获，不是从已登录会话直接读取。'}
+                  </p>
+                </div>
+              </div>
             </section>
+
+            {/* macOS 兼容性检查：只在 macOS 上出现。放在连接页是因为「拿不到
+                密钥」正是用户停在这一页的原因。 */}
+            {api.process.platform === 'darwin' && (
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>
+                    <ShieldCheck size={15} />
+                    macOS 兼容性检查
+                  </h2>
+                </div>
+                <p className="hint" style={{ marginBottom: 10 }}>
+                  逐项检查微信进程、签名权限、完全磁盘访问权限与随包助手状态，说明为什么自动获取密钥可能失败。
+                </p>
+                <div className="diag-actions">
+                  <button className="primary-btn" type="button" disabled={macDiagBusy} onClick={() => void runMacDiagnostics()}>
+                    {macDiagBusy ? '检查中…' : '开始检查'}
+                  </button>
+                  {macDiag ? (
+                    <button className="secondary-btn" type="button" onClick={() => void copyMacDiagnostics()}>
+                      复制诊断信息
+                    </button>
+                  ) : null}
+                </div>
+
+                {macDiag ? (
+                  <ul className="diag-list">
+                    {macDiag.checks.map((check) => (
+                      <li key={check.id} className="diag-item" data-state={check.state}>
+                        <span className="diag-dot" aria-hidden />
+                        <div>
+                          <strong>{check.label}</strong>
+                          <span className="hint">{check.detail}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+            )}
           </div>
         )}
 
         {tab === 'export' && (
-          <section className="panel panel-fill">
-            <div className="panel-head">
-              <h2>
-                <Download size={15} />
-                导出数据
-              </h2>
+          <section className="panel panel-fill export-page">
+            {/* 页头 + 进度合成一个吸顶块。
+                进度原来挂在右栏卡片流的最前面：窗口不到 1280 CSS px 时右栏整块
+                落到会话列表**下面**，进度条和「取消导出」被推出视口；宽窗口下右栏
+                虽然吸顶，进度也会先把「高级选项」顶到折叠线以下。进度是这一页最
+                需要随时看得见的东西，所以并入吸顶块 —— 两种布局下都始终可见，
+                而且它在正常流里的位置就在顶部，不会盖住任何内容。
+
+                吸顶块本身不设 top，页头保持 top: 0，进度条就是它的下一行。
+
+                进度条**自己订阅**导出进度（见 ExportProgressBar）：把它内联在这里、
+                由 App 持有进度 state 时，每条进度事件都会重渲染整个 App（4000 多行、
+                含全部页面），导出期间就是一次持续的全量 reconciliation —— 用户看到
+                的"所有元素被推来推去"的抖动来源就是这个。 */}
+            <div className="exp-sticky">
+            <ExportProgressBar ref={exportProgressRef} api={api.export} busy={busy} />
+
+            <div className="panel-head exp-head">
+              {/* 主操作放在页头并让页头吸顶：导出按钮从此**始终可见**，而且
+                  不会像底部悬浮条那样盖住内容。页头右侧依次是「范围状态 →
+                  恢复默认 → 清空导出库 → 开始导出」，破坏性操作离主操作最远。 */}
+              <div className="exp-head-state">
+                <span className="exp-head-chip">
+                  <FileType size={13} />
+                  {FORMATS.find((f) => f.value === format)?.label}
+                </span>
+                <span className="exp-head-chip">
+                  <FolderOpen size={13} />
+                  {WRITE_LAYOUTS.find((l) => l.value === writeLayout)?.label}
+                </span>
+                <span className="exp-head-chip">
+                  <Users size={13} />
+                  {exportSelectionMode === 'all' ? '全部会话' : `已选 ${selectedExportSessionIds.size} 个`}
+                </span>
+              </div>
               <div className="panel-head-actions">
-                <span>{exportSelectionMode === 'all' ? '默认导出全部会话' : `已选 ${selectedExportSessionIds.size} 个会话`}</span>
                 <button
                   className="ghost-btn"
                   type="button"
@@ -1728,461 +2309,515 @@ export default function App() {
                   <Trash2 size={13} />
                   清空导出库
                 </button>
+                <button className="primary-btn" type="button" disabled={busy} onClick={() => void runExport()}>
+                  <Download size={14} />
+                  {busy
+                    ? '导出中…'
+                    : exportSelectionMode === 'all'
+                      ? '开始导出'
+                      : `导出已选（${selectedExportSessionIds.size}）`}
+                </button>
               </div>
             </div>
+            </div>
 
-            <ExportSessionPicker
-              sessions={filteredExportSessions}
-              totalSessions={exportSessions.length}
-              selectedIds={selectedExportSessionIds}
-              selectionMode={exportSelectionMode}
-              search={exportSessionSearch}
-              type={exportSessionType}
-              loading={exportSessionsLoading}
-              onSearchChange={setExportSessionSearch}
-              onTypeChange={setExportSessionType}
-              onSelectionModeChange={setExportSelectionMode}
-              onToggle={toggleExportSession}
-              onToggleVisible={toggleVisibleExportSessions}
-              onRefresh={() => void loadExportSessions()}
-              allVisibleSelected={allVisibleExportSessionsSelected}
-              disabled={busy}
-            />
-
-            {/* 1. 输出设置 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">2</span>
-                <FolderOpen size={14} />
-                输出设置
-              </div>
-              <div className="field">
-                <label htmlFor="exportPath">输出文件夹</label>
-                <div className="path-row">
-                  <input
-                    id="exportPath"
-                    className="path-input"
-                    value={exportPath}
-                    placeholder="选择导出根目录…"
-                    onChange={(e) => setExportPath(e.target.value)}
-                    onBlur={() => {
-                      if (exportPath.trim()) void persist({ exportPath: exportPath.trim() })
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && exportPath.trim()) {
-                        void persist({ exportPath: exportPath.trim() })
-                        void refreshExportLog(exportPath.trim())
-                      }
-                    }}
-                    spellCheck={false}
-                  />
-                  <button className="ghost-btn" type="button" onClick={() => void pickExportFolder()} disabled={busy}>
-                    浏览
-                  </button>
-                </div>
-              </div>
-              <div className="field" style={{ marginBottom: 0 }}>
-                <label>目录结构</label>
-                <div className="layout-row" role="radiogroup" aria-label="目录结构">
-                  {WRITE_LAYOUTS.map((l) => (
-                    <button
-                      key={l.value}
-                      type="button"
-                      className="chip format-chip layout-chip"
-                      data-active={writeLayout === l.value}
-                      role="radio"
-                      aria-checked={writeLayout === l.value}
-                      onClick={() => {
-                        setWriteLayout(l.value)
-                        void saveExportOptions({ layout: l.value })
-                      }}
-                      disabled={busy}
-                    >
-                      <strong>
-                        <span className="layout-badge">{l.value}</span>
-                        {l.label}
-                      </strong>
-                      <code className="layout-tree">
-                        {l.tree.map((line, i) => (
-                          <span key={i}>{line}</span>
-                        ))}
+            {/* 两栏：左边是「怎么导 / 导哪些」这几步，右边是常驻的动作与状态。
+                原来五段纵向堆叠，页面有三屏高，主按钮够不到；现在主按钮和进度
+                都在吸顶块里，右栏留给高级选项与导出记录。 */}
+            <div className="export-layout">
+              <div className="export-main">
+                {/* 1. 输出设置 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">1</span>
+                    <FolderOpen size={14} />
+                    输出设置
+                  </div>
+                  <div className="field">
+                    <label htmlFor="exportPath">输出文件夹</label>
+                    <div className="path-row">
+                      <input
+                        id="exportPath"
+                        className="path-input"
+                        value={exportPath}
+                        placeholder="选择导出根目录…"
+                        onChange={(e) => setExportPath(e.target.value)}
+                        onBlur={() => {
+                          if (exportPath.trim()) void persist({ exportPath: exportPath.trim() })
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && exportPath.trim()) {
+                            void persist({ exportPath: exportPath.trim() })
+                            void refreshExportLog(exportPath.trim())
+                          }
+                        }}
+                        spellCheck={false}
+                      />
+                      <button className="ghost-btn" type="button" onClick={() => void pickExportFolder()} disabled={busy}>
+                        浏览
+                      </button>
+                    </div>
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>目录结构</label>
+                    <div className="layout-row" role="radiogroup" aria-label="目录结构">
+                      {WRITE_LAYOUTS.map((l) => (
+                        <button
+                          key={l.value}
+                          type="button"
+                          className="chip format-chip layout-chip"
+                          data-active={writeLayout === l.value}
+                          role="radio"
+                          aria-checked={writeLayout === l.value}
+                          onClick={() => {
+                            setWriteLayout(l.value)
+                            void saveExportOptions({ layout: l.value })
+                          }}
+                          disabled={busy}
+                        >
+                          <strong>
+                            <span className="layout-badge">{l.value}</span>
+                            {l.label}
+                          </strong>
+                          <code className="layout-tree">
+                            {l.tree.map((line, i) => (
+                              <span key={i}>{line}</span>
+                            ))}
+                          </code>
+                          <span>{l.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="hint" style={{ marginTop: 8 }}>
+                      输出预览：
+                      <code className="exp-path">
+                        {exportPath.trim()
+                          ? `${exportPath.trim()}\\${formatFolder}\\${writeLayout === 'B' ? 'texts\\' : writeLayout === 'C' ? '群聊_名称\\' : ''}`
+                          : '未选择根目录'}
                       </code>
-                      <span>{l.desc}</span>
-                    </button>
-                  ))}
+                      <span> · 命名：<code>群聊_名称</code> / <code>私聊_名称</code></span>
+                    </p>
+                  </div>
                 </div>
-                <p className="hint" style={{ marginTop: 8 }}>
-                  输出预览：
-                  <code className="exp-path">
-                    {exportPath.trim()
-                      ? `${exportPath.trim()}\\${formatFolder}\\${writeLayout === 'B' ? 'texts\\' : writeLayout === 'C' ? '群聊_名称\\' : ''}`
-                      : '未选择根目录'}
-                  </code>
-                  <span> · 命名：<code>群聊_名称</code> / <code>私聊_名称</code></span>
-                </p>
-              </div>
-            </div>
 
-            {/* 2. 导出格式 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">3</span>
-                <FileType size={14} />
-                导出格式
-              </div>
-              <div className="format-grid" role="radiogroup" aria-label="导出格式">
-                {FORMATS.map((f) => {
-                  const FIcon = f.icon
-                  return (
-                    <button
-                      key={f.value}
-                      type="button"
-                      className="chip format-chip"
-                      data-active={format === f.value}
-                      role="radio"
-                      aria-checked={format === f.value}
-                      onClick={() => {
-                        setFormat(f.value)
-                        void saveExportOptions({ format: f.value })
-                      }}
-                      disabled={busy}
-                    >
-                      <span className="fmt-head">
-                        <FIcon size={14} strokeWidth={1.8} />
-                        <strong>{f.label}</strong>
+                {/* 2. 导出格式 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">2</span>
+                    <FileType size={14} />
+                    导出格式
+                  </div>
+                  <div className="format-grid" role="radiogroup" aria-label="导出格式">
+                    {FORMATS.map((f) => {
+                      const FIcon = f.icon
+                      return (
+                        <button
+                          key={f.value}
+                          type="button"
+                          className="chip format-chip"
+                          data-active={format === f.value}
+                          role="radio"
+                          aria-checked={format === f.value}
+                          onClick={() => {
+                            setFormat(f.value)
+                            void saveExportOptions({ format: f.value })
+                          }}
+                          disabled={busy}
+                        >
+                          <span className="fmt-head">
+                            <FIcon size={14} strokeWidth={1.8} />
+                            <strong>{f.label}</strong>
+                          </span>
+                          <span>{f.desc}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* 3. 内容 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">3</span>
+                    <Paperclip size={14} />
+                    内容（媒体与附件）
+                  </div>
+                  <div className="media-row">
+                    {([
+                      ['images', '图片'],
+                      ['videos', '视频'],
+                      ['voices', '语音'],
+                      ['emojis', '表情包'],
+                      ['files', '文件'],
+                    ] as Array<[keyof typeof exportMedia, string]>).map(([key, label]) => (
+                      <label key={key} className="media-check">
+                        <input
+                          type="checkbox"
+                          checked={exportMedia[key] === true}
+                          onChange={(e) => {
+                            const next = { ...exportMedia, [key]: e.target.checked }
+                            setExportMedia(next)
+                            void saveExportOptions({ media: next })
+                          }}
+                          disabled={busy}
+                        />
+                        <span>导出{label}</span>
+                      </label>
+                    ))}
+                    {(exportMedia.videos || exportMedia.files) && (
+                      <label className="media-size">
+                        <span>视频/文件最大体积</span>
+                        <input
+                          className="num-input"
+                          type="number"
+                          min={1}
+                          max={4096}
+                          value={exportMedia.maxFileSizeMb}
+                          onChange={(e) => {
+                            const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
+                            setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
+                          }}
+                          onBlur={() => void saveExportOptions({ media: exportMedia })}
+                          disabled={busy}
+                        />
+                        <span>MB</span>
+                      </label>
+                    )}
+                  </div>
+                  {exportMedia.images && imageKeyRequired && (
+                    <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={() => void extractImageKey()}
+                        disabled={busy}
+                      >
+                        {imageKeysOk ? '重新获取图片密钥' : '获取图片密钥'}
+                      </button>
+                      <span className="hint" style={{ margin: 0 }}>
+                        {imageKeyStatus || (imageKeysOk
+                          ? '图片密钥已配置（按账号保存）'
+                          : imageKeyHint)}
                       </span>
-                      <span>{f.desc}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
+                    </div>
+                  )}
+                  <p className="hint" style={{ marginTop: 6 }}>
+                    不勾选则仅导出文字消息（默认）。导出媒体时会同时导出对应文字消息。
+                  </p>
+                </div>
 
-            {/* 3. 内容 */}
-            <div className="exp-section">
-              <div className="exp-sec-head">
-                <span className="exp-num">4</span>
-                <Paperclip size={14} />
-                内容（媒体与附件）
+                {/* 4. 选择会话 —— 放在配置之后。
+                    旧顺序是「235 行会话列表 → 四组配置 → 导出按钮」：列表先把全部
+                    配置挤到折叠线以下，而主按钮在整段最底部。现在的顺序对应真实的
+                    心智顺序：先决定怎么导 → 再决定导哪些 → 最后按下去。 */}
+                <div className="exp-section">
+                  <div className="exp-sec-head">
+                    <span className="exp-num">4</span>
+                    <Users size={14} />
+                    选择会话
+                  </div>
+                  <ExportSessionPicker
+                    sessions={filteredExportSessions}
+                    totalSessions={exportSessions.length}
+                    selectedIds={selectedExportSessionIds}
+                    selectionMode={exportSelectionMode}
+                    search={exportSessionSearch}
+                    type={exportSessionType}
+                    loading={exportSessionsLoading}
+                    onSearchChange={setExportSessionSearch}
+                    onTypeChange={setExportSessionType}
+                    onSelectionModeChange={setExportSelectionMode}
+                    onToggle={toggleExportSession}
+                    onToggleVisible={toggleVisibleExportSessions}
+                    onRefresh={() => void loadExportSessions()}
+                    allVisibleSelected={allVisibleExportSessionsSelected}
+                    disabled={busy}
+                  />
+                </div>
               </div>
-              <div className="media-row">
-                {([
-                  ['images', '图片'],
-                  ['videos', '视频'],
-                  ['voices', '语音'],
-                  ['emojis', '表情包'],
-                  ['files', '文件'],
-                ] as Array<[keyof typeof exportMedia, string]>).map(([key, label]) => (
-                  <label key={key} className="media-check">
-                    <input
-                      type="checkbox"
-                      checked={exportMedia[key] === true}
-                      onChange={(e) => {
-                        const next = { ...exportMedia, [key]: e.target.checked }
-                        setExportMedia(next)
-                        void saveExportOptions({ media: next })
-                      }}
-                      disabled={busy}
-                    />
-                    <span>导出{label}</span>
-                  </label>
-                ))}
-                {(exportMedia.videos || exportMedia.files) && (
-                  <label className="media-size">
-                    <span>视频/文件最大体积</span>
-                    <input
-                      className="num-input"
-                      type="number"
-                      min={1}
-                      max={4096}
-                      value={exportMedia.maxFileSizeMb}
-                      onChange={(e) => {
-                        const v = Math.max(1, Math.min(4096, Number(e.target.value) || 1))
-                        setExportMedia((prev) => ({ ...prev, maxFileSizeMb: v }))
-                      }}
-                      onBlur={() => void saveExportOptions({ media: exportMedia })}
-                      disabled={busy}
-                    />
-                    <span>MB</span>
-                  </label>
-                )}
-              </div>
-              {exportMedia.images && imageKeyRequired && (
-                <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
+
+              <aside className="export-side">
+                {/* 进度已移到吸顶页头下方；右栏只留「高级选项 / 导出记录」。 */}
+                {/* 5. 高级选项 */}
+                <div className="exp-side-card">
                   <button
                     type="button"
-                    className="ghost-btn"
-                    onClick={() => void extractImageKey()}
-                    disabled={busy}
+                    className="exp-sec-head exp-collapse"
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    aria-expanded={showAdvanced}
                   >
-                    {imageKeysOk ? '重新获取图片密钥' : '获取图片密钥'}
+                    <SettingsIcon size={14} />
+                    高级选项
+                    <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
                   </button>
-                  <span className="hint" style={{ margin: 0 }}>
-                    {imageKeyStatus || (imageKeysOk
-                      ? '图片密钥已配置（按账号保存）'
-                      : '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）')}
-                  </span>
+                  {showAdvanced && (
+                    <div className="opt-panel">
+                      <div className="opt-checks">
+                        <label className="check-row opt">
+                          <input
+                            type="checkbox"
+                            checked={exportAvatars}
+                            onChange={(e) => {
+                              setExportAvatars(e.target.checked)
+                              void saveExportOptions({ avatars: e.target.checked })
+                            }}
+                            disabled={busy}
+                          />
+                          <span>包含联系人头像</span>
+                        </label>
+                        <label className="check-row opt">
+                          <input
+                            type="checkbox"
+                            checked={exportVoiceAsText}
+                            onChange={(e) => {
+                              setExportVoiceAsText(e.target.checked)
+                              void saveExportOptions({ voiceAsText: e.target.checked })
+                            }}
+                            disabled={busy}
+                          />
+                          <span>语音转文字（若已转换）</span>
+                        </label>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">媒体路径</span>
+                        <div className="seg" role="radiogroup" aria-label="媒体路径">
+                          {PATH_STYLE_OPTIONS.map((o) => (
+                            <button
+                              key={o.value}
+                              type="button"
+                              data-active={exportPathStyle === o.value}
+                              onClick={() => {
+                                setExportPathStyle(o.value)
+                                void saveExportOptions({ pathStyle: o.value })
+                              }}
+                              disabled={busy}
+                            >
+                              {o.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">同名文件</span>
+                        <div className="seg" role="radiogroup" aria-label="同名文件">
+                          {CONFLICT_OPTIONS.map((o) => (
+                            <button
+                              key={o.value}
+                              type="button"
+                              data-active={exportConflict === o.value}
+                              onClick={() => {
+                                setExportConflict(o.value)
+                                void saveExportOptions({ conflict: o.value })
+                              }}
+                              disabled={busy}
+                            >
+                              {o.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">命名方式</span>
+                        <div className="seg" role="radiogroup" aria-label="命名方式">
+                          {NAME_PREF_OPTIONS.map((o) => (
+                            <button
+                              key={o.value}
+                              type="button"
+                              data-active={displayNamePref === o.value}
+                              onClick={() => {
+                                setDisplayNamePref(o.value)
+                                void saveExportOptions({ namePref: o.value })
+                              }}
+                              disabled={busy}
+                            >
+                              {o.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="opt-row">
+                        <span className="opt-label">导出并发数</span>
+                        <div className="seg" role="radiogroup" aria-label="导出并发数">
+                          {CONCURRENCY_OPTIONS.map((c) => (
+                            <button
+                              key={c}
+                              type="button"
+                              data-active={exportConcurrency === c}
+                              onClick={() => {
+                                setExportConcurrency(c)
+                                void saveExportOptions({ concurrency: c })
+                              }}
+                              disabled={busy}
+                              title={c >= 10 ? '最快，易卡顿' : undefined}
+                            >
+                              {c}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-              <p className="hint" style={{ marginTop: 6 }}>
-                不勾选则仅导出文字消息（默认）。导出媒体时会同时导出对应文字消息。
-              </p>
-            </div>
 
-            {/* 4. 高级选项 */}
-            <div className="exp-section">
-              <button
-                type="button"
-                className="exp-sec-head exp-collapse"
-                onClick={() => setShowAdvanced((v) => !v)}
-                aria-expanded={showAdvanced}
-              >
-                <span className="exp-num">5</span>
-                <SettingsIcon size={14} />
-                高级选项
-                <ChevronDown size={14} className={`exp-chevron${showAdvanced ? ' open' : ''}`} />
-              </button>
-              {showAdvanced && (
-                <div className="opt-panel">
-                  <div className="opt-checks">
-                    <label className="check-row opt">
-                      <input
-                        type="checkbox"
-                        checked={exportAvatars}
-                        onChange={(e) => {
-                          setExportAvatars(e.target.checked)
-                          void saveExportOptions({ avatars: e.target.checked })
-                        }}
-                        disabled={busy}
-                      />
-                      <span>包含联系人头像</span>
-                    </label>
-                    <label className="check-row opt">
-                      <input
-                        type="checkbox"
-                        checked={exportVoiceAsText}
-                        onChange={(e) => {
-                          setExportVoiceAsText(e.target.checked)
-                          void saveExportOptions({ voiceAsText: e.target.checked })
-                        }}
-                        disabled={busy}
-                      />
-                      <span>语音转文字（若已转换）</span>
-                    </label>
+                <div className="exp-side-card export-meta" aria-live="polite">
+                  <div className="row">
+                    <span>上次 TXT</span>
+                    <strong className={exportLog?.txt ? undefined : 'muted'}>{exportLog?.txt || '尚未导出'}</strong>
                   </div>
-                  <div className="opt-row">
-                    <span className="opt-label">媒体路径</span>
-                    <div className="seg" role="radiogroup" aria-label="媒体路径">
-                      {PATH_STYLE_OPTIONS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          data-active={exportPathStyle === o.value}
-                          onClick={() => {
-                            setExportPathStyle(o.value)
-                            void saveExportOptions({ pathStyle: o.value })
-                          }}
-                          disabled={busy}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="row">
+                    <span>上次 JSON</span>
+                    <strong className={exportLog?.json ? undefined : 'muted'}>{exportLog?.json || '尚未导出'}</strong>
                   </div>
-                  <div className="opt-row">
-                    <span className="opt-label">同名文件</span>
-                    <div className="seg" role="radiogroup" aria-label="同名文件">
-                      {CONFLICT_OPTIONS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          data-active={exportConflict === o.value}
-                          onClick={() => {
-                            setExportConflict(o.value)
-                            void saveExportOptions({ conflict: o.value })
-                          }}
-                          disabled={busy}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="opt-row">
-                    <span className="opt-label">命名方式</span>
-                    <div className="seg" role="radiogroup" aria-label="命名方式">
-                      {NAME_PREF_OPTIONS.map((o) => (
-                        <button
-                          key={o.value}
-                          type="button"
-                          data-active={displayNamePref === o.value}
-                          onClick={() => {
-                            setDisplayNamePref(o.value)
-                            void saveExportOptions({ namePref: o.value })
-                          }}
-                          disabled={busy}
-                        >
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="opt-row">
-                    <span className="opt-label">导出并发数</span>
-                    <div className="seg" role="radiogroup" aria-label="导出并发数">
-                      {CONCURRENCY_OPTIONS.map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          data-active={exportConcurrency === c}
-                          onClick={() => {
-                            setExportConcurrency(c)
-                            void saveExportOptions({ concurrency: c })
-                          }}
-                          disabled={busy}
-                          title={c >= 10 ? '最快，易卡顿' : undefined}
-                        >
-                          {c}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="row">
+                    <span>日志文件</span>
+                    <span className="muted">export_log.txt</span>
                   </div>
                 </div>
-              )}
-            </div>
-
-            <div className="export-meta" aria-live="polite">
-              <div className="row">
-                <span>上次 TXT</span>
-                <strong className={exportLog?.txt ? undefined : 'muted'}>{exportLog?.txt || '尚未导出'}</strong>
-              </div>
-              <div className="row">
-                <span>上次 JSON</span>
-                <strong className={exportLog?.json ? undefined : 'muted'}>{exportLog?.json || '尚未导出'}</strong>
-              </div>
-              <div className="row">
-                <span>日志文件</span>
-                <span className="muted">export_log.txt</span>
-              </div>
-            </div>
-
-            {progress && (
-              <div className="progress" aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className={`progress-fill${!progress.total || progress.phase === 'preparing' ? ' indeterminate' : ''}`}
-                    style={progress.total ? { width: `${progressPct}%` } : undefined}
-                  />
-                </div>
-                <div className="progress-meta">
-                  <strong className="progress-session" title={progress.currentSession || ''}>{progress.currentSession || '准备中…'}</strong>
-                  <span className="progress-count">
-                    {progress.total > 0
-                      ? `${Math.min(progress.current, progress.total).toFixed(0)} / ${progress.total}`
-                      : ''}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            <div className="export-actions">
-              <button className="primary-btn block" type="button" disabled={busy} onClick={() => void runExport()}>
-                <Download size={16} />
-                {busy && progress
-                  ? '导出中…'
-                  : exportSelectionMode === 'all'
-                    ? '导出全部聊天记录'
-                    : `导出已选聊天记录${selectedExportSessionIds.size ? `（${selectedExportSessionIds.size}）` : ''}`}
-              </button>
-              {busy && progress && progress.phase !== 'complete' && (
-                <button className="ghost-btn block" type="button" disabled={!exportTaskId} onClick={() => void cancelExport()}>
-                  取消导出
-                </button>
-              )}
-              <p className="hint">
-                清空会删除输出目录下的全部格式文件夹与 <code>export_log.txt</code>，不会删除你选的根文件夹。
-              </p>
+              </aside>
             </div>
           </section>
         )}
 
-        {tab === 'ai' && <WeportAiPanel />}
-        {tab === 'sns' && <SnsPage />}
-        {tab === 'analytics' && <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />}
+        {tab === 'ai' && (
+          <Suspense fallback={<LazyFallback label="WeportAI" />}>
+            <WeportAiPanel
+              onOpenSettings={() => {
+                setSettingsSection('ai')
+                switchTab('settings')
+              }}
+            />
+          </Suspense>
+        )}
+        {tab === 'weclone' && (
+          <Suspense fallback={<LazyFallback label="WeClone" />}>
+            <WeClonePage />
+          </Suspense>
+        )}
+        {(tab === 'webot' || tab === 'webot-notes') && (
+          <Suspense fallback={<LazyFallback label={tab === 'webot-notes' ? 'WeBot 笔记' : 'WeBot'} />}>
+            <WeBotModule section={tab === 'webot-notes' ? 'notes' : 'tasks'} />
+          </Suspense>
+        )}
+        {tab === 'sns' && (
+          <Suspense fallback={<LazyFallback label="朋友圈" />}>
+            <SnsPage />
+          </Suspense>
+        )}
+        {tab === 'analytics' && (
+          <Suspense fallback={<LazyFallback label="分析" />}>
+            <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />
+          </Suspense>
+        )}
 
         {tab === 'antirecall' && (
-          <div className="single-col">
+          /* 重排：原来第一屏是三行解释 + 一个复选框 + 三个按钮 + 一长条会话列表，
+             用户在动手之前必须先读完一段说明，而且列表多起来没法找。现在说明
+             折进 details，顶部只留「装了多少」和刷新，列表带搜索与筛选。 */
+          <div className="page-stack">
+            <div className="status-bar" data-live={installedCount > 0}>
+              <ShieldPlus size={15} />
+              <div className="status-bar-text">
+                <strong>
+                  {antiRevokeSessions.length === 0
+                    ? '尚未读取会话'
+                    : `已安装 ${installedCount} / ${antiRevokeSessions.length} 个会话`}
+                </strong>
+                <span className="hint">触发器装在微信侧，装好后不必保持 Weport 运行</span>
+              </div>
+              <p className="status-bar-note">
+                对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
+                安装 / 卸载针对具体会话，微信升级后一般无需重装。
+              </p>
+              <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
+                <RefreshCw size={14} />
+                {antiRevokeBusy ? '刷新中…' : '刷新状态'}
+              </button>
+            </div>
+
+            {!allReady && (
+              <div className="status-warn">
+                完成「连接微信」页的数据目录 / 账号 / 密钥后即可使用。
+              </div>
+            )}
+
             <section className="panel">
               <div className="panel-head">
                 <h2>
                   <ShieldCheck size={15} />
-                  防撤回
+                  会话
                 </h2>
-                <span>会话级 WCDB 触发器（安装后无需保持 Weport 运行）</span>
-              </div>
-              <p className="hint">
-                对选中的会话安装防撤回触发器后，对方撤回的消息在微信本地仍会保留可见。
-                安装/卸载针对具体会话，微信升级后一般无需重装。
-              </p>
-              <div className="btn-row" style={{ alignItems: 'center' }}>
-                <label className="switch-label">
+                <div className="panel-head-actions">
                   <input
-                    type="checkbox"
-                    checked={antiRevokeNewGroupsEnabled}
-                    disabled={!allReady || antiRevokeBusy}
-                    onChange={(e) => void toggleAntiRevokeNewGroups(e.target.checked)}
+                    className="filter-input"
+                    value={antiRevokeQuery}
+                    disabled={!allReady}
+                    placeholder="搜索会话…"
+                    aria-label="搜索会话"
+                    onChange={(e) => setAntiRevokeQuery(e.target.value)}
                   />
-                  <span>新群聊自动安装</span>
-                </label>
-                <span className="hint" style={{ margin: 0 }}>
-                  仅处理开启后首次观察到的 @chatroom，会延迟排队，不影响消息通知；默认关闭。
-                </span>
+                  <div className="segmented" role="radiogroup" aria-label="会话筛选">
+                    {(
+                      [
+                        { id: 'all', label: '全部' },
+                        { id: 'installed', label: '已安装' },
+                        { id: 'pending', label: '未安装' },
+                      ] as const
+                    ).map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={antiRevokeFilter === option.id}
+                        className="segmented-item"
+                        data-active={antiRevokeFilter === option.id}
+                        onClick={() => setAntiRevokeFilter(option.id)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-              <div className="btn-row">
-                <button className="secondary-btn" type="button" disabled={!allReady || antiRevokeBusy} onClick={() => void refreshAntiRevoke()}>
-                  <RefreshCw size={14} />
-                  {antiRevokeBusy ? '刷新中…' : '刷新状态'}
-                </button>
-                <button
-                  className="primary-btn"
-                  type="button"
-                  disabled={!allReady || antiRevokeBusy || antiRevokeSessions.length === 0}
-                  onClick={() => void installAntiRevoke(antiRevokeSessions.map((s) => s.username))}
-                >
-                  <ShieldPlus size={14} />
-                  全部安装 ({installedCount}/{antiRevokeSessions.length})
-                </button>
-                <button
-                  className="danger-btn"
-                  type="button"
-                  disabled={!allReady || antiRevokeBusy || installedCount === 0}
-                  onClick={() => void uninstallAntiRevoke(Object.keys(antiRevokeInstalled).filter((id) => antiRevokeInstalled[id]))}
-                >
-                  <Undo2 size={14} />
-                  全部还原
-                </button>
-              </div>
-              {!allReady && (
-                <p className="hint" style={{ marginTop: 8 }}>
-                  完成「连接」页的数据目录 / 账号 / 密钥后即可使用。
-                </p>
-              )}
+
+              {antiRevokeActions()}
+
               {allReady && antiRevokeSessions.length === 0 && !antiRevokeBusy && (
                 <div className="empty" style={{ marginTop: 12 }}>
                   未找到可安装防撤回的会话（联系人或群聊）。点击「刷新状态」重试。
                 </div>
               )}
-              {antiRevokeSessions.length > 0 && (
+
+              {antiRevokeSessions.length > 0 && filteredAntiRevokeSessions.length === 0 && (
+                <div className="empty" style={{ marginTop: 12 }}>
+                  没有符合当前筛选的会话。
+                </div>
+              )}
+
+              {filteredAntiRevokeSessions.length > 0 && (
                 <div className="account-list anti-revoke-list" role="listbox" aria-label="防撤回会话">
-                  {antiRevokeSessions.map((s) => {
+                  {filteredAntiRevokeSessions.map((s) => {
                     const installed = antiRevokeInstalled[s.username] === true
                     return (
                       <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
+                        {/* 群/私聊一眼可分：列表里大多是群，混着几个联系人时
+                            光看名字判断不出这是群还是个人。能拿到头像就显示头像
+                            （形状本身也区分群/人），拿不到再退回类型图标。 */}
+                        {s.avatarUrl ? (
+                          <Avatar
+                            src={s.avatarUrl}
+                            name={s.displayName || s.username}
+                            size={22}
+                            shape={s.username.endsWith('@chatroom') ? 'rounded' : 'circle'}
+                          />
+                        ) : (
+                          <span className="ar-kind" title={s.username.endsWith('@chatroom') ? '群聊' : '联系人'}>
+                            {s.username.endsWith('@chatroom') ? <Users size={12} /> : <UserRound size={12} />}
+                          </span>
+                        )}
                         <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
-                        <span className="ar-id">{s.username}</span>
-                        <span className={`badge ${installed ? 'ok' : ''}`}>{installed ? '已安装' : '未安装'}</span>
+                        <span className="ar-id" title={s.username}>{s.username}</span>
                         <button
-                          className="ghost-btn"
+                          className={installed ? 'ghost-btn' : 'secondary-btn'}
                           type="button"
                           disabled={antiRevokeBusy}
                           onClick={() => (installed ? void uninstallAntiRevoke([s.username]) : void installAntiRevoke([s.username]))}
@@ -2195,112 +2830,200 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Undo2 size={15} />
+                  自动与批量
+                </h2>
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <ShieldPlus size={14} />
+                  <div>
+                    <strong>新群聊自动安装</strong>
+                    <span className="hint">只处理开启后首次观察到的群聊，会延迟排队，不影响消息通知</span>
+                  </div>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={antiRevokeNewGroupsEnabled}
+                    disabled={!allReady || antiRevokeBusy}
+                    onChange={(e) => void toggleAntiRevokeNewGroups(e.target.checked)}
+                  />
+                  <span className="track" />
+                </label>
+              </div>
+            </section>
           </div>
         )}
 
         {tab === 'notifications' && (
-          <div className="single-col">
+          /* 重排：原来一张面板里塞了「开不开」「长什么样」「收谁的」「现在有没有在跑」，
+             全部同权，于是每一行都要读一遍才知道自己在看什么。现在分成
+             状态条（是否在跑 + 总开关）/ 弹窗外观 / 接收范围 三层。 */
+          <div className="page-stack">
+            <div className="status-bar" data-live={notificationsEnabled && allReady && notifyListening}>
+              <span className={`status-dot${notificationsEnabled && allReady && notifyListening ? ' listening' : ''}`} />
+              <div className="status-bar-text">
+                <strong>
+                  {!notificationsEnabled
+                    ? '消息提醒已关闭'
+                    : !allReady
+                      ? '等待配置完成'
+                      : notifyListening
+                        ? '正在监听新消息与撤回事件'
+                        : '已开启，连接数据库后开始监听'}
+                </strong>
+                <span className="hint">
+                  {!allReady
+                    ? `还需完成：${[
+                        ['微信数据目录', dbReady],
+                        ['微信账号', accountReady],
+                        ['解密密钥', keyOk],
+                      ].filter(([, ok]) => !ok).map(([label]) => label as string).join('、')}`
+                    : '弹窗出现在屏幕一角，右键卡片可立即关闭'}
+                </span>
+              </div>
+              <button className="ghost-btn" type="button" onClick={() => void api.notification.showTest()}>
+                <BellRing size={13} />
+                测试弹窗
+              </button>
+              <label className="switch" title="启用消息提醒">
+                <input
+                  type="checkbox"
+                  checked={notificationsEnabled}
+                  onChange={(e) => void toggleNotifications(e.target.checked)}
+                />
+                <span className="track" />
+              </label>
+            </div>
+
             <section className="panel">
               <div className="panel-head">
                 <h2>
-                  <Bell size={15} />
-                  消息通知
+                  <Sparkles size={15} />
+                  弹窗外观
                 </h2>
-                <span>独立置顶弹窗 · 不抢占焦点</span>
               </div>
-              <div className="btn-row" style={{ alignItems: 'center' }}>
-                <label className="switch-label">
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <MapPin size={14} />
+                  <div>
+                    <strong>弹窗位置</strong>
+                    <span className="hint">通知卡片出现在屏幕的哪个角</span>
+                  </div>
+                </div>
+                <select
+                  className="notification-select"
+                  value={notificationPosition}
+                  onChange={(e) => void updateNotificationPosition(e.target.value as NotificationPosition)}
+                  aria-label="弹窗位置"
+                >
+                  {NOTIFICATION_POSITION_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Timer size={14} />
+                  <div>
+                    <strong>显示时长</strong>
+                    <span className="hint">到点自动淡出，右键卡片可立即关闭</span>
+                  </div>
+                </div>
+                <div className="notification-duration-control">
+                  <input
+                    type="number"
+                    className="notification-select notification-duration-input"
+                    min={1}
+                    max={60}
+                    step={1}
+                    value={durationInput}
+                    onChange={(e) => {
+                      const text = e.target.value
+                      setDurationInput(text)
+                      const seconds = Number(text)
+                      if (text === '' || !Number.isFinite(seconds) || seconds < 1) return
+                      const durationMs = Math.min(60_000, Math.max(1000, Math.round(seconds * 1000)))
+                      if (durationMs !== notificationDuration) void updateNotificationDuration(durationMs)
+                    }}
+                    onBlur={() => setDurationInput(String(Math.round(notificationDuration / 1000)))}
+                    aria-label="弹窗显示时长（秒）"
+                  />
+                  <span className="hint">秒</span>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Sparkles size={14} />
+                  <div>
+                    <strong>弹窗动效</strong>
+                    <span className="hint">关闭后直接显示和隐藏，减少干扰</span>
+                  </div>
+                </div>
+                <label className="switch">
                   <input
                     type="checkbox"
-                    checked={notificationsEnabled}
-                    onChange={(e) => void toggleNotifications(e.target.checked)}
+                    checked={notificationAnimationEnabled}
+                    onChange={(e) => void toggleNotificationAnimation(e.target.checked)}
                   />
-                  <span>启用消息提醒</span>
+                  <span className="track" />
                 </label>
-                <button className="ghost-btn" type="button" onClick={() => void api.notification.showTest()}>
-                  <BellRing size={13} />
-                  测试通知弹窗
-                </button>
+              </div>
+            </section>
+
+            {/* 通知玻璃（v1.0.3）：填充、文字色、描边、圆角、折射、投影全部可调。
+                预览用的是真弹窗组件，见 NotificationGlassPanel 顶部说明。 */}
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Sparkles size={15} />
+                  通知玻璃
+                </h2>
+                <span>卡片填充、文字色、描边与折射强度</span>
+              </div>
+              <Suspense fallback={<div className="wp-loading">正在加载玻璃设置…</div>}>
+                <NotificationGlassPanel />
+              </Suspense>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Filter size={15} />
+                  接收范围
+                </h2>
+                <span>
+                  {notifyFilterMode === 'all'
+                    ? '接收所有会话的通知'
+                    : notifyFilterMode === 'whitelist'
+                      ? `仅通知已选 ${notifyFilterList.length} 个会话`
+                      : notifyFilterMode === 'blacklist'
+                        ? `屏蔽 ${notifyFilterList.length} 个会话的通知`
+                        : '仅提醒群聊中明确 @你的消息（@所有人不触发）'}
+                </span>
               </div>
 
-              <div className="notification-settings" aria-label="弹窗行为设置">
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <MapPin size={14} />
-                    <div>
-                      <strong>弹窗位置</strong>
-                      <span className="hint">选择通知卡片出现的屏幕位置</span>
-                    </div>
-                  </div>
-                  <select
-                    className="notification-select"
-                    value={notificationPosition}
-                    onChange={(e) => void updateNotificationPosition(e.target.value as NotificationPosition)}
-                    aria-label="弹窗位置"
-                  >
-                    {NOTIFICATION_POSITION_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <Timer size={14} />
-                    <div>
-                      <strong>显示时长</strong>
-                      <span className="hint">右键卡片可立即关闭</span>
-                    </div>
-                  </div>
-                  <div className="notification-duration-control">
-                    <input
-                      type="number"
-                      className="notification-select notification-duration-input"
-                      min={1}
-                      max={60}
-                      step={1}
-                      value={durationInput}
-                      onChange={(e) => {
-                        const text = e.target.value
-                        setDurationInput(text)
-                        const seconds = Number(text)
-                        if (text === '' || !Number.isFinite(seconds) || seconds < 1) return
-                        const durationMs = Math.min(60_000, Math.max(1000, Math.round(seconds * 1000)))
-                        if (durationMs !== notificationDuration) void updateNotificationDuration(durationMs)
-                      }}
-                      onBlur={() => setDurationInput(String(Math.round(notificationDuration / 1000)))}
-                      aria-label="弹窗显示时长（秒）"
-                    />
-                    <span className="hint">秒</span>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <BellOff size={14} />
+                  <div>
+                    <strong>跟随微信消息免打扰</strong>
+                    <span className="hint">微信里标了「消息免打扰」的会话不发弹窗（默认开启）</span>
                   </div>
                 </div>
-
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <Sparkles size={14} />
-                    <div>
-                      <strong>弹窗动效</strong>
-                      <span className="hint">关闭后直接显示和隐藏，减少干扰</span>
-                    </div>
-                  </div>
-                  <label className="switch">
-                    <input
-                      type="checkbox"
-                      checked={notificationAnimationEnabled}
-                      onChange={(e) => void toggleNotificationAnimation(e.target.checked)}
-                    />
-                    <span className="track" />
-                  </label>
-                </div>
-
-                <div className="setting-row">
-                  <div className="setting-label">
-                    <BellOff size={14} />
-                    <div>
-                      <strong>跟随微信消息免打扰</strong>
-                      <span className="hint">微信中标记“消息免打扰”的会话不显示 Weport 弹窗（默认开启）</span>
-                    </div>
-                  </div>
+                <div className="setting-inline">
+                  <button className="secondary-btn" type="button" onClick={() => void openMuteReport()}>
+                    {muteReportBusy ? <Loader2 size={13} className="spin" /> : <Search size={13} />}
+                    检测结果…
+                  </button>
                   <label className="switch">
                     <input
                       type="checkbox"
@@ -2312,76 +3035,78 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="checklist">
-                <div className="checklist-title">
-                  <ListChecks size={14} />
-                  提醒的前置条件
-                </div>
-                {[
-                  ['微信数据目录', dbReady, dbReady ? '已连接' : '未选择'],
-                  ['微信账号', accountReady, accountReady ? '已选择' : '未选择'],
-                  ['解密密钥', keyOk, keyOk ? '已就绪' : '待提取'],
-                ].map(([label, ok, detail]) => (
-                  <div className="check-row" key={label as string}>
-                    <span className={ok ? 'check ok' : 'check'}>{ok ? '✓' : '—'}</span>
-                    <span>{label as string}</span>
-                    <span className={ok ? 'detail ok' : 'detail'}>{detail as string}</span>
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Filter size={14} />
+                  <div>
+                    <strong>会话过滤</strong>
+                    <span className="hint">按会话白名单 / 黑名单，或只提醒 @你 的消息</span>
                   </div>
-                ))}
-              </div>
-
-              <div className="btn-row" style={{ alignItems: 'center', marginTop: 12 }}>
+                </div>
                 {!allReady ? (
                   <span className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
                     <button className="secondary-btn" type="button" disabled>
-                      配置会话过滤
+                      配置…
                     </button>
                   </span>
                 ) : (
                   <button className="secondary-btn" type="button" onClick={() => void openNotifyFilter()}>
                     <Filter size={14} />
-                    配置会话过滤
+                    配置…
                   </button>
                 )}
-                <span className="hint">
-                  {notifyFilterMode === 'all'
-                    ? '接收所有会话的通知'
-                    : notifyFilterMode === 'whitelist'
-                      ? `仅通知已选 ${notifyFilterList.length} 个会话`
-                      : notifyFilterMode === 'blacklist'
-                        ? `屏蔽 ${notifyFilterList.length} 个会话的通知`
-                        : '仅提醒群聊中明确 @你的消息（@所有人不触发）'}
-                </span>
               </div>
-
-              <p className="hint">
-                {!notificationsEnabled ? (
-                  '消息提醒已关闭'
-                ) : !allReady ? (
-                  '已开启，完成上面的准备条件后开始监听'
-                ) : notifyListening ? (
-                  <>
-                    <span className="status-dot listening" />
-                    正在监听当前账号的新消息和撤回事件
-                  </>
-                ) : (
-                  '已开启，连接数据库后开始监听'
-                )}
-              </p>
             </section>
           </div>
         )}
 
         {tab === 'settings' && (
-          <div className="single-col">
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <SettingsIcon size={15} />
-                  设置
-                </h2>
-                <span>启动与后台行为 · 外观主题</span>
-              </div>
+          /* v1.0 重排：六块等权重的面板竖着排成一条长滚动，找一项要滚过另外五项。
+             改成「左侧分类 + 右侧内容」，五个分类一次点击直达，右侧每页只放
+             一个主题的内容。 */
+          <div className="settings-page">
+            <nav className="settings-nav" aria-label="设置分类">
+              {(
+                [
+                  { id: 'general', label: '常规', hint: '启动与后台', icon: Rocket },
+                  { id: 'appearance', label: '外观', hint: '背景 · 强调色 · 主题', icon: Images },
+                  { id: 'ai', label: 'AI 服务', hint: '提供商 · 模型 · 密钥', icon: Sparkles },
+                  { id: 'assign', label: '服务分配', hint: '功能面用哪个服务', icon: PlugZap },
+                  { id: 'connectors', label: '连接器', hint: 'Todoist 等第三方工具', icon: Plug },
+                  { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
+                  { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
+                  { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
+                ] as const
+              ).map((item) => {
+                const Icon = item.icon
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="settings-nav-item"
+                    data-active={settingsSection === item.id}
+                    aria-current={settingsSection === item.id ? 'page' : undefined}
+                    onClick={() => setSettingsSection(item.id)}
+                  >
+                    <Icon size={15} />
+                    <span>
+                      <strong>{item.label}</strong>
+                      <em>{item.hint}</em>
+                    </span>
+                  </button>
+                )
+              })}
+            </nav>
+
+            <div className="settings-pane">
+              {settingsSection === 'general' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <SettingsIcon size={15} />
+                      启动与后台行为
+                    </h2>
+                  </div>
 
               <div className="setting-row">
                 <div className="setting-label">
@@ -2434,16 +3159,566 @@ export default function App() {
                   <span className="track" />
                 </label>
               </div>
-            </section>
+                </section>
+              )}
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Archive size={15} />
-                  数据备份
-                </h2>
-                <span>本地聊天数据库快照 · 可恢复</span>
+              {settingsSection === 'appearance' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Images size={15} />
+                      外观
+                    </h2>
+                    <span>明暗 · 强调色 · 背景 · 密度</span>
+                  </div>
+
+              {/* 主题 = 明暗 × 强调色，但**两个轴分别可选**。
+                  
+                  原来是 12 张"深色·冷蓝 / 浅色·冷蓝 …"的组合卡片，点哪张就把
+                  明暗和颜色一起改掉 —— 于是"我只想换个颜色"会顺手把深浅翻过去，
+                  「自定义」那张的标题还跟着当前明暗变（"深色·自定义"↔"浅色·自定义"），
+                  看起来像另一套独立设置。用户指出的正是这个：深浅不该由选色决定。
+
+                  现在：先选深浅（两个分段按钮），再选强调色（7 个色块）。两轴互不
+                  干扰，"自定义"只是第 7 个色块，选中后才展开调色面板。 */}
+              <div className="setting-block">
+                <div className="setting-label">
+                  <Palette size={14} />
+                  <div>
+                    <strong>主题</strong>
+                    <span className="hint">
+                      {appearance.modeAuto && appearance.backgroundPath
+                        ? `明暗跟随背景：${MODE_OPTIONS.find((m) => m.id === appearance.mode)?.label} · `
+                        : ''}
+                      强调色：
+                      {appearance.accent === 'custom' ? '自定义' : ACCENT_OPTIONS.find((a) => a.id === appearance.accent)?.label}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 轴一：深浅 */}
+                <div className="opt-row theme-axis">
+                  <span className="opt-label">深浅</span>
+                  <div className="seg" role="radiogroup" aria-label="深浅">
+                    {MODE_OPTIONS.map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        data-active={appearance.mode === mode.id}
+                        title={mode.hint}
+                        onClick={() => setMode(mode.id)}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                  {appearance.backgroundPath ? (
+                    <label className="mode-auto-toggle inline">
+                      <input
+                        type="checkbox"
+                        checked={appearance.modeAuto}
+                        onChange={(e) => {
+                          setModeAuto(e.target.checked)
+                          // 重新打开时立刻按当前背景重判一次，不用等重启
+                          if (e.target.checked) void adoptModeFromBackground()
+                        }}
+                      />
+                      <span>跟随背景</span>
+                    </label>
+                  ) : null}
+                </div>
+
+                {/* 轴二：强调色（含自定义）。只改颜色，不动深浅。 */}
+                <div className="theme-picker">
+                  {PRESET_ACCENTS.map((accent) => {
+                    const active = appearance.accent === accent.id
+                    const dark = appearance.mode === 'dark'
+                    const surface = dark ? '#17171d' : '#ffffff'
+                    const ink = dark ? '#f2f2f5' : '#16171d'
+                    return (
+                      <button
+                        key={accent.id}
+                        type="button"
+                        className={`theme-card ${active ? 'theme-card-active' : ''}`}
+                        title={accent.label}
+                        onClick={() => setAccent(accent.id)}
+                      >
+                        <div className="theme-card-head">
+                          <span
+                            className="theme-card-preview"
+                            style={{ background: surface, color: ink, borderColor: accent.swatch }}
+                          >
+                            <i style={{ background: accent.swatch }} />
+                            <i style={{ background: ink, opacity: 0.35 }} />
+                          </span>
+                          <strong>{accent.label}</strong>
+                          {active && <span className="theme-card-check">当前</span>}
+                        </div>
+                        <div className="theme-swatches">
+                          {[0.95, 0.8, 0.65, 0.5, 0.35, 0.2].map((t) => (
+                            <span key={t} style={{ background: accent.swatch, opacity: t }} />
+                          ))}
+                          <span style={{ background: surface, border: `1px solid ${ink}22` }} />
+                        </div>
+                      </button>
+                    )
+                  })}
+                  {/* 「自定义」是强调色的**第 7 个色块**：标题不带深浅（那由上面的
+                      「深浅」分段决定），选中后才展开调色面板。 */}
+                  {(() => {
+                    const dark = appearance.mode === 'dark'
+                    const surface = dark ? '#17171d' : '#ffffff'
+                    const ink = dark ? '#f2f2f5' : '#16171d'
+                    const swatch = normalizeHexColor(appearance.customAccent) || '#5b8eff'
+                    const active = appearance.accent === 'custom'
+                    return (
+                      <button
+                        type="button"
+                        className={`theme-card theme-card-custom ${active ? 'theme-card-active' : ''}`}
+                        title="自定义强调色"
+                        onClick={() => setAccent('custom')}
+                      >
+                        <div className="theme-card-head">
+                          <span
+                            className="theme-card-preview theme-card-preview-custom"
+                            style={{ background: surface, color: ink, borderColor: swatch }}
+                          >
+                            <i style={{ background: swatch }} />
+                            <i style={{ background: ink, opacity: 0.35 }} />
+                          </span>
+                          <strong>自定义</strong>
+                          {active && <span className="theme-card-check">当前</span>}
+                        </div>
+                        <div className="theme-swatches">
+                          {[0.95, 0.8, 0.65, 0.5, 0.35, 0.2].map((t) => (
+                            <span key={t} style={{ background: swatch, opacity: t }} />
+                          ))}
+                          <span style={{ background: surface, border: `1px solid ${ink}22` }} />
+                        </div>
+                      </button>
+                    )
+                  })()}
+                </div>
+                {/* 调色面板只在「自定义」被选中时出现 —— 它是这个主题选项的详情，
+                    不是全局常驻设置。含明/暗两个无彩色近路：很多用户想要的只是
+                    "黑白主题"而不想自己去挑十六进制。 */}
+                {appearance.accent === 'custom' && (() => {
+                  // 无彩色色板按明暗分成**方向相反**的两套，见下面注释
+                  const dark = appearance.mode === 'dark'
+                  return (
+                  <div className="accent-custom">
+                    <span className="accent-custom-label">
+                      <Palette size={13} /> 自定义强调色
+                    </span>
+                    <input
+                      type="color"
+                      className="accent-color-input"
+                      value={normalizeHexColor(appearance.customAccent) || '#5b8eff'}
+                      aria-label="自定义强调色"
+                      onChange={(e) => setCustomAccent(e.target.value)}
+                    />
+                    <input
+                      className="accent-hex-input"
+                      value={customAccentDraft || appearance.customAccent}
+                      maxLength={7}
+                      spellCheck={false}
+                      aria-label="自定义强调色十六进制值"
+                      onChange={(e) => {
+                        // 边打字边校验：合法的十六进制立刻生效，半成品（#5b8e）留在
+                        // 输入框里不提交，否则用户打一半就被强制纠正，光标乱跳。
+                        setCustomAccentDraft(e.target.value)
+                        if (normalizeHexColor(e.target.value)) setCustomAccent(e.target.value)
+                      }}
+                      onBlur={() => setCustomAccentDraft('')}
+                    />
+                    {/* 无彩色近路：按当前明暗给出**方向相反**的两套无彩色，而不是
+                        一套通用的"黑到白"。深色背景下白与浅灰是真的能用（提亮、描边、
+                        数值），近黑等于什么都看不见；浅色背景恰恰相反。
+                        之前两档共用同一组色块，深色模式下前三个色块点下去界面上没有
+                        任何变化，看起来像"点了没反应" —— 那不是 bug 而是色块选错了对象。 */}
+                    <div className="accent-swatches" role="group" aria-label={dark ? '无彩色（深色主题）' : '无彩色（浅色主题）'}>
+                      {(dark
+                        ? [
+                            { hex: '#ffffff', label: '纯白' },
+                            { hex: '#f2f2f5', label: '亮白' },
+                            { hex: '#9a9aa4', label: '中性灰' },
+                            { hex: '#5a5a63', label: '深灰' },
+                            { hex: '#17171d', label: '近黑' },
+                          ]
+                        : [
+                            { hex: '#000000', label: '纯黑' },
+                            { hex: '#16171d', label: '近黑' },
+                            { hex: '#4b5563', label: '深灰' },
+                            { hex: '#9ca3af', label: '中性灰' },
+                            { hex: '#ffffff', label: '纯白（仅描边）' },
+                          ]
+                      ).map(({ hex, label }) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          className="accent-swatch-mini"
+                          title={`${label} ${hex}`}
+                          aria-label={`${label} ${hex}`}
+                          data-active={appearance.accent === 'custom' && appearance.customAccent === hex}
+                          data-mono="true"
+                          style={{ background: hex }}
+                          onClick={() => setCustomAccent(hex)}
+                        />
+                      ))}
+                    </div>
+                    <div className="accent-swatches" role="group" aria-label={dark ? '常用颜色（深色主题）' : '常用颜色（浅色主题）'}>
+                      {(dark
+                        // 深色主题：取色板里偏亮的一档，落在深底上才有分量
+                        ? [
+                            '#5b8eff', '#3b82f6', '#818cf8', '#a78bfa', '#c084fc', '#e879f9',
+                            '#f472b6', '#fb7185', '#f87171', '#fb923c', '#fbbf24', '#facc15',
+                            '#a3e635', '#4ade80', '#34d399', '#2dd4bf', '#22d3ee', '#38bdf8',
+                          ]
+                        // 浅色主题：同一批色相压深一档 —— 亮色当文字放在白面板上会看不清
+                        : [
+                            '#4166b8', '#2f6fd0', '#4f46e5', '#7c3aed', '#9333ea', '#c026d3',
+                            '#db2777', '#e11d48', '#dc2626', '#ea580c', '#d97706', '#ca8a04',
+                            '#65a30d', '#16a34a', '#059669', '#0d9488', '#0891b2', '#0284c7',
+                          ]
+                      ).map((hex) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          className="accent-swatch-mini"
+                          title={hex}
+                          aria-label={hex}
+                          data-active={appearance.accent === 'custom' && appearance.customAccent === hex}
+                          style={{ background: hex }}
+                          onClick={() => setCustomAccent(hex)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  )
+                })()}
               </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Images size={14} />
+                  <div>
+                    <strong>背景</strong>
+                    <span className="hint">
+                      {appearance.backgroundRejected === 'too-large'
+                        ? '这个视频超过 50MB，已停用：背景每一帧都要解码，几百 MB 的片子会让界面变卡。请换一个 ≤50MB 的循环片段。'
+                        : appearance.backgroundPath
+                          ? backgroundKindOf(appearance.backgroundPath) === 'video'
+                            ? '视频背景：窗口在前台时循环播放，切到后台自动暂停省电'
+                            : '图片背景：面板自动转为半透明以保证文字可读'
+                          : '支持图片与视频（mp4 / webm，≤50MB）；默认纯色'}
+                    </span>
+                  </div>
+                </div>
+                <div className="appearance-actions">
+                  <button className="secondary-btn" type="button" onClick={() => void pickBackgroundImage()}>
+                    {appearance.backgroundPath ? '更换…' : '选择文件…'}
+                  </button>
+                  {appearance.backgroundPath ? (
+                    <button className="secondary-btn" type="button" onClick={() => setBackgroundPath('')}>
+                      移除
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              {appearance.backgroundPath ? (
+                <>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <div>
+                        <strong>背景遮罩</strong>
+                        <span className="hint">数值越高文字越清晰、背景越淡（推荐 60-80）</span>
+                      </div>
+                    </div>
+                    <div className="appearance-slider">
+                      <input
+                        type="range"
+                        min={0}
+                        max={95}
+                        value={appearance.backgroundDim}
+                        onChange={(e) => setBackgroundDim(Number(e.target.value))}
+                        aria-label="背景遮罩强度"
+                      />
+                      <span className="appearance-slider-value">{appearance.backgroundDim}%</span>
+                    </div>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <div>
+                        <strong>背景模糊</strong>
+                        <span className="hint">让背景退到后景，界面文字更干净（0 为不模糊）</span>
+                      </div>
+                    </div>
+                    <div className="appearance-slider">
+                      <input
+                        type="range"
+                        min={0}
+                        max={40}
+                        value={appearance.backgroundBlur}
+                        onChange={(e) => {
+                          setBackgroundBlur(Number(e.target.value))
+                          // 模糊跨过 4px 阈值会改变实际生效的画质档位，
+                          // 提示文案必须跟着变（主进程算，别在本地猜）。
+                          void refreshVideoQualityInfo()
+                        }}
+                        aria-label="背景模糊半径"
+                      />
+                      <span className="appearance-slider-value">{appearance.backgroundBlur}px</span>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+
+              {backgroundKindOf(appearance.backgroundPath) === 'video' ? (
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <div>
+                      <strong>背景视频画质</strong>
+                      <span className="hint">
+                        背景每一帧都要解码，档位越高越清晰也越费资源。
+                        {appearance.videoQualityDemoted ? (
+                          <>
+                            {' '}
+                            <strong>
+                              当前已自动降到「
+                              {VIDEO_QUALITY_OPTIONS.find((o) => o.id === appearance.videoQualityEffective)?.label}
+                              」
+                            </strong>
+                            ：背景模糊 ≥{BLUR_FORCES_BALANCED_PX}px 时更高分辨率看不出差别，纯属浪费
+                            {appearance.videoDecodeEdge
+                              ? `（实际解码长边约 ${appearance.videoDecodeEdge}px）`
+                              : ''}
+                            。把模糊调低即可恢复。
+                          </>
+                        ) : appearance.videoDecodeEdge ? (
+                          ` 当前解码长边约 ${appearance.videoDecodeEdge}px。`
+                        ) : (
+                          ''
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="segmented" role="radiogroup" aria-label="背景视频画质">
+                    {VIDEO_QUALITY_OPTIONS.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={appearance.videoQuality === option.id}
+                        className="segmented-item"
+                        data-active={appearance.videoQuality === option.id}
+                        title={option.hint}
+                        onClick={() => {
+                          setVideoQuality(option.id)
+                          // 主进程才知道真实的长边与是否降级：提交后把权威值取回来。
+                          void refreshVideoQualityInfo()
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <Palette size={14} />
+                  <div>
+                    <strong>用色浓度</strong>
+                    <span className="hint">控制强调色铺开多少：从只标选中项，到面板也带色底</span>
+                  </div>
+                </div>
+                <div className="segmented" role="radiogroup" aria-label="用色浓度">
+                  {ACCENT_STRENGTH_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={appearance.accentStrength === option.id}
+                      className="segmented-item"
+                      data-active={appearance.accentStrength === option.id}
+                      title={option.hint}
+                      onClick={() => setAccentStrength(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-label">
+                  <div>
+                    <strong>界面密度</strong>
+                    <span className="hint">紧凑模式收紧间距，字号保持不变</span>
+                  </div>
+                </div>
+                <div className="segmented" role="radiogroup" aria-label="界面密度">
+                  {DENSITY_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={appearance.density === option.id}
+                      className="segmented-item"
+                      data-active={appearance.density === option.id}
+                      onClick={() => setDensity(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+                </section>
+              )}
+
+              {settingsSection === 'ai' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Sparkles size={15} />
+                      AI 服务
+                    </h2>
+                    <span>提供商与密钥只在这里配置，WeportAI · WeBot · WeClone 共用</span>
+                  </div>
+
+                  {aiSetup ? (
+                    <Suspense fallback={<div className="wp-loading">正在加载 AI 服务面板…</div>}>
+                      <AiSettingsModal
+                        inline
+                        setup={aiSetup}
+                        onSaved={(next) => {
+                          setAiSetup(next)
+                          void refreshAiAssignments()
+                        }}
+                      />
+                    </Suspense>
+                  ) : (
+                    <div className="wp-loading">正在读取 AI 服务配置…</div>
+                  )}
+                </section>
+              )}
+
+              {settingsSection === 'assign' && aiAssignments !== null && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Sparkles size={15} />
+                      服务分配
+                    </h2>
+                    <span>哪个功能面用哪个服务（默认都跟随默认服务）</span>
+                  </div>
+                  {aiAssignments.profiles.length === 0 ? (
+                    <div className="empty">还没有配置任何 AI 服务。到「AI 服务」添加一个提供商与模型，这里就会出现。</div>
+                  ) : (
+                    <>
+                      {/* 三个功能面各一行。它们默认都跟随「默认服务」，所以绝大多数
+                          用户只需要配一次；想给定时任务单独用一个便宜模型时才分开设。 */}
+                      {(
+                        [
+                          { id: 'chat', label: 'WeportAI', hint: '手动对话与工具调用' },
+                          { id: 'webot', label: 'WeBot', hint: '定时任务的后台执行' },
+                          { id: 'weclone', label: 'WeClone', hint: '生成人格档案' },
+                        ] as const
+                      ).map((row) => {
+                        const current = aiAssignments.consumers.find((item) => item.consumer === row.id)
+                        return (
+                          <div className="setting-row" key={row.id}>
+                            <div className="setting-label">
+                              <div>
+                                <strong>{row.label}</strong>
+                                <span className="hint">
+                                  {current?.followsDefault
+                                    ? `跟随默认服务 · ${current?.model || '未配置'}`
+                                    : `${row.hint} · ${current?.model || '未配置'}`}
+                                </span>
+                              </div>
+                            </div>
+                            <select
+                              className="notification-select"
+                              value={current?.followsDefault ? '' : current?.profileId || ''}
+                              aria-label={`${row.label} 使用的 AI 服务`}
+                              onChange={(e) => void assignAiConsumer(row.id, e.target.value)}
+                            >
+                              <option value="">跟随默认服务</option>
+                              {aiAssignments.profiles.map((profile) => (
+                                <option key={profile.id} value={profile.id}>
+                                  {profile.name} · {profile.model}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )
+                      })}
+
+                      <div className="setting-row">
+                        <div className="setting-label">
+                          <div>
+                            <strong>默认服务</strong>
+                            <span className="hint">未单独指定时，三个功能面都用它</span>
+                          </div>
+                        </div>
+                        <select
+                          className="notification-select"
+                          value={aiAssignments.activeProfileId}
+                          aria-label="默认 AI 服务"
+                          onChange={(e) => void activateAiProfile(e.target.value)}
+                        >
+                          {aiAssignments.profiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.name} · {profile.model}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="setting-block">
+                        <div className="setting-label">
+                          <div>
+                            <strong>已配置的服务</strong>
+                            <span className="hint">增删改都在「AI 服务」页；这里只做分配</span>
+                          </div>
+                        </div>
+                        <div className="ai-profile-list">
+                          {aiAssignments.profiles.map((profile) => (
+                            <div className="ai-profile-row" key={profile.id} data-active={profile.id === aiAssignments.activeProfileId}>
+                              <strong>{profile.name}</strong>
+                              <span className="ai-profile-model">{profile.providerId} · {profile.model}</span>
+                              {profile.hasApiKey ? (
+                                <span className="badge ok">{profile.apiKeyHint || '已配置密钥'}</span>
+                              ) : (
+                                <span className="badge">未配置密钥</span>
+                              )}
+                              {profile.id === aiAssignments.activeProfileId && <span className="badge ok">默认</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </section>
+              )}
+
+              {settingsSection === 'connectors' && (
+                <Suspense fallback={<div className="wp-loading">正在加载连接器…</div>}>
+                  <ConnectorsPanel />
+                </Suspense>
+              )}
+
+              {settingsSection === 'data' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Archive size={15} />
+                      数据备份
+                    </h2>
+                  </div>
               <div className="setting-row backup-row">
                 <div className="setting-label">
                   <HardDrive size={14} />
@@ -2490,120 +3765,136 @@ export default function App() {
                   </button>
                 </div>
               </div>
-            </section>
+                </section>
+              )}
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Database size={15} />
-                  本地 HTTP API
-                </h2>
-                <span>只读接口 · 仅本机可访问</span>
-              </div>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Code2 size={14} />
-                  <div>
-                    <strong>启用本地 HTTP API</strong>
-                    <span className="hint">
-                      提供 /api/sessions、/api/messages、/api/sns/timeline 等只读接口
-                      {httpApiRunning ? ` · 运行中 http://127.0.0.1:${httpApiPort}` : ' · 默认端口 5031'}
-                    </span>
+              {settingsSection === 'connect' && (
+                <>
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Database size={15} />
+                      本地 HTTP API
+                    </h2>
+                    <span>只读接口，供脚本与本地工具使用</span>
                   </div>
-                </div>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={httpApiEnabled}
-                    onChange={(e) => void toggleHttpApi(e.target.checked)}
-                  />
-                  <span className="track" />
-                </label>
-              </div>
-            </section>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <Code2 size={14} />
+                      <div>
+                        <strong>启用本地 HTTP API</strong>
+                        <span className="hint">
+                          提供 /api/sessions、/api/messages、/api/sns/timeline 等只读接口
+                          {httpApiRunning ? ` · 运行中 http://127.0.0.1:${httpApiPort}` : ' · 默认端口 5031'}
+                        </span>
+                      </div>
+                    </div>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={httpApiEnabled}
+                        onChange={(e) => void toggleHttpApi(e.target.checked)}
+                      />
+                      <span className="track" />
+                    </label>
+                  </div>
+                </section>
 
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Palette size={15} />
-                  色彩主题
-                </h2>
-                <span>应用于文字 / 图标 / 图表 / 数字</span>
-              </div>
-              <div className="theme-picker">
-                {(
-                  [
-                    {
-                      id: 'colorful',
-                      label: '浅蓝',
-                      desc: '统一浅蓝 accent 色调，现代克制',
-                      icon: Palette,
-                      swatches: ['#6ea8ff', '#7fb4ff', '#93c2ff', '#5b93ff', '#84b7ff', '#a6cfff'],
-                    },
-                    {
-                      id: 'mono',
-                      label: '黑白',
-                      desc: '经典单色灰阶，保持纯黑白风格',
-                      icon: Contrast,
-                      swatches: ['#f4f4f5', '#d4d4da', '#b8b8c0', '#9a9aa4', '#7e7e88', '#63636d'],
-                    },
-                  ] as Array<{ id: 'colorful' | 'mono'; label: string; desc: string; icon: React.ComponentType<{ size?: number | string }>; swatches: string[] }>
-                ).map((t) => {
-                  const Icon = t.icon
-                  const active = colorMode === t.id
-                  return (
+                {/* MCP 服务在 v0.9.5 就做完了，但一直没有界面：用户看不到它在不在跑，
+                    也拿不到那份客户端配置，只能照着文档手抄 bridge 路径和 token。 */}
+                <section className="panel mcp-panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Server size={15} />
+                      MCP 服务
+                    </h2>
+                    <span>给 Claude Desktop 等支持 MCP 的宿主调用同一批只读接口</span>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <Server size={14} />
+                      <div>
+                        <strong>{mcpStatus?.running ? '运行中' : '未运行'}</strong>
+                        <span className="hint">
+                          {mcpStatus
+                            ? `http://${mcpStatus.host}:${mcpStatus.port} · ${mcpStatus.tokenConfigured ? '已配置访问令牌' : '未配置访问令牌'}`
+                            : '正在读取服务状态…'}
+                        </span>
+                      </div>
+                    </div>
                     <button
-                      key={t.id}
+                      className="secondary-btn"
                       type="button"
-                      className={`theme-card ${active ? 'theme-card-active' : ''}`}
-                      onClick={() => setColorMode(t.id)}
+                      onClick={() => void copyMcpClientConfig()}
                     >
-                      <div className="theme-card-head">
-                        <Icon size={17} />
-                        <strong>{t.label}</strong>
-                        {active && <span className="theme-card-check">当前</span>}
-                      </div>
-                      <div className="theme-swatches">
-                        {t.swatches.map((c) => (
-                          <span key={c} style={{ background: c }} />
-                        ))}
-                      </div>
-                      <span className="theme-card-desc">{t.desc}</span>
+                      <Copy size={13} />
+                      {mcpCopied ? '已复制' : '复制客户端配置'}
                     </button>
-                  )
-                })}
-              </div>
-            </section>
-
-            <section className="panel">
-              <div className="panel-head">
-                <h2>
-                  <Info size={15} />
-                  关于
-                </h2>
-                <span>版本与更新</span>
-              </div>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Info size={14} />
-                  <div>
-                    <strong>Weport v{version}</strong>
-                    <span className="hint">更新源：GitHub Releases (Panther114/Weport)</span>
                   </div>
-                </div>
-                <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                  {updateBusy ? '检查中…' : '检查更新'}
-                </button>
-                <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
-                  更新日志
-                </button>
-                {updateInfo && (
-                  <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                    {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
-                  </button>
-                )}
-              </div>
-            </section>
+                  <p className="setting-note">
+                    复制得到的是 Claude Desktop 的 <code>mcpServers</code> 片段，粘进
+                    <code>claude_desktop_config.json</code> 后重启宿主即可。
+                  </p>
+                </section>
+                </>
+              )}
+
+              {settingsSection === 'about' && (
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>
+                      <Info size={15} />
+                      关于
+                    </h2>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <Info size={14} />
+                      <div>
+                        <strong>Weport v{version}</strong>
+                        {/* 更新源不只是一句说明 —— 直接给可点的链接。原来这里只是
+                            一行纯文本 "(Panther114/Weport)"，用户想去看仓库/issues
+                            得自己手敲地址。 */}
+                        <span className="hint">
+                          开源在 GitHub：
+                          <button
+                            className="link-inline"
+                            type="button"
+                            onClick={() => void api.shell.openExternal('https://github.com/Panther114/Weport')}
+                          >
+                            Panther114/Weport
+                          </button>
+                        </span>
+                      </div>
+                    </div>
+                  {/* 操作必须包成**一个**子元素：`.setting-row` 是两列 grid，
+                      多塞两个按钮会变成两个新的网格单元、把「更新日志」甩到下一行
+                      （用户报的"位置不对"）。 */}
+                  <div className="setting-actions">
+                    <button
+                      className="ghost-btn"
+                      type="button"
+                      title="在浏览器里打开项目主页"
+                      onClick={() => void api.shell.openExternal('https://github.com/Panther114/Weport')}
+                    >
+                      <GitPullRequest size={13} />                      GitHub
+                    </button>
+                    <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
+                      {updateBusy ? '检查中…' : '检查更新'}
+                    </button>
+                    <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
+                      更新日志
+                    </button>
+                    {updateInfo && (
+                      <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
+                        {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                      </button>
+                    )}
+                  </div>
+                  </div>
+                </section>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -2665,7 +3956,9 @@ export default function App() {
               <div className="changelog-new">
                 <span className="changelog-new-tag">新版本 v{updateInfo.version}</span>
                 {updateInfo.body ? (
-                  <AiMarkdown text={updateInfo.body} />
+                  <Suspense fallback={null}>
+                    <AiMarkdown text={updateInfo.body} />
+                  </Suspense>
                 ) : (
                   <p className="hint" style={{ margin: '6px 0 0' }}>暂无该版本的更新说明。</p>
                 )}
@@ -2675,13 +3968,108 @@ export default function App() {
               {changelogLoading ? (
                 <div className="empty">正在加载更新日志…</div>
               ) : changelogContent ? (
-                <AiMarkdown text={changelogContent} />
+                <Suspense fallback={<div className="empty">正在排版更新日志…</div>}>
+                  <AiMarkdown text={changelogContent} />
+                </Suspense>
               ) : (
                 <div className="empty">暂无更新日志</div>
               )}
             </div>
             <div className="modal-actions">
               <button className="secondary-btn" type="button" onClick={() => setChangelogOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {muteReport && (
+        <div className="modal-backdrop" onClick={() => setMuteReport(null)}>
+          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="mute-report-title">
+            <h3 id="mute-report-title">
+              <BellOff size={15} />
+              免打扰检测结果
+            </h3>
+
+            <div className="mute-report-grid">
+              <div className="mute-report-cell" data-state={muteReport.success ? 'ok' : 'fail'}>
+                <span>读取会话</span>
+                <b>{muteReport.success ? `${muteReport.sessionCount} 个` : '失败'}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.nativeAvailable ? 'ok' : 'fail'}>
+                <span>原生接口</span>
+                <b>{muteReport.nativeAvailable ? '可用' : '不可用'}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.returnedKeyCount > 0 ? 'ok' : 'fail'}>
+                <span>原生返回</span>
+                <b>{muteReport.nativeRawKeyCount ?? muteReport.returnedKeyCount}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.unknownStatusCount === 0 ? 'ok' : 'warn'}>
+                <span>状态未知</span>
+                <b>{muteReport.unknownStatusCount}</b>
+              </div>
+              <div className="mute-report-cell" data-state={muteReport.mutedCount > 0 ? 'ok' : 'warn'}>
+                <span>判定免打扰</span>
+                <b>{muteReport.mutedCount} 个</b>
+              </div>
+            </div>
+
+            {!muteReport.success && (
+              <p className="mute-report-note fail">读取失败：{muteReport.error || '未知错误'}</p>
+            )}
+            {muteReport.success && !muteReport.nativeAvailable && (
+              <p className="mute-report-note fail">
+                原生接口没有就绪（{muteReport.error || '接口未就绪'}），因此**任何会话都不会被判定为免打扰** ——
+                通知会照常弹出。这是「跟随微信免打扰」失效最常见的原因。
+              </p>
+            )}
+            {muteReport.success && muteReport.nativeAvailable && muteReport.returnedKeyCount === 0 && (
+              <p className="mute-report-note fail">
+                原生接口返回了 0 条 —— 和请求的 {muteReport.sessionCount} 个会话对不上，同样会导致全部按「未免打扰」处理。
+              </p>
+            )}
+            {muteReport.success && muteReport.nativeAvailable && muteReport.returnedKeyCount > 0 && muteReport.mutedCount === 0 && (
+              <p className="mute-report-note warn">
+                接口正常但一个免打扰都没识别出来。如果你在微信里确实给某些会话开了免打扰，这一条就是问题所在。
+              </p>
+            )}
+            {muteReport.success && muteReport.unknownStatusCount > 0 && (
+              <p className="mute-report-note warn">
+                有 {muteReport.unknownStatusCount} 个会话的状态没查到。v1.0.0 之前「状态未知」会被当成「未免打扰」，
+                这些会话的免打扰设置不会生效 —— 现在会在每次同步时补查（补查后带标记的会话：{muteReport.flagBefore} → {muteReport.flagAfter}）。
+              </p>
+            )}
+
+            <div className="mute-report-list">
+              {muteReport.muted.length === 0 ? (
+                <div className="empty">没有被判定为免打扰的会话</div>
+              ) : (
+                muteReport.muted.map((row) => (
+                  <div className="mute-report-row" key={row.username}>
+                    <strong>{row.displayName}</strong>
+                    <span className="mute-report-id">{row.username}</span>
+                    <span className="badge">{row.isMuted ? '免打扰' : '正常'}</span>
+                    {row.isFolded && <span className="badge">已折叠</span>}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={() => void navigator.clipboard.writeText(JSON.stringify(muteReport, null, 2)).then(() => pushToast('ok', '已复制自检结果', '', 4000))}
+              >
+                <Copy size={13} />
+                复制结果
+              </button>
+              <button className="secondary-btn" type="button" onClick={() => void openMuteReport()}>
+                <RefreshCw size={13} />
+                重新检测
+              </button>
+              <button className="secondary-btn" type="button" onClick={() => setMuteReport(null)}>
                 关闭
               </button>
             </div>

@@ -1,4 +1,7 @@
-import ExcelJS from 'exceljs';
+// exceljs 是主进程最重的依赖之一（实测 node 基线 RSS +18.4MB）。它只在用户
+// 真的导出 XLSX 时才需要，所以这里**只留类型**，运行时在用到的地方动态加载 ——
+// 否则每一个只导出 TXT/JSON 的用户都要永久背着这 18MB。
+import type ExcelJS from 'exceljs';
 //  '../../wcdbService';
 import { resolveExportDisplayProfile } from '../../export/contacts/contactResolver';
 import { buildGroupNicknameIdCandidates } from '../../export/contacts/groupNickname';
@@ -105,7 +108,8 @@ export class ExcelFormatter {
         exportedMessages: 0
       })
 
-      // 创建 Excel 工作簿
+      // 创建 Excel 工作簿（这里才真正加载 exceljs）
+      const { default: ExcelJS } = await import('exceljs')
       const workbook = new ExcelJS.Workbook()
       workbook.creator = 'WeFlow'
       workbook.created = new Date()

@@ -7,7 +7,9 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
-import ExcelJS from 'exceljs'
+// 只用类型（ExcelJS.Cell 出现在下面两个公开方法的签名里）；运行时按需动态加载，
+// 避免所有导出（哪怕是 TXT）都背上 exceljs 的 ~18MB 常驻。见 ExcelFormatter.ts 说明。
+import type ExcelJS from 'exceljs'
 import { getEmojiPath } from 'wechat-emojis'
 import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'
@@ -432,7 +434,8 @@ export class ExportContext {
           cacheMissFiles: 0,
           cacheFillFiles: 0,
           dedupReuseFiles: 0,
-          bytesWritten: 0
+          bytesWritten: 0,
+          imageKeyMissingFiles: 0
         }
     }
 
@@ -500,7 +503,8 @@ export class ExportContext {
           mediaCacheMissFiles: stats.cacheMissFiles,
           mediaCacheFillFiles: stats.cacheFillFiles,
           mediaDedupReuseFiles: stats.dedupReuseFiles,
-          mediaBytesWritten: stats.bytesWritten
+          mediaBytesWritten: stats.bytesWritten,
+          mediaImageKeyMissingFiles: stats.imageKeyMissingFiles
         }
     }
 
@@ -524,6 +528,10 @@ export class ExportContext {
 
         if (Number.isFinite(delta.dedupReuseFiles)) {
           this.mediaExportTelemetry.dedupReuseFiles += Math.max(0, Math.floor(Number(delta.dedupReuseFiles || 0)))
+        }
+
+        if (Number.isFinite(delta.imageKeyMissingFiles)) {
+          this.mediaExportTelemetry.imageKeyMissingFiles += Math.max(0, Math.floor(Number(delta.imageKeyMissingFiles || 0)))
         }
 
         if (Number.isFinite(delta.bytesWritten)) {
@@ -3067,6 +3075,9 @@ export class ExportContext {
           const imagesDir = path.join(mediaRootDir, mediaRelativePrefix, 'images')
           await ensureExportDir(imagesDir, control, dirCache)
 
+          // issue #15/#5b：记录本条消息是否因缺图片解密密钥而失败。
+          // 在最终占位分支统一计数一次，避免回填重试把同一条消息算两次。
+          let sawMissingImageKey = false
           const tryResolveImagePath = async (imageMd5?: string, imageDatName?: string): Promise<string | null> => {
             if (!imageMd5 && !imageDatName) return null
             return this.runWithChatImagePipelineLimit(async () => {
@@ -3106,6 +3117,7 @@ export class ExportContext {
                 hardlinkOnly: true,
                 allowCacheIndex: true
               })
+              if (decryptResult.failureKind === 'missing_key') sawMissingImageKey = true
               const decryptedPath = pickResolvedImagePath(decryptResult)
               if (decryptedPath) return decryptedPath
 
@@ -3166,7 +3178,13 @@ export class ExportContext {
 
           if (!sourcePath) {
             const missingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName, (msg as any)?.localId)
-            console.log(`[Export] 缩略图也获取失败，所有方式均失败 → 将显示 [图片] 占位符`)
+            if (sawMissingImageKey) {
+              // 缺密钥导致的占位必须可数可见（issue #15 静默失败的反面），而不再淹没在通用日志里。
+              this.noteMediaTelemetry({ imageKeyMissingFiles: 1 })
+              console.log(`[Export] 图片缺解密密钥 (localId=${msg.localId}): imageMd5=${imageMd5 || ''}, imageDatName=${imageDatName || ''} → 将显示 [图片] 占位符，请先获取图片密钥后重新导出`)
+            } else {
+              console.log(`[Export] 缩略图也获取失败，所有方式均失败 → 将显示 [图片] 占位符`)
+            }
             if (missingRunCacheKey) {
               this.mediaRunMissingImageKeys.add(missingRunCacheKey)
             }
@@ -5460,6 +5478,7 @@ export class ExportContext {
                 } = params;
         try {
           const { mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+          const { default: ExcelJS } = await import('exceljs')
           const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
             filename: outputPath,
             useStyles: true,

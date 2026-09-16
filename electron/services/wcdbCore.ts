@@ -333,6 +333,19 @@ export class WcdbCore {
    * 获取库文件路径（跨平台）
    */
   private getDllPath(): string {
+    const { libName, candidates } = this.buildDllCandidates()
+    for (const path of candidates) {
+      if (existsSync(path)) return path
+    }
+
+    return candidates[0] || libName
+  }
+
+  /**
+   * 构建动态库搜索候选列表（issue #17/#5a：缺失时需完整上报，供日志自举诊断）。
+   * getDllPath 与 initialize 共用，保证日志里的候选列表与实际查找一致。
+   */
+  private buildDllCandidates(): { libName: string; candidates: string[] } {
     const isMac = process.platform === 'darwin'
     const isLinux = process.platform === 'linux'
     const isArm64 = process.arch === 'arm64'
@@ -343,7 +356,7 @@ export class WcdbCore {
 
     const envDllPath = process.env.WCDB_DLL_PATH
     if (envDllPath && envDllPath.length > 0) {
-      return envDllPath
+      return { libName, candidates: [envDllPath] }
     }
 
     // 基础路径探测
@@ -376,14 +389,12 @@ export class WcdbCore {
       candidates.push(join(root, libName))
     }
 
-    for (const path of candidates) {
-      if (existsSync(path)) return path
-    }
-
-    return candidates[0] || libName
+    return { libName, candidates }
   }
 
   private formatInitProtectionError(code: number): string {
+    const logPath = this.getLogFileCandidates()[0] || '%APPDATA%\\Weport\\logs\\wcdb.log'
+    const sentinelNextStep = `；下一步：确认数据目录选的是 xwechat_files 根目录、账号与 64 位密钥属于同一账号后重试，并把日志 ${logPath} 一起反馈`
     const messages: Record<number, string> = {
       '-3001': '未找到数据库目录 (db_storage)，请确认已选择正确的微信数据目录（应包含以 wxid_ 开头的子文件夹）',
       '-3002': '未找到 session.db 文件，请确认微信已登录并且数据目录完整',
@@ -392,9 +403,16 @@ export class WcdbCore {
       '-2301': '动态库加载失败，请检查安装是否完整',
       '-2302': 'WCDB 初始化异常，请重试',
       '-2303': 'WCDB 未能成功初始化',
+      // issue #17：这两个是**客户端哨兵**，不是 WCDB / 微信返回的码。万一它们
+      // 从原生层漏到这里，也不能只回一个数字 —— 用户会当成"服务器的错误码"去查。
+      '-3999': `微信数据服务初始化失败，且未能解析出具体错误码${sentinelNextStep}`,
+      '-3998': `连接过程中出现未预期异常${sentinelNextStep}`,
     }
     const msg = messages[String(code) as unknown as keyof typeof messages]
-    return msg ? `${msg} (错误码: ${code})` : `操作失败，错误码: ${code}`
+    if (msg) return `${msg} (错误码: ${code})`
+    // issue #17：未收录的码以前只回「操作失败，错误码: X」——一串既查不到也
+    // 没法反馈的数字。现在给出下一步（去哪看日志、先检查什么）。
+    return `微信数据服务初始化失败，返回了未收录的错误码 ${code}；请确认数据目录、账号与 64 位密钥属于同一账号后重试，并把日志 ${logPath} 一起反馈`
   }
 
   private isLogEnabled(): boolean {
@@ -779,6 +797,13 @@ export class WcdbCore {
       if (!existsSync(dllPath)) {
         console.error('WCDB数据服务不存在:', dllPath)
         this.writeLog(`[bootstrap] initialize failed:数据服务not found path=${dllPath}`, true)
+        // issue #17/#5a：此前该分支直接 return false 且不设置 lastDllInitError，
+        // 上层只能看到 getLastInitError() === null 并显示无意义的 -3999。
+        // 现在上报完整候选列表 + 资源路径，wcdb.log 即可自举定位缺件原因。
+        const searchedCandidates = this.buildDllCandidates().candidates
+        this.writeLog(`[bootstrap] dll search candidates (${searchedCandidates.length}): ${searchedCandidates.join(' | ')}`, true)
+        this.writeLog(`[bootstrap] dll search env: WCDB_DLL_PATH=${process.env.WCDB_DLL_PATH || ''} WCDB_RESOURCES_PATH=${process.env.WCDB_RESOURCES_PATH || ''} setPaths.resourcesPath=${this.resourcesPath || ''}`, true)
+        lastDllInitError = `动态库加载失败，请检查安装是否完整：${dllPath} (错误码: -2301)`
         return false
       }
 
@@ -3566,7 +3591,7 @@ export class WcdbCore {
     }
   }
 
-  async getContactStatus(usernames: string[]): Promise<{ success: boolean; map?: Record<string, { isFolded: boolean; isMuted: boolean }>; error?: string }> {
+  async getContactStatus(usernames: string[]): Promise<{ success: boolean; map?: Record<string, { isFolded: boolean; isMuted: boolean }>; rawKeys?: string[]; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
@@ -3583,6 +3608,7 @@ export class WcdbCore {
       if (!jsonStr) return { success: false, error: '解析会话状态失败' }
 
       const rawMap = JSON.parse(jsonStr) || {}
+      const rawKeys = Object.keys(rawMap)
       const map: Record<string, { isFolded: boolean; isMuted: boolean }> = {}
       for (const username of usernames || []) {
         const state = rawMap[username] || {}
@@ -3591,7 +3617,9 @@ export class WcdbCore {
           isMuted: Boolean(state.isMuted)
         }
       }
-      return { success: true, map }
+      // rawKeys 供免打扰自检使用：原生返回的键和请求的 username 对不上时，上面的
+      // 循环会给每个会话填 {isMuted:false} —— 看起来成功，实际一条都不生效。
+      return { success: true, map, rawKeys }
     } catch (e) {
       return { success: false, error: String(e) }
     }

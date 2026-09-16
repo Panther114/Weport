@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'fs'
@@ -53,7 +53,7 @@ type DecryptResult = {
   success: boolean
   localPath?: string
   error?: string
-  failureKind?: 'not_found' | 'decrypt_failed'
+  failureKind?: 'not_found' | 'decrypt_failed' | 'missing_key'
   isThumb?: boolean  // 是否是缩略图（没有高清图时返回缩略图）
 }
 
@@ -583,8 +583,21 @@ export class ImageDecryptService {
         }
       }
       if (Number.isNaN(xorKey) || (!xorKey && xorKey !== 0)) {
+        // issue #15：缺图片密钥是用户**能自己解决**的失败，所以它必须带下一步。
+        // 旧文案只有"未配置图片解密密钥"，macOS 用户看到它时既不知道点哪里，
+        // 也不知道 macOS 的密钥来自磁盘缓存而不是进程内存。
+        this.logError('缺少图片解密密钥', undefined, {
+          platform: process.platform,
+          wxid,
+          hasXorKey: xorKeyRaw !== undefined && xorKeyRaw !== null && String(xorKeyRaw).trim() !== '',
+          hasAesKey: Boolean(imageKeys.aesKey)
+        })
         this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', '缺少解密密钥')
-        return { success: false, error: '未配置图片解密密钥', failureKind: 'not_found' }
+        return {
+          success: false,
+          error: `未配置图片解密密钥。${this.describeMissingImageKeyHint(wxid)}`,
+          failureKind: 'missing_key'
+        }
       }
 
       const aesKeyRaw = imageKeys.aesKey
@@ -609,10 +622,21 @@ export class ImageDecryptService {
 
       // 如果解密产物无法识别为图片，归类为“解密失败”。
       if (!detectedExt) {
+        // issue #20：两个账号同机时最常见的原因不是"文件坏了"，而是**用错了账号
+        // 的密钥**（加密能跑完，但解出来是噪声）。旧文案只回"解密后不是有效图片"，
+        // 用户既不知道是密钥问题，也不知道要回到连接页重取 —— 必须带上下一步。
+        this.logError('解密后不是有效图片', undefined, {
+          datPath,
+          wxid,
+          xorKey,
+          hasAesKey: Boolean(aesKeyForNative)
+        })
+        const hint = `密钥可能属于另一个微信账号（同一台电脑登录过多个账号时最常见）：`
+          + `请回到「连接」页选中当前账号后重新点「获取图片密钥」，再用该账号在微信里打开几张图片`
         this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', '解密后不是有效图片')
         return {
           success: false,
-          error: '解密后不是有效图片',
+          error: `解密后不是有效图片。${hint}`,
           failureKind: 'decrypt_failed',
           isThumb: this.isThumbnailPath(datPath)
         }
@@ -648,6 +672,24 @@ export class ImageDecryptService {
       this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', String(e))
       return { success: false, error: String(e), failureKind: 'not_found' }
     }
+  }
+
+  /**
+   * issue #15：把"缺图片密钥"变成一条可执行的指令。
+   *
+   * 平台差异是真实存在的，不能糊在一句话里：Windows 走 wx_key.dll 的进程内提取，
+   * macOS/Linux 走 kvcomm 缓存 + 内存扫描兜底，而 macOS 上内存扫描通常拿不到
+   * task_for_pid（正式版微信没有 get-task-allow），所以磁盘路径才是用户该走的那条。
+   */
+  private describeMissingImageKeyHint(wxid: string): string {
+    const account = wxid ? `当前账号 ${wxid} 尚未保存图片密钥。` : '当前账号尚未保存图片密钥。'
+    const steps = process.platform === 'win32'
+      ? '请回到导出页勾选「导出图片」，点击「获取图片密钥」并等待完成后再导出。'
+      : '请在导出页勾选「导出图片」，点击「获取图片密钥」——Weport 会从微信的 kvcomm 缓存推导密钥，不需要附加微信进程。'
+    const fallback = process.platform === 'darwin'
+      ? '若缓存读取失败：保持微信已登录并打开几张图片大图，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport，然后重新获取。'
+      : '若失败：保持微信已登录并打开几张图片后重试。'
+    return `${account}${steps}${fallback}`
   }
 
   private resolveAccountDir(dbPath: string, wxid: string): string | null {

@@ -29,6 +29,7 @@ import { readdir, copyFile, mkdir as mkdirAsync, rm as rmAsync, writeFile as wri
 import { Worker } from 'worker_threads'
 import { ConfigService } from './services/config'
 import { avatarCacheService, toProtocolUrl, protocolUrlToPath } from './services/avatarCacheService'
+import { BackgroundVideoService } from './services/backgroundVideoService'
 import { snsService, isVideoUrl } from './services/snsService'
 import { WasmService } from './services/wasmService'
 import { analyticsService } from './services/analyticsService'
@@ -40,7 +41,6 @@ import { exportService } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { backupService } from './services/backupService'
 import { httpService } from './services/httpService'
-import { mcpService } from './services/mcpService'
 import { windowsHelloService } from './services/windowsHelloService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
@@ -48,11 +48,23 @@ import { KeyServiceMac } from './services/keyServiceMac'
 import { KeyServiceLinux } from './services/keyServiceLinux'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
+
 import { getProviderCatalog } from './services/ai/providerCatalog'
+import { refreshModelRegistry } from './services/ai/registryRuntime'
+import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
+import { setWeBotService } from './services/weBotRegistry'
+import { weCloneService } from './services/weCloneService'
+import { connectorsService } from './services/connectors/connectorsService'
+import { registerCliCommands } from './services/cliCommands'
+import { runCommand } from './services/weportCommands'
+import { collectMacDiagnostics } from './services/macDiagnosticsService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
   showNotification,
+  suppressLiveGlassProtection,
+  getBackdropFrameCount,
+  getBackdropSeq,
   setNotificationNavigateHandler,
 } from './windows/notificationWindow'
 import type { MessagePushPayload } from './services/messagePushService'
@@ -71,11 +83,39 @@ let tray: Tray | null = null
 let isAppQuitting = false
 let mainWindowReady = false
 let configService: ConfigService | null = null
+/** 视频背景降采样缓存（startApp 里初始化，config:get 会用到） */
+let backgroundVideoService: BackgroundVideoService | null = null
 let messagePushService: MessagePushService | null = null
 let shutdownPromise: Promise<void> | null = null
 let fatalProcessError = false
+/**
+ * MCP 服务是**按需加载**的（v1.0.4）。
+ *
+ * `@modelcontextprotocol/sdk` 加上 zod 常驻约 20 MB，而"默认开启的 MCP"在绝大多数
+ * 会话里只是"一个本地端口开着、没有任何客户端连进来"。这 20 MB 因此是白付的。
+ * 改成惰性单例：真的要用（start / 查状态）时才 `import()`。
+ *
+ * 收尾路径刻意读 `mcpServiceRef` 而不是调用下面的 getter —— **没起来过的服务，
+ * 不该为了"停它"把整个 SDK 载进内存**（那正好把这次省下的又付回去）。
+ */
+let mcpServiceRef: (typeof import('./services/mcpService'))['mcpService'] | null = null
+async function getMcpService(): Promise<NonNullable<typeof mcpServiceRef>> {
+  if (!mcpServiceRef) {
+    const mod = await import('./services/mcpService')
+    mcpServiceRef = mod.mcpService
+  }
+  return mcpServiceRef
+}
 /** 是否以静默方式启动（开机自启 Run 键带 --background，主窗口保持隐藏） */
 const startHidden = process.argv.includes('--background')
+/**
+ * TUI 引擎模式（`weport` 在终端里起的子进程）。
+ *
+ * 终端界面本身是另一个进程（packages/weport-tui），它需要的是"服务能力"而不是
+ * 渲染层，所以这个模式不创建主窗口、不建托盘，只在既有 IPC 通道上接一个
+ * JSON-RPC 服务器 —— 命令走的是和 GUI 完全相同的 service 层。
+ */
+const isCliMode = process.argv.includes('--cli')
 /** QA 截图模式（scripts/capture-ui.ps1 驱动）。 */
 const isScreenshotMode = process.env.WEPORT_SCREENSHOT_POPUP === '1'
 /** README 截图模式：读取隔离的用户配置/数据库副本，并在渲染层统一模糊隐私字段。 */
@@ -90,7 +130,10 @@ const isAnyQaMode =
   process.env.WEPORT_REAL_DUMP === '1' ||
   process.env.WEPORT_UI_DUMP === '1' ||
   process.env.WEPORT_SELFTEST === '1' ||
-  process.env.WEPORT_AI_SELFTEST === '1'
+  process.env.WEPORT_AI_SELFTEST === '1' ||
+  process.env.WEPORT_AI_PROBE === '1' ||
+  process.env.WEPORT_AI_SETUP === '1' ||
+  isCliMode
 
 // ---------------------------------------------------------------------------
 // 资源路径（wcdb / key / runtime DLL）
@@ -107,10 +150,35 @@ function resolveResourcesPath(): string {
 // 旧版设置迁移（Rust egui v0.6.x → electron-store）
 // ---------------------------------------------------------------------------
 function migrateLegacySettings() {
+  // 截图 / 转储模式**绝不**迁移：`settings.json` 是 v0.6.x 遗留的真实配置，
+  // 里面就是真实的 dbPath 与解密密钥。迁移之后，harness 用的那个一次性
+  // user-data-dir 会连上真实数据库 —— 演示数据只覆盖了「有 override 的那些
+  // 通道」，任何新加的、没写 override 的通道（例如新的自检对话框）都会把真实
+  // 会话 id 截进 README 截图里。实测过一次，就是这么漏的。
+  if (isScreenshotMode) return
+
   const store = configService!
   const fresh = !store.get('dbPath') && !store.get('myWxid') && !store.get('decryptKey') && !store.get('onboardingDone')
   // 修复模式：旧版存在密钥而 store 为空时也要迁移（早期迁移可能因字段名不一致漏掉）
   const legacyPath = join(app.getPath('appData'), 'Weport', 'settings.json')
+  /**
+   * 这里曾经是 `if (!fresh && store.get('decryptKey')) return` ——
+   * 把「已经配过」等同于「decryptKey 此刻读出来非空」。而 `decryptKey` 会在三种
+   * **正常可达**的状态下读成空串：
+   *   1. 应用锁：`lock:` 值在解锁前没有明文缓存（config.ts 的 get 直接返回 ''）；
+   *   2. safeStorage 不可用（headless / 无密钥后端）；
+   *   3. 密文解不开（换了机器、DPAPI 变了）。
+   * 这三种情况下那个 early-return 被跳过，函数就会去读 v0.6.x 的
+   * `%APPDATA%\Weport\settings.json` 并**覆盖** dbPath / decryptKey / myWxid /
+   * exportPath / 通知与自启开关 —— 而且会把 `lock:` 的密钥改写成 `safe:`，
+   * 于是应用锁静默失效、数据库密钥换成旧版的。本机那份 settings.json 真的存在
+   * （含 64 位明文密钥），所以这不是理论风险。
+   *
+   * 正确的判据是「用户到底配过没有」：只要 store 里已经有 dbPath 或 myWxid，
+   * 这次启动就与旧版无关，一律不迁移 —— 与 decryptKey 能不能解密无关。
+   */
+  const alreadyConfigured = Boolean(store.get('dbPath')) || Boolean(store.get('myWxid'))
+  if (!fresh && alreadyConfigured) return
   if (!fresh && store.get('decryptKey')) return
 
   let legacy: Record<string, unknown> | null = null
@@ -664,6 +732,26 @@ function formatLocalTime(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/**
+ * 进度事件里会话名的长度上限。
+ *
+ * 为什么要封顶：会话名来自 `sessionInfo.displayName`，**群聊名可以很长**（真实库里
+ * 就有 35 字符的英文群名，微信本身的上限还更高），而进度事件是高频的（每 400ms
+ * 一条、一次导出 189 条）。无界字符串进高频通道有两个代价：一是渲染层每次都要对
+ * 一行超长文本做整形与省略号计算；二是这类内容在界面上"一个接一个地闪"，越长的
+ * 名字越显得在抖。
+ *
+ * 40 字符是按渲染侧那格 260px 的容量取的：等宽拉丁字母约 42 个、汉字约 21 个，
+ * 因此 40 已经超过它能显示的极限 —— 截断只影响**根本显示不出来**的部分，画面
+ * 一个字都不会变，但通道里的负载从此有界。
+ */
+const PROGRESS_SESSION_LABEL_MAX = 40
+function boundProgressSessionLabel(value: unknown): string {
+  const name = String(value ?? '').replace(/\s+/g, ' ').trim()
+  if (!name) return ''
+  return name.length > PROGRESS_SESSION_LABEL_MAX ? `${name.slice(0, PROGRESS_SESSION_LABEL_MAX)}…` : name
+}
+
 function parseExportLog(path: string): { txt?: string; json?: string } {
   let txt: string | undefined
   let json: string | undefined
@@ -995,9 +1083,35 @@ function createWindow(autoShow: boolean): BrowserWindow {
     }
   })
 
+  // 最小化 / 隐藏同样要排进内存回收：此前只有「关闭到托盘」这一条路会
+  // scheduleMainWindowDiscard()，于是「最小化之后就不管了」的窗口会一直
+  // 占着整个渲染进程（实测托盘态 567MB，因为软件光栅；见上面 GPU 注释）。
+  // isVisible() 在最小化时已经是 false，所以 tick 本身能正确处理，
+  // 缺的只是"没人给它排期"。
+  win.on('minimize', () => {
+    // 最小化保留窗口（任务栏按钮要在），只排期卸载渲染层。
+    scheduleMainWindowDiscard('unload')
+  })
+  win.on('hide', () => {
+    scheduleMainWindowDiscard('destroy')
+  })
+  // 还原/显示时撤销回收计划；若已被回收，必须先把应用页装回来再显示 ——
+  // 否则从任务栏还原会露出一个 about:blank 白窗（只走托盘路径才盖得住）。
+  win.on('restore', () => {
+    cancelMainWindowDiscard()
+    restoreDiscardedMainWindow()
+  })
+  win.on('show', () => {
+    cancelMainWindowDiscard()
+    restoreDiscardedMainWindow()
+  })
+
   win.on('closed', () => {
     mainWindow = null
     mainWindowReady = false
+    // 主动回收（托盘态销毁窗口）不是"用户关掉了应用"：它之后会被重建。
+    // 少了这个判断，回收会命中下面那条"零窗口即退出"的兜底，把应用顺手杀掉。
+    if (mainWindowReclaimInProgress) return
     if (!isAppQuitting && process.platform !== 'darwin') {
       destroyNotificationWindow()
       if (BrowserWindow.getAllWindows().length === 0) app.quit()
@@ -1036,6 +1150,23 @@ const MAIN_WINDOW_DISCARD_DELAY_MS = Math.max(
 )
 let mainWindowDiscarded = false
 let mainWindowDiscardTimer: NodeJS.Timeout | null = null
+/**
+ * 回收方式：
+ *  - `destroy`：**销毁窗口**（托盘态）。实测 `about:blank` 只回收 ~29MB
+ *    （738MB → 738MB，渲染进程纹丝不动），因为 Chromium 不会把进程的基础设施
+ *    还给系统；销毁窗口才会真正杀掉那个渲染进程并把 GPU 侧的图层/解码器一起放掉。
+ *    恢复路径本来就存在（`showMainWindow()` 里 `!mainWindow` 分支会重建窗口，
+ *    静默启动的托盘实例走的就是它）。
+ *  - `unload`：只卸载渲染层（最小化态）。最小化的窗口**必须留着** ——
+ *    销毁它任务栏按钮就没了，用户没法从任务栏还原。
+ */
+let mainWindowDiscardMode: 'destroy' | 'unload' = 'unload'
+/**
+ * 正在主动回收窗口。`closed` 处理器里有一条"没有窗口就退出应用"的兜底 ——
+ * 那是给用户真的关掉窗口用的；主动销毁时必须跳过它，否则回收会顺手把应用杀掉
+ * （AGENTS.md 记的"零窗口即退出"就是这个坑）。
+ */
+let mainWindowReclaimInProgress = false
 
 /** 常驻诊断：隐藏窗口内存回收/恢复路径写入 userData/discard.log（每轮仅 1-2 行） */
 function discardDiag(msg: string): void {
@@ -1044,8 +1175,9 @@ function discardDiag(msg: string): void {
   } catch { /* noop */ }
 }
 
-function scheduleMainWindowDiscard(): void {
-  discardDiag(`schedule delay=${MAIN_WINDOW_DISCARD_DELAY_MS}`)
+function scheduleMainWindowDiscard(mode: 'destroy' | 'unload' = 'unload'): void {
+  mainWindowDiscardMode = mode
+  discardDiag(`schedule delay=${MAIN_WINDOW_DISCARD_DELAY_MS} mode=${mode}`)
   if (mainWindowDiscardTimer) {
     clearTimeout(mainWindowDiscardTimer)
     mainWindowDiscardTimer = null
@@ -1055,20 +1187,40 @@ function scheduleMainWindowDiscard(): void {
     // 导出中不卸载渲染层（进度事件目标需存活），导出结束后再试
     mainWindowDiscardTimer = setTimeout(() => {
       mainWindowDiscardTimer = null
-      scheduleMainWindowDiscard()
+      scheduleMainWindowDiscard(mode)
     }, MAIN_WINDOW_DISCARD_DELAY_MS)
     mainWindowDiscardTimer.unref?.()
     return
   }
   mainWindowDiscardTimer = setTimeout(() => {
     mainWindowDiscardTimer = null
-    discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode}`)
+    discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode} mode=${mainWindowDiscardMode}`)
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
     if (isAppQuitting || isAnyQaMode) return
     if (exportTaskControlService.hasActiveTasks()) {
-      scheduleMainWindowDiscard()
+      scheduleMainWindowDiscard(mainWindowDiscardMode)
       return
     }
+    if (mainWindowDiscardMode === 'destroy') {
+      // 托盘态：整窗销毁，把渲染进程与它的 GPU 资源真正还给系统。
+      // 恢复由 showMainWindow() 的重建分支负责（托盘点击 / 二次启动）。
+      try {
+        mainWindowReclaimInProgress = true
+        mainWindowDiscarded = false
+        const win = mainWindow
+        mainWindow = null
+        mainWindowReady = false
+        win.destroy()
+        discardDiag('discard destroyed window')
+        console.log('[Weport] 主窗口隐藏超时，已销毁窗口回收内存')
+      } catch (e) {
+        discardDiag(`discard destroy failed: ${String(e)}`)
+      } finally {
+        mainWindowReclaimInProgress = false
+      }
+      return
+    }
+    // 最小化态：保留窗口（任务栏按钮要在），只卸载渲染层。
     try {
       mainWindowDiscarded = true
       void mainWindow.loadURL('about:blank').then(
@@ -1084,6 +1236,49 @@ function scheduleMainWindowDiscard(): void {
   mainWindowDiscardTimer.unref?.()
 }
 
+/** 撤销待执行的内存回收（窗口重新可见时调用） */
+function cancelMainWindowDiscard(): void {
+  if (mainWindowDiscardTimer) {
+    clearTimeout(mainWindowDiscardTimer)
+    mainWindowDiscardTimer = null
+  }
+}
+
+/**
+ * 把被回收（about:blank）的主窗口渲染层装回来并显示。
+ *
+ * 三条路径共用：托盘点击（showMainWindow）、任务栏还原（restore）、重新显示
+ * （show）。**必须共用** —— 只处理托盘那一条，从任务栏还原时会露出一个
+ * about:blank 白窗，因为那时应用页已经被卸载了。
+ *
+ * ready-to-show 在隐藏窗口的后续导航上可能不再触发，用 did-finish-load
+ * 兜底（短延时等首帧），保证恢复路径在任何情况下都能把窗口带回前台。
+ */
+function restoreDiscardedMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindowDiscarded) return
+  mainWindowDiscarded = false
+  loadMainWindowPage(mainWindow)
+  discardDiag('restore: reloading app page')
+  console.log('[Weport] 恢复主窗口渲染层')
+  let restoreTimer: NodeJS.Timeout | null = null
+  const showRestored = () => {
+    if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindowReady = true
+    mainWindow.show()
+    try {
+      mainWindow.setSkipTaskbar(false)
+    } catch { /* noop */ }
+    mainWindow.focus()
+    discardDiag('restore: window shown')
+  }
+  mainWindow.once('ready-to-show', showRestored)
+  mainWindow.webContents.once('did-finish-load', () => {
+    restoreTimer = setTimeout(showRestored, 250)
+    restoreTimer.unref?.()
+  })
+}
+
 /** 隐藏到托盘：必须同时移除任务栏按钮，否则关闭后窗口仍留在任务栏 */
 function hideMainWindowToTray() {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -1091,7 +1286,8 @@ function hideMainWindowToTray() {
     mainWindow.setSkipTaskbar(true)
   } catch { /* noop */ }
   mainWindow.hide()
-  scheduleMainWindowDiscard()
+  // 托盘态可以整窗销毁：恢复走托盘点击/二次启动，那条路会重建窗口。
+  scheduleMainWindowDiscard('destroy')
 }
 
 function showMainWindow() {
@@ -1113,30 +1309,7 @@ function showMainWindow() {
     return
   }
   if (mainWindowDiscarded) {
-    // 渲染层已被内存回收：先重载应用页，就绪后再显示（避免黑屏闪烁）。
-    // ready-to-show 在隐藏窗口的后续导航上可能不再触发，用 did-finish-load
-    // 兜底（短延时等首帧），保证恢复路径在任何情况下都能把窗口带回前台
-    mainWindowDiscarded = false
-    loadMainWindowPage(mainWindow)
-    discardDiag('restore: reloading app page')
-    console.log('[Weport] 恢复主窗口渲染层')
-    let restoreTimer: NodeJS.Timeout | null = null
-    const showRestored = () => {
-      if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
-      if (!mainWindow || mainWindow.isDestroyed()) return
-      mainWindowReady = true
-      mainWindow.show()
-      try {
-        mainWindow.setSkipTaskbar(false)
-      } catch { /* noop */ }
-      mainWindow.focus()
-      discardDiag('restore: window shown')
-    }
-    mainWindow.once('ready-to-show', showRestored)
-    mainWindow.webContents.once('did-finish-load', () => {
-      restoreTimer = setTimeout(showRestored, 250)
-      restoreTimer.unref?.()
-    })
+    restoreDiscardedMainWindow()
     return
   }
   if (!mainWindow.isVisible()) {
@@ -1854,6 +2027,89 @@ async function runRealDataDump() {
 // ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
+/**
+ * WeBot 定时任务（v1.0）。
+ *
+ * 派发直接走 `weportAiService.runChat` —— 与用户在 WeportAI 页面手动提问是
+ * **同一条路径**。任务因此同样受工具白名单、只读约束与缓存策略管辖，不存在
+ * 一条绕过用户可见配置的「特权」通道。
+ */
+let weBotService: WeBotService | null = null
+
+async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSignal): Promise<WeBotDispatchResult> {
+  if (signal.aborted) throw new Error('已中止')
+
+  const chat = weportAiService.createChat(request.task.title)
+  const sections: string[] = []
+  if (request.task.description.trim()) sections.push(request.task.description.trim())
+
+  if (request.task.references.length > 0) {
+    const lines = request.task.references
+      .map((reference) => {
+        const kind = reference.kind === 'group' ? '群聊' : reference.kind === 'official' ? '公众号' : '私聊'
+        return `- ${reference.label}（${kind}）`
+      })
+      .join('\n')
+    sections.push(`本任务限定的会话：\n${lines}\n请聚焦这些会话（可用 list_sessions 找到对应 id 后读取消息）。`)
+  }
+
+  sections.push(
+    `这是 WeBot 定时任务的自动执行（${new Date().toLocaleString('zh-CN')}）。` +
+      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。'
+  )
+
+  // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
+  // 任务可以独立指向一个便宜/快的模型，而不影响 WeportAI 的手动对话。
+  const result = await weportAiService.runChat(chat.id, sections.join('\n\n'), { consumer: 'webot' })
+  if (!result.success) throw new Error(result.error || '任务执行失败')
+
+  const finished = weportAiService.getChat(chat.id)
+  const answer = [...(finished?.messages || [])]
+    .reverse()
+    .find((message) => message.role === 'assistant' && String(message.content || '').trim())
+  return { title: request.task.title, summary: String(answer?.content || '').trim() || '（本次运行没有产出内容）' }
+}
+
+function ensureWeBotService(): WeBotService {
+  if (weBotService) return weBotService
+  weBotService = new WeBotService({
+    dataDir: join(app.getPath('userData'), 'webot'),
+    dispatch: dispatchWeBotTask,
+    notify: (note) => {
+      // 复用聊天通知的那套独立置顶窗口（notificationWindow.ts），不另起一套
+      // 通知系统 —— 用户已经熟悉它出现的位置与交互。
+      try {
+        ensureWeChatRequestHeaderInterceptor()
+        void showNotification({
+          sessionId: `webot:${note.taskId}`,
+          channel: 'webot',
+          title: note.status === 'error' ? `WeBot 任务失败 · ${note.taskTitle}` : `WeBot 任务完成 · ${note.taskTitle}`,
+          content: note.summary.slice(0, 160),
+          timestamp: note.createdAt,
+        })
+      } catch (e) {
+        console.warn('[WeBot] 通知发送失败:', e)
+      }
+      try {
+        mainWindow?.webContents.send('webot:note', note)
+      } catch { /* 窗口可能尚未创建 */ }
+    },
+  })
+  return weBotService
+}
+
+/**
+ * MCP stdio 桥接脚本的绝对路径。
+ *
+ * 开发期在仓库的 `scripts/` 下，打包后由 `prepare-mcp-bundle.cjs` 产出到
+ * `resources/mcp/`，再由 extraResources 映射成 `<resources>/mcp/`。设置页要
+ * 把这条路径写进用户的客户端配置，所以两边都得算对。
+ */
+function resolveMcpBridgePath(): string {
+  if (app.isPackaged) return join(process.resourcesPath, 'mcp', 'mcp-stdio-bridge.cjs')
+  return join(app.getAppPath(), 'scripts', 'mcp-stdio-bridge.mjs')
+}
+
 function registerIpcHandlers() {
   void registerNotificationHandlers()
 
@@ -1862,7 +2118,60 @@ function registerIpcHandlers() {
   })
 
   // 配置
-  ipcMain.handle('config:get', (_e, key: string) => (configService as any)?.get(key))
+  ipcMain.handle('config:get', (_e, key: string) => {
+    // 视频背景的透明降采样：渲染进程只管拿到「该播哪个文件」，转码与缓存全在
+    // 主进程做（见 backgroundVideoService）。第一次返回原文件并启动后台转码，
+    // 之后返回缓存 —— 启动路径永远不等 ffmpeg。
+    if (key === 'appearanceBackgroundPath') {
+      // 渲染层要**两个**值，语义不同，不能混：
+      //   appearanceBackgroundPath     → 该播哪个文件（可能是转码缓存；被拒时为空）
+      //   appearanceBackgroundSource   → 用户实际选的文件（界面显示 / 扩展名判断）
+      // 只用前者的话，一个被拒的背景会让设置页显示成"没选过背景"，
+      // 用户看到自己选的壁纸凭空消失；只用后者的话，转码缓存就白做了。
+      const requested = String((configService as any)?.get(key) || '')
+      if (!requested || !backgroundVideoService) return requested
+      const info = backgroundVideoService.resolve(requested, {
+        quality: (configService as any)?.get('appearanceBackgroundVideoQuality'),
+        blurPx: (configService as any)?.get('appearanceBackgroundBlur'),
+      })
+      // 被拒的背景（超 50MB）必须**说出来**：静默把壁纸变没，用户只会以为
+      // 是自己选错了文件。原因写到配置里，设置页读到就显示一行提示。
+      // 用已有的 config 通道而不是新增 IPC —— 见 utils/appearance.ts 顶部说明。
+      void (configService as any)?.set(
+        'appearanceBackgroundRejected',
+        info.reason === 'too-large' ? 'too-large' : ''
+      )
+      return info.path
+    }
+    // 画质档位的**实际生效结果**（只读合成键，不落盘）。
+    //
+    // 为什么不把结果写进配置：这个值每次都会变（模糊一改就可能被降级），
+    // 而 configService.set 是同步落盘的 —— 为了显示一行提示去反复写配置文件
+    // 不值得。渲染层要的是"你能不能按我选的走、为什么不能"，重算一次最省事，
+    // 而且 resolve() 在命中缓存时只是 stat + 哈希 + Map 查询。
+    if (key === 'appearanceBackgroundVideoInfo') {
+      const requested = String((configService as any)?.get('appearanceBackgroundPath') || '')
+      const quality = (configService as any)?.get('appearanceBackgroundVideoQuality')
+      const blurPx = (configService as any)?.get('appearanceBackgroundBlur')
+      if (!requested || !backgroundVideoService) {
+        return { quality: 'balanced', selectedQuality: 'balanced', demoted: false, longEdge: 0, optimized: false, pending: false, reason: 'none' }
+      }
+      const info = backgroundVideoService.resolve(requested, { quality, blurPx })
+      return {
+        quality: info.quality,
+        selectedQuality: info.selectedQuality,
+        demoted: info.demoted,
+        longEdge: info.longEdge,
+        optimized: info.optimized,
+        pending: info.pending,
+        reason: info.reason || '',
+      }
+    }
+    if (key === 'appearanceBackgroundSource') {
+      return String((configService as any)?.get('appearanceBackgroundPath') || '')
+    }
+    return (configService as any)?.get(key)
+  })
   ipcMain.handle('config:set', async (_e, key: string, value: unknown) => {
     (configService as any)?.set(key, value)
     if (key === 'launchAtStartup') {
@@ -1975,7 +2284,27 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
-  ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
+  ipcMain.handle('mcp:getStatus', async () => (await getMcpService()).getStatus())
+  // 客户端配置在**主进程**里拼好再交给渲染进程：mcpToken 是 safeStorage 加密的
+  // 密钥，没必要为了渲染一段 JSON 把它送进渲染进程。
+  ipcMain.handle('mcp:getClientConfig', async () => {
+    const status = (await getMcpService()).getStatus()
+    const bridge = resolveMcpBridgePath()
+    const token = String(configService?.get('mcpToken') || '')
+    return {
+      ...status,
+      bridgePath: bridge,
+      json: JSON.stringify(
+        { mcpServers: { weport: { command: bridge, args: ['--port', String(status.port), '--token', token] } } },
+        null,
+        2,
+      ),
+    }
+  })
+  // macOS 能力诊断（v1.0）：把「为什么拿不到密钥」的三条独立原因逐条测出来。
+  // 非 darwin 平台返回 supported:false，界面据此隐藏入口。
+  ipcMain.handle('diagnostics:collectMac', () =>
+    collectMacDiagnostics({ appVersion: APP_VERSION, resourcesPath: process.resourcesPath }))
   ipcMain.handle('auth:verifyHello', (_e, message: string) => {
     // Windows Hello（mac 为 Touch ID 路径）：Linux 无对应生物认证后端，直接给出明确错误
     if (process.platform !== 'win32' && process.platform !== 'darwin') {
@@ -2157,7 +2486,16 @@ function registerIpcHandlers() {
     const control = exportTaskControlService.createControl(taskId, outDir)
     const progressEmitter = (progress: any) => {
       // 进度事件携带 taskId：渲染层靠它执行 export:cancelTask
-      mainWindow?.webContents.send('export:progress', { ...progress, taskId })
+      //
+      // 会话名在这里**截断**（见 boundProgressSessionLabel）：进度事件全程 189 条、
+      // 每 400ms 一条，而群聊名可以很长。把无界字符串塞进高频事件里，渲染层每帧都
+      // 要把一行超长文本交给文本整形 + 省略号计算，观感就是"名字在抖"。三个消费方
+      // （进度条 / CLI 日志 / TUI）都从这里取数，所以在最上游收敛一次即可。
+      mainWindow?.webContents.send('export:progress', {
+        ...progress,
+        currentSession: boundProgressSessionLabel(progress?.currentSession),
+        taskId,
+      })
     }
 
     // Weport 默认值（与旧版 TXT/JSON 行为一致），用户选项优先
@@ -2672,6 +3010,10 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     return { success: true }
   })
 
+  // 免打扰自检：「跟随微信消息免打扰」跨四层，任何一层悄悄返回空都表现成
+  // 「通知照发且没有报错」。这个通道把每层的中间结果摊开给用户看。
+  ipcMain.handle('notification:getMuteReport', () => chatService.getSessionMuteReport())
+
   // -------------------------------------------------------------------------
   // WeportAI（v0.8 聊天历史分析助手）
   // -------------------------------------------------------------------------
@@ -2685,6 +3027,16 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   }))
   ipcMain.handle('ai:saveProfile', (_e, input: any) => weportAiService.saveProviderProfile(input || {}))
   ipcMain.handle('ai:activateProfile', (_e, id: string) => weportAiService.activateProviderProfile(String(id || '')))
+  // 「设置 → AI 服务」：三个功能面各自指向哪个服务。以前只有一个全局默认 +
+  // WeClone 私自 activate，见 providerProfiles 里的说明。
+  ipcMain.handle('ai:getConsumerAssignments', () => ({
+    success: true,
+    consumers: weportAiService.getConsumerAssignments(),
+    profiles: weportAiService.listProviderProfiles(),
+    activeProfileId: weportAiService.getActiveProfileId(),
+  }))
+  ipcMain.handle('ai:assignConsumer', (_e, consumer: string, profileId: string) =>
+    weportAiService.assignConsumerProfile(String(consumer || ''), String(profileId || '')))
   ipcMain.handle('ai:deleteProfile', (_e, id: string) => weportAiService.deleteProviderProfile(String(id || '')))
   ipcMain.handle('ai:testProfile', (_e, input: any) => weportAiService.fetchProviderModels(input || {}))
   ipcMain.handle('ai:setSetup', (_e, patch: any) => {
@@ -2703,6 +3055,16 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     success: weportAiService.deleteChat(String(chatId || '')),
   }))
   ipcMain.handle('ai:getChat', (_e, chatId: string) => weportAiService.getChat(String(chatId || '')))
+  // 手动压缩：与 runChat 的自动压缩共用 service 侧实现，返回体区分
+  // 「已压缩」和「还没到阈值」，面板据此给出不同提示。
+  ipcMain.handle('ai:compactChat', (_e, chatId: string) => weportAiService.compactChat(String(chatId || '')))
+  // 背景平均亮度：用于「明暗跟随背景」。必须在主进程算 —— 渲染层把
+  // weport-media:// 画到 canvas 会被标记为 tainted，getImageData 抛 SecurityError。
+  ipcMain.handle('appearance:backgroundLuminance', async (_e, path: string) => {
+    if (!backgroundVideoService) return { success: false, luminance: null as number | null }
+    const luminance = await backgroundVideoService.meanLuminance(String(path || ''))
+    return { success: luminance !== null, luminance }
+  })
   ipcMain.handle('ai:listNotes', (_e, chatId: string) => ({ notes: weportAiService.listNotes(String(chatId || '')) }))
   ipcMain.handle('ai:readNoteFile', (_e, chatId: string, path: string) => ({
     content: weportAiService.readNoteFile(String(chatId || ''), String(path || '')),
@@ -2723,6 +3085,112 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weportAiService.abort(String(chatId || ''))
     return { success: true }
   })
+
+  // -------------------------------------------------------------------------
+  // WeBot（v1.0）：定时任务、运行历史与笔记板
+  //
+  // 注意：这些**不是**可选的。截图/演示模式会用 override() 覆盖同名通道，因此
+  // 少了这段代码时演示截图依然全绿，而真实应用里 WeBot 页面会全部报
+  // "No handler registered"。渲染层的 demo 覆盖掩盖了缺失的真实实现。
+  // -------------------------------------------------------------------------
+  ipcMain.handle('webot:listTasks', () => ensureWeBotService().listTasks())
+  ipcMain.handle('webot:createTask', (_e, input: any) => ensureWeBotService().createTask(input || {}))
+  ipcMain.handle('webot:updateTask', (_e, id: string, patch: any) => ensureWeBotService().updateTask(String(id || ''), patch || {}))
+  ipcMain.handle('webot:deleteTask', (_e, id: string) => ensureWeBotService().deleteTask(String(id || '')))
+  ipcMain.handle('webot:runNow', (_e, id: string) => ensureWeBotService().runNow(String(id || '')))
+  ipcMain.handle('webot:listRuns', (_e, taskId?: string) => ensureWeBotService().listRuns(taskId ? String(taskId) : undefined))
+  ipcMain.handle('webot:listNotes', (_e, options?: any) => ensureWeBotService().listNotes(options || {}))
+  ipcMain.handle('webot:getNote', (_e, id: string) => ensureWeBotService().getNote(String(id || '')))
+  ipcMain.handle('webot:updateNote', (_e, id: string, patch: any) => ensureWeBotService().updateNote(String(id || ''), patch || {}))
+  ipcMain.handle('webot:unreadCount', () => ensureWeBotService().unreadNoteCount())
+  ipcMain.handle('webot:clearNotes', () => ensureWeBotService().clearNotes())
+
+  // -------------------------------------------------------------------------
+  // 连接器（第三方工具，v1.0）
+  //
+  // 凭据只进不出：`list` 返回 `····9f2c` 形式的掩码，明文令牌永远不会经 IPC
+  // 回到渲染进程，所以界面里的输入框永远是"写一次就空"的。
+  // -------------------------------------------------------------------------
+  ipcMain.handle('connectors:list', () => connectorsService.list())
+  ipcMain.handle('connectors:connect', (_e, id: string, token: string) =>
+    connectorsService.connect(String(id || ''), String(token || '')))
+  ipcMain.handle('connectors:disconnect', (_e, id: string) => connectorsService.disconnect(String(id || '')))
+  ipcMain.handle('connectors:verify', (_e, id: string) => connectorsService.verify(String(id || '')))
+  ipcMain.handle('connectors:listTargets', (_e, id: string) => connectorsService.listTargets(String(id || '')))
+  ipcMain.handle('connectors:createTask', (_e, id: string, input: any) =>
+    connectorsService.createTask(String(id || ''), input || {}))
+  ipcMain.handle('connectors:getAgentSettings', () => ({ allowAgentWrite: connectorsService.agentWriteAllowed() }))
+  ipcMain.handle('connectors:setAgentSettings', (_e, patch: { allowAgentWrite?: boolean }) => {
+    if (typeof patch?.allowAgentWrite === 'boolean') connectorsService.setAgentWriteAllowed(patch.allowAgentWrite)
+    return { allowAgentWrite: connectorsService.agentWriteAllowed() }
+  })
+
+  // -------------------------------------------------------------------------
+  // WeClone（人格克隆）
+  //
+  // 从 9669dcb 恢复并前移。服务层 weCloneService.ts（1144 行）无需改写即兼容
+  // 当前的 provider 层 —— 它用的是 ProviderProfileService / getProviderAdapter
+  // 这几个我保留并扩展过的接口。此处只补齐 IPC。
+  // -------------------------------------------------------------------------
+  const wecloneControllers = new Map<string, AbortController>()
+  ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
+    const taskId = 'generate'
+    if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
+    const ctrl = new AbortController()
+    wecloneControllers.set(taskId, ctrl)
+    try {
+      return await weCloneService.generateClone(
+        (progress) => mainWindow?.webContents.send('weclone:progress', progress),
+        ctrl.signal
+      )
+    } finally {
+      wecloneControllers.delete(taskId)
+    }
+  })
+  ipcMain.handle('weclone:list', () => weCloneService.getClones())
+  ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
+  ipcMain.handle('weclone:delete', (_e, id: string) => weCloneService.deleteClone(String(id || '')))
+  // 和分身对话：**完全在本机完成**（人格 MD 注入上下文 + 本地检索语料），
+  // 没有服务器可转发，也不上传任何东西。返回体带 `hint`，因为最常见的失败
+  // （还没生成过克隆、模型 key 不可用）需要具体的下一步指引。
+  ipcMain.handle(
+    'weclone:chat',
+    (_e, cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
+      weCloneService.chatWithClone({ cloneId: String(cloneId || ''), message: String(message || ''), history })
+  )
+  ipcMain.handle('weclone:cancel', () => {
+    wecloneControllers.get('generate')?.abort()
+    weCloneService.cancel()
+    return { success: true }
+  })
+  // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
+  // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
+  ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))
+  ipcMain.handle('weclone:getChat', (_e, cloneId: string, chatId: string) =>
+    weCloneService.getChat(String(cloneId || ''), String(chatId || ''))
+  )
+  ipcMain.handle(
+    'weclone:saveChat',
+    (
+      _e,
+      payload: { cloneId: string; chatId?: string; turns: Array<{ role: 'user' | 'assistant'; content: string; at?: number }>; title?: string }
+    ) =>
+      weCloneService.saveChat({
+        cloneId: String(payload?.cloneId || ''),
+        chatId: payload?.chatId ? String(payload.chatId) : undefined,
+        turns: (payload?.turns || []).map((t) => ({ role: t.role, content: String(t.content || ''), at: Number(t.at) || Date.now() })),
+        title: payload?.title,
+      })
+  )
+  ipcMain.handle('weclone:renameChat', (_e, cloneId: string, chatId: string, title: string) =>
+    weCloneService.renameChat(String(cloneId || ''), String(chatId || ''), String(title || ''))
+  )
+  ipcMain.handle('weclone:deleteChat', (_e, cloneId: string, chatId: string) =>
+    weCloneService.deleteChat(String(cloneId || ''), String(chatId || ''))
+  )
+  // v1.0：`weclone:getForcedProviderStatus` / `weclone:ensureProvider` /
+  // `weclone:setForcedApiKey` 三个通道已删除 —— 人格克隆不再有自己的服务，
+  // 它用「设置 → AI 服务」里用户配的那一个（默认 DeepSeek）。
 
   // 演示截图模式：用演示数据覆盖会暴露个人信息的通道。
   // 真实 README 截图模式读取隔离副本，不安装这些 IPC 覆盖。
@@ -2757,6 +3225,20 @@ function demoConfigValue(key: string): unknown {
       return { [DEMO_WXID]: { decryptKey: DEMO_DECRYPT_KEY, updatedAt: 0 } }
     case 'lastTab':
       return 'connect'
+    // v1.0.1 主题模型：明暗 × 强调色。截图模式据此可以整套切到浅色
+    // （capture-ui.ps1 -LightMode），用来验证浅色模式不是只改了背景色。
+    case 'appearanceMode':
+      return process.env.WEPORT_THEME_MODE === 'light' ? 'light' : 'dark'
+    case 'appearanceAccent':
+      return process.env.WEPORT_THEME_ACCENT || 'blue'
+    // 视频背景自检：给截图模式指定一个背景文件（图片或视频），用来验证
+    // <video> 图层真的渲染出来了 —— 这条路径只有真实文件才能跑到。
+    case 'appearanceBackgroundPath':
+      return process.env.WEPORT_BG_PATH || ''
+    case 'appearanceBackgroundDim':
+      return 55
+    case 'appearanceBackgroundBlur':
+      return 0
     case 'colorMode':
       return 'colorful'
     case 'messagePushEnabled':
@@ -2793,6 +3275,15 @@ function demoAiSetup() {
     model: 'deepseek-v4-flash',
     hasApiKey: true,
     apiKeyHint: 'sk•••demo',
+    // Demo model metadata so screenshot mode exercises the capability chips and
+    // the real pricing line (never real user data — these are published rates).
+    modelContextWindow: 1000000,
+    modelMaxOutputTokens: 384000,
+    modelProtocol: 'openai-compatible',
+    modelCost: { input: 0.15, output: 0.6, reasoning: 0.6, cacheRead: 0.003 },
+    modelCapabilities: { attachment: false, reasoning: true, toolCall: true, chatCapable: true, modalities: { input: ['text'], output: ['text'] } },
+    modelReasoningOptions: [{ type: 'toggle' }, { type: 'effort', values: ['low', 'high', 'max'] }],
+    modelMetadataSource: 'bundled',
     createdAt: Date.now() - 86400000,
     updatedAt: Date.now(),
     discovery: { models: ['deepseek-v4-flash', 'deepseek-v4-pro'], fetchedAt: Date.now() },
@@ -2905,9 +3396,17 @@ function demoAntiRevokeSessions() {
 }
 
 function installScreenshotDemoHandlers() {
+  // WEPORT_TRACE_AI=1 时把渲染进程实际发出的 ai:* 调用打到 stdout：截图模式里
+  // "AI 页面只渲染出空态"这类问题，只有看清调用了哪些通道、拿到了什么才能定位。
+  const traceAi = process.env.WEPORT_TRACE_AI === '1'
   const override = (channel: string, handler: (...args: any[]) => unknown) => {
     ipcMain.removeHandler(channel)
-    ipcMain.handle(channel, handler)
+    ipcMain.handle(channel, (event, ...args) => {
+      if (traceAi && channel.startsWith('ai:')) {
+        console.log(`[ai-trace] ${channel} <- ${JSON.stringify(args)}`)
+      }
+      return handler(event, ...args)
+    })
   }
   override('config:get', (_e, key: string) => demoConfigValue(String(key || '')))
   override('config:set', async () => { /* 截图模式不落盘：演示数据绝不写进真实配置 */ })
@@ -2948,6 +3447,167 @@ function installScreenshotDemoHandlers() {
   override('ai:clearDebugLog', () => ({ success: true }))
   override('ai:send', () => ({ success: true }))
   override('ai:abort', () => ({ success: true }))
+
+  // 连接器演示数据：默认给一个"已连接"的 Todoist 卡片，截图里能同时看到状态胶囊、
+  // 重新验证/断开按钮和目标列表。令牌只用掩码，绝不出现真实凭据。
+  override('connectors:list', () => [
+    {
+      id: 'todoist',
+      descriptor: {
+        id: 'todoist',
+        name: 'Todoist',
+        description: '把 WeportAI 或定时代理整理出来的待办写进 Todoist。',
+        authKind: 'token',
+        capabilities: { read: true, write: true, hasTargets: true },
+        credentialUrl: 'https://app.todoist.com/app/settings/integrations/developer',
+        credentialHelp: [
+          '打开 Todoist 网页版 → 左下角头像 → 设置 → 集成 → 开发者。',
+          '在「API 令牌」下点「复制」，它会复制一整串 40 位十六进制字符。',
+          '粘贴到下面的输入框并保存，Weport 会立刻验证一次。',
+        ],
+        credentialPlaceholder: '粘贴 40 位 API 令牌',
+      },
+      connected: true,
+      credentialHint: '····4f21',
+      connectedAt: Date.now() - 7_200_000,
+      lastCheck: { at: Date.now() - 600_000, ok: true, accountName: 'Todoist' },
+    },
+  ])
+  override('connectors:getAgentSettings', () => ({ allowAgentWrite: true }))
+  override('connectors:setAgentSettings', () => ({ allowAgentWrite: true }))
+  override('connectors:verify', () => ({ success: true }))
+  override('connectors:disconnect', () => ({ success: true }))
+  override('connectors:connect', () => ({ success: true }))
+  override('connectors:listTargets', () => ({
+    success: true,
+    data: [
+      { id: '', name: '收件箱（Inbox）', kind: 'inbox' },
+      { id: '6X7r8g', name: '工作', kind: 'project' },
+      { id: '6X7r9h', name: '家务', kind: 'project' },
+      { id: 'label:weport-verify', name: '@weport-verify', kind: 'label' },
+    ],
+  }))
+
+  // WeBot 演示数据：任务与笔记各一份，用于验证新页面的渲染与布局。
+  // 与其余演示数据一样是脱敏、确定性的，且绝不写进真实配置
+  // （config:set 在演示模式下被吞掉，这里更是直接返回内存对象）。
+  const demoWebBotTask = {
+    id: 'task-demo-1',
+    title: '化学群作业整理',
+    description: '每天扫描 @化学 3 班，把老师布置的作业整理成笔记。',
+    schedule: { kind: 'daily' as const, hour: 8, minute: 30 },
+    catchUp: 'once' as const,
+    enabled: true,
+    references: [{ id: 'demo-room@chatroom', label: '化学 3 班', kind: 'group' as const }],
+    allowParallel: false,
+    createdAt: Date.now() - 86_400_000,
+    updatedAt: Date.now() - 3_600_000,
+    nextRunAt: Date.now() + 7_200_000,
+    lastRunAt: Date.now() - 3_600_000,
+  }
+  const demoWebBotNote = {
+    version: 1 as const,
+    id: 'note-demo-1',
+    taskId: 'task-demo-1',
+    taskTitle: '化学群作业整理',
+    runId: 'run-demo-1',
+    createdAt: Date.now() - 3_600_000,
+    title: '化学群作业整理',
+    summary:
+      '今天布置的是必修二第三章课后练习 3-5 题，另需预习有机化合物一节。\n老师提醒周三小测，范围是前两章。',
+    status: 'ok' as const,
+    references: [{ id: 'demo-room@chatroom', label: '化学 3 班', kind: 'group' as const }],
+    read: false,
+    pinned: false,
+  }
+  // 三条任务而不是一条：任务列表是「卡片网格」，一条任务时看不出网格是否
+  // 真的排开；第二条停用、第三条是每周任务，顺带覆盖停用态与每周排期文案。
+  const demoWebBotTask2 = {
+    ...demoWebBotTask,
+    id: 'task-demo-2',
+    title: '家庭群每周摘要',
+    description: '每周日晚上把 @一家人 的聊天整理成一段摘要。',
+    schedule: { kind: 'weekly' as const, weekday: 0, hour: 21, minute: 0 },
+    enabled: false,
+    references: [{ id: 'demo-family@chatroom', label: '一家人', kind: 'group' as const }],
+    nextRunAt: Date.now() + 3 * 86_400_000,
+    lastRunAt: Date.now() - 4 * 86_400_000,
+  }
+  const demoWebBotTask3 = {
+    ...demoWebBotTask,
+    id: 'task-demo-3',
+    title: '项目群进展跟踪',
+    description: '每隔 6 小时看一次 @项目协作 群，把新的进展和待办挑出来。',
+    schedule: { kind: 'interval' as const, everyMinutes: 360, anchorMs: 0 },
+    references: [{ id: 'demo-work@chatroom', label: '项目协作', kind: 'group' as const }],
+    nextRunAt: Date.now() + 540_000,
+  }
+  override('webot:listTasks', () => [demoWebBotTask, demoWebBotTask2, demoWebBotTask3])
+  override('webot:listNotes', () => [demoWebBotNote])
+  override('webot:getNote', () => demoWebBotNote)
+  override('webot:updateNote', () => demoWebBotNote)
+  override('webot:unreadCount', () => 1)
+  override('webot:clearNotes', () => 0)
+  override('webot:listRuns', () => [
+    {
+      id: 'run-demo-1',
+      taskId: 'task-demo-1',
+      taskTitle: '化学群作业整理',
+      scheduledAt: Date.now() - 3_630_000,
+      startedAt: Date.now() - 3_600_000,
+      finishedAt: Date.now() - 3_570_000,
+      status: 'ok' as const,
+      noteId: 'note-demo-1',
+      durationMs: 30_000,
+    },
+  ])
+  override('webot:createTask', () => demoWebBotTask)
+  override('webot:updateTask', () => demoWebBotTask)
+  override('webot:deleteTask', () => true)
+  override('webot:runNow', () => ({ success: true }))
+  // 免打扰自检：必须给演示数据。它是 v1.0.1 新加的通道，没有 override 时会打到
+  // 真实数据库，把真实会话 id 画进对话框 —— 而截图 harness 正是用它来出图的。
+  override('notification:getMuteReport', () => ({
+    success: true,
+    sessionCount: 8,
+    sessionFlagMutedCount: 3,
+    mutedCount: 3,
+    flagBefore: 3,
+    flagAfter: 3,
+    unknownStatusCount: 0,
+    nativeRawKeyCount: 8,
+    foldedCount: 1,
+    error: undefined,
+    muted: [
+      { username: 'daily@chatroom', displayName: '工作日报群', isMuted: true, isFolded: false },
+      { username: 'alumni@chatroom', displayName: '老同学', isMuted: true, isFolded: false },
+      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', isMuted: true, isFolded: true },
+    ],
+    all: [],
+    nativeAvailable: true,
+    returnedKeyCount: 8,
+    returnedKeysSample: ['family@chatroom', 'proj@chatroom', 'alumni@chatroom'],
+    missingKeys: 0,
+  }))
+
+  // WeClone 演示数据：让「人格克隆」页在截图/转储模式下有内容可渲染。
+  // 与其余演示数据一样脱敏且确定。
+  const demoClone = {
+    id: 'clone-demo-1',
+    wxid: 'wxid_demo',
+    displayName: '演示分身',
+    knowledgeCutoff: '2026-08-31',
+    messageCount: 48_210,
+    sessionCount: 37,
+    chunkCount: 1284,
+    generatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+    piiHits: 3,
+  }
+  override('weclone:list', () => ({ success: true, clones: [{ ...demoClone, source: 'local' as const }] }))
+  override('weclone:get', () => ({ success: true, clone: demoClone, mds: { profile: '# 演示画像\n\n这是脱敏的演示内容。' } }))
+  override('weclone:cancel', () => ({ success: true }))
+  override('weclone:delete', () => ({ success: true }))
+  override('weclone:generate', () => ({ success: false, error: '演示模式不执行克隆生成' }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3198,9 +3858,11 @@ const hourly: Record<number, number> = {}
   )
   return {
     groups: [
-      { username: 'family@chatroom', displayName: '一家人', memberCount: 6, avatarUrl: demoSnsAvatarUrl('家') },
-      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', memberCount: 18, avatarUrl: demoSnsAvatarUrl('项') },
-      { username: 'alumni@chatroom', displayName: '老同学', memberCount: 42, avatarUrl: demoSnsAvatarUrl('同') },
+      // messageCount 不能省：列表行渲染的是「{messageCount} 条 · {memberCount} 人」，
+      // 少了它就是屏幕上明晃晃的「undefined 条」（placeholder 扫描就是为此加的）。
+      { username: 'family@chatroom', displayName: '一家人', memberCount: 6, messageCount: 9163, avatarUrl: demoSnsAvatarUrl('家') },
+      { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', memberCount: 18, messageCount: 48211, avatarUrl: demoSnsAvatarUrl('项') },
+      { username: 'alumni@chatroom', displayName: '老同学', memberCount: 42, messageCount: 15240, avatarUrl: demoSnsAvatarUrl('同') },
     ],
     members,
     ranking: members.map((m) => ({ member: m, messageCount: m.messageCount as number })),
@@ -3298,8 +3960,76 @@ commonEmojis: [
   }
 }
 
-function demoAnnualReport(year: number): Record<string, unknown> {
-  const heatmap: number[][] = Array.from({ length: 7 }, () =>
+/**
+ * 双人报告的演示数据（脱敏、确定）。
+ *
+ * 形状必须和 `dualReportWorker` 的产物一致 —— 缺一个字段，页面上就是一块空白
+ * 或者一个 0，而截图断言只会告诉你"非空白"。
+ */
+function demoDualReport(friendUsername: string, year: number): Record<string, unknown> {
+  const heatmap = Array.from({ length: 7 }, (_, day) =>
+    Array.from({ length: 24 }, (_, hour) => {
+      const base = Math.round(40 * Math.exp(-((hour - 21) ** 2) / 30))
+      return base * (day >= 1 && day <= 5 ? 0.7 : 1)
+    }),
+  )
+  const monthly: Record<string, number> = {}
+  for (let m = 1; m <= 12; m += 1) monthly[String(m)] = 180 + Math.round(120 * Math.sin(m / 2))
+  return {
+    year,
+    selfName: '我',
+    friendUsername,
+    friendName: '李娜',
+    firstChat: {
+      createTime: Date.now() - 400 * 86_400_000,
+      createTimeStr: '2023-08-12',
+      content: '在吗？想问下上次那个文档你还有吗',
+      isSentByMe: false,
+    },
+    yearFirstChat: {
+      createTime: Date.now() - 250 * 86_400_000,
+      createTimeStr: '2024-01-01 09:12',
+      content: '新年快乐！今年也要一起加油',
+      isSentByMe: true,
+      friendName: '李娜',
+      firstThreeMessages: [
+        { content: '新年快乐！今年也要一起加油', isSentByMe: true, createTime: 0, createTimeStr: '09:12' },
+        { content: '新年快乐～ 你也是！', isSentByMe: false, createTime: 0, createTimeStr: '09:15' },
+        { content: '改天一起吃个饭', isSentByMe: true, createTime: 0, createTimeStr: '09:16' },
+      ],
+    },
+    stats: {
+      totalMessages: 12846,
+      totalWords: 96234,
+      imageCount: 412,
+      voiceCount: 168,
+      emojiCount: 934,
+    },
+    topPhrases: [
+      { phrase: '好的', count: 412 },
+      { phrase: '哈哈哈', count: 356 },
+      { phrase: '收到', count: 288 },
+      { phrase: '明天见', count: 164 },
+      { phrase: '辛苦啦', count: 142 },
+      { phrase: '晚安', count: 121 },
+    ],
+    myExclusivePhrases: [
+      { phrase: '我来订票', count: 18 },
+      { phrase: '路上小心', count: 14 },
+    ],
+    friendExclusivePhrases: [
+      { phrase: '你吃了没', count: 21 },
+      { phrase: '记得带伞', count: 12 },
+    ],
+    heatmap,
+    initiative: { initiated: 6120, received: 6726 },
+    response: { avg: 214, fastest: 12, count: 1842 },
+    monthly,
+    streak: { days: 67, startDate: '2024-03-04', endDate: '2024-05-09' },
+  }
+}
+
+function demoAnnualReport(year: number): Record<string, unknown> {  const heatmap: number[][] = Array.from({ length: 7 }, () =>
     Array.from({ length: 24 }, () => (Math.random() < 0.55 ? Math.round(Math.random() * 40) : 0)),
   )
   return {
@@ -3506,6 +4236,13 @@ override('groupAnalytics:getGroupActiveHours', () => ({ success: true, data: gro
     return { success: true, taskId: 'years_demo', reused: false, snapshot: { years: [2024, 2025], done: true, statusText: '年份数据加载完成' } }
   })
   override('annualReport:cancelAvailableYearsLoad', () => ({ success: true }))
+  // 双人报告：没有演示数据时它跑的是真实 worker，而演示配置指向不存在的目录，
+  // 于是整页渲染成一片 0 —— 「渲染成功但一个字都没验证到」。这里给一份脱敏的
+  // 演示报告，截图才真的能证明布局是活的。
+  override('dualReport:generateReport', async (_event, payload: { friendUsername?: string; year?: number }) => {
+    await new Promise((r) => setTimeout(r, 400))
+    return { success: true, data: demoDualReport(String(payload?.friendUsername || 'wxid_lina'), Number(payload?.year) || 0) }
+  })
   override('annualReport:generateReport', async (event, year: number) => {
     for (let i = 1; i <= 4; i += 1) {
       await new Promise((r) => setTimeout(r, 150))
@@ -3568,7 +4305,7 @@ async function runV09DumpMode() {
   const clickTab = async (label: string) => {
     const r = await wc.executeJavaScript(`
       (() => {
-        const buttons = Array.from(document.querySelectorAll('.tab'));
+        const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
         const b = buttons.find((x) => x.textContent.includes(${JSON.stringify(label)}));
         if (!b) return { ok: false, tabs: buttons.map((x) => x.textContent.trim()) };
         b.click();
@@ -3901,7 +4638,7 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   const layoutProbe = async (width: number, height: number) => {
     mainWindow?.setSize(width, height)
     await sleep(700)
-    const snsClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab')).find((x) => x.textContent.includes('朋友圈')); b?.click(); return !!b; })()`)
+    const snsClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((x) => x.textContent.includes('朋友圈')); b?.click(); return !!b; })()`)
     await sleep(1200)
     const sns = await wc.executeJavaScript(`
       (() => {
@@ -3912,12 +4649,12 @@ const groupDetailDom = results.groupDetail as Record<string, any>
         return { cols, feedW: feed ? Math.round(feed.getBoundingClientRect().width) : 0, sidebarW: sidebar ? Math.round(sidebar.getBoundingClientRect().width) : 0, viewport: window.innerWidth };
       })()
     `)
-    const anaClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab')).find((x) => x.textContent.trim() === '分析'); b?.click(); return !!b; })()`)
+    const anaClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((x) => x.textContent.trim() === '分析'); b?.click(); return !!b; })()`)
     await sleep(1500)
     const afterAna = await wc.executeJavaScript(`
       (() => {
         const ws = document.querySelector('.workspace');
-        const active = document.querySelector('.tab[data-active="true"]');
+        const active = document.querySelector('.tab[data-active="true"], .rail-item[data-active="true"]');
         return {
           workspaceText: ws ? (ws.textContent || '').trim().slice(0, 120) : null,
           activeTab: active ? active.textContent.trim() : null,
@@ -3951,7 +4688,60 @@ const groupDetailDom = results.groupDetail as Record<string, any>
         };
       })()
     `)
-    return { snsClick, anaClick, cardClick, sns, global }
+    // v1.0 外壳与 WeBot：断言新的左侧导航确实渲染、且没有把内容挤出横向滚动条。
+    // 横向溢出是最容易被忽略的响应式缺陷 —— 它不报错，只是把右侧内容切掉。
+    const shell = await wc.executeJavaScript(`
+      (() => {
+        const rail = document.querySelector('.rail');
+        const firstLabel = rail ? rail.querySelector('.rail-item span') : null;
+        return {
+          railW: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+          items: document.querySelectorAll('.rail-item').length,
+          statusChips: document.querySelectorAll('.rail-foot .status-chip').length,
+          labelsVisible: firstLabel ? getComputedStyle(firstLabel).display !== 'none' : null,
+          viewport: window.innerWidth,
+          docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        };
+      })()
+    `)
+    log(`shell@${width} = ${JSON.stringify(shell)}`)
+
+    const webotClick = await wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((x) => x.textContent.includes('WeBot')); b?.click(); return !!b; })()`)
+    await sleep(1200)
+    const webot = await wc.executeJavaScript(`
+      (() => {
+        // 编辑器默认收起，先点「新建任务」把它展开再量：v1.0 的布局是
+        // 「列表占满宽 + 编辑器（展开时）在列表上方」。
+        const btn = Array.from(document.querySelectorAll('.webot-toolbar-actions button')).find((x) => x.textContent.includes('新建任务'));
+        btn?.click();
+        return { opened: !!btn };
+      })()
+    `)
+    await sleep(400)
+    const webotLayout = await wc.executeJavaScript(`
+      (() => {
+        const body = document.querySelector('.webot-body');
+        const list = document.querySelector('.webot-list');
+        const card = document.querySelector('.webot-card');
+        const editor = document.querySelector('.webot-editor');
+        const grid = document.querySelector('.webot-editor-grid');
+        const title = document.querySelector('.webot-card-title');
+        return {
+          mounted: !!document.querySelector('.webot'),
+          editor: !!editor,
+          editorW: editor ? Math.round(editor.getBoundingClientRect().width) : 0,
+          bodyW: body ? Math.round(body.getBoundingClientRect().width) : 0,
+          gridCols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : 0,
+          listCols: list ? getComputedStyle(list).gridTemplateColumns.split(' ').length : 0,
+          cardW: card ? Math.round(card.getBoundingClientRect().width) : 0,
+          titleW: title ? Math.round(title.getBoundingClientRect().width) : 0,
+          docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        };
+      })()
+    `)
+    log(`webot@${width} = ${JSON.stringify(webot)} opened=${webot.opened} layout=${JSON.stringify(webotLayout)}`)
+
+    return { snsClick, anaClick, cardClick, sns, global, shell, webotClick, webot: webotLayout }
   }
   const medium = await layoutProbe(1000, 680)
   log(`layout@1000 = ${JSON.stringify(medium)}`)
@@ -3965,6 +4755,41 @@ const groupDetailDom = results.groupDetail as Record<string, any>
   if (medium.global.statCards < 3) {
     results.fail = 'layout stat cards broken'
     log('FAIL: 1000px 宽度下统计卡片塌陷')
+    app.exit(1)
+    return
+  }
+  // v1.0：新外壳必须真的渲染出来（10 个导航项、3 个全局状态点），且不得产生
+  // 横向溢出 —— 后者是最难发现的一类响应式缺陷。
+  if (!medium.shell || medium.shell.items < 10 || medium.shell.statusChips < 3) {
+    results.fail = 'rail not rendered'
+    log(`FAIL: 1000px 宽度下左侧导航未正确渲染 ${JSON.stringify(medium.shell)}`)
+    app.exit(1)
+    return
+  }
+  if (medium.shell.docOverflow > 2) {
+    results.fail = `horizontal overflow at 1000px (${medium.shell.docOverflow}px)`
+    log(`FAIL: 1000px 宽度下出现横向溢出 ${medium.shell.docOverflow}px`)
+    app.exit(1)
+    return
+  }
+  // v1.0 WeBot 布局：编辑器展开后必须几乎占满内容宽度（而不是把列表挤成
+  // 约 300px 的窄条 —— 那是被修掉的旧两栏布局），并且任务卡片的标题不能被
+  // 那排动作按钮压到每行一两个字。
+  if (!medium.webot?.mounted || !medium.webot.editor) {
+    results.fail = 'webot page did not mount'
+    log(`FAIL: WeBot 页面未挂载 ${JSON.stringify(medium.webot)}`)
+    app.exit(1)
+    return
+  }
+  if (medium.webot.editorW < medium.webot.bodyW * 0.8) {
+    results.fail = 'webot editor not full width'
+    log(`FAIL: WeBot 编辑器没有占满内容宽度 ${JSON.stringify(medium.webot)}`)
+    app.exit(1)
+    return
+  }
+  if (medium.webot.listCols < 2 || medium.webot.titleW < 60) {
+    results.fail = 'webot task list squeezed'
+    log(`FAIL: WeBot 任务列表/卡片被压扁 ${JSON.stringify(medium.webot)}`)
     app.exit(1)
     return
   }
@@ -4007,6 +4832,31 @@ async function runScreenshotMode() {
   }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  /** 弹窗玻璃折射管线（live / snapshot / native），由 popup 渲染层自报 */
+  let popupGlassState = '(unknown)'
+  /** 实时玻璃的行为证据：弹窗后桌面变动前后两帧的平均像素差（0 = 没在动） */
+  let popupLiveDelta = -1
+  /** 主进程实际推给弹窗的桌面帧数 */
+  let popupBackdropFrames = 0
+  /** 玻璃 <img> 的 src 在两帧之间是否真的换了（渲染层有没有应用新帧的硬证据） */
+  let popupGlassImgChanged = false
+  /** 渲染层实际应用到玻璃上的帧序号 vs 主进程最新发出的序号 */
+  let popupGlassAppliedSeq = 0
+  let popupGlassSentSeq = 0
+  /** 两帧 NativeImage 的平均绝对像素差（BGRA，逐字节） */
+  const meanAbsDiff = (a: Electron.NativeImage, b: Electron.NativeImage): number => {
+    try {
+      const bufA = a.toBitmap()
+      const bufB = b.toBitmap()
+      const n = Math.min(bufA.length, bufB.length)
+      if (n === 0) return -1
+      let sum = 0
+      for (let i = 0; i < n; i += 4) sum += Math.abs(bufA[i] - bufB[i])
+      return sum / (n / 4)
+    } catch {
+      return -1
+    }
+  }
   // capturePage 在 GPU 负载高时可能永不 resolve，加超时兜底
   const captureWithTimeout = (win: BrowserWindow, ms: number) =>
     Promise.race([
@@ -4188,10 +5038,34 @@ async function runScreenshotMode() {
     return false
   }
 
+  /**
+   * 单帧非空白保存（不要求两帧相同）。
+   *
+   * 弹窗玻璃改成实时折射后，"连续两帧完全一致"在设计上就不可能成立 ——
+   * saveStable 会一直重试到超时，popup.png 反而永远写不出来。这里只要求非空白；
+   * 入场动画在上层已经等过，不会截到淡出的中间帧。
+   */
+  const saveNonBlank = async (win: BrowserWindow, file: string, threshold = 12, attempts = 6) => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const image = await captureWithTimeout(win, 8000)
+      if (image) {
+        const png = image.toPNG()
+        if (!isBlank(png, threshold)) {
+          writeFileSync(join(outDir, file), png)
+          console.log(`[screenshot] ${file} saved (single frame, attempt ${attempt + 1})`)
+          return true
+        }
+      }
+      await sleep(400)
+    }
+    console.warn(`[screenshot] ${file} stayed blank after retries`)
+    return false
+  }
+
   const clickTab = (label: string) =>
     (mainWindow?.webContents
       .executeJavaScript(
-        `(() => { const b = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
+        `(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
         true,
       )
       .catch(() => false) ?? Promise.resolve(false))
@@ -4239,9 +5113,27 @@ async function runScreenshotMode() {
   // 1) 连接页（演示数据：假路径 / 假密钥 / 演示账号，无任何真实个人信息）
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
+      // 视频背景会让每一帧都不一样，后面的 saveStable 永远等不到"连续两帧相同"。
+      // 先读出它的状态（证明它真的在播），再暂停，之后所有截图才能稳定。
+      if (process.env.WEPORT_BG_PATH) {
+        const bgState = await mainWindow.webContents
+          .executeJavaScript(
+            `(() => {
+               const v = document.querySelector('.app-bg video');
+               return v ? { readyState: v.readyState, paused: v.paused, currentTime: v.currentTime, w: v.videoWidth } : null;
+             })()`,
+            true,
+          )
+          .catch(() => null)
+        log(`[screenshot] initial video background = ${JSON.stringify(bgState)}`)
+        await mainWindow.webContents
+          .executeJavaScript(`(() => { const v = document.querySelector('.app-bg video'); if (v) v.pause(); return !!v; })()`, true)
+          .catch(() => false)
+        await sleep(400)
+      }
       await saveStable(mainWindow, 'main.png')
       await dumpRects('main-rects.json', [
-        '.tab', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
+        '.tab', '.rail-item', '.primary-btn', '.account-item', '.callout', '.toast', '.path-input', '.checklist',
       ])
     } catch (e) {
       log('WARN [screenshot] main capture failed:', e)
@@ -4321,7 +5213,10 @@ async function runScreenshotMode() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await clickTab('消息通知')
-      if (await waitForDom('.checklist')) {
+      // 等待条件改成「通知设置行已渲染」。v1.0 移除了重复页面标题的卡片头和
+      // 复述左侧栏状态的 .checklist 面板（同一事实在一屏里出现两次没有价值），
+      // 因此旧选择器不再存在。
+      if (await waitForDom('.notification-settings .setting-row, .setting-row')) {
         mainWindow.webContents.executeJavaScript(
           `(() => { const s = document.querySelector('.switch-label input'); if (s && !s.checked) { s.click(); return true } return false })()`,
           true,
@@ -4339,7 +5234,7 @@ async function runScreenshotMode() {
         console.log(`[screenshot] notifications scrollTop=${notifScroll}`)
         await saveStable(mainWindow, 'notifications.png')
         await dumpRects('notifications-rects.json', [
-          '.switch-label', '.status-dot', '.check-row', '.checklist', '.setting-row',
+          '.switch-label', '.status-dot', '.setting-row', '.btn-row',
         ])
       } else {
         log('WARN [screenshot] notifications tab did not render')
@@ -4388,9 +5283,9 @@ async function runScreenshotMode() {
         const aiState = await mainWindow?.webContents
           .executeJavaScript(
             `(() => {
-              const tab = Array.from(document.querySelectorAll('.tab')).find((el) => el.textContent.includes('WeportAI'))
+              const tab = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes('WeportAI'))
               const workspace = document.querySelector('.workspace')
-              const active = document.querySelector('.tab[data-active="true"]')
+              const active = document.querySelector('.tab[data-active="true"], .rail-item[data-active="true"]')
               return JSON.stringify({
                 tabFound: !!tab,
                 tabDisabled: tab ? tab.disabled : null,
@@ -4470,7 +5365,10 @@ async function runScreenshotMode() {
     await showNotification(payload, { force: true })
     const popup = BrowserWindow.getAllWindows().find((w) => w !== mainWindow && !w.isDestroyed())
     if (popup) {
-      // 内容保护会排除该窗口被采集（含 capturePage），截图模式临时关闭
+      // 内容保护会排除该窗口被采集（含 capturePage），截图模式临时关闭。
+      // 同时接管主进程侧的开关：实时玻璃会在可见期把保护重新打开，否则这里只能
+      // 截到空白帧。
+      suppressLiveGlassProtection(true)
       try {
         popup.setContentProtection(false)
       } catch { /* noop */ }
@@ -4491,9 +5389,75 @@ async function runScreenshotMode() {
       await installScreenshotPrivacyMask(popup, 'popup')
       // 等卡片入场动画 + 玻璃面板就绪；若指定了真实头像，多等 CDN 加载完成
       await sleep(payload.avatarUrl ? 5000 : 1500)
+
+      // 先问渲染层用的是哪条折射管线，再决定能不能用"两帧一致"来判定稳定：
+      // 实时玻璃永远不会有连续两帧完全相同，saveStable 会一直重试到超时，
+      // popup.png 反而写不出来。
+      //
+      // 要轮询而不是读一次：折射循环的第一帧要走一次完整的采集管线初始化
+      // （本机实测首次 >2s，之后 ~160ms），读得太早会得到还没收到帧的 'snapshot'。
+      try {
+        let glass = '(unset)'
+        for (let i = 0; i < 24; i += 1) {
+          glass = String(await popup.webContents
+            .executeJavaScript(`document.documentElement.dataset.glass || '(unset)'`, true)
+            .catch(() => '(unset)'))
+          if (glass === 'stream' || glass === 'frames' || glass === 'native') break
+          await sleep(500)
+        }
+        popupGlassState = glass
+        log(`[screenshot] popup glass pipeline = ${popupGlassState}`)
+      } catch { /* noop */ }
+
+      const glassIsLive = popupGlassState === 'stream' || popupGlassState === 'frames' || popupGlassState === 'native'
+      // 实时玻璃会把**弹窗背后的真实画面**折射进这张图里。README 用的是这张
+      // popup.png，所以先把主窗口铺成一块中性底色再截，玻璃里就只有纯色 —— 既不
+      // 泄露桌面，也和文档里其它深色截图一致。截完立刻撤掉，后面的行为断言
+      // （闪一块亮色、看两帧差异）用的还是真实桌面。
+      if (glassIsLive) {
+        // 把 QA 主窗口提到最前：玻璃折射的是**屏幕上弹窗背后**的内容，如果有别的"app 盖在 QA 窗口上面，注入的中性底色根本到不了玻璃，截出来的 popup.png 里就是真实桌面的模糊残影（README 不能出现这种东西）。
+        mainWindow?.show()
+        mainWindow?.moveTop()
+        mainWindow?.focus()
+        await sleep(700)
+        await mainWindow?.webContents
+          .executeJavaScript(
+            `(() => {
+               const d = document.createElement('div');
+               d.id = 'qa-neutral-backdrop';
+               d.style.cssText = 'position:fixed;inset:0;background:#101014;z-index:2147482999';
+               document.body.appendChild(d);
+               return true;
+             })()`,
+            true,
+          )
+          .catch(() => false)
+        await sleep(1000)
+      }
       // 阈值与其他 11 张截图一致（12）：CI 桌面快照可能为黑底，
       // 40 的阈值会把「有真实内容但背景暗」的弹窗误判为空白
-      await saveStable(popup, 'popup.png', 12, 40)
+      if (glassIsLive) await saveNonBlank(popup, 'popup.png', 12)
+      else await saveStable(popup, 'popup.png', 12, 40)
+      if (glassIsLive) {
+        // 把 QA 主窗口提到最前：玻璃折射的是**屏幕上弹窗背后**的内容，如果有别的"app 盖在 QA 窗口上面，注入的中性底色根本到不了玻璃，截出来的 popup.png 里就是真实桌面的模糊残影（README 不能出现这种东西）。
+        mainWindow?.show()
+        mainWindow?.moveTop()
+        mainWindow?.focus()
+        await sleep(700)
+        await mainWindow?.webContents
+          .executeJavaScript(`(() => { document.getElementById('qa-neutral-backdrop')?.remove(); return true })()`, true)
+          .catch(() => false)
+        await sleep(400)
+        // 关键：把内容保护还回去再跑行为断言。
+        //
+        // 抓帧会拍到屏幕上的一切 —— 包括弹窗自己。真实运行时靠内容保护把弹窗排除
+        // 掉，玻璃采样到的才是"弹窗背后"；QA 为了让 capturePage 能截到弹窗而临时
+        // 关掉了保护，于是帧里含弹窗自身，玻璃采样区域被它自己的内容占据，背景
+        // 变化几乎看不出来（实测帧差 0.4，而排除自身后有 5-10）。之前这条断言时
+        // 好时坏，就是这个开关的时序在决定。
+        await sleep(600)
+      }
+
       try {
         const rects = await popup.webContents.executeJavaScript(
           `(() => {
@@ -4510,7 +5474,96 @@ async function runScreenshotMode() {
         )
         if (rects) writeFileSync(join(outDir, 'popup-rects.json'), JSON.stringify(rects, null, 1), 'utf8')
       } catch { /* noop */ }
-    } else {
+
+      // 实时玻璃的**行为**断言：把弹窗背后的底色从亮换成暗，比较两次弹窗截图。
+      //
+      // 为什么用"亮 vs 暗"而不是"变一下"：开着内容保护时 capturePage 只能拿到空白
+      // 帧（AGENTS 的 QA 说明），所以这一步必须在保护关闭时做；而保护关闭时抓帧会
+      // 拍到弹窗自身，玻璃采样区域里有它自己的模糊残影 —— 背景的**细微**变化会被
+      // 淹没（实测只差 0.4），但整档明暗变化仍然明确可辨。玻璃若没在重绘，两次
+      // 截图会逐像素相同。
+      {
+        try {
+          const setOverlay = async (colour: string | null) =>
+            mainWindow?.webContents
+              .executeJavaScript(
+                colour
+                  ? `(() => {
+                       const d = document.getElementById('qa-neutral-backdrop') || document.createElement('div');
+                       d.id = 'qa-neutral-backdrop';
+                       d.style.cssText = 'position:fixed;inset:0;background:${colour};z-index:2147483000';
+                       document.body.appendChild(d);
+                       return true;
+                     })()`
+                  : `(() => { document.getElementById('qa-neutral-backdrop')?.remove(); return true })()`,
+                true,
+              )
+              .catch(() => false)
+
+          const readImg = async () =>
+            String(await popup.webContents
+              .executeJavaScript(
+                "(() => { const img = document.querySelector('.liquid-glass img'); return img ? (img.src.length + ':' + img.complete + ':' + img.naturalWidth + 'x' + img.naturalHeight + ':' + img.src.slice(2000, 2012)) : '(no img)' })()",
+                true,
+              )
+              .catch(() => '(err)'))
+
+          const readHash = async () =>
+            String(await popup.webContents
+              .executeJavaScript(`document.documentElement.dataset.glassHash || '(none)'`, true)
+              .catch(() => '(none)'))
+
+          // 控制实验：先确认 popup 的 capturePage 真的能看到自身变化。若它拿到的是
+          // 陈旧帧，下面的像素差就毫无意义（实测 117，说明是活的）。这条只记日志、
+          // 不作断言 —— 它是"测量工具本身是否可用"的自检。
+          {
+            const cBefore = await popup.webContents.capturePage()
+            await popup.webContents.executeJavaScript(`document.body.style.background = '#00d5ff'; true`, true).catch(() => false)
+            await sleep(1000)
+            const cAfter = await popup.webContents.capturePage()
+            await popup.webContents.executeJavaScript(`document.body.style.background = ''; true`, true).catch(() => false)
+            await sleep(600)
+            log(`[screenshot] popup capturePage control (self-paint) delta = ${meanAbsDiff(cBefore, cAfter)}`)
+          }
+
+          // 行为断言的前提同样是"QA 窗口在弹窗正下方"：否则注入的亮/暗底色压根不在玻璃采样区里，两次截图自然只差一点点。
+          mainWindow?.show()
+          mainWindow?.moveTop()
+          await sleep(500)
+          await setOverlay('#ffd60a')
+          await sleep(1700)
+          const bright = await popup.webContents.capturePage()
+          const imgBright = await readImg()
+          log(`[screenshot] popup glass img (bright) = ${imgBright}`)
+          const hashBright = await readHash()
+          try { writeFileSync(join(outDir, 'popup-live-bright.png'), bright.toPNG()) } catch { /* noop */ }
+
+          await setOverlay('#101014')
+          await sleep(1700)
+          const dark = await popup.webContents.capturePage()
+          const imgDark = await readImg()
+          log(`[screenshot] popup glass img (dark) = ${imgDark}`)
+          const hashDark = await readHash()
+          try { writeFileSync(join(outDir, 'popup-live-dark.png'), dark.toPNG()) } catch { /* noop */ }
+
+          await setOverlay(null)
+          await sleep(400)
+
+          popupLiveDelta = meanAbsDiff(bright, dark)
+          popupGlassImgChanged = imgBright !== imgDark
+          popupGlassAppliedSeq = Number(await popup.webContents.executeJavaScript('document.documentElement.dataset.glassSeq || 0', true).catch(() => 0))
+          popupGlassSentSeq = getBackdropSeq()
+          log(`[screenshot] popup glass applied frame seq = ${popupGlassAppliedSeq} (sent ${popupGlassSentSeq})`)
+          popupBackdropFrames = getBackdropFrameCount()
+          log(
+            `[screenshot] popup live-glass bright/dark delta = ${popupLiveDelta.toFixed(2)}` +
+              ` (frames sent: ${popupBackdropFrames}, renderer says: ${popupGlassState})`,
+          )
+          log(`[screenshot] popup glass frame hash bright=${hashBright} dark=${hashDark}`)
+        } catch (e) {
+          log('WARN [screenshot] popup live-glass delta probe failed:', e)
+        }
+      }    } else {
       log('WARN [screenshot] popup window not found')
     }
   } catch (e) {
@@ -4518,6 +5571,174 @@ async function runScreenshotMode() {
   }
 
   // 7) v0.9 页面截图（演示数据，无真实个人信息）
+  //
+  // placeholderHits：截图上「看起来有内容」但内容是 undefined / NaN / [object
+  // Object] 的页面不会被非空白断言拦住 —— 群聊分析页就带着三条「undefined 条」
+  // 通过了很久的断言。每次截图后扫一遍可见文本，命中就记下来，最后当成失败。
+  const placeholderHits: Record<string, string[]> = {}
+  const contrastHits: Record<string, Array<{ text: string; ratio: number; color: string; bg: string }>> = {}
+  /** 3.0-4.5 的"够用但偏低"区间：只记录不阻断，见 auditContrast 注释。 */
+  const contrastWarnHits: Record<string, Array<{ text: string; ratio: number; color: string; bg: string }>> = {}
+  /** 哪一步截图没有渲染出目标页面。截图"文件存在但内容是上一页"是这套工具最
+      隐蔽的失败模式，必须让外层构建真的失败，而不是只打一行 WARN。 */
+  const captureFailures: string[] = []
+  /**
+   * 对比度审计：浅色模式最容易出的问题不是"看不出来"，而是**部分文字变成白底
+   * 白字 / 浅底浅字** —— 截图本身仍然是"非空白"，任何现有断言都拦不住。
+   *
+   * 做法：遍历有文字的元素，沿祖先链找到第一个不透明的背景色，按 WCAG 算对比度。
+   * 低于 3.0 即记录（正文阈值 4.5，但界面里大量是 11-12px 的次要文字与图标，
+   * 用 3.0 作为"硬失败"线，4.5 作为提示）。
+   */
+  const auditContrast = async (label: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const rows = (await mainWindow.webContents.executeJavaScript(
+        `(() => {
+           const parse = (value) => {
+             const raw = value || ''
+             const m = /rgba?\\(([^)]+)\\)/.exec(raw)
+             if (m) {
+               const parts = m[1].split(',').map((v) => Number.parseFloat(v.trim()))
+               if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null
+               return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 }
+             }
+             // color-mix() 的计算值序列化为 color(srgb r g b [/ a])，通道是 0..1 的小数。
+             // 只认 rgb() 的话，所有由 color-mix 得到底色的元素都会被当成透明：审计
+             // 于是拿祖先层去算，浅色模式下会把白底上的白字报成 1.0（假失败），
+             // 真正的问题也会被更外层的背景掩盖。
+             const c = /color\\(srgb\\s+([^)]+)\\)/.exec(raw)
+             if (c) {
+               const parts = c[1].split(/[\\s/]+/).filter(Boolean).map((v) => Number.parseFloat(v))
+               if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null
+               return {
+                 r: parts[0] * 255,
+                 g: parts[1] * 255,
+                 b: parts[2] * 255,
+                 a: parts.length > 3 && Number.isFinite(parts[3]) ? parts[3] : 1,
+               }
+             }
+             return null
+           }
+           const lum = (c) => {
+             const f = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4) }
+             return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+           }
+           const ratio = (a, b) => {
+             const l1 = lum(a); const l2 = lum(b)
+             const hi = Math.max(l1, l2); const lo = Math.min(l1, l2)
+             return (hi + 0.05) / (lo + 0.05)
+           }
+           const blend = (fg, bg) => ({
+             r: fg.r * fg.a + bg.r * (1 - fg.a),
+             g: fg.g * fg.a + bg.g * (1 - fg.a),
+             b: fg.b * fg.a + bg.b * (1 - fg.a),
+             a: 1,
+           })
+           const effectiveBg = (el) => {
+             let bg = { r: 0, g: 0, b: 0, a: 0 }
+             let node = el
+             const layers = []
+             while (node && node.nodeType === 1) {
+               const c = parse(getComputedStyle(node).backgroundColor)
+               if (c && c.a > 0) layers.push(c)
+               if (c && c.a >= 0.99) break
+               node = node.parentElement
+             }
+             const root = parse(getComputedStyle(document.body).backgroundColor) || { r: 0, g: 0, b: 0, a: 1 }
+             bg = root.a >= 0.99 ? root : { r: 255, g: 255, b: 255, a: 1 }
+             for (let i = layers.length - 1; i >= 0; i -= 1) bg = blend(layers[i], bg)
+             return bg
+           }
+           const out = []
+           // 有浮层时只审视浮层内部：被遮罩盖住的元素，用户根本看不到它们的
+           // 真实底色（遮罩是兄弟节点，祖先链里找不到），继续审计只会产生假警报。
+           const scrim = document.querySelector('.modal-backdrop')
+           const scope = scrim || document.body
+           const nodes = scope.querySelectorAll('*')
+           for (const el of nodes) {
+             if (el.closest('[aria-hidden="true"], .app-bg, script, style')) continue
+             const style = getComputedStyle(el)
+             if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) < 0.35) continue
+             const rect = el.getBoundingClientRect()
+             if (rect.width < 8 || rect.height < 6) continue
+             // 只看直接包含文字的元素，避免每个包裹层都算一遍
+             const own = Array.from(el.childNodes).filter((n) => n.nodeType === 3 && n.textContent.trim().length > 0)
+             if (own.length === 0) continue
+             const fgRaw = parse(style.color)
+             if (!fgRaw) continue
+             const bg = effectiveBg(el)
+             const fg = fgRaw.a >= 0.99 ? fgRaw : blend(fgRaw, bg)
+             const r = ratio(fg, bg)
+             if (r < 4.5) {
+               out.push({
+                 text: (el.textContent || '').trim().slice(0, 40),
+                 ratio: Math.round(r * 100) / 100,
+                 color: style.color,
+                 bg: 'rgb(' + Math.round(bg.r) + ',' + Math.round(bg.g) + ',' + Math.round(bg.b) + ')',
+                 size: Number.parseFloat(style.fontSize) || 12,
+                 // 哪个元素：只有文字是不够的 —— 光看 "演" 没人能定位到规则。
+                 node: el.tagName.toLowerCase() + (el.className ? '.' + String(el.className).split(' ').join('.') : ''),
+                 parent: el.parentElement ? el.parentElement.tagName.toLowerCase() + (el.parentElement.className ? '.' + String(el.parentElement.className).split(' ').join('.') : '') : '',
+                 // 整条祖先链的计算背景色。只报"实际底色"时无法判断是"元素本身透明"
+                 // 还是"祖先链上没有不透明层"，这条链能一次说清。
+                 chain: (() => {
+                   const parts = []
+                   let node = el
+                   let depth = 0
+                   while (node && node.nodeType === 1 && depth < 8) {
+                     const cs = getComputedStyle(node)
+                     parts.push(
+                       node.tagName.toLowerCase() +
+                         (node.className ? '.' + String(node.className).split(' ').slice(0, 2).join('.') : '') +
+                         '[' + cs.backgroundColor + ']'
+                     )
+                     node = node.parentElement
+                     depth += 1
+                   }
+                   return parts.join(' < ')
+                 })(),
+               })
+             }
+           }
+           return out.slice(0, 40)
+         })()`,
+        true,
+      )) as Array<{ text: string; ratio: number; color: string; bg: string; size: number }>
+      // 大号加粗文字按 WCAG 只需 3.0，不记；其余低于 3.0 视为硬失败。
+      const bad = (Array.isArray(rows) ? rows : []).filter((row) => row.ratio < 3)
+      // 3.0-4.5 之间记成"警告"：够不上硬失败，但正是用户说的"文字颜色不对"最常
+      // 落在的区间（深灰压深底、浅灰压强调色底）。审计只把它写进单独的文件，
+      // 由人判断，不阻断构建。
+      const warn = (Array.isArray(rows) ? rows : []).filter((row) => row.ratio >= 3 && row.ratio < 4.5)
+      if (warn.length > 0) contrastWarnHits[label] = warn
+      if (bad.length > 0) {
+        contrastHits[label] = bad
+        console.warn(`[screenshot] ${label} contrast: ${bad.length} element(s) below 3.0, worst=${bad[0].ratio}`)
+        for (const row of bad.slice(0, 4)) {
+          console.warn(`   "${row.text}" ratio=${row.ratio} color=${row.color} on ${row.bg} size=${row.size}`)
+        }
+      }
+    } catch { /* 审计失败不影响截图 */ }
+  }
+
+  const placeholderHitsExport = placeholderHits
+  const scanPlaceholders = async (label: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      const hits = (await mainWindow.webContents.executeJavaScript(
+        `(() => {
+           const text = document.body ? document.body.innerText || '' : '';
+           return ['undefined', 'NaN', '[object Object]'].filter((needle) => text.includes(needle));
+         })()`,
+        true,
+      )) as string[]
+      if (Array.isArray(hits) && hits.length > 0) {
+        placeholderHits[label] = hits
+        console.warn(`[screenshot] ${label} shows placeholder text on screen: ${hits.join(', ')}`)
+      }
+    } catch { /* 扫描失败不影响截图本身 */ }
+  }
   const captureV09 = async (label: string, fileName: string, selectors: string[], pre?: () => Promise<unknown>, settleMs = 900) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     try {
@@ -4525,21 +5746,45 @@ async function runScreenshotMode() {
       const ok = await waitForDom(selectors[0], isRealScreenshotMode ? 240 : 40)
         || (isRealScreenshotMode && selectors[1] ? await waitForDom(selectors[1], 20) : false)
       if (!ok) {
+        // 静默返回会留下一个更坏的结果：这一步没截到，但文件名仍然存在（上一次
+        // 的运行残留、或者截到的是上一页），外层只看"文件存在 + 非空白"就会通过。
+        // 记进 captureFailures，由 capture-ui.ps1 硬断言。
+        captureFailures.push(`${label} (${selectors[0]} did not render)`)
         console.warn(`[screenshot] ${label} did not render`)
         return
       }
       await sleep(settleMs)
       await saveStable(mainWindow, fileName, 12, 30)
+      await scanPlaceholders(label)
+      await auditContrast(label)
       await dumpRects(`${fileName.replace('.png', '')}-rects.json`, selectors)
       console.log(`[screenshot] ${fileName} captured`)
     } catch (e) {
+      captureFailures.push(`${label} (capture threw: ${String(e)})`)
       console.warn(`[screenshot] ${label} capture failed:`, e)
     }
   }
 
   // 7.1) 朋友圈
-  await captureV09('sns', 'sns.png', ['.sns-post-item', '.sns-page'], async () => {
+  //
+  // 断言的是**页面**而不是某条动态：动态来自一次异步时间线加载，等它出现会让
+  // 这一步随机失败（已经发生过两次）。时间线是否真的有内容由下面这条日志和
+  // 非空白断言兜底。
+  await captureV09('sns', 'sns.png', ['.sns-page', '.sns-post-item'], async () => {
     await clickTab('朋友圈')
+    await sleep(2000)
+    const state = await mainWindow!.webContents
+      .executeJavaScript(
+        `(() => ({
+           posts: document.querySelectorAll('.sns-post-item').length,
+           empty: !!document.querySelector('.sns-feed .empty, .sns-feed .wp-empty'),
+           error: (document.querySelector('.wp-error') || {}).textContent || '',
+           authors: document.querySelectorAll('.sns-author-list > *').length,
+         }))()`,
+        true,
+      )
+      .catch(() => null)
+    log(`[screenshot] sns state = ${JSON.stringify(state)}`)
   })
   // 7.2) 分析入口（两个大卡片并排）
   await captureV09('analytics-hub', 'analytics-hub.png', ['.analytics-big-card'], async () => {
@@ -4603,10 +5848,393 @@ async function runScreenshotMode() {
     ).catch(() => false)
     await sleep(500)
   }, 1600)
-  // 7.6) 设置（主题选择 + 启动行为）
-  await captureV09('settings', 'settings.png', ['.theme-card'], async () => {
-    await clickTab('设置')
+  // 7.5.1) 双人报告：四个分析入口里唯一没有截图的一个，等于没验证过。
+  await captureV09('dual', 'dual-report.png', ['.dual-report-result', '.dual-report-hero', '.dual-report-friend'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const back = Array.from(document.querySelectorAll('.v09-actions .chip, .v09-toolbar .chip')).find((x) => x.textContent.includes('返回选择'));
+         back?.click();
+         return !!back;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+    await waitForDom('.analytics-big-card', isRealScreenshotMode ? 120 : 40)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const cards = document.querySelectorAll('.analytics-big-card'); cards[3]?.click(); return !!cards[3]; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(700)
+    // 报告默认停在好友选择页，先挑第一个好友生成报告再截图。
+    await waitForDom('.dual-report-friend', isRealScreenshotMode ? 120 : 40)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const f = document.querySelector('.dual-report-friend'); f?.click(); return !!f; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(1500)
+  }, 1800)
+  // 7.5.2) 免打扰自检对话框：「跟随微信消息免打扰」到底有没有生效，只能靠它看，
+  // 所以它本身也得有截图（否则这个新界面等于没验证过）。
+  await captureV09('mute-report', 'mute-report.png', ['.mute-report-grid'], async () => {
+    const tab = await clickTab('消息通知').catch(() => false)
+    await sleep(700)
+    const clicked = await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('button')).find((x) => x.textContent.includes('检测结果'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(1500)
+    const state = await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const active = document.querySelector('.rail-item[data-active="true"], .tab[data-active="true"]');
+         return {
+           tab: active ? active.textContent.trim() : '(none)',
+           modal: !!document.querySelector('.modal-backdrop'),
+           grid: !!document.querySelector('.mute-report-grid'),
+         };
+       })()`,
+      true,
+    ).catch(() => null)
+    log(`[screenshot] mute-report pre: clickTab=${tab} clickedButton=${clicked} state=${JSON.stringify(state)}`)
+    await sleep(1200)
+  }, 1200)
+
+  // 关掉对话框再往下走：它是全局浮层，不随标签切换消失 —— 忘了关的话，后面每一张
+  // 截图都会压着这个对话框（视频背景那张就是这么被污染的）。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    await mainWindow.webContents
+      .executeJavaScript(
+        `(() => {
+           const close = Array.from(document.querySelectorAll('.modal-backdrop button')).find((b) => b.textContent.trim() === '关闭');
+           if (close) { close.click(); return true; }
+           const backdrop = document.querySelector('.modal-backdrop');
+           if (backdrop) { backdrop.click(); return true; }
+           return false;
+         })()`,
+        true,
+      )
+      .catch(() => false)
+    await sleep(600)
+  }
+
+  // 7.5.3) 视频背景：图片背景是 background-image，视频是真实的 <video> 图层 ——
+  // 只有给一个真文件才跑得到这条路径。
+  if (process.env.WEPORT_BG_PATH) {
+    await captureV09('video-bg', 'video-bg.png', ['.app-bg video'], async () => {
+      await clickTab('连接微信')
+      await sleep(1200)
+      const state = await mainWindow!.webContents
+        .executeJavaScript(
+          `(() => {
+             const v = document.querySelector('.app-bg video');
+             const root = document.documentElement;
+             return {
+               present: !!v,
+               readyState: v ? v.readyState : -1,
+               paused: v ? v.paused : null,
+               currentTime: v ? Math.round(v.currentTime * 100) / 100 : -1,
+               videoWidth: v ? v.videoWidth : 0,
+               bgKind: root.dataset.bgKind || '(unset)',
+               hasBg: root.dataset.hasBg || '(unset)',
+               dim: getComputedStyle(root).getPropertyValue('--app-bg-dim').trim(),
+             };
+           })()`,
+          true,
+        )
+        .catch(() => null)
+      log(`[screenshot] video background state = ${JSON.stringify(state)}`)
+      // 播放中的视频不可能有两帧完全相同，saveStable 会一直等不到稳定帧 —— 它在
+      // 这里已经被证明在播放了（currentTime），暂停它只是为了能截到一张稳定的图。
+      await mainWindow!.webContents
+        .executeJavaScript(`(() => { const v = document.querySelector('.app-bg video'); if (v) { v.pause(); return true; } return false; })()`, true)
+        .catch(() => false)
+      await sleep(300)
+    }, 1200)
+  }
+
+  // 7.6) 设置（默认落在「常规」分类 + 左侧分类列）
+  await captureV09('settings', 'settings.png', ['.settings-nav-item', '.settings-page'], async () => {    await clickTab('设置')
   })
+  // 7.7) 设置 → 外观：合并后的外观分类（背景 / 强调色 / 密度 / 主题卡片）
+  await captureV09('settings-appearance', 'settings-appearance.png', ['.theme-card', '.settings-pane'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('外观'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+  })
+  // 7.7) 设置 → AI 服务：三个功能面各自指向哪个服务
+  await captureV09('settings-ai', 'settings-ai.png', ['.ai-profile-list'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('AI 服务'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+  })
+
+  // 7.8) 设置 → 接口：只读 HTTP API 与服务端 MCP 面板（含「复制客户端配置」）
+  await captureV09('settings-connect', 'settings-connect.png', ['.mcp-panel', '.settings-pane'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('接口'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+  })
+
+  // WeBot（v1.0）：任务列表与笔记板。两者都断言到了具体的 DOM 节点，
+  // 因此「页面挂载了但内容没渲染」这种情况会直接失败而不是产出一张空图。
+  await captureV09('webot', 'webot.png', ['.webot-card'], async () => {
+    await clickTab('WeBot')
+  })
+
+  // WeBot 编辑器：点「新建任务」展开表单，断言内部两栏网格真的存在。
+  await captureV09('webot-editor', 'webot-editor.png', ['.webot-editor-grid', '.webot-editor'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const b = Array.from(document.querySelectorAll('.webot-toolbar-actions button')).find((x) => x.textContent.includes('新建任务')); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+  })
+
+  await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {
+    await clickTab('WeBot 笔记')
+  })
+
+  // WeClone（人格克隆）：进入时停在 hub（入口选择），因此断言 hub 的节点。
+  // 注意 .weclone-server-chip 只在 manage 段渲染，用它会在 hub 上误判为
+  // "did not render" —— 断言必须对应当前实际渲染的那一段。
+  await captureV09('weclone', 'weclone.png', ['.weclone-hub', '.analytics-hub-cards'], async () => {
+    await clickTab('WeClone')
+  })
+
+  // WeClone 的 manage / create 两段此前从未被渲染过（hub 是唯一有截图的界面），
+  // 各自补一张：没有截图的界面就等于没有验证过。
+  await captureV09('weclone-manage', 'weclone-manage.png', ['.weclone-grid', '.weclone-empty-cta'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('管理 WeClone'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
+  })
+
+  await captureV09('weclone-create', 'weclone-create.png', ['.weclone-generate-main'], async () => {
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const back = Array.from(document.querySelectorAll('.v09-actions .chip')).find((x) => x.textContent.includes('返回'));
+         back?.click();
+         return !!back;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('新建 WeClone'));
+         b?.click();
+         return !!b;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
+  })
+
+  // 响应式：把窗口缩到接近最小宽度再截一次，并**记录度量**交给 PowerShell 断言。
+  //
+  // 横向溢出不会报错，只会把右侧内容静默切掉 —— 必须用度量兜住，肉眼截图看不
+  // 出来。导航标签在窄宽度下是否还显示同样要断言：那正是 v1.0 导航改版的核心
+  // 收益，被媒体查询误藏起来就等于白做。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const viewportMetrics: Record<string, unknown> = {}
+    const measure = () =>
+      mainWindow!.webContents.executeJavaScript(`
+        (() => {
+          const rail = document.querySelector('.rail');
+          const label = rail ? rail.querySelector('.rail-item span') : null;
+          const editor = document.querySelector('.webot-editor');
+          const grid = document.querySelector('.webot-editor-grid');
+          const list = document.querySelector('.webot-list');
+          const card = document.querySelector('.webot-card');
+          const title = document.querySelector('.webot-card-title');
+          const aiShell = document.querySelector('.ai-shell');
+          const aiCols = aiShell
+            ? getComputedStyle(aiShell).gridTemplateColumns.split(' ').map((v) => Math.round(Number.parseFloat(v) || 0))
+            : [];
+          return {
+            viewport: window.innerWidth,
+            railW: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+            labelsVisible: label ? getComputedStyle(label).display !== 'none' : null,
+            railItems: document.querySelectorAll('.rail-item').length,
+            statusChips: document.querySelectorAll('.rail-foot .status-chip').length,
+            docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+            // WeBot 布局：编辑器应占满列表宽度（旧的并排两栏会把列表挤到约
+            // 300px），卡片标题不能被那排动作按钮压扁。
+            webotEditorW: editor ? Math.round(editor.getBoundingClientRect().width) : 0,
+            webotGridCols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').length : 0,
+            webotListCols: list ? getComputedStyle(list).gridTemplateColumns.split(' ').length : 0,
+            webotCardW: card ? Math.round(card.getBoundingClientRect().width) : 0,
+            webotTitleW: title ? Math.round(title.getBoundingClientRect().width) : 0,
+            // WeportAI 三栏：中间一栏是真正读内容的地方，窄窗口下不能被两侧挤没。
+            aiCols,
+            aiThreadW: aiCols.length >= 3 ? aiCols[aiCols.length - 2] : 0,
+          };
+        })()
+      `)
+
+    mainWindow.setSize(1000, 680)
+    await sleep(1000)
+    await clickTab('WeBot')
+    await sleep(600)
+    // 编辑器在这一步是收起的（切换标签会重挂载 WeBot 页面），而它恰恰是最需要
+    // 验证响应式的那块：窄窗口下两栏要能塌成一栏。先展开再截图兼测量。
+    await mainWindow.webContents.executeJavaScript(
+      `(() => { const b = Array.from(document.querySelectorAll('.webot-toolbar-actions button')).find((x) => x.textContent.includes('新建任务')); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(600)
+    await saveStable(mainWindow, 'webot-narrow.png')
+    viewportMetrics.narrow = await measure()
+
+    // 只改尺寸、不切标签：WeBot 面板与它展开的编辑器都还在，两档测的是同一屏。
+    mainWindow.setSize(1440, 900)
+    await sleep(900)
+    viewportMetrics.wide = await measure()
+
+    // WeportAI 在窄窗口下也截一张：它是唯一的三栏页面，两侧栏在窄窗口下必须
+    // 主动让位，否则中间一栏会被挤到读不了（原来的 1100/940 断点从未生效）。
+    mainWindow.setSize(1000, 680)
+    await sleep(800)
+    await clickTab('WeportAI')
+    await sleep(900)
+    await saveStable(mainWindow, 'ai-narrow.png')
+    viewportMetrics.aiNarrow = await measure()
+
+    mainWindow.setSize(1440, 900)
+    await sleep(900)
+    viewportMetrics.aiWide = await measure()
+
+    // 7.9) 全量清屏：每个页面 + 每个设置分类，顶部与底部各截一张并跑对比度审计。
+    //
+    // 为什么需要：上面那些捕获点只覆盖"每个页面第一屏"。用户报的"文字/底色对上
+    // 不"的问题多数出现在折叠线以下（第二张卡片、列表尾部、说明段落），而
+    // stddev 与单张首页截图都发现不了。底部截图同时也是一份"所有界面都长什么样"
+    // 的完整记录。
+    {
+      mainWindow.setSize(1440, 900)
+      await sleep(600)
+      const scrollWorkspace = (where: 'top' | 'bottom') => mainWindow!.webContents.executeJavaScript(
+        `(() => { const ws = document.querySelector('.workspace'); if (!ws) return -1; ws.scrollTop = ${where === 'top' ? 0 : 'ws.scrollHeight'}; return Math.round(ws.scrollTop) })()`,
+        true,
+      ).catch(() => -1)
+
+      const sweepPages: Array<[string, string]> = [
+        ['connect', '连接微信'],
+        ['export', '导出数据'],
+        ['sns', '朋友圈'],
+        ['analytics', '分析'],
+        ['antirecall', '防撤回'],
+        ['notifications', '消息通知'],
+        ['ai', 'WeportAI'],
+        ['webot', 'WeBot'],
+        ['webot-notes', 'WeBot 笔记'],
+        ['weclone', 'WeClone'],
+      ]
+
+      let sweepIndex = 0
+      for (const [slug, label] of sweepPages) {
+        if (!mainWindow || mainWindow.isDestroyed()) break
+        sweepIndex += 1
+        try {
+          await clickTab(label)
+          await sleep(900)
+          for (const where of ['top', 'bottom'] as const) {
+            await scrollWorkspace(where)
+            await sleep(450)
+            const name = `sweep${String(sweepIndex).padStart(2, '0')}-${slug}-${where}.png`
+            await saveStable(mainWindow, name)
+            await auditContrast(`sweep:${slug}:${where}`)
+          }
+        } catch (e) {
+          log(`WARN [screenshot] sweep ${slug} failed:`, e)
+        }
+      }
+
+      // 设置：每个分类都是一个独立界面（很多控件只在其中一个分类里出现）
+      const settingsSections = ['常规', '外观', 'AI 服务', '服务分配', '连接器', '数据', '接口', '关于']
+      let sectionIndex = 0
+      for (const section of settingsSections) {
+        if (!mainWindow || mainWindow.isDestroyed()) break
+        sectionIndex += 1
+        try {
+          await clickTab('设置')
+          await sleep(700)
+          await mainWindow.webContents.executeJavaScript(
+            `(() => { const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes(${JSON.stringify(section)})); b?.click(); return !!b })()`,
+            true,
+          ).catch(() => false)
+          await sleep(700)
+          for (const where of ['top', 'bottom'] as const) {
+            await scrollWorkspace(where)
+            await sleep(400)
+            const name = `sweep-settings${String(sectionIndex).padStart(2, '0')}-${section}-${where}.png`
+            await saveStable(mainWindow, name)
+            await auditContrast(`sweep:设置/${section}:${where}`)
+          }
+        } catch (e) {
+          log(`WARN [screenshot] sweep settings/${section} failed:`, e)
+        }
+      }
+      log(`[screenshot] full sweep done (${sweepPages.length} pages + ${settingsSections.length} settings sections)`)
+    }
+
+    try {
+      writeFileSync(join(outDir, 'viewport-metrics.json'), JSON.stringify(viewportMetrics, null, 2), 'utf8')
+      log(`[screenshot] viewport metrics = ${JSON.stringify(viewportMetrics)}`)
+    } catch (e) {
+      log('WARN [screenshot] could not write viewport metrics:', e)
+    }
+
+    try {
+      writeFileSync(join(outDir, 'placeholder-scan.json'), JSON.stringify(placeholderHitsExport, null, 2), 'utf8')
+      log(`[screenshot] placeholder scan = ${JSON.stringify(placeholderHitsExport)}`)
+    } catch (e) {
+      log('WARN [screenshot] could not write placeholder scan:', e)
+    }
+
+    try {
+      writeFileSync(join(outDir, 'contrast-audit.json'), JSON.stringify(contrastHits, null, 2), 'utf8')
+      log(`[screenshot] contrast audit = ${JSON.stringify(Object.keys(contrastHits))} (failing screens)`)
+      writeFileSync(join(outDir, 'contrast-warnings.json'), JSON.stringify(contrastWarnHits, null, 2), 'utf8')
+      log(`[screenshot] contrast warnings = ${JSON.stringify(Object.keys(contrastWarnHits))}`)
+      // AI 页在 CI 软渲染下偶发挂载超时，那条由 capture-ui.ps1 单独软处理。
+      try {
+        writeFileSync(join(outDir, 'popup-glass.json'), JSON.stringify({ pipeline: popupGlassState, liveFrameDelta: popupLiveDelta, framesSent: popupBackdropFrames, glassImgChanged: popupGlassImgChanged, appliedSeq: popupGlassAppliedSeq, sentSeq: popupGlassSentSeq }, null, 2), 'utf8')
+      } catch { /* noop */ }
+      const hardFailures = captureFailures.filter((entry) => !entry.startsWith('ai '))
+      writeFileSync(join(outDir, 'capture-failures.json'), JSON.stringify(hardFailures, null, 2), 'utf8')
+      log(`[screenshot] capture failures = ${JSON.stringify(hardFailures)}`)
+    } catch (e) {
+      log('WARN [screenshot] could not write contrast audit:', e)
+    }
+  }
 
   log('[screenshot] captures done, shutting down services...')
   try { messagePushService?.stop() } catch { /* noop */ }
@@ -4889,7 +6517,7 @@ async function runUiDumpMode() {
   // 1) 切换到 WeportAI 页签
   const tabClick = await wc.executeJavaScript(`
     (() => {
-      const buttons = Array.from(document.querySelectorAll('.tab'));
+      const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
       const ai = buttons.find((b) => b.textContent.includes('WeportAI'));
       if (!ai) return { ok: false, tabs: buttons.map((b) => b.textContent.trim()) };
       ai.click();
@@ -5296,7 +6924,8 @@ function installMainProcessErrorHandlers() {
     // 错误框（含 fatal.log 路径），让用户/反馈有迹可循。QA/无人值守模式跳过弹窗。
     const inQaMode = process.env.WEPORT_SCREENSHOT_POPUP === '1' ||
       process.env.WEPORT_V09_DUMP === '1' ||
-      process.env.WEPORT_AI_SELFTEST === '1'
+      process.env.WEPORT_AI_SELFTEST === '1' ||
+  process.env.WEPORT_AI_PROBE === '1'
     if (!inQaMode && app.isReady()) {
       try {
         const logPath = fatalLog || join(app.getPath('logs'), 'fatal.log')
@@ -5317,9 +6946,400 @@ function installMainProcessErrorHandlers() {
   })
 }
 
+// ---------------------------------------------------------------------------
+// AI 探针模式（WEPORT_AI_PROBE=1）：用**当前配置的 provider profile** 跑一段
+// 多轮对话，把每一轮的用量、缓存命中与延迟写成 JSON。
+//
+// 为什么单独一个模式：`WEPORT_AI_SELFTEST` 读的是旧的 `weportAiApiKey`（v1.0 已经
+// 换成分 profile 存储，那把钥匙早就不用了），所以它测不到真实配置。缓存命中率、
+// 克隆相似度评估都需要一个"拿真实配置、可脚本调用、输出结构化指标"的入口。
+//
+// 环境变量：
+//   WEPORT_AI_PROBE_OUT     输出目录（默认 <temp>/weport-ai-probe）
+//   WEPORT_AI_PROBE_TURNS   轮数（默认 3）
+//   WEPORT_AI_PROBE_TASKS   自定义提示词，JSON 数组或 | 分隔
+//   WEPORT_AI_PROBE_TOOLS   设为 0 则不挂工具（纯对话，用于隔离缓存行为）
+//   WEPORT_AI_PROBE_CONSUMER chat | webot | weclone（默认 chat）
+//   WEPORT_AI_PROBE_PROFILE  'active'（默认）| 'all'（逐个试探）| id/名称/模型片段
+//   WEPORT_AI_PROBE_MODEL    只用内存里换掉模型 id 跑一轮（"这个模型这台机器能不能调通"）
+//   WEPORT_AI_PROBE_BASE_URL 配合上面一起换成别的网关
+//   WEPORT_AI_PROBE_MODELS   设为 1 时先做一次模型发现，把网关 /models 的结果写进 JSON
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 一次性服务配置（WEPORT_AI_SETUP=1）
+//
+// 存在的理由：provider 配置存在 safeStorage 加密的 blob 里，脚本 / 自动化没有任何
+// 受支持的写入路径（手工改配置文件会毁掉加密信封）。这个模式只做一件事——把
+// "唯一一个服务" 写进去并验证它能调通——因此它既是首次引导，也是密钥轮换的工具。
+//
+// 环境变量：
+//   WEPORT_AI_SETUP_KEY       API key（必填）
+//   WEPORT_AI_SETUP_MODEL     模型 id（默认 deepseek-v4.1-flash）
+//   WEPORT_AI_SETUP_BASE_URL  服务地址（默认 opencode-go 网关）
+//   WEPORT_AI_SETUP_PROVIDER  provider id（默认 opencode-go）
+//   WEPORT_AI_SETUP_NAME      显示名称
+// ---------------------------------------------------------------------------
+async function runAiSetup() {
+  const outDir = process.env.WEPORT_AI_PROBE_OUT || join(app.getPath('temp'), 'weport-ai-setup')
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'setup.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+  }
+
+  const apiKey = String(process.env.WEPORT_AI_SETUP_KEY || '').trim()
+  if (!apiKey) {
+    log('FAIL: 缺少 WEPORT_AI_SETUP_KEY')
+    app.exit(1)
+    return
+  }
+  const model = String(process.env.WEPORT_AI_SETUP_MODEL || 'deepseek-v4.1-flash').trim()
+  const providerId = String(process.env.WEPORT_AI_SETUP_PROVIDER || 'opencode-go').trim()
+  const baseUrl = String(process.env.WEPORT_AI_SETUP_BASE_URL || 'https://opencode.ai/zen/go/v1').trim()
+  const name = String(process.env.WEPORT_AI_SETUP_NAME || 'OpenCode Go · DeepSeek V4.1 Flash').trim()
+
+  const before = weportAiService.listProviderProfiles().map((profile) => profile.id)
+  const saved = weportAiService.saveProviderProfile({ name, providerId, protocol: 'openai-compatible', baseUrl, model, apiKey })
+  if (!saved.success || !saved.profile) {
+    log(`FAIL: 保存失败：${saved.error}`)
+    app.exit(1)
+    return
+  }
+  const profileId = saved.profile.id
+  log(`saved profile ${profileId} (${providerId}/${model})`)
+
+  // 只保留这一个服务：用户明确要求"只有 opencode + deepseek v4.1"，留着指向已失效
+  // 密钥的旧 profile 只会让其它功能面在 401 里打转。
+  for (const id of before) {
+    if (id === profileId) continue
+    const removed = weportAiService.deleteProviderProfile(id)
+    log(`removed old profile ${id}: ${removed.success}`)
+  }
+  log(`activate: ${weportAiService.activateProviderProfile(profileId).success}`)
+  for (const consumer of ['chat', 'weclone', 'webot'] as const) {
+    log(`assign ${consumer}: ${weportAiService.assignConsumerProfile(consumer, profileId).success}`)
+  }
+
+  // 验证：真发一轮请求，确认这把钥匙在**这台机器**上可用（网关按地区拒模型）。
+  const chat = weportAiService.createChat('[setup]')
+  let doneResolve: ((value: { usage?: Record<string, unknown>; context?: Record<string, unknown> }) => void) | null = null
+  weportAiService.setEventEmitter((ev) => {
+    if (ev.type === 'done' && doneResolve) {
+      const resolve = doneResolve
+      doneResolve = null
+      resolve({ usage: ev.usage as unknown as Record<string, unknown>, context: ev.context as unknown as Record<string, unknown> })
+    }
+  })
+  const completion = new Promise<{ usage?: Record<string, unknown>; context?: Record<string, unknown> }>((resolve) => {
+    doneResolve = resolve
+    setTimeout(() => { doneResolve = null; resolve({}) }, 180000).unref?.()
+  })
+  const result = await weportAiService.runChat(chat.id, '回复两个字：就绪', { consumer: 'chat' })
+  const done = await completion
+  const usage = done.usage || {}
+  log(`verify: ok=${result.success} error=${result.error || ''} prompt=${Number(usage.promptTokens) || 0} cacheHit=${Number((usage as Record<string, unknown>).promptCacheHitTokens) || 0}`)
+  weportAiService.deleteChat(chat.id)
+
+  const payload = {
+    profileId,
+    providerId,
+    baseUrl,
+    model,
+    verified: result.success === true,
+    error: result.error,
+    usage,
+    profiles: weportAiService.listProviderProfiles().map((profile) => ({ id: profile.id, name: profile.name, model: profile.model })),
+  }
+  try { writeFileSync(join(outDir, 'setup.json'), JSON.stringify(payload, null, 2), 'utf8') } catch { /* noop */ }
+  log(`${result.success ? 'PASS' : 'FAIL'} (out: ${outDir})`)
+  isAppQuitting = true
+  try { chatService.close() } catch { /* noop */ }
+  try { await wcdbService.shutdown() } catch { /* noop */ }
+  try { mainWindow?.destroy() } catch { /* noop */ }
+  mainWindow = null
+  app.exit(result.success ? 0 : 1)
+}
+
+// ---------------------------------------------------------------------------
+// TUI 引擎模式（`--cli`）：把服务层接到 stdio 上，供 packages/weport-tui 驱动
+//
+// 通道用 Node 的 IPC（`process.send`/`message`）而不是管道 JSON：Windows 上
+// Electron 主进程的 stdin 会立刻 EOF（见 AGENTS.md），只有 IPC channel 稳定。
+// 握手用一次性令牌（`--weport-token` + 环境变量比对），所以终端进程能确认自己
+// 连上的是同一个会话里启动的引擎，而不是碰巧占了这条通道的别的东西。
+// ---------------------------------------------------------------------------
+async function runCliHost() {
+  const hostPath = join(app.getPath('userData'), 'weport-cli-host.json')
+  const envToken = String(process.env.WEPORT_CLI_TOKEN || '').trim()
+  const argToken = (() => {
+    const index = process.argv.indexOf('--weport-token')
+    return index >= 0 ? String(process.argv[index + 1] || '') : ''
+  })()
+  const expected = envToken || argToken
+  let handshaken = expected.length === 0
+  let shuttingDown = false
+
+  registerCliCommands()
+
+  const shutdown = (code: number) => {
+    if (shuttingDown) return
+    shuttingDown = true
+    try { rmSync(hostPath, { force: true }) } catch { /* noop */ }
+    isAppQuitting = true
+    // Tear down the services the engine started for the terminal session: leaving the
+    // MCP/HTTP listeners and the WCDB host behind would keep a second, invisible
+    // Weport alive for every TUI run.
+    // MCP/HTTP 监听与 WCDB host 都要收掉：留着等于给每次 TUI 运行留一个看不见的 Weport。
+    // 用 mcpServiceRef 而不是 getMcpService()：**没起来过的服务不需要为了停它把 SDK 载进内存**。
+    try { mcpServiceRef?.stop() } catch { /* noop */ }
+    try { httpService.stop() } catch { /* noop */ }
+    try { chatService.close() } catch { /* noop */ }
+    void (async () => {
+      try { await wcdbService.shutdown() } catch { /* noop */ }
+      app.exit(code)
+    })()
+    // 兜底：宿主进程卡在原生调用里时也要退出，否则终端会一直挂着
+    setTimeout(() => app.exit(code), 4000).unref?.()
+  }
+
+  const send = (payload: Record<string, unknown>) => {
+    try { process.send?.(payload) } catch { /* channel closed */ }
+  }
+
+  process.on('message', (raw: unknown) => {
+    void (async () => {
+      const message = raw as { id?: string; kind?: string; command?: string; args?: Record<string, unknown>; token?: string }
+      if (!message || typeof message !== 'object') return
+      if (message.kind === 'hello') {
+        if (expected && message.token !== expected) {
+          send({ kind: 'error', error: '令牌不匹配：终端进程与引擎会话不一致' })
+          shutdown(3)
+          return
+        }
+        handshaken = true
+        send({ kind: 'ready', version: APP_VERSION, pid: process.pid, dbPath: String(configService?.get('dbPath') || '') })
+        return
+      }
+      if (!handshaken) {
+        send({ id: message.id, kind: 'result', success: false, error: '尚未完成握手' })
+        return
+      }
+      if (message.kind === 'bye') {
+        send({ id: message.id, kind: 'result', success: true })
+        shutdown(0)
+        return
+      }
+      if (message.kind !== 'call') return
+      const result = await runCommand(String(message.command || ''), message.args || {}, { origin: 'cli' })
+      send({ id: message.id, kind: 'result', ...result })
+    })()
+  })
+
+  // 通道断开（终端被关掉/被 kill）= 引擎没有主人在等，直接退出，避免留下
+  // 一个连着微信库、会弹通知的隐形进程。
+  process.on('disconnect', () => shutdown(0))
+  process.on('SIGINT', () => shutdown(0))
+  process.on('SIGTERM', () => shutdown(0))
+
+  try {
+    writeFileSync(hostPath, JSON.stringify({ version: APP_VERSION, pid: process.pid, startedAt: Date.now() }, null, 2), 'utf8')
+  } catch { /* noop */ }
+  console.log(`[weport] TUI 引擎已就绪 (pid ${process.pid})`)
+  // 引擎只服务于终端界面：没有窗口、没有托盘，所以不注册 window-all-closed 的
+  // "全部窗口关闭即退出"逻辑（这条日志之后主进程会一直等到 bye/disconnect）。
+  if (mainWindow) {
+    try { mainWindow.destroy() } catch { /* noop */ }
+    mainWindow = null
+  }
+}
+
+async function runAiProbe() {
+  const outDir = process.env.WEPORT_AI_PROBE_OUT || join(app.getPath('temp'), 'weport-ai-probe')
+  try { mkdirSync(outDir, { recursive: true }) } catch { /* noop */ }
+  const logFile = join(outDir, 'probe.log')
+  const log = (msg: string) => {
+    const line = `${new Date().toISOString()} ${msg}`
+    console.log(line)
+    try { appendFileSync(logFile, line + '\n') } catch { /* noop */ }
+  }
+
+  const consumer = (String(process.env.WEPORT_AI_PROBE_CONSUMER || 'chat').trim() || 'chat') as 'chat' | 'weclone' | 'webot'
+  const useTools = process.env.WEPORT_AI_PROBE_TOOLS !== '0'
+  const turns = Math.max(1, Math.min(40, Number(process.env.WEPORT_AI_PROBE_TURNS) || 3))
+
+  const rawTasks = String(process.env.WEPORT_AI_PROBE_TASKS || '').trim()
+  let tasks: string[] = []
+  if (rawTasks) {
+    try {
+      const parsed = JSON.parse(rawTasks)
+      if (Array.isArray(parsed)) tasks = parsed.map((t) => String(t))
+    } catch {
+      tasks = rawTasks.split('|').map((t) => t.trim()).filter(Boolean)
+    }
+  }
+  if (tasks.length === 0) {
+    tasks = [
+      '用一句话说明你现在能做什么。不要调用任何工具。',
+      '把刚才那句话改得更短一些，仍然不要调用工具。',
+      '用三条要点总结你上一个回答的重点，不要调用工具。',
+      '再用一句话补充：这些要点里哪一条最重要，为什么。',
+    ]
+  }
+
+  // 只读摘要：providerId / model / baseUrl / 是否配了密钥（永不打印密钥本身）
+  const profiles = weportAiService.listProviderProfiles()
+  const activeProfileId = weportAiService.getActiveProfileId()
+  const assignments = weportAiService.getConsumerAssignments()
+  const active = profiles.find((p) => p.id === activeProfileId) || null
+  const summary = {
+    consumer,
+    tools: useTools,
+    activeProfileId,
+    active: active
+      ? { id: active.id, name: active.name, providerId: active.providerId, model: active.model, baseUrl: active.baseUrl, protocol: active.protocol, hasApiKey: active.hasApiKey }
+      : null,
+    profiles: profiles.map((p) => ({ id: p.id, name: p.name, providerId: p.providerId, model: p.model, baseUrl: p.baseUrl, protocol: p.protocol, hasApiKey: p.hasApiKey })),
+    consumerAssignment: assignments.find((c) => c.consumer === consumer)?.profileId || '',
+    turns: [] as Array<Record<string, unknown>>,
+    discovery: null as { profileId: string; models: string[]; error: string } | null,
+  }
+  log(`profiles = ${JSON.stringify(summary.profiles)}`)
+  log(`active  = ${JSON.stringify(summary.active)}`)
+  const override = weportAiService.probeOverrideState()
+  if (override.model) log(`model override = ${JSON.stringify(override)}`)
+  if (process.env.WEPORT_AI_PROBE_MODELS === '1') {
+    // 网关的 /models 是权威清单：配置里存在的模型不等于账号/地区可用。
+    const target = summary.active || summary.profiles[0] || null
+    if (target) {
+      const discovery = await weportAiService.discoverModelsForProfile(target.id)
+      summary.discovery = { profileId: target.id, ...discovery }
+      log(`discovery(${target.providerId}) models=${discovery.models.length} error=${discovery.error || ''}`)
+      log(`discovery list = ${JSON.stringify(discovery.models)}`)
+    }
+  }
+
+  const chat = weportAiService.createChat('[ai-probe]')
+  log(`chat = ${chat.id}`)
+
+  let doneResolve: ((value: { usage?: Record<string, unknown>; context?: Record<string, unknown> }) => void) | null = null
+  weportAiService.setEventEmitter((ev) => {
+    if (ev.type === 'done' && doneResolve) {
+      const resolve = doneResolve
+      doneResolve = null
+      resolve({ usage: ev.usage as unknown as Record<string, unknown>, context: ev.context as unknown as Record<string, unknown> })
+    }
+  })
+
+  const runTurns = async (label: string, count: number, targetChatId: string) => {
+    for (let i = 0; i < count; i += 1) {
+      const task = tasks[i % tasks.length]
+      const startedAt = Date.now()
+      const completion = new Promise<{ usage?: Record<string, unknown>; context?: Record<string, unknown> }>((resolve) => {
+        doneResolve = resolve
+        const timer = setTimeout(() => {
+          doneResolve = null
+          resolve({})
+        }, 300000)
+        timer.unref?.()
+      })
+      const result = await weportAiService.runChat(targetChatId, task, { consumer, tools: useTools } as never)
+      const done = await completion
+      const elapsedMs = Date.now() - startedAt
+      const usage = done.usage || {}
+      const context = done.context || {}
+      const promptTokens = Number(usage.promptTokens) || 0
+      const cacheHit = Number((usage as Record<string, unknown>).promptCacheHitTokens) || 0
+      summary.turns.push({
+        profile: label,
+        index: i + 1,
+        task: task.slice(0, 120),
+        success: result.success === true,
+        error: result.error || undefined,
+        elapsedMs,
+        promptTokens,
+        completionTokens: Number(usage.completionTokens) || 0,
+        reasoningTokens: Number(usage.reasoningTokens) || 0,
+        promptCacheHitTokens: cacheHit,
+        cacheHitRate: promptTokens > 0 ? Math.round((cacheHit / promptTokens) * 10000) / 100 : null,
+        contextPromptTokens: Number(context.promptTokens) || 0,
+        contextCacheHitTokens: Number(context.cacheHitTokens) || 0,
+        contextRecentRate: Number(context.recentRate) || 0,
+        contextWindow: Number(context.contextWindow) || 0,
+      })
+      log(`[${label}] turn ${i + 1}: ok=${result.success === true} ${elapsedMs}ms prompt=${promptTokens} cacheHit=${cacheHit} rate=${summary.turns.at(-1)!.cacheHitRate}${result.error ? ` error=${result.error}` : ''}`)
+    }
+  }
+
+  // 目标 profile：默认用当前激活的那个；'all' 逐个试探 —— 网关会按地区拒绝模型，
+  // "配置里存在"不等于"这台机器调得通"，所以需要一个能自己找出可用模型的模式。
+  const target = String(process.env.WEPORT_AI_PROBE_PROFILE || 'active').trim()
+  const originalActiveId = activeProfileId
+  const batches: Array<Record<string, unknown>> = []
+  let ok = true
+  if (target === 'all') {
+    const perProfileTurns = Math.max(1, Math.min(5, Number(process.env.WEPORT_AI_PROBE_ALL_TURNS) || 1))
+    for (const profile of summary.profiles) {
+      const activated = weportAiService.activateProviderProfile(profile.id)
+      if (!activated.success) {
+        log(`[${profile.model}] activate failed: ${activated.error}`)
+        continue
+      }
+      // 每个 profile 一条独立对话：不把上一个模型的上下文带过去
+      const scoped = weportAiService.createChat(`[ai-probe] ${profile.model}`)
+      const before = summary.turns.length
+      try {
+        await runTurns(profile.model || profile.id, perProfileTurns, scoped.id)
+      } finally {
+        weportAiService.deleteChat(scoped.id)
+      }
+      batches.push({ profileId: profile.id, model: profile.model, providerId: profile.providerId, turns: summary.turns.slice(before) })
+    }
+    if (originalActiveId) weportAiService.activateProviderProfile(originalActiveId)
+    ok = batches.some((b) => (b.turns as Array<Record<string, unknown>>).some((t) => t.success === true))
+  } else {
+    if (target && target !== 'active') {
+      const match = summary.profiles.find((p) => p.id === target || p.name.includes(target) || p.model.includes(target))
+      if (match) weportAiService.activateProviderProfile(match.id)
+    }
+    const label = weportAiService.getActiveProfileId() || 'active'
+    await runTurns(label, turns, chat.id)
+    ok = summary.turns.every((t) => t.success === true)
+  }
+
+  const rates = summary.turns.map((t) => Number(t.cacheHitRate)).filter((n) => Number.isFinite(n))
+  const steady = rates.slice(1)
+  const payload = {
+    ...summary,
+    batches,
+    steadyStateCacheHitRate: steady.length > 0 ? Math.round((steady.reduce((a, b) => a + b, 0) / steady.length) * 100) / 100 : null,
+    averageLatencyMs: Math.round(summary.turns.reduce((a, t) => a + Number(t.elapsedMs || 0), 0) / Math.max(1, summary.turns.length)),
+    restoredActiveProfileId: weportAiService.getActiveProfileId(),
+  }
+  try {
+    writeFileSync(join(outDir, 'probe.json'), JSON.stringify(payload, null, 2), 'utf8')
+  } catch { /* noop */ }
+  log(`steadyStateCacheHitRate = ${payload.steadyStateCacheHitRate}% averageLatencyMs = ${payload.averageLatencyMs}`)
+  for (const batch of batches) {
+    const first = (batch.turns as Array<Record<string, unknown>>)[0]
+    log(`model ${String(batch.model)} [${String(batch.providerId)}] -> ok=${String(first?.success)} ${String(first?.error || '')}`)
+  }
+
+  weportAiService.deleteChat(chat.id)
+  log(`${ok ? 'PASS' : 'FAIL'} (out: ${outDir})`)
+  isAppQuitting = true
+  try { chatService.close() } catch { /* noop */ }
+  try { await wcdbService.shutdown() } catch { /* noop */ }
+  try { mainWindow?.destroy() } catch { /* noop */ }
+  mainWindow = null
+  app.exit(ok ? 0 : 1)
+}
+
 function startApp() {
   installMainProcessErrorHandlers()
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
+  const aiProbe = process.env.WEPORT_AI_PROBE === '1'
   if (process.platform !== 'win32' && process.platform !== 'darwin' && process.platform !== 'linux') {
     console.warn('[Weport] 当前平台未受支持（仅支持 Windows / macOS / Linux）')
   }
@@ -5339,17 +7359,35 @@ function startApp() {
     app.commandLine.appendSwitch('disk-cache-size', '16777216')
   } catch { /* noop */ }
 
-  // 静默启动（--background 托盘常驻）无窗口渲染需求：关闭硬件加速，
-  // 省掉 GPU 进程（实测 ~130MB 工作集 / ~312MB 私有提交）。
-  // 窗口显示走软件光栅（文本/列表/ECharts 足够流畅）；通知弹窗在
-  // Windows 走原生玻璃面板（D3D11 在原生侧，不受 Chromium GPU 影响）。
-  if (startHidden) {
+  // 硬件加速**不再因为 `--background` 而关闭**（v1.0.3 修正）。
+  //
+  // 旧行为：静默启动（开机自启 + 托盘常驻）时 disableHardwareAcceleration()，
+  // 依据是"隐藏窗口不需要渲染，省掉 GPU 进程 ~130MB"。
+  //
+  // 实测这个前提是错的：`--background` 是**整个进程生命周期**的开关，而用户
+  // 之后一定会把窗口打开。窗口一打开，软件光栅的代价立刻反超：
+  //
+  //   场景（16 核机器，前台播放 1080p 视频背景，见 .ui-probe/measure-video-cpu.mjs）
+  //     软件渲染 + 原始 4K 背景   CPU 1.16%（单核 18.64%）  工作集 1232MB（渲染进程 684MB）
+  //     硬件加速 + 原始 4K 背景   CPU 0.24%（单核  3.84%）  工作集  870MB（渲染进程 146MB）
+  //     软件渲染 + 1080p 缓存     CPU 0.41%                 工作集  720MB（渲染进程 218MB）
+  //     硬件加速 + 1080p 缓存     CPU 0.31%                 工作集  866MB（渲染进程 124MB）
+  //
+  // 也就是说：软件光栅把渲染进程从 ~124MB 顶到 ~684MB（+560MB），换来的只是
+  // GPU 进程少 ~200MB —— 净亏，而且 CPU 差 3-5 倍。连"纯隐藏"状态也不划算
+  // （实测隐藏态硬件加速 801MB vs 软件 941MB）。
+  //
+  // 保留显式逃生口：只有在这台机器的 GPU 驱动真的有问题时才用环境变量关掉，
+  // 不再让"启动时是隐藏的"这一个瞬时状态决定整个进程的渲染方式。
+  if (String(process.env.WEPORT_FORCE_SOFTWARE_RENDER || '') === '1') {
     try {
       app.disableHardwareAcceleration()
     } catch { /* noop */ }
   }
-  // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）
-  if (process.env.WEPORT_SCREENSHOT_POPUP === '1') {
+  // CI/无 GPU 会话下截图模式需要软件渲染（必须在 ready 前生效）。
+  // 例外：桌面采集（WGC）在软件渲染下会以 E_ACCESSDENIED 失败，弹窗玻璃只能退回
+  // 静态快照。要验证实时玻璃，用 WEPORT_SCREENSHOT_KEEP_GPU=1 保留 GPU。
+  if (process.env.WEPORT_SCREENSHOT_POPUP === '1' && process.env.WEPORT_SCREENSHOT_KEEP_GPU !== '1') {
     try {
       app.commandLine.appendSwitch('disable-gpu')
     } catch { /* noop */ }
@@ -5394,6 +7432,9 @@ function startApp() {
     // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
     avatarCacheService.init(configService.getCacheBasePath())
 
+    // 视频背景的降采样缓存：把 4K 壁纸转成显示尺寸那一版，省下大部分解码。
+    backgroundVideoService = new BackgroundVideoService(configService.getCacheBasePath())
+
     // weport-media://local/<encodeURIComponent(绝对路径)>：本地媒体只读协议
     // （仅允许文件存在时返回；用于朋友圈视频/图片预览 + 头像磁盘缓存）
     try {
@@ -5435,7 +7476,7 @@ function startApp() {
     // registry synchronization, or visible renderer. Windows Electron can quit
     // a zero-window process while the WCDB host is active, so retain one hidden
     // 1x1 keep-alive window for the duration of the self-test only.
-    if (aiSelfTest) {
+    if (aiSelfTest || aiProbe) {
       app.on('window-all-closed', () => { /* self-test owns explicit shutdown */ })
       mainWindow = new BrowserWindow({
         width: 1,
@@ -5445,7 +7486,7 @@ function startApp() {
         skipTaskbar: true,
         focusable: false,
       })
-      await runAiSelfTest()
+      await (aiProbe ? runAiProbe() : runAiSelfTest())
       return
     }
 
@@ -5463,11 +7504,33 @@ function startApp() {
     if (configService.get('mcpEnabled') !== false) {
       const port = Number(configService.get('mcpPort') || 5032)
       const host = String(configService.get('mcpHost') || '127.0.0.1')
-      void mcpService.start(port, host)
+      void getMcpService().then((svc) => svc.start(port, host)).catch(() => { /* noop */ })
     }
 
     registerIpcHandlers()
     setupNotificationPipeline()
+
+    // TUI 引擎：不建窗口、不建托盘，`weport` 在终端里通过 stdio 驱动服务层。
+    if (isCliMode) {
+      await runCliHost()
+      return
+    }
+
+    // 一次性服务配置（引导 / 密钥轮换）。放在窗口创建前，因为它要么改配置要么退出。
+    if (process.env.WEPORT_AI_SETUP === '1') {
+      await runAiSetup()
+      return
+    }
+
+    // 模型元数据（models.dev）后台刷新：只在 TTL 过期时发一次条件 GET，304
+    // 是 0 字节；失败只降级到磁盘缓存 + 内置快照，不影响任何 UI 路径。
+    void refreshModelRegistry()
+
+    // WeBot 调度器：启动时立刻 tick 一次，把应用未运行期间错过的任务按各自
+    // 的补偿策略补上（见 services/weBotSchedule.ts）。
+    ensureWeBotService().start()
+    // 注册到只读 registry，供 HTTP API 与 MCP 对外暴露笔记/任务（单向依赖）。
+    setWeBotService(ensureWeBotService())
 
     // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
     weportAiService.setEventEmitter((event) => {
@@ -5641,7 +7704,11 @@ try { tray?.destroy() } catch { /* noop */ }
     tray = null
     destroyNotificationWindow()
     try { await httpService.stop() } catch { /* noop */ }
-    try { await mcpService.stop() } catch { /* noop */ }
+    try { await mcpServiceRef?.stop() } catch { /* noop */ }
+    // WeBot：先停调度再中止对话，避免退出过程中又派发新任务。
+    try { weBotService?.stop() } catch { /* noop */ }
+    // WeClone：中止正在进行的克隆生成
+    try { weCloneService.cancel() } catch { /* noop */ }
     messagePushService?.stop()
     for (const chatId of weportAiService.listChats().map((c) => c.id)) {
       weportAiService.abort(chatId)

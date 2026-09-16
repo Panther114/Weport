@@ -362,6 +362,82 @@ const emojiCache: Map<string, string> = new Map()
 const emojiDownloading: Map<string, Promise<string | null>> = new Map()
 const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
 
+/**
+ * 从任意来源的错误文本里抽出错误码（`错误码: -1234`、`(错误码: -1234)`）。
+ */
+export function extractErrorCode(message?: string | null): number | null {
+  const text = String(message || '').trim()
+  if (!text) return null
+  const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{2,6})(?:\)|\b)/)
+  if (!match) return null
+  const parsed = Number(match[1])
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * 构造「初始化失败」的用户可见文案。
+ *
+ * 旧实现只返回 `错误码: -3999`：当 `getLastInitError()` 里没有可解析的
+ * 错误码时，用户拿到的就是一个既不属于 WCDB 也不属于微信的哨兵值 ——
+ * 它既不能自查，也不能反馈（issue #17 的标题就是「错误码: -3999 什么意思？」）。
+ *
+ * -3999 / -3998 都是**客户端**哨兵，不是任何一方的错误码：
+ *   -3999 = open() 失败但没能解析出具体错误码
+ *   -3998 = 连接过程中抛出未预期异常
+ * 既然哨兵本身没有信息量，就一定要把「这是什么 + 下一步做什么」一起带上；
+ * 本项目规则：失败文案必须自带下一步，否则用户只能看到一串数字。
+ *
+ * 独立成模块级函数（而不是私有方法）是为了能被单元测试直接调用 —— 断言
+ * 必须落在真实产物字符串上，而不是测试里抄一份逻辑。
+ */
+export function describeInitFailure(rawMessage?: string | null, fallbackCode = -3999): string {
+  const code = extractErrorCode(rawMessage) ?? fallbackCode
+  const detail = String(rawMessage || '').replace(/\s+/g, ' ').trim().slice(0, 400)
+  const isSentinel = code === -3999 || code === -3998
+  const sentinel =
+    code === -3999
+      ? '（微信数据服务初始化失败，且未能解析出具体错误码）'
+      : code === -3998
+        ? '（连接过程中出现未预期异常）'
+        : ''
+  // 哨兵值没有自查价值，必须给出下一步；具体错误码（-3001/-2301…）本身已经
+  // 由 wcdbCore.formatInitProtectionError 写好解决步骤，不再重复堆文案。
+  const nextStep = isSentinel ? `；下一步：确认数据目录选的是 xwechat_files 根目录、账号与 64 位密钥属于同一账号后重试；仍失败请把日志 ${wcdbLogPathHint()} 一起反馈` : ''
+  // 原始原因本身就是「错误码: -1234」时不重复拼接；否则附在破折号后面。
+  const isBareCodeOnly = /^错误码\s*[:：]\s*-?\d+$/.test(detail)
+  const alreadyCarriesCode = detail.includes(`错误码: ${code}`) || detail.includes(`错误码：${code}`)
+  if (alreadyCarriesCode) {
+    // `操作失败，错误码: -3005` 这类文本已经带了原因，再前缀一次错误码只会变成复读。
+    return `${detail}${sentinel}${nextStep}`
+  }
+  const hasExtraDetail = detail.length > 0 && !isBareCodeOnly
+  return hasExtraDetail
+    ? `错误码: ${code}${sentinel} — ${detail}${nextStep}`
+    : `错误码: ${code}${sentinel}${nextStep}`
+}
+
+/**
+ * wcdb.log 的推荐路径（用户反馈时要附上的那个文件）。
+ *
+ * **必须按平台拼**：旧实现写死 `${APPDATA}\Weport\logs\wcdb.log`，于是 macOS/Linux 用户
+ * 收到的提示是 `/Users/x\Weport\logs\wcdb.log` —— 一个不存在的混合路径，照着找必然找不到
+ * （而用户拿不到日志，这个"附上日志"的下一步就等于没有）。`wcdbCore.formatInitProtectionError`
+ * 走的是 `getLogFileCandidates()[0]`，两边必须一致。
+ */
+function wcdbLogPathHint(): string {
+  if (process.platform === 'win32') {
+    const base = process.env.APPDATA || ''
+    return base ? `${base}\\Weport\\logs\\wcdb.log` : '%APPDATA%\\Weport\\logs\\wcdb.log'
+  }
+  // macOS: ~/Library/Application Support/Weport/logs/wcdb.log
+  // Linux: ~/.config/Weport/logs/wcdb.log（Electron 的 userData 目录名与 productName 同名）
+  const home = process.env.HOME || ''
+  if (!home) return process.platform === 'darwin' ? '~/Library/Application Support/Weport/logs/wcdb.log' : '~/.config/Weport/logs/wcdb.log'
+  return process.platform === 'darwin'
+    ? `${home}/Library/Application Support/Weport/logs/wcdb.log`
+    : `${home}/.config/Weport/logs/wcdb.log`
+}
+
 class ChatService {
   private configService: ConfigService
   private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
@@ -524,17 +600,14 @@ class ChatService {
   }
 
   private extractErrorCode(message?: string | null): number | null {
-    const text = String(message || '').trim()
-    if (!text) return null
-    const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{2,6})(?:\)|\b)/)
-    if (!match) return null
-    const parsed = Number(match[1])
-    return Number.isFinite(parsed) ? parsed : null
+    return extractErrorCode(message)
   }
 
-  private toCodeOnlyMessage(rawMessage?: string | null, fallbackCode = -3999): string {
-    const code = this.extractErrorCode(rawMessage) ?? fallbackCode
-    return `错误码: ${code}`
+  /**
+   * 实例侧入口，逻辑在模块级 {@link describeInitFailure}（见那里的文档）。
+   */
+  private describeInitFailure(rawMessage?: string | null, fallbackCode = -3999): string {
+    return describeInitFailure(rawMessage, fallbackCode)
   }
 
   private async maybeShowInitFailureDialog(errorMessage: string): Promise<void> {
@@ -603,7 +676,7 @@ class ChatService {
 
       const openOk = await wcdbService.open(accountDir, decryptKey)
       if (!openOk) {
-        const detailedError = this.toCodeOnlyMessage(await wcdbService.getLastInitError())
+        const detailedError = this.describeInitFailure(await wcdbService.getLastInitError())
         await this.maybeShowInitFailureDialog(detailedError)
         return { success: false, error: detailedError }
       }
@@ -619,7 +692,7 @@ class ChatService {
       return { success: true }
     } catch (e) {
       console.error('ChatService: 连接数据库失败:', e)
-      return { success: false, error: this.toCodeOnlyMessage(String(e), -3998) }
+      return { success: false, error: this.describeInitFailure(String(e), -3998) }
     }
   }
 
@@ -1496,6 +1569,155 @@ class ChatService {
       summaryTimestamp: state?.summaryTimestamp,
       lastMsgType: state?.lastMsgType
     })
+  }
+
+  /**
+   * 把已知的免打扰状态贴回会话对象，并返回**状态未知**的用户名。
+   *
+   * getSessions() 只在缓存命中时才会写 isMuted；缓存没命中的会话就完全没有这个
+   * 字段。推送侧用 `session.isMuted === true` 判断，于是「未知」被当成「未免打扰」
+   * —— 正好让免打扰会话漏出通知。所以这里把未知的挑出来交给调用方补查，而不是
+   * 让它们静悄悄地按未免打扰处理。
+   */
+  applyKnownSessionStatuses(sessions: ChatSession[]): string[] {
+    const unknown: string[] = []
+    const now = Date.now()
+    for (const session of sessions) {
+      const username = String(session.username || '').trim()
+      if (!username) continue
+      const cached = this.sessionStatusCache.get(username)
+      if (cached && now - cached.updatedAt <= this.sessionStatusCacheTtlMs) {
+        session.isMuted = cached.isMuted
+        session.isFolded = cached.isFolded
+      } else if (typeof session.isMuted !== 'boolean') {
+        unknown.push(username)
+      }
+    }
+    return unknown
+  }
+
+  /** 原生 wcdb_get_contact_status 对一批 username 实际返回了多少个键。 */
+  private async getNativeSessionStatusKeyCount(usernames: string[]): Promise<number> {
+    try {
+      const result = await wcdbService.getContactStatus(usernames)
+      return Array.isArray(result.rawKeys) ? result.rawKeys.length : 0
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * 免打扰检测自检报告。
+   *
+   * 「跟随微信消息免打扰」这条链路跨了四层（原生 wcdb_get_contact_status → wcdbCore
+   * 解析 → chatService 缓存 → messagePushService 过滤），任何一层悄悄返回空都会
+   * 表现成同一个现象：**通知照发**，而且没有任何报错。所以这里把每一层的中间
+   * 结果都摊开：接口在不在、请求了多少会话、原生返回的键长什么样、其中多少条
+   * 被标成免打扰。
+   *
+   * `returnedKeys` 是最关键的一项：如果原生返回的键和请求的 username 对不上，
+   * 解析层会给每个 username 填一个 {isMuted:false}，看起来"一切正常"但一条都
+   * 不生效。
+   */
+  async getSessionMuteReport(limit = 40): Promise<{
+    success: boolean
+    sessionCount: number
+    /** 从 getSessions() 回来的会话对象**自身**带 isMuted=true 的数量 —— 也就是
+     *  推送过滤真正会看到的东西。它和下面的 mutedCount 对不上，就说明"检测到了
+     *  但没贴到会话对象上"，过滤自然不生效。 */
+    sessionFlagMutedCount: number
+    mutedCount: number
+    /** 补查前 / 补查后，会话对象上带免打扰标记的数量。 */
+    flagBefore: number
+    flagAfter: number
+    /** 缓存里查不到状态、需要补查的会话数。未知状态过去被当成"未免打扰"。 */
+    unknownStatusCount: number
+    /** 原生接口对前 20 个 username 实际返回的键数。0 表示接口返回了空对象 ——
+     *  那会让上面所有"逐条填空"的指标看起来都是满分。 */
+    nativeRawKeyCount: number
+    foldedCount: number
+    nativeAvailable: boolean
+    returnedKeyCount: number
+    returnedKeysSample: string[]
+    missingKeys: number
+    muted: Array<{ username: string; displayName: string; isMuted: boolean; isFolded: boolean }>
+    all: Array<{ username: string; displayName: string; isMuted: boolean; isFolded: boolean }>
+    error?: string
+  }> {
+    const empty = {
+      sessionCount: 0,
+      sessionFlagMutedCount: 0,
+      mutedCount: 0,
+      foldedCount: 0,
+      nativeAvailable: false,
+      returnedKeyCount: 0,
+      returnedKeysSample: [] as string[],
+      missingKeys: 0,
+      flagBefore: 0,
+      flagAfter: 0,
+      unknownStatusCount: 0,
+      nativeRawKeyCount: 0,
+      muted: [] as Array<{ username: string; displayName: string; isMuted: boolean; isFolded: boolean }>,
+      all: [] as Array<{ username: string; displayName: string; isMuted: boolean; isFolded: boolean }>,
+    }
+    try {
+      const sessionsResult = await this.getSessions()
+      if (!sessionsResult.success || !sessionsResult.sessions) {
+        return { success: false, ...empty, error: sessionsResult.error || '读取会话失败' }
+      }
+      const sessions = sessionsResult.sessions
+      const usernames = Array.from(new Set(sessions.map((s) => String(s.username || '').trim()).filter(Boolean)))
+      if (usernames.length === 0) {
+        return { success: true, ...empty }
+      }
+      // 先看会话对象自身带回来的状态（这就是推送过滤看到的东西），再补一次查询，
+      // 这样报告能区分「没检测到」和「检测到了但没贴到会话对象上」。
+      const flagBefore = sessions.filter((s) => s.isMuted === true).length
+      const unknownStatusCount = this.applyKnownSessionStatuses(sessions).length
+      const status = await this.getSessionStatuses(usernames)
+      this.applyKnownSessionStatuses(sessions)
+      const flagAfter = sessions.filter((s) => s.isMuted === true).length
+      // 原生**实际返回**了多少个键。前面那些指标都是"按请求的 username 逐条填空"，
+      // 原生返回空对象时它们同样会是满分；只有这个数字能区分"接口在返回数据"和
+      // "接口返回了空"。
+      const nativeRawKeyCount = await this.getNativeSessionStatusKeyCount(usernames.slice(0, 20))
+      const nativeAvailable = status.success === true
+      const map = status.map || {}
+      const returnedKeys = Object.keys(map)
+      const missingKeys = usernames.filter((u) => map[u] === undefined).length
+      const rows = sessions
+        .map((s) => {
+          const username = String(s.username || '').trim()
+          const state = map[username]
+          return {
+            username,
+            displayName: String(s.displayName || username),
+            isMuted: state?.isMuted === true,
+            isFolded: state?.isFolded === true,
+          }
+        })
+        .filter((row) => row.username)
+      return {
+        success: true,
+        sessionCount: usernames.length,
+        sessionFlagMutedCount: flagAfter,
+        mutedCount: rows.filter((r) => r.isMuted).length,
+        flagBefore,
+        flagAfter,
+        unknownStatusCount,
+        nativeRawKeyCount,
+        foldedCount: rows.filter((r) => r.isFolded).length,
+        nativeAvailable,
+        returnedKeyCount: returnedKeys.length,
+        returnedKeysSample: returnedKeys.slice(0, 5),
+        missingKeys,
+        muted: rows.filter((r) => r.isMuted || r.isFolded).slice(0, limit),
+        all: rows.slice(0, limit),
+        error: status.error,
+      }
+    } catch (e) {
+      return { success: false, ...empty, error: String(e) }
+    }
   }
 
   async getSessionStatuses(usernames: string[]): Promise<{

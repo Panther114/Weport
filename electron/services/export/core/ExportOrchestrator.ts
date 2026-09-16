@@ -5,7 +5,8 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
-import ExcelJS from 'exceljs'
+// 这里原本 import 了 exceljs 却从未使用 —— 它把 18MB 的库拉进主进程启动图。
+// XLSX 的实际写入在 ExcelFormatter / ExportContext，那里按需动态加载。
 import { getEmojiPath } from 'wechat-emojis'
 import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'
@@ -43,6 +44,15 @@ import { WeCloneFormatter } from '../formatters/WeCloneFormatter';
 
 export class ExportOrchestrator {
     constructor(public context: ExportContext) {
+    }
+
+    /**
+     * issue #15/#5b：读取本次运行的缺图片密钥计数。
+     * 必须在 clearMediaRuntimeState() 之前调用（finally 会清掉遥测）。
+     */
+    private getRunImageKeyMissingCount(): number {
+        const raw = Number(this.context.getMediaTelemetrySnapshot().mediaImageKeyMissingFiles || 0)
+        return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0
     }
 
     /**
@@ -123,6 +133,8 @@ export class ExportOrchestrator {
         failedSessionIds?: string[]
         failedSessionErrors?: Record<string, string>
         sessionOutputPaths?: Record<string, string>
+        // issue #15/#5b：因缺图片解密密钥而显示为 [图片] 占位符的消息数。
+        imageKeyMissingFiles?: number
         error?: string
         }> {
         let successCount = 0;
@@ -146,7 +158,7 @@ export class ExportOrchestrator {
         try {
           const conn = await this.context.ensureConnected()
           if (!conn.success) {
-            return { success: false, successCount: 0, failCount: sessionIds.length, error: conn.error }
+            return { success: false, successCount: 0, failCount: sessionIds.length, imageKeyMissingFiles: 0, error: conn.error }
           }
 
           this.context.resetMediaRuntimeState()
@@ -552,7 +564,8 @@ export class ExportOrchestrator {
               successSessionIds,
               failedSessionIds,
               failedSessionErrors,
-              sessionOutputPaths
+              sessionOutputPaths,
+              imageKeyMissingFiles: this.getRunImageKeyMissingCount()
             }
           }
           if (pauseRequested) {
@@ -565,7 +578,8 @@ export class ExportOrchestrator {
               successSessionIds,
               failedSessionIds,
               failedSessionErrors,
-              sessionOutputPaths
+              sessionOutputPaths,
+              imageKeyMissingFiles: this.getRunImageKeyMissingCount()
             }
           }
 
@@ -591,11 +605,12 @@ export class ExportOrchestrator {
             failedSessionIds,
             failedSessionErrors,
             sessionOutputPaths,
+            imageKeyMissingFiles: this.getRunImageKeyMissingCount(),
             error: failureSummary
           }
         } catch (e) {
           progressEmitter.flush()
-          return { success: false, successCount, failCount, error: String(e) }
+          return { success: false, successCount, failCount, imageKeyMissingFiles: this.getRunImageKeyMissingCount(), error: String(e) }
         } finally {
           this.context.clearMediaRuntimeState()
         }

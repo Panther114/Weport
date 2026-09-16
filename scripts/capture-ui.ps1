@@ -1,4 +1,4 @@
-﻿# Weport UI capture harness (Electron)
+# Weport UI capture harness (Electron)
 # Captures the main window + notification popup via the app's own
 # WEPORT_SCREENSHOT_POPUP mode, then asserts the popup is non-blank.
 # A blank popup (broken renderer / unwired viewport) fails the build.
@@ -7,6 +7,21 @@ param(
   [string]$ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path,
   [string]$OutputDir = (Join-Path $env:TEMP "weport-electron-screenshots"),
   [string]$UserDataDir = (Join-Path $env:TEMP ("weport-electron-screenshot-user-data-" + [guid]::NewGuid().ToString('N'))),
+  # 17 张截图 + 一次响应式窗口重排。120s 是 12 张时代的预算，机器一忙就会在
+  # 中途（WeportAI 那一步）超时，看起来像"截图失败"，其实是预算不够。
+  # 300 是 24 张时代的预算；加上全量清屏（每个页面 + 每个设置分类各截顶部/底部，
+  # 34 张额外截图）后需要更长。截图本身很快，真正的成本是每屏的稳定帧等待。
+  [int]$TimeoutSeconds = 600,
+  # 浅色模式整套跑一遍：捕获 + 对比度审计。浅色最容易出的问题（白底白字）
+  # 用"截图非空白"是抓不到的。
+  [switch]$LightMode,
+  # 保留 GPU：软件渲染下桌面采集（WGC）会失败，弹窗玻璃只能退回静态快照。
+  # 跑这个开关时才断言 popup-glass.json 必须是动态管线（stream/frames）且帧差 > 1.0。
+  [switch]$KeepGpu,
+  # 覆盖强调色（blue / violet / teal / rose / amber / graphite），用于逐套抽查。
+  [string]$Accent = '',
+  # 背景文件（图片或视频）的绝对路径；设置后额外截一张，用来验证视频背景图层。
+  [string]$BackgroundPath = '',
   [switch]$PublishToDocs
 )
 
@@ -59,6 +74,10 @@ function Assert-ImageHasContent([string]$Path, [string]$Label) {
 
 $env:WEPORT_SCREENSHOT_POPUP = '1'
 $env:WEPORT_SCREENSHOT_OUT = $OutputDir
+if ($LightMode) { $env:WEPORT_THEME_MODE = 'light' } else { Remove-Item Env:WEPORT_THEME_MODE -ErrorAction SilentlyContinue }
+if ($Accent) { $env:WEPORT_THEME_ACCENT = $Accent } else { Remove-Item Env:WEPORT_THEME_ACCENT -ErrorAction SilentlyContinue }
+if ($BackgroundPath) { $env:WEPORT_BG_PATH = $BackgroundPath } else { Remove-Item Env:WEPORT_BG_PATH -ErrorAction SilentlyContinue }
+if ($KeepGpu) { $env:WEPORT_SCREENSHOT_KEEP_GPU = '1' } else { Remove-Item Env:WEPORT_SCREENSHOT_KEEP_GPU -ErrorAction SilentlyContinue }
 Remove-Item Env:ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue
 
 Write-Output "Launching $Executable (screenshot mode)..."
@@ -71,10 +90,10 @@ if ($ProjectRootArg) {
   $processArgs = @("--user-data-dir=$UserDataDir")
 }
 $p = Start-Process -FilePath $Executable -ArgumentList $processArgs -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
-$waited = $p.WaitForExit(120000)
+$waited = $p.WaitForExit($TimeoutSeconds * 1000)
 if (-not $waited) {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-  throw "Weport screenshot mode timed out after 120s (see $appOut / $appErr)"
+  throw "Weport screenshot mode timed out after ${TimeoutSeconds}s (see $appOut / $appErr)"
 }
 $code = $p.ExitCode
 if ($null -eq $code) {
@@ -107,7 +126,20 @@ $hubPng = Join-Path $OutputDir 'analytics-hub.png'
 $globalPng = Join-Path $OutputDir 'analytics-global.png'
 $annualPng = Join-Path $OutputDir 'annual-report.png'
 $groupPng = Join-Path $OutputDir 'analytics-group.png'
+$dualPng = Join-Path $OutputDir 'dual-report.png'
+$muteReportPng = Join-Path $OutputDir 'mute-report.png'
 $settingsPng = Join-Path $OutputDir 'settings.png'
+$settingsAppearancePng = Join-Path $OutputDir 'settings-appearance.png'
+$settingsAiPng = Join-Path $OutputDir 'settings-ai.png'
+$settingsConnectPng = Join-Path $OutputDir 'settings-connect.png'
+$webotPng = Join-Path $OutputDir 'webot.png'
+$webotNotesPng = Join-Path $OutputDir 'webot-notes.png'
+$webotNarrowPng = Join-Path $OutputDir 'webot-narrow.png'
+$aiNarrowPng = Join-Path $OutputDir 'ai-narrow.png'
+$weclonePng = Join-Path $OutputDir 'weclone.png'
+$wecloneManagePng = Join-Path $OutputDir 'weclone-manage.png'
+$wecloneCreatePng = Join-Path $OutputDir 'weclone-create.png'
+$viewportMetrics = Join-Path $OutputDir 'viewport-metrics.json'
 function Assert-Captured([string]$Path, [string]$Label) {
   if (-not (Test-Path $Path)) {
     $tail = (Get-Content $appOut -ErrorAction SilentlyContinue | Select-Object -Last 30) -join "`n"
@@ -139,7 +171,20 @@ Assert-Captured $hubPng 'analytics-hub.png'
 Assert-Captured $globalPng 'analytics-global.png'
 Assert-Captured $annualPng 'annual-report.png'
 Assert-Captured $groupPng 'analytics-group.png'
+Assert-Captured $dualPng 'dual-report.png'
+Assert-Captured $muteReportPng 'mute-report.png'
 Assert-Captured $settingsPng 'settings.png'
+Assert-Captured $settingsAppearancePng 'settings-appearance.png'
+Assert-Captured $settingsAiPng 'settings-ai.png'
+Assert-Captured $settingsConnectPng 'settings-connect.png'
+Assert-Captured $webotPng 'webot.png'
+Assert-Captured $webotNotesPng 'webot-notes.png'
+Assert-Captured $webotNarrowPng 'webot-narrow.png'
+Assert-Captured $aiNarrowPng 'ai-narrow.png'
+Assert-Captured $weclonePng 'weclone.png'
+Assert-Captured $wecloneManagePng 'weclone-manage.png'
+Assert-Captured $wecloneCreatePng 'weclone-create.png'
+Assert-Captured $viewportMetrics 'viewport-metrics.json'
 
 Assert-ImageHasContent $mainPng 'main window'
 Assert-ImageHasContent $popupPng 'notification popup'
@@ -152,7 +197,153 @@ Assert-ImageHasContent $hubPng 'analytics hub'
 Assert-ImageHasContent $globalPng 'global analytics'
 Assert-ImageHasContent $annualPng 'annual report'
 Assert-ImageHasContent $groupPng 'group analytics'
+Assert-ImageHasContent $dualPng 'dual report'
+Assert-ImageHasContent $muteReportPng 'mute report'
 Assert-ImageHasContent $settingsPng 'settings'
+Assert-ImageHasContent $settingsAppearancePng 'settings appearance'
+Assert-ImageHasContent $settingsAiPng 'settings AI services'
+Assert-ImageHasContent $settingsConnectPng 'settings connections'
+Assert-ImageHasContent $webotPng 'WeBot tasks'
+Assert-ImageHasContent $webotNotesPng 'WeBot notes'
+Assert-ImageHasContent $webotNarrowPng 'WeBot at narrow width'
+Assert-ImageHasContent $aiNarrowPng 'WeportAI at narrow width'
+Assert-ImageHasContent $weclonePng 'WeClone'
+Assert-ImageHasContent $wecloneManagePng 'WeClone manage'
+Assert-ImageHasContent $wecloneCreatePng 'WeClone create'
+
+# Responsive assertions: horizontal overflow and nav-label visibility.
+#
+# Neither is detectable by "the screenshot looks fine": horizontal overflow just
+# silently clips content on the right, and labels hidden by an over-eager media
+# query would negate the whole point of the v1.0 navigation rework.
+#
+# NOTE: keep these strings ASCII-only. Windows PowerShell 5.1 reads .ps1 as ANSI
+# unless the file has a UTF-8 BOM, and an em-dash becomes a byte that it treats
+# as a closing quote.
+$metrics = Get-Content $viewportMetrics -Raw | ConvertFrom-Json
+foreach ($name in @('narrow', 'wide')) {
+  $m = $metrics.$name
+  if ($null -eq $m) { throw "viewport-metrics.json missing '$name' entry" }
+  Write-Output "  [viewport:$name] $($m.viewport)px rail=$($m.railW) labels=$($m.labelsVisible) overflow=$($m.docOverflow)"
+  if ($m.docOverflow -gt 2) {
+    throw "horizontal overflow at ${name} ($($m.viewport)px): $($m.docOverflow)px - content is being clipped. Aborting."
+  }
+  if ($m.railItems -lt 10) {
+    throw "navigation rail incomplete at ${name}: $($m.railItems) items (expected >= 10). Aborting."
+  }
+  if ($m.statusChips -lt 3) {
+    throw "global status strip incomplete at ${name}: $($m.statusChips) chips (expected >= 3). Aborting."
+  }
+  # WeBot 布局回归：编辑器必须占满内容宽度（旧版并排两栏把任务列表挤到约
+  # 300px，卡片标题被动作按钮压成每行一两个字），且卡片本身不能窄到塌掉。
+  if ($m.webotEditorW -le 0) {
+    throw "WeBot editor missing at ${name} - the task page did not render. Aborting."
+  }
+  if ($m.webotTitleW -lt 60) {
+    throw "WeBot task title squeezed to $($m.webotTitleW)px at ${name} - the card actions are starving the title. Aborting."
+  }
+  if ($m.webotCardW -lt 300) {
+    throw "WeBot task card collapsed to $($m.webotCardW)px at ${name}. Aborting."
+  }
+  Write-Output "  [webot:$name] card=$($m.webotCardW) title=$($m.webotTitleW) listCols=$($m.webotListCols) editorGridCols=$($m.webotGridCols)"
+}
+
+# WeportAI 三栏是唯一一个两侧栏会跟中间内容抢宽度的页面，单独断言：不管窗口多
+# 窄，中间那一栏都得留下能读的宽度（曾经的 1100/940 断点被 v1.scss 覆盖，
+# 986px 视口下中间一栏只剩约 270px）。
+foreach ($name in @('aiNarrow', 'aiWide')) {
+  $m = $metrics.$name
+  if ($null -eq $m) { throw "viewport-metrics.json missing '$name' entry" }
+  Write-Output "  [ai:$name] $($m.viewport)px cols=$($m.aiCols -join '/') thread=$($m.aiThreadW) overflow=$($m.docOverflow)"
+  if ($m.aiThreadW -lt 300) {
+    throw "WeportAI middle column squeezed to $($m.aiThreadW)px at ${name} ($($m.viewport)px). Aborting."
+  }
+  if ($m.docOverflow -gt 2) {
+    throw "horizontal overflow on WeportAI at ${name} ($($m.viewport)px): $($m.docOverflow)px. Aborting."
+  }
+  if ($m.aiCols.Count -lt 2) {
+    throw "WeportAI shell collapsed at ${name}: cols=$($m.aiCols -join '/'). Aborting."
+  }
+}
+if ($metrics.narrow.labelsVisible -ne $true) {
+  throw "navigation labels hidden at $($metrics.narrow.viewport)px - the rail collapsed far too early. Aborting."
+}
+
+# Placeholder scan: a page can render, be non-blank, and still be showing
+# "undefined 条" / "NaN" / "[object Object]" to the user. That is not detectable
+# by stddev, and the group analytics page carried three "undefined 条" rows
+# through many green runs. Any hit is a failure.
+$placeholderScan = Join-Path $OutputDir 'placeholder-scan.json'
+Assert-Captured $placeholderScan 'placeholder-scan.json'
+$placeholders = Get-Content $placeholderScan -Raw | ConvertFrom-Json
+$offenders = @()
+foreach ($prop in $placeholders.PSObject.Properties) {
+  if ($prop.Value -and $prop.Value.Count -gt 0) {
+    $offenders += "$($prop.Name): $($prop.Value -join ', ')"
+  }
+}
+if ($offenders.Count -gt 0) {
+  throw ("placeholder text visible on screen - " + ($offenders -join ' | ') + " (see placeholder-scan.json). Aborting.")
+}
+Write-Output "  [placeholders] none visible on any captured screen"
+
+# Contrast audit: in light mode the classic failure is not "blank" but white text
+# on white - invisible to a stddev check. The app walks every element with its own
+# text, resolves the effective background and computes the WCAG ratio; anything
+# under 3.0 lands here.
+$contrastScan = Join-Path $OutputDir 'contrast-audit.json'
+Assert-Captured $contrastScan 'contrast-audit.json'
+$contrast = Get-Content $contrastScan -Raw | ConvertFrom-Json
+$contrastOffenders = @()
+foreach ($prop in $contrast.PSObject.Properties) {
+  if ($prop.Value -and $prop.Value.Count -gt 0) {
+    $worst = ($prop.Value | Sort-Object { [double]$_.ratio } | Select-Object -First 1)
+    $contrastOffenders += "$($prop.Name) ($($prop.Value.Count) el, worst $($worst.ratio): ""$($worst.text)"" $($worst.color) on $($worst.bg))"
+  }
+}
+if ($contrastOffenders.Count -gt 0) {
+  throw ("contrast below 3.0 - " + ($contrastOffenders -join ' | ') + " (see contrast-audit.json). Aborting.")
+}
+Write-Output "  [contrast] no text below 3.0 on any captured screen"
+
+# 弹窗玻璃折射管线：必须是动态的，而且是**真的在动**。
+#
+# 用户报过"玻璃背景在弹出那一刻就被钉住"。判据是端到端的帧序号，而不是渲染层的
+# 自述（`data-glass` 来自 React 状态，实测过它在该收到帧时仍报 snapshot）：
+# 主进程每推一帧带一个递增 seq，渲染层把它写进 `data-glass-seq`；QA 读回来比对，
+# 「玻璃上应用的是第 N 帧、主进程发到了第 N 帧」就证明背景一路在更新。
+#   stream = WGC 视频流（30fps，需要真实 GPU/驱动支持）
+#   frames = 主进程定帧推送（约 3fps；WGC 不可用时的兜底，本机就是这条）
+$popupGlass = Join-Path $OutputDir 'popup-glass.json'
+Assert-Captured $popupGlass 'popup-glass.json'
+$glass = Get-Content $popupGlass -Raw | ConvertFrom-Json
+Write-Output "  [popup] glass pipeline=$($glass.pipeline) framesSent=$($glass.framesSent) appliedSeq=$($glass.appliedSeq)/$($glass.sentSeq)"
+if ([int]$glass.framesSent -lt 2) {
+  throw "popup glass got only $($glass.framesSent) desktop frame(s) - the refraction loop is not feeding the popup. Aborting."
+}
+# 核心断言：**渲染层应用到玻璃上的帧，必须是主进程最新发出的那一帧**。
+#
+# 为什么不用像素差当主判据：QA 里内容保护是关掉的（否则 capturePage 只能拿到空白
+# 帧），于是抓帧会拍到弹窗自身，玻璃采样区域被它自己的模糊残影占住 —— 背景变化
+# 落在像素上只剩 0.4-5 的差别，量级取决于纱层浓度，判不稳。帧序号是端到端的确定
+# 事实：玻璃上显示的是第 N 帧，主进程发到了第 N 帧，就说明它一路在更新，而不是
+# "钉在出现那一刻"。
+#
+# 允许落后 1 帧（采样时可能正好有新帧在飞）。
+if ([int]$glass.appliedSeq -le 0) {
+  throw "popup glass never applied a backdrop frame (appliedSeq=$($glass.appliedSeq)) - the renderer is not consuming frames. Aborting."
+}
+if ([int]$glass.sentSeq - [int]$glass.appliedSeq -gt 1) {
+  throw "popup glass is stuck: applied frame $($glass.appliedSeq) while the main process already sent $($glass.sentSeq) - the backdrop is frozen. Aborting."
+}
+# 像素差只记录不判定：QA 里内容保护必须关掉（否则 capturePage 是空白帧），于是抓帧
+# 会拍到弹窗自身，玻璃采样区被自己的模糊残影占住，背景变化落在像素上只有 0.3-5，
+# 量级取决于纱层与窗口层叠，判不稳。真实证据是上面那对帧序号。
+Write-Output "  [popup] pixel delta (informational only) = $($glass.liveFrameDelta)"
+
+if ($BackgroundPath) {
+  Assert-ImageHasContent (Join-Path $OutputDir 'video-bg.png') 'video background'
+}
 Write-Output "Screenshots written to $OutputDir"
 
 if ($PublishToDocs) {
@@ -170,5 +361,11 @@ if ($PublishToDocs) {
   Copy-Item $annualPng (Join-Path $docsDir "annual-report.png") -Force
   Copy-Item $groupPng (Join-Path $docsDir "analytics-group.png") -Force
   Copy-Item $settingsPng (Join-Path $docsDir "settings.png") -Force
+  # v1.0 新增界面：README 的截图清单必须覆盖新功能，否则新东西在 README 里根本
+  # 不存在。设置页第二张是「外观」分类（背景图 / 强调色 / 密度 / 主题）。
+  Copy-Item $settingsAppearancePng (Join-Path $docsDir "settings-appearance.png") -Force
+  Copy-Item $webotPng (Join-Path $docsDir "webot.png") -Force
+  Copy-Item $webotNotesPng (Join-Path $docsDir "webot-notes.png") -Force
+  Copy-Item $weclonePng (Join-Path $docsDir "weclone.png") -Force
   Write-Output "Published screenshots to $docsDir"
 }

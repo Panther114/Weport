@@ -101,7 +101,7 @@
 }
 .wp-dialog-icon.danger {
   background: rgba(255, 60, 60, 0.14);
-  color: #ff5252;
+  color: var(--danger);
 }
 .wp-dialog-title {
   text-align: center;
@@ -168,7 +168,7 @@
   color: var(--text-faint);
 }
 .wp-error {
-  color: #ff6b6b;
+  color: var(--danger);
   font-size: 13px;
   padding: 12px;
   border: 1px solid rgba(255, 90, 90, 0.3);
@@ -237,7 +237,6 @@
   font-size: 17px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .v09-stat span {
   font-size: 11px;
@@ -353,6 +352,52 @@
   min-height: 0;
   overflow: hidden;
 }
+
+/* 侧栏分区：每段一条小标题。之前三个功能段直接摞在一起，输入框、复选框、
+   日历按钮长得一样，用户看不出哪一块管什么。
+   `flex-shrink: 0` 不能少：侧栏是 flex 列，默认 `flex: 0 1 auto` 会让每一段
+   被压到比内容还矮（搜索段实测 24px，内容是 89px），子元素溢出去正好压在
+   日历按钮和发布者列表上 —— 截图里那团糊在一起的文字就是这么来的。 */
+.sns-side-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line, #17171b);
+  flex: 0 0 auto;
+}
+.sns-side-block:last-child {
+  border-bottom: none;
+}
+/**
+ * 发布者侧栏的「生长块」不再自己滚动，也不再自己撑高：里面的虚拟滚动列表由
+ * JS 按数据算出高度（短列表收缩、长列表封顶），这里只负责不裁掉它。
+ *
+ * 原来的 `overflow-y: auto` 配 `.sns-author-list` 的百分比高度会塌：(1) 百分比高度
+ * 落在内容高度的父盒上解析不出确定值，Virtuoso 拿到 4px；(2) 就算给了确定值，
+ * 两层滚动容器也会互相打架。一个滚动容器就够。
+ */
+.sns-side-block-grow {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.sns-side-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.sns-side-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
 /* 侧栏头部（合并原顶栏：标题 / 统计 / 操作，紧凑单栏布局） */
 .sns-sidebar-hero {
   display: flex;
@@ -418,13 +463,17 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 10px 10px 0;
   padding: 7px 10px;
   background: var(--bg);
   border: 1px solid var(--line, #1c1c21);
   border-radius: var(--radius-sm);
   color: var(--text-faint);
   position: relative;
+  transition: border-color 0.15s ease;
+}
+.sns-sidebar-search:focus-within,
+.sns-sidebar-date:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 .sns-sidebar-search input,
 .sns-sidebar-date input {
@@ -456,12 +505,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 10px 10px 0;
-  padding: 7px 10px;
+  padding: 6px 9px;
   background: var(--bg);
   border: 1px solid var(--line, #1c1c21);
   border-radius: var(--radius-sm);
   color: var(--text-faint);
+  transition: border-color 0.15s ease;
+}
+.sns-author-search:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 .sns-author-search input {
   flex: 1;
@@ -518,12 +570,25 @@
   color: var(--text);
 }
 .sns-author-list {
-  flex: 1;
+  /* Virtuoso 滚动盒：高度由 JS 按行数给出（内联 style），这里只兜底不发散 */
+  flex: 0 0 auto;
   overflow-y: auto;
-  padding: 2px 8px 10px;
+  overscroll-behavior: contain;
+  padding: 0 0 4px;
+}
+/* 加载/空状态分支保持原来的行为（占满剩余空间、纵向堆叠），那一条不是虚拟滚动 */
+.sns-author-list-state {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+/**
+ * 虚拟滚动里每行的行距**不能用 margin**：Virtuoso 量的是元素自身的盒子高度，
+ * margin 不计入，量出来会比实际矮 2px，行与行会叠在一起。用内层 padding 承载。
+ */
+.sns-author-row {
+  padding-bottom: 2px;
 }
 .sns-author {
   display: flex;
@@ -533,19 +598,17 @@
   border: none;
   background: transparent;
   border-radius: var(--radius-sm);
-  padding: 4px 7px;
+  padding: 5px 7px;
   cursor: pointer;
   text-align: left;
-  transition: background 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .sns-author:hover {
-  background: var(--accent-softer, rgba(255, 255, 255, 0.05));
-  transform: translateX(3px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .sns-author-active {
-  background: rgba(255, 255, 255, 0.09);
-  outline: 1px solid rgba(255, 255, 255, 0.16);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
 }
 .sns-author-name {
   flex: 1;
@@ -562,7 +625,6 @@
 .sns-author-count {
   font-size: 11px;
   color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 当前筛选摘要条 */
@@ -588,14 +650,12 @@
   gap: 5px;
 }
 
-/* 动态流 */
+/* 动态流：不套外框。原来一个描边大卡片包住整列，只有两三条动态时底下留出
+   一大片空框，看着像「没加载完」。改成每条动态自己是一张卡，滚动区透明。 */
 .sns-feed {
-  background: var(--bg-raised);
-  border: 1px solid var(--line, #1c1c21);
-  border-radius: var(--radius);
   overflow: hidden;
   min-height: 0;
-  padding: 14px 16px 30px;
+  padding: 0 2px 30px 0;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -605,6 +665,7 @@
   flex: 1;
   min-height: 0;
   height: 100%;
+  padding-right: 6px;
 }
 .sns-feed-sentinel {
   display: flex;
@@ -641,7 +702,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 14px 0;
+  padding: 2px 2px 0;
   font-size: 11.5px;
   color: var(--text-dim);
   cursor: pointer;
@@ -790,31 +851,23 @@
 .sns-post-item {
   display: flex;
   gap: 12px;
-  padding: 14px 6px;
-  border-bottom: 1px solid var(--line, #17171b);
-  border-radius: var(--radius-sm);
-  transition: background 0.18s ease;
+  padding: 14px 16px;
+  margin: 0 0 10px;
+  background: var(--panel);
+  border: 1px solid var(--line, #1c1c21);
+  border-radius: var(--radius);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
   animation: wp-post-in 0.34s cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
-.sns-post-item:nth-child(1) { animation-delay: 0.02s; }
-.sns-post-item:nth-child(2) { animation-delay: 0.05s; }
-.sns-post-item:nth-child(3) { animation-delay: 0.08s; }
-.sns-post-item:nth-child(4) { animation-delay: 0.11s; }
-.sns-post-item:nth-child(5) { animation-delay: 0.14s; }
-.sns-post-item:nth-child(6) { animation-delay: 0.17s; }
-.sns-post-item:nth-child(7) { animation-delay: 0.2s; }
-.sns-post-item:nth-child(8) { animation-delay: 0.23s; }
 .sns-post-item:hover {
-  background: rgba(255, 255, 255, 0.025);
+  border-color: var(--line-strong, #33333d);
+  box-shadow: var(--elev-1, 0 6px 18px rgba(0, 0, 0, 0.28));
 }
 @keyframes wp-post-in {
   from {
     opacity: 0;
     transform: translateY(12px);
   }
-}
-.sns-post-item:last-child {
-  border-bottom: none;
 }
 .sns-post-item.post-deleted {
   opacity: 0.55;
@@ -886,7 +939,7 @@
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: #ff6b6b;
+  color: var(--danger);
   border: 1px solid rgba(255, 90, 90, 0.35);
   border-radius: 999px;
   padding: 2px 8px;
@@ -1062,7 +1115,9 @@
   justify-content: center;
   gap: 6px;
   background: rgba(0, 0, 0, 0.62);
-  color: var(--text-dim);
+  // 这一层永远压**媒体内容**上，与页面明暗无关；文字色必须写死为浅色。跟着
+  // --text-dim 走的话，浅色模式下会变成"深灰字压灰底"（1.33 对比度）。
+  color: rgba(255, 255, 255, 0.92);
   font-size: 11.5px;
 }
 .media-badge {
@@ -1116,7 +1171,7 @@
   gap: 7px;
 }
 .like-icon {
-  color: #ff6b6b;
+  color: var(--danger);
   margin-top: 2px;
   flex-shrink: 0;
 }
@@ -1298,7 +1353,6 @@
 .lightbox-count {
   font-size: 13px;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 .lightbox-actions {
   display: flex;
@@ -1315,6 +1369,21 @@
   width: 100%;
   height: 100%;
   padding: 40px;
+}
+/* 放大后可拖动平移；光标随之变化，用户才知道图能拖。 */
+.lightbox-body[data-zoomed='true'] {
+  cursor: grab;
+}
+.lightbox-body[data-dragging='true'] {
+  cursor: grabbing;
+}
+.lightbox-zoom-tag {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 11px;
 }
 .lightbox-media {
   max-width: 100%;
@@ -1447,11 +1516,13 @@
   gap: 12px;
 }
 
-/* 入口选择（两个大按钮） */
+/* 入口选择（大按钮网格） */
 .analytics-hub {
   align-items: center;
-  justify-content: center;
-  padding-top: 4vh;
+  /* v1.0：hero 去掉后不再需要垂直居中 —— 居中会把整块内容推到中间，
+     上方留出一大片空白，反而更像"没加载完"。 */
+  justify-content: flex-start;
+  padding-top: 0;
   gap: 0;
 }
 .analytics-hub-hero {
@@ -1569,10 +1640,12 @@
   color: var(--accent-4, var(--text));
 }
 .analytics-big-card:nth-child(1) .analytics-big-arrow {
-  color: var(--accent-3, var(--text));
+  color: var(--accent);
 }
+// 箭头是**文字/图标**，不能用色阶最深的 --accent-4：它压在深色面板上只有 3.4。
+// 色阶深档只用在这种地方当背景或条填充。
 .analytics-big-card:nth-child(2) .analytics-big-arrow {
-  color: var(--accent-4, var(--text));
+  color: var(--accent);
 }
 .analytics-big-card:nth-child(3) .analytics-big-icon {
   background: color-mix(in srgb, var(--accent-5) 18%, var(--bg));
@@ -1584,8 +1657,8 @@
   border-color: var(--accent-6, var(--line));
   color: var(--accent-6, var(--text));
 }
-.analytics-big-card:nth-child(3) .analytics-big-arrow { color: var(--accent-5, var(--text)); }
-.analytics-big-card:nth-child(4) .analytics-big-arrow { color: var(--accent-6, var(--text)); }
+.analytics-big-card:nth-child(3) .analytics-big-arrow { color: var(--accent); }
+.analytics-big-card:nth-child(4) .analytics-big-arrow { color: var(--accent); }
 .analytics-big-icon {
   width: 64px;
   height: 64px;
@@ -1692,7 +1765,6 @@
   font-size: 22px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -1736,7 +1808,6 @@
   font-size: 16px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 图表双栏 */
@@ -1786,7 +1857,6 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 .ranking-top {
@@ -1827,7 +1897,6 @@
   font-size: 13px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   min-width: 56px;
   text-align: right;
 }
@@ -1884,7 +1953,7 @@
 }
 .exclude-item-active {
   border-color: rgba(255, 90, 90, 0.45);
-  color: #ff8a8a;
+  color: var(--danger);
 }
 .exclude-badge {
   display: inline-flex;
@@ -2047,7 +2116,9 @@
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-faint);
+  // --text-faint 在选中行（浅一档的底色）上只有 2.98 对比度，低于 3.0 —— 截图
+  // 对比度审计抓到的唯一一处。11px 的小字本来就不该用最淡的那一档。
+  color: var(--text-dim);
   margin-top: 1px;
 }
 .group-detail {
@@ -2140,8 +2211,10 @@
   white-space: nowrap;
 }
 .member-badge.owner {
-  color: #ffd166;
-  border-color: rgba(255, 209, 102, 0.4);
+  // 原来写死 #ffd166（浅色金）：浅色模式下是白底上的浅黄，1.44 对比度，等于
+  // 看不见。改用语义色 --warn，浅色模式下它会自动压深。
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
 }
 .member-bar {
   flex: 1;
@@ -2160,7 +2233,6 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
   min-width: 56px;
   text-align: right;
 }
@@ -2212,7 +2284,6 @@
 .phrase-count {
   font-size: 12px;
   color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
 }
 .emoji-tags {
   display: flex;
@@ -2247,7 +2318,6 @@
 .member-msg-time {
   color: var(--text-faint);
   white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
 .member-msg-content {
   color: var(--text-dim);
@@ -2280,7 +2350,6 @@
 .media-type-list b {
   margin-left: auto;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 
 /* 年度报告 */
@@ -2350,7 +2419,9 @@
   margin: 0 auto;
 }
 .annual-hero {
-  background: linear-gradient(160deg, #191920 0%, #0d0d10 100%);
+  // 写死的深色渐变 + 跟随主题的文字色：浅色模式下就是「深字压深底」，
+  // 对比度 1.09（截图对比度审计抓到的）。改用强调色渐变，明暗两档都成立。
+  background: var(--accent-grad), var(--panel);
   border: 1px solid var(--line-strong, #2c2c33);
   border-radius: 16px;
   padding: 36px 34px;
@@ -2433,7 +2504,6 @@
   font-size: 18px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .annual-monthly-list {
   display: flex;
@@ -2457,7 +2527,6 @@
   color: var(--text-faint);
   width: 42px;
   flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
 }
 .annual-monthly-name {
   flex: 1;
@@ -2470,7 +2539,6 @@
 .annual-monthly-row b {
   font-size: 13px;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 .annual-fun-grid {
   display: grid;
@@ -2511,7 +2579,6 @@
   color: var(--text);
   display: block;
   text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 .sns-type-chips {
   display: flex;
@@ -2550,9 +2617,10 @@
   color: var(--accent, #f4f4f5);
 }
 
-/* 年度报告 hero 渐变 */
+/* 年度报告 hero 渐变：底色必须是 --panel（跟随明暗），原来第二层写死 #0d0d10，
+   于是浅色模式下整块 hero 仍是深色，而标题文字已经变成深色 → 1.09 对比度。 */
 .annual-hero {
-  background: var(--accent-grad, linear-gradient(160deg, #191920 0%, #0d0d10 100%)), #0d0d10;
+  background: var(--accent-grad, linear-gradient(160deg, #191920 0%, #0d0d10 100%)), var(--panel);
   border-color: var(--accent, var(--line-strong));
 }
 
@@ -2564,6 +2632,69 @@
 .annual-fun-grid {
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
 }
+/* 朋友圈页面级工具条：左侧统计、右侧动作。
+   这些原来都挤在筛选侧栏顶部（侧栏因此近三分之一高度不是筛选器），而页面头
+   已经重复过一次标题，于是「朋友圈」在同一屏里出现两次。 */
+.sns-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #1c1c21);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+.sns-topbar-stats {
+  display: flex;
+  gap: 6px;
+}
+.sns-topbar-stats .v09-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.sns-topbar-stats .v09-stat b {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+}
+.sns-topbar-stats .v09-stat span {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.sns-topbar-actions {
+  display: flex;
+  gap: 6px;
+}
+.sns-topbar-actions .chip {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 侧栏三段之间加分隔线：搜索 / 日期 / 发布者原本只是靠间距分开，
+   连在一起看像一大坨输入框。 */
+.sns-sidebar > * + * {
+  border-top: 1px solid var(--line, #17171b);
+}
+.sns-sidebar-search,
+.sns-sidebar-date {
+  padding: 10px var(--space-3);
+}
+
+/* 侧栏不再被拉到和动态流一样高：只有 5 个发布者时会留下一大片空白卡片，
+   看起来像还没加载完。让它按内容收缩，超出时自己滚。 */
+.sns-sidebar,
+.group-list-panel {
+  align-self: start;
+  max-height: 100%;
+}
+
 .sns-main {
   grid-template-columns: minmax(230px, 250px) 1fr;
 }
@@ -2598,7 +2729,9 @@
 }
 .theme-picker {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  /* 12 套主题（2 明暗 × 6 强调色）：两列时整页要滚三屏，选之前看不到全部选项。
+     自适应列数让默认窗口下一屏半就能看全。 */
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
 }
 .theme-card {
@@ -2809,7 +2942,6 @@
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
 }
 .dual-report-hero {
   display: flex;
@@ -2892,7 +3024,6 @@
   font-size: 18px;
   font-weight: 800;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
 }
 .dual-report-stat-card span:last-child {
   font-size: 11px;
@@ -2953,7 +3084,7 @@
 }
 .chat-mini-line.me span:first-child { color: var(--accent, #60a5fa); }
 .chat-mini-line p { color: var(--text-dim); margin: 0; word-break: break-word; min-width: 0; }
-.chat-mini-time { color: var(--text-faint) !important; font-size: 10.5px !important; font-variant-numeric: tabular-nums; text-align: right; min-width: 0 !important; font-weight: 400 !important; }
+.chat-mini-time { color: var(--text-faint) !important; font-size: 10.5px !important; text-align: right; min-width: 0 !important; font-weight: 400 !important; }
 .dual-report-initiative {
   display: flex;
   flex-direction: column;
@@ -2978,7 +3109,7 @@
   font-size: 12px;
   color: var(--text-dim);
 }
-.dual-report-initiative-labels b { color: var(--text); font-variant-numeric: tabular-nums; }
+.dual-report-initiative-labels b { color: var(--text); }
 .dual-report-response {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3032,7 +3163,6 @@
   border: 1px solid var(--line, #1c1c21);
   padding: 1px 6px;
   border-radius: 999px;
-  font-variant-numeric: tabular-nums;
 }
 .dual-report-phrase.me { border-color: color-mix(in srgb, var(--accent) 22%, var(--line)); background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
 .dual-report-phrase.friend { border-color: color-mix(in srgb, var(--accent-2) 18%, var(--line)); }
@@ -3208,7 +3338,6 @@
   padding: 4px 7px;
   border-radius: 6px;
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
@@ -3237,9 +3366,14 @@
   min-height: 46px;
   padding-block: 9px;
 }
+// 序号与数量：用可读的文字色，前 3 名用强调色（强调色在深浅两档下都保证 ≥3 对比度，
+// 色阶里的深色档不是 —— 它只适合当进度条填充）。
 .ranking-row .ranking-no,
 .ranking-row .ranking-count {
-  color: var(--rank-color, var(--text));
+  color: var(--text-dim);
+}
+.ranking-row .ranking-no.ranking-top {
+  color: var(--accent);
 }
 .ranking-row .ranking-bar .progress-fill {
   transition: width 0.25s ease, background 0.25s ease;

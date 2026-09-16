@@ -2,7 +2,10 @@
     position: relative;
     display: inline-block;
     overflow: hidden;
-    background-color: var(--bg-tertiary, #f5f5f5);
+    // 这些 --text-secondary / --bg-tertiary / --bg-secondary 变量在 Weport 里
+    // 根本不存在（是从别的项目抄来的命名），因此全部走兜底值：字母头像永远是
+    // #666 on #e0e0e0 —— 浅色下勉强，深色下就是一块突兀的浅灰。改用真实令牌。
+    background-color: var(--elevated);
     flex-shrink: 0;
     border-radius: 4px;
     /* Default radius */
@@ -42,8 +45,8 @@
         align-items: center;
         justify-content: center;
         font-weight: 500;
-        color: var(--text-secondary, #666);
-        background-color: var(--bg-tertiary, #e0e0e0);
+        color: var(--text-dim);
+        background-color: var(--elevated);
         font-size: 1.2em;
         text-transform: uppercase;
         user-select: none;
@@ -56,8 +59,8 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        color: var(--text-tertiary, #999);
-        background-color: var(--bg-tertiary, #e0e0e0);
+        color: var(--text-dim);
+        background-color: var(--elevated);
         border-radius: inherit;
 
         .avatar-loading-icon {
@@ -73,9 +76,9 @@
         width: 100%;
         height: 100%;
         background: linear-gradient(90deg,
-                var(--bg-tertiary, #f0f0f0) 25%,
-                var(--bg-secondary, #e0e0e0) 50%,
-                var(--bg-tertiary, #f0f0f0) 75%);
+                var(--elevated) 25%,
+                var(--bg) 50%,
+                var(--elevated) 75%);
         background-size: 200% 100%;
         animation: shimmer 1.5s infinite;
         z-index: 1;

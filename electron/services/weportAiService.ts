@@ -19,13 +19,31 @@ import { join, dirname, basename, extname, relative, resolve, normalize, isAbsol
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, renameSync, rmSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import { ConfigService } from './config'
+import { connectorsService } from './connectors/connectorsService'
 import { chatService } from './chatService'
 import { wcdbService } from './wcdbService'
 import type { ChatSession, Message } from './chatService'
 import { getProviderAdapter, makeDefaultProfile } from './ai/providerAdapters'
-import { getProviderCatalog, getProviderCatalogEntry } from './ai/providerCatalog'
+import { getProviderCatalog, getProviderCatalogEntry, invalidateCatalogOverride, normalizeProviderId } from './ai/providerCatalog'
 import { ProviderProfileService } from './ai/providerProfiles'
-import type { ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
+import { getModelRegistry, resolvedProfileCache } from './ai/registryRuntime'
+import { extractModelIds, isChatCapable, normalizeModelRecord, resolveModelMetadata } from './ai/modelRegistry'
+import type { ModelRecord, ResolvedModel } from './ai/modelRegistry'
+import type { ProviderProfile } from './ai/providerTypes'
+import {
+  CHARS_PER_TOKEN,
+  COMPACT_RETAIN_RATIO,
+  COMPACT_TRIGGER_RATIO,
+  buildPrefixFrame,
+  comparePrefixFrames,
+  compressOverflow as compressOverflowPure,
+  mergeDigest,
+  type CompressibleMessage,
+  type PrefixChange,
+  type PrefixFrame,
+} from './ai/prefixCache'
+import type { ProviderConsumer, ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
+import { buildFallbackTitle, hasCjk, normaliseTitle, titleEchoesSource } from './ai/chatTitle'
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -40,6 +58,23 @@ export interface AiToolCall {
   result?: string
 }
 
+/**
+ * 一次模型调用的解码计时，和 DSH 用的是同一套口径：
+ *
+ *   ttftMs   = 首个 token 到达 − 发出请求
+ *   decodeMs = 生成结束 − 首个 token 到达
+ *   TPS      = outputTokens / (decodeMs / 1000)
+ *
+ * 关键是**把首 token 等待从解码时间里扣掉**。用「总耗时」算出来的速度会把
+ * TTFT（长前缀下往往是几秒）算进分子分母，读出来的数字比真实解码速度低一个
+ * 量级，且前缀越长越显得慢 —— 那是延迟，不是吞吐。
+ */
+export interface AiStepTiming {
+  ttftMs: number
+  decodeMs: number
+  outputTokens: number
+}
+
 export interface AiMessage {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -49,6 +84,8 @@ export interface AiMessage {
   toolCallId?: string
   toolName?: string
   createdAt: number
+  /** 本轮解码计时，用于消息尾部的 `N tok/s` 读数 */
+  timing?: AiStepTiming
 }
 
 export interface AiChatMeta {
@@ -85,6 +122,21 @@ export interface AiSetupInfo {
   activeProfileId: string
   profiles: ProviderProfileSummary[]
   catalog: ReturnType<typeof getProviderCatalog>
+  /**
+   * 模型 id → 定价（USD / 百万 token）。渲染侧用它给每个模型下拉项标价。
+   *
+   * 为什么要在这里下发而不是渲染侧自己查：定价来自 models.dev 的 registry，
+   * 那是主进程持有多 MB 级 JSON + 解析缓存的模块，渲染侧拿不到。没有这一项，
+   * 「这个模型多少钱」在选模型的时候就完全不可见 —— 而选模型正是唯一该看它的时刻。
+   */
+  modelCosts?: Record<string, {
+    input?: number
+    output?: number
+    reasoning?: number
+    cacheRead?: number
+    cacheWrite?: number
+    source?: string
+  }>
 }
 
 export interface AiRunUsage {
@@ -101,7 +153,7 @@ export type AiEvent =
   | { type: 'text_delta'; chatId: string; delta: string }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
   | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string }
-  | { type: 'assistant_message'; chatId: string; message: AiMessage }
+  | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: AiStepTiming }
   | { type: 'chat_title'; chatId: string; title: string }
   | { type: 'error'; chatId: string; message: string }
   | { type: 'done'; chatId: string; usage?: AiRunUsage; aborted?: boolean; context?: { promptTokens: number; cacheHitTokens: number; lastRequestTokens: number; recentRate: number; contextWindow: number } }
@@ -146,6 +198,20 @@ interface ToolDefinition {
 
 const NOTE_DIR = 'notes'
 
+/**
+ * Model-discovery budget.
+ *
+ * 30 s + one retry because `opencode.ai/zen/v1/models` is intermittently slow:
+ * live probes timed out at 20 s and 60 s, then answered in 0.8 s on the next
+ * attempt. The previous fixed 15 s with no retry reported a working endpoint as
+ * a permissions problem.
+ */
+const MODEL_DISCOVERY_TIMEOUT_MS = 30000
+const MODEL_DISCOVERY_ATTEMPTS = 2
+
+/** Gateway profiles that get the identification header and the empty-list retry. */
+const OPENCODE_GATEWAYS = new Set(['opencode-zen', 'opencode-go'])
+
 /** Canonical provider JSON: object keys and order-insensitive schema lists are stable. */
 const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
   if (Array.isArray(value)) {
@@ -164,7 +230,7 @@ const canonicalProviderValue = (value: unknown, parentKey = ''): unknown => {
   return out
 }
 
-const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Weport", capital A, "AI" — never "WreportAI", "WepoortAI", "Weport Ai" or any other variant), a meticulous WeChat chat-history analyst agent running inside the Weport harness on this Windows machine. Always refer to yourself and to this product exactly as "WeportAI"; if you ever encounter a misspelled variant of the name — in the conversation, in notes, or in memory — silently correct it to "WeportAI" and never repeat the variant. The user gives you analysis tasks about their own WeChat history; you explore it with the provided tools, reason objectively, and deliver rigorous, evidence-grounded Markdown answers. Reply in the language the user used (Chinese by default).
+const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Weport", capital A, "AI" — never "WreportAI", "WepoortAI", "Weport Ai" or any other variant), a meticulous WeChat chat-history analyst agent running inside the Weport harness. Always refer to yourself and to this product exactly as "WeportAI"; if you ever encounter a misspelled variant of the name — in the conversation, in notes, or in memory — silently correct it to "WeportAI" and never repeat the variant. The user gives you analysis tasks about their own WeChat history; you explore it with the provided tools, reason objectively, and deliver rigorous, evidence-grounded Markdown answers. Reply in the language the user used (Chinese by default).
 
 ## Working principles
 1. GROUND EVERY CLAIM IN TOOL RESULTS. Never invent message content, names, dates, or events. If a tool fails or returns nothing, say so explicitly. Mark inferences with "推断" and keep them clearly separate from facts.
@@ -400,13 +466,53 @@ class WeportAiService {
    * used to diagnose prefix stability without writing message contents to disk.
    */
   private previousApiInput = new Map<string, string>()
+  /**
+   * 前缀稳定性探针的上一帧（见 {@link probePrefixChange}）。
+   * 只在内存中保留哈希与逐条序列化结果，不落盘、不含原始正文。
+   */
+  private prefixProbe = new Map<string, PrefixFrame>()
   private emitter: EventEmitter | null = null
   private sessionListCache: { at: number; sessions: ChatSession[] } = { at: 0, sessions: [] }
   private titleUpgrading = new Set<string>()
+  /** 标题生成的追踪开关（WEPORT_TITLE_PROBE=1 时把结果写进 debug.log） */
+  private titleProbe: boolean | undefined
+  /** 见 {@link applyProbeOverride}：仅在 `WEPORT_AI_PROBE_MODEL` 进程里非空。 */
+  private probeModel = String(process.env.WEPORT_AI_PROBE_MODEL || '').trim()
 
   constructor() {
     this.configService = ConfigService.getInstance()
     this.providerProfiles = new ProviderProfileService(this.configService)
+  }
+
+  /**
+   * 诊断用的模型覆盖（`WEPORT_AI_PROBE_MODEL`）。
+   *
+   * 存在的理由：网关按 **模型** 而不是按 profile 决定协议，而"配置里存着某个
+   * 模型"不等于"这台机器、这把钥匙真的能调用它"（OpenCode Go 对部分模型会回
+   * `This model is not available in your country.`）。想知道某个模型 id 是否可用，
+   * 就得能拿同一个 profile 换模型试一次，而不是去改用户配置或建一个持久化 profile。
+   *
+   * 只在探针进程里生效，且只改内存里的这一份副本，绝不落盘。
+   */
+  private applyProbeOverride(profile: ProviderProfile): ProviderProfile {
+    if (!this.probeModel) return profile
+    const baseUrl = String(process.env.WEPORT_AI_PROBE_BASE_URL || '').trim().replace(/\/+$/, '')
+    const providerId = String(process.env.WEPORT_AI_PROBE_PROVIDER || '').trim()
+    return {
+      ...profile,
+      model: this.probeModel,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(providerId ? { providerId } : {}),
+    }
+  }
+
+  /** 探针模式的只读状态（供 `WEPORT_AI_PROBE` 打印，便于确认覆盖是否生效）。 */
+  probeOverrideState(): { model: string; baseUrl: string; providerId: string } {
+    return {
+      model: this.probeModel,
+      baseUrl: String(process.env.WEPORT_AI_PROBE_BASE_URL || '').trim(),
+      providerId: String(process.env.WEPORT_AI_PROBE_PROVIDER || '').trim(),
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -476,6 +582,57 @@ class WeportAiService {
 
   private chatFilePath(chatId: string): string {
     return join(this.sessionsDir, `${chatId}.json`)
+  }
+
+  /**
+   * 压缩预算。`trigger` 用 DSH 的比例（0.8 触发 / 0.16 保留），自动触发和
+   * 手动 `/compact` 共用同一个函数 —— 两套阈值必然漂移，然后「手动压缩之后
+   * 下一轮又自动压一次」。
+   */
+  private compactBudgetFor(contextWindow: number, trigger = COMPACT_TRIGGER_RATIO, retain = COMPACT_RETAIN_RATIO) {
+    return {
+      maxChars: Math.floor(contextWindow * CHARS_PER_TOKEN * trigger),
+      retainChars: Math.floor(contextWindow * CHARS_PER_TOKEN * retain),
+    }
+  }
+
+  /**
+   * 手动压缩：把历史收进摘要，保留最近一段原文。
+   *
+   * 这是 Harness 的显式入口（CLI `ai.compact`、面板上的「压缩上下文」），
+   * 与 runChat 里那次自动压缩走同一套代码：`compressOverflow` + 单份摘要 +
+   * 归档。手动指定更低的触发比例，是因为用户主动要求压缩时，通常是要**腾出**
+   * 空间继续长任务，而不是等到 0.8 才动手。
+   *
+   * 返回 `changed: false` 且 `reason: 'below-threshold'` 表示当前历史还没到
+   * 该压的程度 —— 调用方不该谎报"已压缩"，那会让用户以为腾出了空间。
+   */
+  compactChat(chatId: string, options?: { consumer?: ProviderConsumer; trigger?: number; retain?: number }): {
+    success: boolean
+    changed: boolean
+    reason?: 'below-threshold' | 'not-found'
+    dropped?: number
+    kept?: number
+    digestChars?: number
+    error?: string
+  } {
+    try {
+      const chat = this.loadChats().find((c) => c.id === chatId)
+      if (!chat) return { success: false, changed: false, reason: 'not-found', error: '会话不存在' }
+      const stored = this.loadMessages(chatId)
+      const consumer = options?.consumer || 'chat'
+      const contextWindow = this.resolveContextWindow(consumer, this.providerProfiles.getForConsumer(consumer))
+      const budget = this.compactBudgetFor(contextWindow, options?.trigger ?? COMPACT_TRIGGER_RATIO * 0.75, options?.retain ?? COMPACT_RETAIN_RATIO)
+      const { kept, digest, dropped } = this.compressOverflow(stored.messages, budget)
+      if (!digest || dropped.length === 0) {
+        return { success: true, changed: false, reason: 'below-threshold', dropped: 0, kept: stored.messages.length }
+      }
+      this.archiveMessages(chatId, dropped)
+      this.persistMessages(chatId, kept, this.mergeDigest(stored.compressed, digest))
+      return { success: true, changed: true, dropped: dropped.length, kept: kept.length, digestChars: digest.length }
+    } catch (e) {
+      return { success: false, changed: false, error: String(e) }
+    }
   }
 
   private chatArchivePath(chatId: string): string {
@@ -568,54 +725,56 @@ class WeportAiService {
   }
 
   /**
-   * 上下文压缩（Reasonix 式「cache-aware context maintenance」）：
-   * 当历史消息数量超过窗口上限、或估算体积过大时，把最旧的溢出部分压缩为摘要。
+   * 上下文压缩（DSH 式「append-only projection」；架构依据见
+   * `docs/reference/dsh-cache-architecture.md`）。
    *
-   * Compression runs only at a user-turn boundary. During an agent loop the
-   * request history must remain append-only: dropping its head changes token 0
-   * of the conversation and destroys the provider's prefix-cache match.
+   * 三条不变量：
+   *
+   * 1. **只在用户回合边界压缩**。agent loop 内部严格 append-only —— 丢掉历史
+   *    头部会改变 token 0，直接摧毁提供商的 prefix-cache 匹配。
+   * 2. **触发必须罕见且大**。按真实上下文窗口的 token 压力触发（默认 0.8），
+   *    而不是「消息条数 > 40」。后者几乎每一轮都触发，等于每一轮都把整段前缀
+   *    缓存清零 —— 这是命中率被钉在 95% 附近的主要原因。
+   * 3. **摘要只有一份，永不链式增长**。调用方必须用 {@link mergeDigest} 把它
+   *    合并进旧摘要，而不是追加。旧实现是
+   *    `compressed = compressed + '\n\n' + digest`，既让摘要无限膨胀，又让每轮
+   *    都改写前缀头部。
+   *
+   * 代价是明知的、有界的：一次压缩 = 一次完整的 prefix miss。把它做得罕见且
+   * 足够大，这一次 miss 就会被之后几十轮的高命中摊薄。
    */
   private compressOverflow(
     messages: AiMessage[],
-    limit: number,
-    maxChars = 120000
+    options: { maxChars: number; retainChars: number }
   ): { kept: AiMessage[]; digest: string; dropped: AiMessage[] } {
-    const messageChars = (m: AiMessage): number => {
-      // Tool results are represented by their own role=tool message. Counting
-      // call.result here as well would double-count the same provider payload.
-      return m.content.length + (m.reasoning?.length || 0) + 40
-    }
-    const estimateChars = (list: AiMessage[]): number => {
-      let total = 0
-      for (const m of list) total += messageChars(m)
-      return total
-    }
+    // 纯函数实现见 ai/prefixCache.ts —— 抽出去是为了能脱离 electron 直接单测，
+    // 这些不变量（边界落在 user 消息、摘要单份且有界、不压缩时原样返回）
+    // 是命中率的根因，必须有回归测试兜着。
+    return compressOverflowPure<AiMessage & CompressibleMessage>(messages, options)
+  }
 
-    let dropCount = Math.max(0, messages.length - limit)
-    let est = estimateChars(messages)
-    while (est > maxChars && messages.length - dropCount > 10) {
-      // 从最旧的消息开始丢弃（messages[0]、messages[1]…）
-      const dropped = messages[dropCount]
-      if (!dropped) break
-      est -= messageChars(dropped)
-      dropCount += 1
-    }
-    if (dropCount <= 0) return { kept: messages, digest: '', dropped: [] }
+  /**
+   * 把「上一份摘要」与「本轮新摘要」合并成**唯一一份**有界摘要。
+   * 实现见 ai/prefixCache.ts。
+   */
+  private mergeDigest(previous: string, incoming: string, maxChars?: number): string {
+    return mergeDigest(previous, incoming, maxChars)
+  }
 
-    const trimmed = messages.slice(0, dropCount)
-    const lines = trimmed.map((m) => {
-      if (m.role === 'assistant') {
-        return `[AI ${m.toolCalls?.length ? `(工具${m.toolCalls.length}个)` : '回答'}] ${String(m.content || '').slice(0, 280)}`
-      }
-      if (m.role === 'user') return `[用户] ${String(m.content || '').slice(0, 140)}`
-      return `[工具 ${m.toolName || ''}] ${String(m.content || '').slice(0, 140)}`
-    })
-    const digest = [
-      '以下是更早轮次的关键内容摘要（为节省上下文，原始消息已压缩）：',
-      ...lines,
-      '（摘要结束 —— 新对话从这里继续）',
-    ].join('\n')
-    return { kept: messages.slice(dropCount), digest, dropped: trimmed }
+  /**
+   * 当前模型真实的上下文窗口（token）。
+   *
+   * 这是压缩触发线与「上下文占用」指示器的**唯一真源**。旧实现直接在两个
+   * 调用点写死 `weportAiContextWindow`（默认 100 万），于是 128k/200k 的模型
+   * 也会显示成「用了 4%」，而且永远不会触发压缩。provider 层带回 per-model
+   * 元数据后优先使用它，config 只作为未知时的兜底。
+   */
+  private resolveContextWindow(consumer: ProviderConsumer = 'chat', resolved?: ProviderProfile | null): number {
+    const profile = resolved || this.providerProfiles.getForConsumer(consumer)
+    const perModel = Number(profile?.modelContextWindow)
+    if (Number.isFinite(perModel) && perModel > 0) return perModel
+    const configured = Number(this.configService.get('weportAiContextWindow'))
+    return Number.isFinite(configured) && configured > 0 ? configured : 1000000
   }
 
   private getWorkspaceRoot(): string {
@@ -844,6 +1003,165 @@ class WeportAiService {
     return Array.isArray(actions) ? actions : []
   }
 
+  // -------------------------------------------------------------------------
+  // 模型元数据（provider 层）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 从一次 `GET {base}/models` 的真实返回里解析出**模型记录**。
+   *
+   * 这一步是 per-model 协议的唯一真源：网关按模型挑协议，而 /models 是唯一
+   * 能告诉我们「这个模型存在」的本地证据。registry（models.dev）随后补上协议、
+   * 上下文窗口和价格。
+   */
+  private liveModelRecords(providerId: string, envelope: unknown): ModelRecord[] {
+    const registryEntry = getModelRegistry().getProviderEntry(this.registryProviderIdFor(providerId))
+    const npmDefault = registryEntry?.npmDefault
+    const objects = Array.isArray(envelope)
+      ? envelope
+      : envelope && typeof envelope === 'object'
+        ? ['data', 'models', 'result']
+            .map((key) => (envelope as Record<string, unknown>)[key])
+            .find((value) => Array.isArray(value)) || []
+        : []
+
+    // The provider id stamped onto each record is the REGISTRY id (opencode-go,
+    // not opencode-go's app alias) so provenance and lookups stay comparable.
+    const registryProviderId = registryEntry?.providerId || normalizeProviderId(providerId)
+    const records: ModelRecord[] = []
+    for (const item of objects as unknown[]) {
+      // The bare-array providers (Together AI, Mistral) return plain strings.
+      const raw = typeof item === 'string' ? { id: item } : item
+      const record = normalizeModelRecord(registryProviderId, raw, npmDefault, 'live')
+      if (record) records.push(record)
+    }
+
+    // Some gateways answer `{data:{...}}` instead of `{data:[...]}`: fall back to
+    // the tolerant id extraction so those still reach the picker.
+    if (records.length === 0) {
+      for (const id of extractModelIds(envelope)) {
+        const record = normalizeModelRecord(registryProviderId, { id }, npmDefault, 'live')
+        if (record) records.push(record)
+      }
+    }
+    return records
+  }
+
+  /** 解析 profile 的 provider 在 models.dev 里的键；catalog 没声明就按同 id 尝试。 */
+  private registryProviderIdFor(providerId: string): string {
+    const entry = getProviderCatalogEntry(providerId)
+    return entry?.registryProviderId || normalizeProviderId(providerId)
+  }
+
+  /**
+   * 把「本地已知的元数据」合并成这条 profile 的解析结果（纯本地，不发请求）。
+   *
+   * 参数只取解析真正需要的四个字段，这样 `getSetup()` 能直接用
+   * `ProviderProfileSummary` 调它，不必为了拿完整 profile 再读一次配置。
+   */
+  private resolveProfileModel(
+    profile: { id: string; providerId: string; protocol: ProviderProfile['protocol']; model: string },
+    live?: ModelRecord
+  ): ResolvedModel {
+    return resolveModelMetadata({
+      registry: getModelRegistry(),
+      registryProviderId: this.registryProviderIdFor(profile.providerId),
+      defaultProtocol: getProviderCatalogEntry(profile.providerId)?.protocol,
+      profile,
+      modelId: profile.model,
+      live,
+    })
+  }
+
+  /**
+   * 把解析出的元数据写回 profile。
+   *
+   * 只在**真的变了**时写：这个方法会在主调用路径上被调用，而每次调用都写一遍
+   * 配置（disk + safeStorage）是不必要的写放大。
+   */
+  private persistResolvedModelMetadata(profile: ProviderProfile, resolved: ResolvedModel): void {
+    const next = resolvedProfileCache(resolved)
+    const changed =
+      profile.modelContextWindow !== next.modelContextWindow ||
+      profile.modelMaxOutputTokens !== next.modelMaxOutputTokens ||
+      profile.modelProtocol !== next.modelProtocol ||
+      JSON.stringify(profile.modelCost ?? null) !== JSON.stringify(next.modelCost ?? null) ||
+      profile.modelMetadataSource !== next.modelMetadataSource
+    if (!changed) return
+    this.providerProfiles.setModelMetadata(profile.id, {
+      contextWindow: next.modelContextWindow,
+      maxOutputTokens: next.modelMaxOutputTokens,
+      protocol: next.modelProtocol,
+      cost: next.modelCost,
+      capabilities: next.modelCapabilities,
+      reasoningOptions: next.modelReasoningOptions,
+      source: next.modelMetadataSource,
+    })
+    profile.modelContextWindow = next.modelContextWindow
+    profile.modelMaxOutputTokens = next.modelMaxOutputTokens
+    profile.modelProtocol = next.modelProtocol
+    profile.modelCost = next.modelCost
+    profile.modelCapabilities = next.modelCapabilities
+    profile.modelReasoningOptions = next.modelReasoningOptions
+    profile.modelMetadataSource = next.modelMetadataSource
+    profile.modelMetadataUpdatedAt = next.modelMetadataUpdatedAt
+  }
+
+  /** 把 registry 的解析结果刷新到 profile 上（纯本地）。返回解析结果，供调用链复用。 */
+  private refreshModelMetadata(profileId: string, live?: ModelRecord): ResolvedModel | null {
+    const profile = this.providerProfiles.getById(profileId)
+    if (!profile || !profile.model) return null
+    const resolved = this.resolveProfileModel(profile, live)
+    this.persistResolvedModelMetadata(profile, resolved)
+    return resolved
+  }
+
+  /**
+   * OpenCode 网关要求的标识头。
+   *
+   * 只在这两个网关上加，别家不给陌生 header 面子；用户自定义的同名 header 优先
+   * （合并顺序在 `authHeaders` 里保证）。
+   */
+  private withGatewayHeaders(profile: ProviderProfile): ProviderProfile {
+    if (!OPENCODE_GATEWAYS.has(profile.providerId)) return profile
+    return { ...profile, headers: { 'x-opencode-session': profile.id, ...(profile.headers || {}) } }
+  }
+
+  /**
+   * 模型发现：30s 超时 + 1 次重试。
+   *
+   * opencode.ai 的 `/models` 间歇性变慢（实测两次分别在 20s 与 60s 超时，随后
+   * 0.8s 成功），固定 15s 无重试会把一次可用请求报成失败，并让 UI 反过来指责
+   * 用户「服务商、地址或权限」有问题。
+   *
+   * 只有这两个网关在**空列表**时也重试：别家返回空列表通常是真的没有模型
+   * （或没权限），重试只是让失败慢 30 秒。
+   */
+  private async listModelsWithRetry(profile: ProviderProfile): Promise<string[]> {
+    const effective = this.withGatewayHeaders(profile)
+    const retryOnEmpty = OPENCODE_GATEWAYS.has(profile.providerId)
+    const attempts = retryOnEmpty ? MODEL_DISCOVERY_ATTEMPTS : 1
+    let lastError: unknown
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const envelope = await getProviderAdapter(effective).listModelsWithEnvelope(effective, AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS))
+        const live = this.liveModelRecords(profile.providerId, envelope)
+        const ids = live.filter(isChatCapable).map((record) => record.id)
+        if (ids.length > 0) {
+          // 合并进 catalog override（不是整体替换）：一次会话里可能有多条 profile
+          // 各自发现过模型，覆盖整张表会把别人的列表抹掉。
+          invalidateCatalogOverride(profile.providerId, ids)
+          return ids
+        }
+        lastError = new Error('EMPTY_MODEL_LIST')
+      } catch (error) {
+        lastError = error
+      }
+    }
+    if (String((lastError as Error)?.message || lastError) === 'EMPTY_MODEL_LIST') return []
+    throw lastError
+  }
+
   saveActions(actions: Array<{ id: string; name: string; prompt: string }>): boolean {
     if (!Array.isArray(actions)) return false
     const cleaned = actions
@@ -860,7 +1178,37 @@ class WeportAiService {
 
   getSetup(): AiSetupInfo {
     const active = this.providerProfiles.getActive()
-    const profiles = this.providerProfiles.list()
+    // 本地（无网络）解析一次元数据，让「上下文窗口 / 能力 / 价格」面板在首屏就
+    // 有真值：registry 磁盘缓存 + bundled snapshot 已经足够，不必等一次发现请求。
+    // 这里刻意不再每条 getById()——那是 N 次「读配置 + 解析 JSON」。
+    const profiles = this.providerProfiles.list().map((item) =>
+      item.model
+        ? { ...item, ...resolvedProfileCache(this.resolveProfileModel({ id: item.id, providerId: item.providerId, protocol: item.protocol, model: item.model })) }
+        : item
+    )
+
+    // 定价表：每个已配置过的模型都查一遍，渲染侧据此在模型下拉里标价。
+    // 用当前 active profile 的 provider 做解析上下文，让网关类服务的模型也能
+    // 命中 registry（它们大多用上游模型 id）。
+    const modelCosts: NonNullable<AiSetupInfo['modelCosts']> = {}
+    const pricingContext = {
+      id: active?.id || 'pricing',
+      providerId: active?.providerId || 'custom',
+      protocol: active?.protocol || 'openai-compatible',
+    }
+    for (const profile of profiles) {
+      const modelId = String(profile.model || '').trim()
+      if (!modelId || modelCosts[modelId]) continue
+      try {
+        const resolved = this.resolveProfileModel({ ...pricingContext, model: modelId })
+        const cost = resolved.record?.cost
+        if (!cost) continue
+        modelCosts[modelId] = { ...cost, source: resolved.record?.provenance }
+      } catch {
+        /* 缺一个模型的定价不影响设置页 */
+      }
+    }
+
     return {
       hasApiKey: Boolean(active?.apiKey) || Boolean(active && getProviderCatalogEntry(active.providerId)?.apiKeyOptional),
       baseUrl: String(active?.baseUrl || this.configService.get('weportAiBaseUrl') || 'https://api.deepseek.com').trim(),
@@ -877,6 +1225,7 @@ class WeportAiService {
       activeProfileId: active?.id || '',
       profiles,
       catalog: getProviderCatalog(),
+      modelCosts,
     }
   }
 
@@ -899,9 +1248,21 @@ class WeportAiService {
     })
     if (!profile.baseUrl) return { success: false, error: '请先填写接口地址' }
     if (!profile.apiKey && !catalog?.apiKeyOptional) return { success: false, error: '请先填写 API key' }
+    // 模型列表与 registry 元数据一起刷新：协议是按模型决定的，缺了 registry 就
+    // 只能猜；这里顺手把刷新挂上，失败也只是降级到缓存。
+    void getModelRegistry().refresh().catch(() => undefined)
     try {
-      const models = await getProviderAdapter(profile).listModels(profile, AbortSignal.timeout(15000))
-      if (models.length === 0) return { success: false, models: [], error: '接口未返回可用模型，请检查服务商、地址或权限' }
+      const models = await this.listModelsWithRetry(profile)
+      if (models.length === 0) {
+        // 不再把「空列表」一律算成用户的配置错误：Together/Mistral 这类裸数组
+        // 服务商以前会被解析成空列表并收到同一句指责；现在解析已修好，剩下来的
+        // 空列表就如实说明，并指出手填模型 id 这条永久可用的退路。
+        return {
+          success: false,
+          models: [],
+          error: '接口未返回可用对话模型。若该服务商的模型列表接口不可用，请直接在 Model 输入框手动填写模型 id',
+        }
+      }
       return { success: true, models }
     } catch (error) {
       const status = Number((error as { status?: number })?.status) || undefined
@@ -921,7 +1282,12 @@ class WeportAiService {
 
   saveProviderProfile(input: ProviderProfileInput): { success: boolean; profile?: ProviderProfileSummary; error?: string } {
     try {
-      return { success: true, profile: this.providerProfiles.save(input) }
+      const saved = this.providerProfiles.save(input)
+      // 保存后立刻用本地 registry 解析一次协议 / 窗口 / 价格，这样新 profile 从
+      // 第一次调用起就带正确的 maxOutputTokens 和上下文窗口。
+      this.refreshModelMetadata(saved.id)
+      const enriched = this.providerProfiles.list().find((item) => item.id === saved.id) || saved
+      return { success: true, profile: enriched }
     } catch (error) {
       return { success: false, error: String((error as Error)?.message || error) }
     }
@@ -931,6 +1297,50 @@ class WeportAiService {
     return this.providerProfiles.activate(String(id || '').trim())
       ? { success: true }
       : { success: false, error: '找不到要启用的 AI 配置' }
+  }
+
+  /** 「设置 → AI 服务」用：三个功能面各自指向哪个服务。 */
+  getConsumerAssignments() {
+    return this.providerProfiles.consumerAssignments()
+  }
+
+  /**
+   * 拉一次某个服务的 `/models` 清单（探针/诊断用）。
+   *
+   * 这里是**只读**的包装：`discoverProfileModels` 会把结果写回 profile 的
+   * discovery 字段（设置页要显示），诊断场景不应该产生这种副作用。
+   */
+  async discoverModelsForProfile(profileId: string): Promise<{ models: string[]; error: string }> {
+    const profile = this.providerProfiles.getById(String(profileId || '').trim()) || this.providerProfiles.getActive()
+    if (!profile) return { models: [], error: '找不到 AI 服务配置' }
+    try {
+      const models = await this.listModelsWithRetry(profile)
+      return { models, error: '' }
+    } catch (error) {
+      const status = Number((error as { status?: number })?.status)
+      const detail = String((error as Error)?.message || error).trim()
+      return { models: [], error: `${status ? `HTTP ${status}：` : ''}${detail || '模型发现失败'}` }
+    }
+  }
+
+  /** 已配置的服务清单（带已解析的模型元数据），设置页直接渲染它。 */
+  listProviderProfiles() {
+    return this.providerProfiles.list().map((item) =>
+      item.model
+        ? { ...item, ...resolvedProfileCache(this.resolveProfileModel({ id: item.id, providerId: item.providerId, protocol: item.protocol, model: item.model })) }
+        : item
+    )
+  }
+
+  getActiveProfileId(): string {
+    return this.providerProfiles.getActive()?.id || ''
+  }
+
+  assignConsumerProfile(consumer: string, profileId: string): { success: boolean; error?: string } {
+    const allowed: ProviderConsumer[] = ['chat', 'weclone', 'webot']
+    if (!allowed.includes(consumer as ProviderConsumer)) return { success: false, error: `未知的功能面: ${consumer}` }
+    const ok = this.providerProfiles.assign(consumer as ProviderConsumer, profileId)
+    return ok ? { success: true } : { success: false, error: '指定的服务不存在' }
   }
 
   deleteProviderProfile(id: string): { success: boolean; error?: string } {
@@ -980,13 +1390,16 @@ class WeportAiService {
     const profile = this.providerProfiles.getById(profileId)
     if (!profile) return
     try {
-      const models = await getProviderAdapter(profile).listModels(profile, AbortSignal.timeout(15000))
+      const models = await this.listModelsWithRetry(profile)
       this.providerProfiles.recordDiscovery(profileId, models)
     } catch (error) {
       const status = Number((error as { status?: number })?.status)
       const detail = String((error as Error)?.message || error).trim()
       this.providerProfiles.recordDiscovery(profileId, [], `${status ? `HTTP ${status}：` : ''}${detail || '模型发现失败'}`)
     }
+    // 发现完之后无论成败都刷新一次本地元数据：即使 /models 失败，registry 里
+    // 往往也已经知道这个模型的协议和上下文窗口。
+    this.refreshModelMetadata(profileId)
   }
 
   // -------------------------------------------------------------------------
@@ -1835,7 +2248,82 @@ class WeportAiService {
           }
         },
       },
+      ...this.connectorTools(),
     ]
+  }
+
+  /**
+   * 连接器工具（Todoist 等）。
+   *
+   * 只在「确实连上了」的时候才挂进工具表：没连上的账号里出现一个 todoist_add_task
+   * 只会浪费一轮上下文，还会让模型去猜一个不存在的连接。工具清单在 run 开始时
+   * 冻结，所以在设置页连接/断开连接器只影响下一轮，不会中途改写前缀缓存。
+   *
+   * 写入默认开启（`connectorsAllowAgent`），关掉之后只保留只读的目标列表工具。
+   */
+  private connectorTools(): ToolDefinition[] {
+    const connected = connectorsService.listConnectedIds()
+    if (connected.length === 0) return []
+    const allowWrite = connectorsService.agentWriteAllowed()
+    const tools: ToolDefinition[] = [
+      {
+        name: 'list_connector_targets',
+        description:
+          'List the places a task can be filed in a connected third-party service (Todoist projects, labels, inbox). Call this before creating a task when you need a project or label id; omit the target to file into the Inbox.',
+        parameters: {
+          type: 'object',
+          properties: {
+            connector: { type: 'string', enum: connected, description: 'Connected service id (default the first connected one)' },
+          },
+        },
+        friendly: (args) => `查看了 ${String(args.connector || 'todoist')} 的目标列表`,
+        handler: async (args) => {
+          const id = String(args.connector || connected[0])
+          const result = await connectorsService.listTargets(id)
+          if (!result.success) return `获取失败：${result.error}`
+          const targets = result.data || []
+          if (targets.length === 0) return '没有可用的目标（该项目/标签列表为空）。'
+          return targets.map((target) => `${target.kind === 'inbox' ? '（默认收件箱）' : `${target.id}`}\t${target.kind}\t${target.name}`).join('\n')
+        },
+      },
+    ]
+    if (!allowWrite) return tools
+    tools.push({
+      name: 'create_connector_task',
+      description:
+        'Create a task in a connected third-party service (Todoist). Use it when the user asks you to record a follow-up, reminder, or to-do outside Weport. Write the task content in the same language the user speaks, keep it one actionable line, and put supporting detail in `description`. The due date accepts natural language ("tomorrow at 5pm", "next Monday", "每周一") — pass it through as `due_text` instead of computing a date yourself.',
+      parameters: {
+        type: 'object',
+        properties: {
+          connector: { type: 'string', enum: connected, description: 'Connected service id (default the first connected one)' },
+          content: { type: 'string', description: 'One-line task title, imperative and specific' },
+          description: { type: 'string', description: 'Optional Markdown notes, evidence, or context' },
+          due_text: { type: 'string', description: 'Natural-language due date, e.g. "tomorrow at 17:00", "in 3 days", "每周一"' },
+          due_date: { type: 'string', description: 'Exact due date YYYY-MM-DD (prefer due_text when the user was vague)' },
+          priority: { type: 'string', enum: ['none', 'low', 'medium', 'high', 'urgent'], description: 'Task priority (default none)' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Label names to attach' },
+          target_id: { type: 'string', description: 'Project/label id from list_connector_targets; omit for the Inbox' },
+        },
+        required: ['content'],
+      },
+      friendly: (args) => `新建待办「${String(args.content || '').slice(0, 24)}」`,
+      handler: async (args) => {
+        const id = String(args.connector || connected[0])
+        const result = await connectorsService.createTask(id, {
+          content: String(args.content || ''),
+          description: args.description ? String(args.description) : undefined,
+          dueText: args.due_text ? String(args.due_text) : undefined,
+          dueDate: args.due_date ? String(args.due_date) : undefined,
+          priority: String(args.priority || 'none') as never,
+          labels: Array.isArray(args.labels) ? (args.labels as string[]).map(String) : undefined,
+          targetId: args.target_id ? String(args.target_id) : undefined,
+        })
+        if (!result.success) return `创建失败：${result.error}`
+        const task = result.data
+        return `已创建待办：${task?.content || String(args.content)}${task?.dueText ? `（${task.dueText}）` : ''}${task?.url ? `\n${task.url}` : ''}`
+      },
+    })
+    return tools
   }
 
   private toOpenAiTools(definitions = this.buildTools()): OpenAiToolDef[] {
@@ -1955,15 +2443,16 @@ class WeportAiService {
   }
 
   /** 触发一次完整的 agent run（异步，事件流经 emitter 派发） */
-  async runChat(chatId: string, text: string): Promise<{ success: boolean; error?: string }> {
+  async runChat(chatId: string, text: string, options?: { consumer?: ProviderConsumer }): Promise<{ success: boolean; error?: string }> {
     if (this.running.has(chatId)) return { success: false, error: '该对话正在执行中' }
     const chat = this.loadChats().find((c) => c.id === chatId)
     if (!chat) return { success: false, error: '对话不存在' }
     const userText = String(text || '').trim()
     if (!userText) return { success: false, error: '消息为空' }
 
-    const activeProfile = this.providerProfiles.getActive()
-    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
+    const consumer = options?.consumer || 'chat'
+    const activeProfile = this.providerProfiles.getForConsumer(consumer)
+    if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在「设置 → AI 服务」中添加服务配置' }
 
     const ctrl = new AbortController()
     this.running.set(chatId, ctrl)
@@ -2002,13 +2491,22 @@ class WeportAiService {
       })
     }
 
-    // 上下文压缩：历史超出窗口时把最旧部分压缩为摘要（对话要点不丢失）
-    const convoLimit = Number(this.configService.get('weportAiConversationLimit')) || 60
-    const { kept, digest, dropped } = this.compressOverflow(messages, convoLimit)
+    // 上下文压缩：只在用户回合边界，且只在真正接近窗口上限时触发。
+    //
+    // 触发条件由「条数 > weportAiConversationLimit」改为「体积 > 0.8 × 模型
+    // 窗口」。条数触发几乎每轮都会命中，等于每轮都把整段前缀缓存清零 —— 这是
+    // 命中率被钉在 95% 的直接原因。压缩做得罕见且足够大，这一次 prefix miss
+    // 才能被之后几十轮的高命中摊薄。
+    const contextWindow = this.resolveContextWindow(consumer, activeProfile)
+    const compactBudget = this.compactBudgetFor(contextWindow)
+    const { kept, digest, dropped } = this.compressOverflow(messages, compactBudget)
     if (digest) {
       this.archiveMessages(chatId, dropped)
       messages = kept
-      compressed = compressed ? `${compressed}\n\n${digest}` : digest
+      // 唯一一份摘要：合并而不是追加。旧实现是
+      // `compressed = compressed + '\n\n' + digest`，既让摘要无界增长，
+      // 又让每一轮都改写前缀头部。
+      compressed = this.mergeDigest(compressed, digest)
       this.persistMessages(chatId, messages, compressed)
     }
 
@@ -2048,11 +2546,15 @@ class WeportAiService {
         }
         loopCount += 1
 
-        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape)
+        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape, consumer, activeProfile)
         if (!stepResult.ok) {
           error = stepResult.error || '模型调用失败'
+          // 保留网关的原文：映射后的中文只是提示，真正定位问题的是 provider 的
+          // 那一句话（例如 OpenCode Go 的「This model is not available in your
+          // country.」在旧代码里会被 401 掩盖成「密钥无效」，误导排查方向）。
+          const upstream = String(stepResult.error || '').trim().slice(0, 300)
           if (stepResult.httpStatus === 401) {
-            error = 'API 密钥无效或已过期（401），请在 WeportAI 设置中更新'
+            error = `API 密钥无效或已过期（401），请在 WeportAI 设置中更新${upstream ? `：${upstream}` : ''}`
           } else if (stepResult.httpStatus === 402) {
             error = 'API 余额不足（402），请充值后重试'
           } else if (stepResult.httpStatus === 429) {
@@ -2089,7 +2591,7 @@ class WeportAiService {
             cacheHitTokens: usage.promptCacheHitTokens,
             lastRequestTokens,
             recentRate: Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10,
-            contextWindow: Number(this.configService.get('weportAiContextWindow')) || 1000000,
+            contextWindow: this.resolveContextWindow(consumer, activeProfile),
           })
         }
 
@@ -2100,6 +2602,7 @@ class WeportAiService {
           reasoning: stepResult.reasoning || '',
           toolCalls: stepResult.toolCalls || [],
           createdAt: Date.now(),
+          timing: stepResult.timing,
         }
         finalAssistant = assistant
         messages.push(assistant)
@@ -2112,24 +2615,21 @@ class WeportAiService {
         if (toolCalls.length === 0) {
           // 最终回答
           this.persistMessages(chatId, messages, compressed)
-          this.emit({ type: 'assistant_message', chatId, message: assistant })
+          this.emit({ type: 'assistant_message', chatId, message: assistant, timing: stepResult.timing })
           break
         }
 
         // 执行工具调用
         const configuredToolBudget = Number(this.configService.get('weportAiMaxToolChars')) || 12000
-        // A stable prefix alone is insufficient: the next request misses on the
-        // assistant reasoning plus every newly appended tool result. Keep that
-        // fresh suffix near <= 1/21 of the reusable conversation (~95.5% target),
-        // while retaining a small evidence floor for early investigation steps.
-        const reusableChars = this.previousApiInput.get(chatId)?.length || 0
-        const assistantTailChars =
-          assistant.content.length +
-          (assistant.reasoning?.length || 0) +
-          toolCalls.reduce((sum, call) => sum + call.name.length + JSON.stringify(call.args || {}).length + 80, 0) +
-          240
-        const cacheAwareAllowance = Math.max(3200, Math.floor(reusableChars / 21) - assistantTailChars)
-        const stepToolBudget = Math.max(1000, Math.min(configuredToolBudget, 6000, cacheAwareAllowance))
+        // 旧实现在这里把工具预算压到「新鲜后缀 ≤ 会话的 1/21」，注释里写明目标
+        // 就是 ~95.5% —— 这正是 UI 上显示 95% 的原因。
+        //
+        // 命中率 = Σ 新增 token / Σ 请求 token。压制后缀只是把分子变小，代价却是
+        // 强迫 agent 用更多步数拿到同样的证据，而**每一步都要重发整段前缀**；
+        // 工具被饿到拿不到东西时，agent 还会反复检索同一批证据。真正让命中率上升
+        // 的是「步数变多、每一步新增变少」，也就是 DSH 的形态（443 步 → 99%）。
+        // 因此这里直接用配置预算，不再做 1/21 截断。
+        const stepToolBudget = Math.max(1000, configuredToolBudget)
         let remainingToolBudget = stepToolBudget
         let stepToolChars = 0
         for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
@@ -2197,9 +2697,6 @@ class WeportAiService {
           calls: toolCalls.length,
           configuredBudgetChars: configuredToolBudget,
           budgetChars: stepToolBudget,
-          reusableChars,
-          assistantTailChars,
-          cacheAwareAllowance,
           actualChars: stepToolChars,
           remainingChars: remainingToolBudget,
           tools: toolCalls.map((call) => call.name),
@@ -2237,7 +2734,7 @@ class WeportAiService {
         recentRate: recentRates.length
           ? Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10
           : 0,
-        contextWindow: Number(this.configService.get('weportAiContextWindow')) || 1000000,
+        contextWindow: this.resolveContextWindow(consumer, activeProfile),
       }
       // 每次运行结束都记录本会话的用量/命中统计（切换会话后仍显示各自的数据）
       this.persistMessages(chatId, messages, compressed, {
@@ -2349,53 +2846,100 @@ class WeportAiService {
    * v2：标题必须 ≤8 个汉字，概括「用户意图」（用户想做什么），而非复述问题原文。
    * 失败时返回 null，调用方回退到文本截断标题。
    */
+  /**
+   * 生成 AI 标题。纯逻辑（规整 / 判重 / 兜底）在 `ai/chatTitle.ts`，那里可单测。
+   *
+   * 返回 `null` 覆盖三种情况：模型不可用、输出是噪声、输出只是原话的截断。
+   * 第三种是关键 —— 抄回原话的"标题"必须当作失败，否则列表里显示的就是
+   * 用户消息的前几个字，也就是用户报的那个 bug。
+   *
+   * 重要：`reasoning_effort: 'low'` 并不代表快。实测 `deepseek-v4.1-flash` 为
+   * 一句「用一句话说明你能做什么」生成标题时，completion 用了 399 个 token，
+   * 其中 **395 个是 reasoning**，可正文只有 4 个字。也就是说延迟几乎全在思考上，
+   * 而思考时间跟输入长度基本无关。原先 15s 的超时经常在正文回来之前就中止，
+   * 于是标题静默停在兜底值上 —— 界面看起来就是"标题功能没生效"。
+   */
   private async generateAITitle(userText: string): Promise<string | null> {
+    if (this.titleProbe === undefined) this.titleProbe = process.env.WEPORT_TITLE_PROBE === '1'
+    const trace = (detail: Record<string, unknown>) => {
+      if (!this.titleProbe) return
+      this.appendDebugLog({ kind: 'title', ...detail })
+    }
     try {
-      const profile = this.providerProfiles.getActive()
-      if (!profile || (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional)) return null
-      const result = await getProviderAdapter(profile).stream({
-        profile,
+      const profile = this.applyProbeOverride(this.providerProfiles.getActive() || ({} as ProviderProfile))
+      if (!profile || (!profile.apiKey && !getProviderCatalogEntry(profile.providerId)?.apiKeyOptional)) {
+        trace({ outcome: 'no-profile', providerId: profile?.providerId, hasKey: Boolean(profile?.apiKey) })
+        return null
+      }
+      // 标题请求也必须按**模型**挑协议：网关按模型路由（`gpt-5.6-luna` 走
+      // `/responses`，`deepseek-v4.1-flash` 走 `/chat/completions`），用
+      // profile 级别的 protocol 会把模型发到错的端点，标题就悄悄失败。
+      const resolved = this.resolveProfileModel(profile)
+      // **必须**过 `withGatewayHeaders`：OpenCode 系网关要求 `x-opencode-session`，
+      // 缺了会直接 400（"Request is missing x-opencode-session"）。主调用路径一直
+      // 带这个头，标题请求却漏了 —— 于是标题静默失败、永远停在兜底截断上，而
+      // 界面上完全看不出发生过什么（就是用户报的「标题是前几个字」）。
+      const adaptive = getProviderAdapter({ ...this.withGatewayHeaders(profile), modelProtocol: resolved.protocol })
+      const startedAt = Date.now()
+      const result = await adaptive.stream({
+        profile: this.withGatewayHeaders(profile),
         messages: [
-          { role: 'system', content: '为对话生成简短标题。只输出标题本身，不要引号、标点或解释；中文不超过 8 个汉字，英文不超过 16 个字符。' },
+          {
+            role: 'system',
+            content:
+              '你是对话标题生成器。用 2-4 个词概括用户这条消息的**主题**（做了什么 / 关于什么），' +
+              '不要复述原话，也不要把原话的前半句当标题。只输出标题本身：不要引号、不要标点、' +
+              '不要「标题：」前缀、不要解释。中文不超过 12 个字，英文不超过 4 个词。',
+          },
           { role: 'user', content: sanitizeForApi(String(userText || '').slice(0, 2000)) },
         ],
         tools: [],
         reasoningEffort: 'low',
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(45000),
         onReasoning: () => undefined,
         onText: () => undefined,
       })
-      const title = String(result.content || '')
-        .trim()
-        .replace(/["'“”「」]/g, '')
-        .replace(/\s+/g, ' ')
-      if (!title || title.length > 16) return null
-      return title.slice(0, 12)
-    } catch {
+      const raw = String(result.content || '')
+      const title = normaliseTitle(raw)
+      if (!title) {
+        trace({ outcome: 'empty-or-noise', raw: raw.slice(0, 120), durationMs: Date.now() - startedAt, completionTokens: result.usage?.completionTokens })
+        return null
+      }
+      // 抄回原话的标题虽然不理想（那正是用户报的「标题就是前几个字」），但它
+      // 至少是一句完整的话，比兜底截断更像标题。所以**接受**它并标注出来，
+      // 不要静默丢弃 —— 丢弃会让标题永远停在兜底值，而调用方看不出发生过什么。
+      // 从 `upgradeStaleTitle` 的角度看，这条标题也不该被当成"已经升级过"。
+      const echoes = titleEchoesSource(title, userText)
+      trace({ outcome: echoes ? 'accepted-echo' : 'ok', title, durationMs: Date.now() - startedAt, completionTokens: result.usage?.completionTokens })
+      return title
+    } catch (e) {
+      trace({ outcome: 'threw', error: String((e as Error)?.message || e).slice(0, 200) })
       return null
     }
   }
+
   private fallbackTitleFromText(text: string): string {
-    const stripped = String(text || '')
-      .trim()
-      .replace(
-        /^(请(你|帮我)?|帮我|我想|我想要|请你|麻烦你|可以|能不能|帮我分析|帮我看看|分析一下|总结一下|梳理一下|看看|查一下|找找|找出|整理一下|给我)\s*/,
-        ''
-      )
-    const cleaned = stripped.replace(/\s+/g, ' ')
-    return cleaned.slice(0, 8) || '新对话'
+    return buildFallbackTitle(text)
   }
 
-  /** 打开会话时，把旧版（过长/复述原文）标题静默升级为 v2 意图标题 */
+  /**
+   * 打开会话时，把旧版「原话截断」标题静默升级为真正的 AI 标题。
+   *
+   * 判定条件是**这条标题是否只是用户原话的截断**，而不是它的长度。旧实现用
+   * `title.length > 8` 当门槛，恰好放过了最难看的那些：8 个字以内的原话截断
+   * （「帮我分析一下我和」「8月8日发生了」）永远不会被升级，用户看到的就一直是
+   * 半句话。反过来，长度超过 8 的**真正标题**又会白白重写一次。
+   */
   private upgradeStaleTitle(chatId: string): void {
     if (this.titleUpgrading.has(chatId)) return
     const chat = this.loadChats().find((c) => c.id === chatId)
     if (!chat) return
     if (chat.titleVersion === 2) return
-    if ((chat.title?.length || 0) <= 8) return
     const stored = this.loadMessages(chatId)
     const firstUser = stored.messages.find((m) => m.role === 'user')
     if (!firstUser?.content) return
+    const looksTruncated = titleEchoesSource(chat.title || '', firstUser.content)
+    if (!looksTruncated && (chat.title?.length || 0) <= 8) return
     this.titleUpgrading.add(chatId)
     void this.generateAITitle(firstUser.content).then((t) => {
       this.titleUpgrading.delete(chatId)
@@ -2438,52 +2982,136 @@ class WeportAiService {
     }
   }
 
+  /**
+   * 前缀稳定性探针（逐字节）。
+   *
+   * 每次请求都把「系统提示 + 工具定义 + 完整请求数组」与前一次请求逐条对比，
+   * 并给出**为什么**前缀变了：
+   *
+   * - `first`        本会话的第一条请求；
+   * - `append`       上一次请求是本次请求的逐字节前缀 —— 唯一健康的形态；
+   * - `system`       系统提示变了 —— 整段前缀失效；
+   * - `tools`        工具定义变了 —— 整段前缀失效；
+   * - `head-rewrite` 历史中段被改写（压缩，或丢弃了历史头部）—— 从分歧点起失效。
+   *
+   * 这是把「命中率莫名掉到 95%」变成可定位问题的关键工具。DSH 正是靠
+   * 442/442 全为 `append` 来证明其设计成立
+   * （见 docs/reference/dsh-cache-architecture.md §D.3）。
+   *
+   * 期望的健康形态：一整轮里全是 `append`；一次压缩对应**恰好一次**
+   * `head-rewrite`，位置就等于保留窗口的起点。
+   */
+  private probePrefixChange(
+    chatId: string,
+    systemContent: string,
+    tools: unknown,
+    apiMessages: Array<Record<string, unknown>>
+  ): PrefixChange {
+    const frame = buildPrefixFrame(systemContent, tools, apiMessages)
+    const change = comparePrefixFrames(this.prefixProbe.get(chatId), frame)
+    this.prefixProbe.set(chatId, frame)
+    return change
+  }
+
   private async callModel(
     chatId: string,
     history: AiMessage[],
     signal: AbortSignal,
     compressed: string | undefined,
-    requestShape: ModelRequestShape
+    requestShape: ModelRequestShape,
+    consumer: ProviderConsumer = 'chat',
+    resolvedProfile?: ProviderProfile | null
   ): Promise<{
     ok: boolean
     content?: string
     reasoning?: string
     toolCalls?: AiToolCall[]
     usage?: AiRunUsage
+    timing?: AiStepTiming
     error?: string
     httpStatus?: number
   }> {
-    const profile = this.providerProfiles.getActive()
+    // 功能面指定的服务优先于「默认服务」：WeClone / WeBot 可以在设置里各自指向
+    // 另一个 profile，而这里以前读的是 getActive()，于是三处配置里有两处是
+    // 摆设（选了也不生效），请求实际打到默认服务上。
+    const base = resolvedProfile || this.providerProfiles.getForConsumer(consumer)
+    const profile = base ? this.applyProbeOverride(base) : null
     if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
     if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在 WeportAI 设置中完善服务配置' }
     const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: profile.providerId === 'deepseek' })
+    // 逐字节前缀稳定性探针：把「为什么这次请求没命中缓存」变成可查的日志事实，
+    // 而不是靠猜。健康状态是一整轮全为 append，一次压缩只有一次 head-rewrite。
+    const prefixChange = this.probePrefixChange(chatId, requestShape.systemContent, requestShape.tools, apiMessages)
+    this.appendDebugLog({
+      kind: 'prefix',
+      chatId,
+      change: prefixChange.change,
+      divergedAt: prefixChange.divergedAt,
+      previousLength: prefixChange.previousLength,
+      messages: apiMessages.length,
+      prefixHash: requestShape.hash,
+    })
     const startedAt = Date.now()
+    // 按模型解析协议 / 输出上限（纯本地：registry 缓存 + bundled snapshot）。
+    // 网关是按模型挑协议的，用 profile.protocol 一个值兜所有模型会把
+    // `grok-4.6` 这类模型发到错误的端点。
+    const resolved = this.resolveProfileModel(profile)
+    this.persistResolvedModelMetadata(profile, resolved)
+    const callProfile: ProviderProfile = { ...this.withGatewayHeaders(profile), modelProtocol: resolved.protocol }
     try {
-      const result: ProviderStreamResult = await getProviderAdapter(profile).stream({
-        profile,
+      // 解码计时：首个 delta（思考或正文）到达即认为开始解码，和 DSH 的
+      // `firstTokenTime` 一致。之前这里只记 startedAt 与结束时间，算出来的
+      // 「速度」把首 token 等待也摊进去了。
+      let firstTokenAt: number | null = null
+      const markFirstToken = () => {
+        if (firstTokenAt === null) firstTokenAt = Date.now()
+      }
+      const result: ProviderStreamResult = await getProviderAdapter(callProfile).stream({
+        profile: callProfile,
         messages: apiMessages,
         tools: requestShape.tools,
+        // Main path: send the model's own output limit. Before this it was
+        // declared on `ProviderStreamInput` but never set here, so the Anthropic
+        // adapter fell back to its hard-coded 32768 regardless of the model.
+        maxOutputTokens: profile.modelMaxOutputTokens,
         reasoningEffort: String(this.configService.get('weportAiReasoningEffort') || 'high'),
         signal,
-        onReasoning: (delta) => this.emit({ type: 'reasoning_delta', chatId, delta }),
-        onText: (delta) => this.emit({ type: 'text_delta', chatId, delta }),
+        onReasoning: (delta) => {
+          markFirstToken()
+          this.emit({ type: 'reasoning_delta', chatId, delta })
+        },
+        onText: (delta) => {
+          markFirstToken()
+          this.emit({ type: 'text_delta', chatId, delta })
+        },
       })
-      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: profile.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt })
+      const finishedAt = Date.now()
+      const decodeStartedAt = firstTokenAt ?? finishedAt
+      const timing: AiStepTiming = {
+        ttftMs: Math.max(0, decodeStartedAt - startedAt),
+        decodeMs: Math.max(0, finishedAt - decodeStartedAt),
+        outputTokens: Math.max(0, result.usage?.completionTokens || 0),
+      }
+      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: resolved.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt, ttftMs: timing.ttftMs, decodeMs: timing.decodeMs })
       return {
         ok: true,
         content: result.content,
         reasoning: result.reasoning,
         toolCalls: result.toolCalls.map((call) => ({ id: call.id, name: call.name, args: call.args, friendly: '' })),
         usage: result.usage,
+        timing,
       }
     } catch (error) {
       if (signal.aborted) return { ok: false, error: '已中止' }
       const status = Number((error as { status?: number })?.status)
       const detail = String((error as Error)?.message || error).trim()
-      this.appendDebugLog({ kind: 'error', chatId, provider: profile.providerId, protocol: profile.protocol, httpStatus: status || undefined, error: detail, durationMs: Date.now() - startedAt })
+      this.appendDebugLog({ kind: 'error', chatId, provider: profile.providerId, protocol: resolved.protocol, httpStatus: status || undefined, error: detail, durationMs: Date.now() - startedAt })
       return { ok: false, error: detail || '模型调用失败', httpStatus: status || undefined }
     }
   }
 }
 
 export const weportAiService = new WeportAiService()
+
+export const __BUNDLE_MARKER_PROBE = 'ZZ_BUNDLE_MARKER_9911'
+

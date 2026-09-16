@@ -1,0 +1,113 @@
+// 设置 → 消息通知 → 通知玻璃（由 NotificationGlassPanel.tsx 自己引入）。
+//
+// 为什么单独一个文件而不是塞进 v1.scss：这类"只被一个组件用到"的类名必须由
+// 使用它的组件自己 import —— lazy chunk 是按导入图拆 CSS 的，漏掉就会在
+// 没进过该页面的会话里渲染成没有样式的裸控件（AGENTS.md 记过这个坑）。
+
+.glass-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/**
+ * 预览区。玻璃必须有"背后的东西"才看得出来，所以这里给一块渐变假桌面；
+ * 用渐变而不是纯色是为了让折射/模糊/描边的变化肉眼可见。
+ */
+.glass-preview {
+  position: relative;
+  margin: 6px 0 10px;
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 104px;
+  background: linear-gradient(135deg, #2b3550 0%, #6b4a6f 45%, #c98a5b 100%);
+
+  // 预览卡片本身不该可点（它是设置项的一部分，不是真通知）
+  .notification-toast-container {
+    pointer-events: none;
+  }
+}
+
+.glass-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.glass-range {
+  width: 118px;
+}
+
+// 数值列：用固定宽度而不是 tabular-nums —— 内置字体没有 tnum，
+// 声明它反而会让 Chromium 给数字换一个回退字形（见 AGENTS.md 的性能笔记）。
+.glass-value {
+  min-width: 46px;
+  text-align: right;
+  font-size: 12px;
+  opacity: 0.78;
+}
+
+.glass-settings input[type='color'] {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.16));
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+/**
+ * 渐变预设色板。
+ *
+ * 每格直接**画出它自己的渐变**（linear-gradient(90deg, from, to)），而不是只显示
+ * 一个色点：用户要选的是"整条渐变长什么样"，一个色点无法表达这件事。
+ * 也因此这里不需要额外的 label 文字 —— 悬停给出名字（title），色块本身即预览。
+ */
+.glass-presets {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  max-width: 190px;
+}
+
+.glass-preset {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  // 发丝边：浅色预设（霜白/晨曦）在浅色面板上会化进背景，没有这条边就看不见色块
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.2));
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+
+  &:hover:not(:disabled) {
+    transform: translateY(-1px);
+  }
+
+  &[data-active='true'] {
+    box-shadow: 0 0 0 2px var(--accent, #5b8eff);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  // 动效偏好：只去掉位移，颜色与选中环保留（它们承载信息，不是装饰）
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+
+    &:hover:not(:disabled) {
+      transform: none;
+    }
+  }
+}

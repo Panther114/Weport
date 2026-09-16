@@ -54,6 +54,13 @@ export interface LiquidGlassBackdropImage {
     /** 玻璃所在窗口在屏幕上的位置 */
     screenX: number
     screenY: number
+    /**
+     * 窗口自身的尺寸（DIP）。主题采样要按它把取样点挪到窗口**外面**去：
+     * 抓帧抓的是整屏，窗口就在屏幕上，直接采样卡片那一片读到的是弹窗自己
+     * （自指闭环，会把主题锁死在第一次采样上）。
+     */
+    winW?: number
+    winH?: number
 }
 
 export interface LiquidGlassProps {

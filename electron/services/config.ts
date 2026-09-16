@@ -181,6 +181,21 @@ interface ConfigSchema {
   weportAiActions: Array<{ id: string; name: string; prompt: string }>
   weportAiMaxToolChars: number
   weportAiContextWindow: number
+
+  // WeClone（人格克隆）—— v1.0 起**纯本地**
+  //
+  // 这里原有 weCloneServerUrl / weCloneServerToken / weCloneEnabled 三个键，
+  // 对应"把克隆上传到私有服务、聊天时向它发 HTTP"的旧设计。v1.0 的边界是数据
+  // 不出本机，那条路径整体删除，键也一并移除（包括加密键清单里的 token）。
+  // 老配置文件里残留的这三个键会在下次写入时被丢弃 —— 它们不再被读取。
+  /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
+  weCloneLastCutoff: string
+
+  // 连接器（第三方工具，v1.0）
+  /** 连接器配置 + 凭据信封，整体 safeStorage 加密（同 weportAiProfilesBlob）。 */
+  weportConnectorsBlob: string
+  /** 允许 WeportAI / 定时代理调用连接器（写操作）的开关。 */
+  connectorsAllowAgent: boolean
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -194,7 +209,8 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'aiInsightApiKey',
   'aiInsightWeiboCookie',
   'weportAiApiKey',
-  'weportAiProfilesBlob'
+  'weportAiProfilesBlob',
+  'weportConnectorsBlob'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
 const ENCRYPTED_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
@@ -374,6 +390,9 @@ export class ConfigService {
       weportAiMaxToolChars: 12000,
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
+      weCloneLastCutoff: '',
+      weportConnectorsBlob: '',
+      connectorsAllowAgent: true,
     }
 
     const storeOptions: any = {
@@ -532,6 +551,29 @@ export class ConfigService {
   }
 
   // === 加密/解密工具 ===
+
+  /**
+   * 磁盘上**有值，但当前进程读不出来**（值是 `safe:` 加密的，而这个进程拿不到
+   * 系统密钥存储）。
+   *
+   * 为什么必须能问出这个问题：`get()` 在解密失败时返回空串，于是"解密失败"和
+   * "用户根本没配置"长得一模一样。调用方（provider profile 的 store）据此走了
+   * "用户还没配过 → 迁移旧字段"的分支，**把一个新建的空配置写回磁盘**，用户原有的
+   * 全部服务项与密钥就没了 —— 实测在 CLI/TUI 宿主进程里连续发生过（safeStorage 在
+   * 那个进程里不可用），并且因为 `safeEncrypt` 的降级路径，密钥还会被明文写回。
+   *
+   * `safeEncrypt('')` 写的是空串而不是 `safe:`，所以 `safe:` 开头的值一旦能解开就
+   * 一定非空 —— 用 `safeDecrypt() === ''` 判断"读不出来"是准确的。
+   */
+  isValueUnreadable(key: string): boolean {
+    try {
+      const raw: unknown = this.store.get(key as never)
+      if (typeof raw !== 'string' || !raw.startsWith(SAFE_PREFIX)) return false
+      return this.safeDecrypt(raw) === ''
+    } catch {
+      return false
+    }
+  }
 
   private safeEncrypt(plaintext: string): string {
     if (!plaintext) return ''
@@ -1221,4 +1263,29 @@ export class ConfigService {
     this.unlockPassword = null
   }
 }
+
+// ===========================================================================
+// WeClone（人格克隆）
+// ===========================================================================
+
+// === 强制 provider 已移除（v1.0）===
+//
+// 这里原来有 WECLONE_FORCED_PROVIDER_ID / _BASE_URL / _MODEL 三个常量，用来把人格
+// 克隆锁死在 `opencode-go / muse-spark-1.2-contributor` 上，以及一个轻读状态的
+// getWeCloneForcedProviderStatus()。整套逻辑都是错的方向：人格克隆没有任何理由
+// 用一个和 WeportAI 不同的服务，而被锁定的那个网关在用户本机是按地区拒绝的，于是
+// 人格克隆的唯一表现是 "Internal server error"。
+//
+// 现在人格克隆直接用 ProviderProfileService 解析出来的服务（`weclone` 这一面没
+// 单独指定时就是默认服务）。清理当年被创建出来的那个服务项由
+// weCloneService.purgeLegacyForcedProfile() 负责（它内部保留了历史标识符常量，
+// 那是**清理用**的，不要再用它们创建服务）。
+
+// === WeClone 私有服务配置已移除（v1.0） ===
+//
+// 这里原来有 WeCloneServerConfig / getWeCloneServerConfig()，用来读取"私有服务
+// 地址 + ownerToken"。v1.0 的边界是**数据不出本机**：生成好的档案与语料不再上传，
+// 对话也在本机完成（人格 MD + 本地 BM25 检索 + 用户自己的模型 API）。因此这套
+// 配置连同它的加密键一起删除，而不是保留成"未使用"——留着就会有人再接回去。
+
 

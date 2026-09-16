@@ -557,26 +557,43 @@ setMembers([])
         </aside>
 
         <div className="group-detail">
-          <div className="v09-toolbar-sub group-toolbar-sub">
-            <span className="v09-sub">选择群聊查看成员构成、活跃排行与媒体统计</span>
-            {loading && <Loader2 className="spin" size={14} />}
-          </div>
+          {/* 原来这里永远显示一句「选择群聊查看成员构成…」—— 选中群之后它还在，
+              和下面的群卡片自相矛盾。现在它只在真的没选中时出现，选中后同一位置
+              变成该群的状态条（名字 + 成员/好友/消息数），标签页单独排一行，
+              既好点，也和其它页的状态条是同一套东西。 */}
+          {!selected ? (
+            <div className="status-bar">
+              <MessageSquare size={15} />
+              <div className="status-bar-text">
+                <strong>选择一个群聊开始分析</strong>
+                <span className="hint">
+                  左侧列表来自你本地的群聊会话{groups.length > 0 ? ` · 共 ${groups.length} 个` : ''}
+                </span>
+              </div>
+              {loading && <Loader2 className="spin" size={14} />}
+            </div>
+          ) : (
+            <div className="status-bar">
+              <Avatar src={selected.avatarUrl} name={selected.displayName} size={40} shape="rounded" />
+              <div className="status-bar-text">
+                <strong>{selected.displayName}</strong>
+                <span className="hint">
+                  {selected.memberCount} 名成员
+                  {members.length > 0 ? ` · ${members.filter((m) => m.isFriend).length} 位好友` : ''}
+                  {` · ${formatNum(selected.messageCount)} 条消息`}
+                </span>
+              </div>
+              {loading && <Loader2 className="spin" size={14} />}
+            </div>
+          )}
 
           {!selected && (
-            <EmptyState icon={MessageSquare} title="选择一个群聊开始分析" hint="左侧列表来自你本地的群聊会话" />
+            <EmptyState icon={MessageSquare} title="选择一个群聊开始分析" hint="也可以在上方搜索群名" />
           )}
 
           {selected && (
             <>
-              <div className="v09-panel group-detail-head">
-                <Avatar src={selected.avatarUrl} name={selected.displayName} size={40} shape="rounded" />
-                <div className="group-detail-title">
-                  <h3>{selected.displayName}</h3>
-                  <span className="v09-sub">
-                    {selected.memberCount} 名成员 · {members.length > 0 ? `${members.filter((m) => m.isFriend).length} 位好友` : ''}
-                  </span>
-                </div>
-                <div className="group-tabs">
+              <div className="group-tabs">
 {(
                     [
                       { id: 'members', label: '成员', icon: Users },
@@ -594,7 +611,6 @@ setMembers([])
                       </button>
                     )
                   })}
-                </div>
               </div>
 
               {tab === 'members' && (

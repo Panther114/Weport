@@ -37,7 +37,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     glassRect: (payload: any) => ipcRenderer.send('notification:glassRect', payload),
     glassHide: () => ipcRenderer.send('notification:glassHide'),
     showTest: () => ipcRenderer.invoke('notification:showTest'),
+    getMuteReport: () => ipcRenderer.invoke('notification:getMuteReport'),
     onLuma: (callback: (bands: any) => void) => subscribe('notification:luma', callback),
+    // 主进程的定帧折射：弹窗可见期间持续推新的桌面帧（约 3fps，按实测帧成本自适应）
+    onBackdrop: (callback: (frame: any) => void) => subscribe('notification:backdrop', callback),
+    // 渲染层的 WGC 视频流已接管折射，主进程可以停掉抓帧
+    setGlassMode: (mode: string) => ipcRenderer.send('notification:glassMode', { mode }),
     onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback)
   },
 
@@ -60,6 +65,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setLaunchAtStartup: (enabled: boolean) => ipcRenderer.invoke('app:setLaunchAtStartup', enabled),
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
     getChangelog: () => ipcRenderer.invoke('app:getChangelog'),
+    /** 背景平均亮度（0-1），用于「明暗跟随背景」；拿不到时 luminance 为 null */
+    backgroundLuminance: (path: string) => ipcRenderer.invoke('appearance:backgroundLuminance', path),
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
     ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
     onDownloadProgress: (callback: (progress: any) => void) => subscribe('app:downloadProgress', callback),
@@ -80,6 +87,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     start: () => ipcRenderer.invoke('http:start'),
     stop: () => ipcRenderer.invoke('http:stop'),
     getStatus: () => ipcRenderer.invoke('http:getStatus')
+  },
+
+  // MCP 服务（v0.9.5）。客户端配置整段由主进程拼好，token 不必进入渲染进程。
+  mcp: {
+    getStatus: () => ipcRenderer.invoke('mcp:getStatus'),
+    getClientConfig: () => ipcRenderer.invoke('mcp:getClientConfig')
   },
 
   // Windows Hello（v0.9.4 认证能力）
@@ -237,6 +250,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveProfile: (input: any) => ipcRenderer.invoke('ai:saveProfile', input),
     activateProfile: (id: string) => ipcRenderer.invoke('ai:activateProfile', id),
     deleteProfile: (id: string) => ipcRenderer.invoke('ai:deleteProfile', id),
+    getConsumerAssignments: () => ipcRenderer.invoke('ai:getConsumerAssignments'),
+    assignConsumer: (consumer: string, profileId: string) => ipcRenderer.invoke('ai:assignConsumer', consumer, profileId),
     testProfile: (input: any) => ipcRenderer.invoke('ai:testProfile', input),
     setSetup: (patch: any) => ipcRenderer.invoke('ai:setSetup', patch),
     listChats: () => ipcRenderer.invoke('ai:listChats'),
@@ -245,6 +260,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     reorderChats: (orderedIds: string[]) => ipcRenderer.invoke('ai:reorderChats', orderedIds),
     deleteChat: (chatId: string) => ipcRenderer.invoke('ai:deleteChat', chatId),
     getChat: (chatId: string) => ipcRenderer.invoke('ai:getChat', chatId),
+    compactChat: (chatId: string) => ipcRenderer.invoke('ai:compactChat', chatId),
     listNotes: (chatId: string) => ipcRenderer.invoke('ai:listNotes', chatId),
     readNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:readNoteFile', chatId, path),
     deleteNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:deleteNoteFile', chatId, path),
@@ -256,6 +272,63 @@ contextBridge.exposeInMainWorld('electronAPI', {
     send: (chatId: string, text: string) => ipcRenderer.invoke('ai:send', chatId, text),
     abort: (chatId: string) => ipcRenderer.invoke('ai:abort', chatId),
     onEvent: (callback: (event: any) => void) => subscribe('ai:event', callback)
+  },
+
+  // WeBot（v1.0 定时任务与笔记板）
+  weBot: {
+    listTasks: () => ipcRenderer.invoke('webot:listTasks'),
+    createTask: (input: any) => ipcRenderer.invoke('webot:createTask', input),
+    updateTask: (id: string, patch: any) => ipcRenderer.invoke('webot:updateTask', id, patch),
+    deleteTask: (id: string) => ipcRenderer.invoke('webot:deleteTask', id),
+    runNow: (id: string) => ipcRenderer.invoke('webot:runNow', id),
+    listRuns: (taskId?: string) => ipcRenderer.invoke('webot:listRuns', taskId),
+    listNotes: (options?: { taskId?: string; unreadOnly?: boolean; limit?: number }) =>
+      ipcRenderer.invoke('webot:listNotes', options),
+    getNote: (id: string) => ipcRenderer.invoke('webot:getNote', id),
+    updateNote: (id: string, patch: { read?: boolean; pinned?: boolean }) =>
+      ipcRenderer.invoke('webot:updateNote', id, patch),
+    unreadCount: () => ipcRenderer.invoke('webot:unreadCount'),
+    clearNotes: () => ipcRenderer.invoke('webot:clearNotes'),
+    /** 任务完成/失败时的通知（主进程弹出右上角卡片后也会广播到这里）。 */
+    onNote: (callback: (note: any) => void) => subscribe('webot:note', callback),
+    onRunStarted: (callback: (run: any) => void) => subscribe('webot:runStarted', callback)
+  },
+
+  // macOS 能力诊断（v1.0）：仅在 darwin 上返回真实结果
+  diagnostics: {
+    collectMac: () => ipcRenderer.invoke('diagnostics:collectMac')
+  },
+
+  // 连接器（第三方工具，v1.0）。`connect` 收明文令牌，其余接口只出掩码。
+  connectors: {
+    list: () => ipcRenderer.invoke('connectors:list'),
+    connect: (id: string, token: string) => ipcRenderer.invoke('connectors:connect', id, token),
+    disconnect: (id: string) => ipcRenderer.invoke('connectors:disconnect', id),
+    verify: (id: string) => ipcRenderer.invoke('connectors:verify', id),
+    listTargets: (id: string) => ipcRenderer.invoke('connectors:listTargets', id),
+    createTask: (id: string, input: any) => ipcRenderer.invoke('connectors:createTask', id, input),
+    getAgentSettings: () => ipcRenderer.invoke('connectors:getAgentSettings'),
+    setAgentSettings: (patch: { allowAgentWrite?: boolean }) => ipcRenderer.invoke('connectors:setAgentSettings', patch)
+  },
+
+  weclone: {
+    generate: () => ipcRenderer.invoke('weclone:generate'),
+    list: () => ipcRenderer.invoke('weclone:list'),
+    get: (id: string) => ipcRenderer.invoke('weclone:get', id),
+    // 纯本地：删除就是删掉本机目录，没有 remote 参数
+    delete: (id: string) => ipcRenderer.invoke('weclone:delete', id),
+    // on-device 对话：人格档案 + 本地检索都在主进程完成，不上传
+    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
+      ipcRenderer.invoke('weclone:chat', cloneId, message, history),
+    cancel: () => ipcRenderer.invoke('weclone:cancel'),
+    // 对话历史（本机文件）：回看 / 改标题 / 删除都走这几个通道
+    listChats: (cloneId: string) => ipcRenderer.invoke('weclone:listChats', cloneId),
+    getChat: (cloneId: string, chatId: string) => ipcRenderer.invoke('weclone:getChat', cloneId, chatId),
+    saveChat: (payload: { cloneId: string; chatId?: string; turns: Array<{ role: 'user' | 'assistant'; content: string; at?: number }>; title?: string }) =>
+      ipcRenderer.invoke('weclone:saveChat', payload),
+    renameChat: (cloneId: string, chatId: string, title: string) => ipcRenderer.invoke('weclone:renameChat', cloneId, chatId, title),
+    deleteChat: (cloneId: string, chatId: string) => ipcRenderer.invoke('weclone:deleteChat', cloneId, chatId),
+    onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
   },
 
   process: {

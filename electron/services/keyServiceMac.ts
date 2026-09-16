@@ -24,6 +24,15 @@ export class KeyServiceMac {
   private machVmReadOverwrite: any = null
   private machPortDeallocate: any = null
   private _needsElevation = false
+  /**
+   * Which layer of the image memory scan failed last (issue #15).
+   *
+   * The scan used to return a bare `null` after a 60 s wait, so "WeChat has no
+   * get-task-allow entitlement", "the shipped helper is quarantined" and "the user
+   * never opened an image" all produced the same useless line. Recording the layer
+   * is what lets the failure carry a next step.
+   */
+  private imageScanDiagnostic = ''
   private restrictedFailureCount = 0
   private restrictedFailureAt = 0
   private readonly restrictedFailureWindowMs = 8 * 60_000
@@ -803,6 +812,21 @@ export class KeyServiceMac {
     }
   }
 
+  /**
+   * macOS image-key acquisition — the DISK path (WeChat's kvcomm cache).
+   *
+   * WeChat 4.x writes `key_<code>_*.statistic` files under `net/kvcomm`; the image
+   * keys are derived from that code plus the account id. This path attaches to no
+   * process, which matters: on macOS the memory-scan path below needs
+   * `task_for_pid` on WeChat, and a stock WeChat carries no `get-task-allow`
+   * entitlement (see docs/macos-troubleshooting.md), so the disk path is the one
+   * that can actually work for real users.
+   *
+   * Every failure here carries a next step. A bare "failed" leaves the user with
+   * nothing to act on, and issue #15 is precisely "macOS never told me why image
+   * export cannot work" — so a silent or unexplained return is the bug, not just
+   * an inconvenience.
+   */
   async autoGetImageKey(
     accountPath?: string,
     onStatus?: (message: string) => void,
@@ -810,9 +834,21 @@ export class KeyServiceMac {
   ): Promise<ImageKeyResult> {
     try {
       onStatus?.('正在从缓存目录扫描图片密钥...')
+      const kvcommDirs = this.getKvcommCandidates(accountPath)
+      const existingKvcommDirs = kvcommDirs.filter((dir) => existsSync(dir))
       const codes = this.collectKvcommCodes(accountPath)
+      console.log('[KeyServiceMac] autoGetImageKey scan:', JSON.stringify({
+        platform: process.platform,
+        accountPath: accountPath || '(empty)',
+        kvcommCandidateCount: kvcommDirs.length,
+        kvcommExistingDirs: existingKvcommDirs,
+        codeCount: codes.length
+      }))
       if (codes.length === 0) {
-        return { success: false, error: '未找到有效的密钥码（kvcomm 缓存为空）' }
+        return {
+          success: false,
+          error: this.describeMissingKvcommCodes(existingKvcommDirs, kvcommDirs)
+        }
       }
 
       const wxidCandidates = this.collectWxidCandidates(accountPath, wxid)
@@ -821,6 +857,10 @@ export class KeyServiceMac {
       }
 
       const accountPathCandidates = this.collectAccountPathCandidates(accountPath)
+      console.log('[KeyServiceMac] autoGetImageKey account dirs:', JSON.stringify({
+        accountPathCandidates,
+        wxidCandidates
+      }))
 
       // 使用模板密文做验真，避免 wxid 不匹配导致快速方案算错
       if (accountPathCandidates.length > 0) {
@@ -848,28 +888,77 @@ export class KeyServiceMac {
         }
         return {
           success: false,
-          error: '缓存 code 与当前账号 wxid 未匹配。若数据库密钥获取后微信刚刚崩溃并重启，可能当前选中的账号目录已经不是最新会话；请先重新扫描 wxid，或直接使用内存扫描。'
+          error: [
+            '缓存 code 与当前账号 wxid 未匹配。若数据库密钥获取后微信刚刚崩溃并重启，可能当前选中的账号目录已经不是最新会话；请先重新扫描 wxid，或直接使用内存扫描。',
+            accountPathCandidates.length > 0
+              ? `已尝试校验的账号目录：${accountPathCandidates.slice(0, 4).join('、')}`
+              : '未找到可校验的账号目录（请在设置中选择正确的微信数据目录）',
+            `已尝试的 wxid 候选：${wxidCandidates.slice(0, 6).join('、')}`,
+            `已尝试的 code：${codes.slice(0, 6).map((c) => `key_${c}_*`).join('、')}`
+          ].join('\n')
         }
       }
 
-      // 无法获取模板密文时，回退为历史策略（优先级最高候选 + 第一条 code）
+      // 无法获取模板密文时，回退为历史策略（优先级最高候选 + 第一条 code）。
+      // 这条路径**无法校验**密钥归属，因此必须把"未校验"讲清楚，不能当作成功静默返回。
       const fallbackWxid = wxidCandidates[0]
       const fallbackCode = codes[0]
       const { xorKey, aesKey } = this.deriveImageKeys(fallbackCode, fallbackWxid)
-      onStatus?.(`密钥获取成功 (wxid: ${fallbackWxid}, code: ${fallbackCode})`)
+      console.warn('[KeyServiceMac] autoGetImageKey could not verify the derived key (no template/account dir):', JSON.stringify({
+        accountPath: accountPath || '(empty)',
+        fallbackWxid,
+        fallbackCode
+      }))
+      onStatus?.(`密钥已按账号推导 (wxid: ${fallbackWxid}, code: ${fallbackCode})，但目录中没有可校验的图片缓存，未能确认归属`)
       return { success: true, xorKey, aesKey, verified: false }
     } catch (e: any) {
-      return { success: false, error: `自动获取图片密钥失败: ${e.message}` }
+      console.error('[KeyServiceMac] autoGetImageKey failed:', e?.stack || e)
+      return { success: false, error: `自动获取图片密钥失败: ${e.message}\n下一步：请确认微信已登录、数据目录选择正确，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport 后重试。` }
     }
+  }
+
+  /**
+   * macOS roots worth probing when the caller gave us no usable dbPath (issue #15).
+   *
+   * Without this, `autoGetImageKey` had nothing to verify a derived key against and
+   * fell straight through to "return the first guess as success" — which is how a
+   * macOS user ends up with a key that is saved, marked configured, and wrong, with
+   * no prompt anywhere. Probing the known roots lets the verification step run.
+   */
+  private macXwechatRootCandidates(): string[] {
+    const home = homedir()
+    return [
+      join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files'),
+      join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat'),
+      join(home, 'Documents', 'xwechat_files'),
+      join(home, 'Documents', 'xwechat')
+    ]
+  }
+
+  private describeMissingKvcommCodes(existingDirs: string[], allDirs: string[]): string {
+    const lines = ['未找到有效的密钥码（kvcomm 缓存为空）。']
+    if (existingDirs.length > 0) {
+      lines.push(`目录存在但没有 key_*_.statistic 文件：${existingDirs.slice(0, 4).join('、')}`)
+    } else {
+      lines.push(`以下目录都不存在：${allDirs.slice(0, 4).join('、')}`)
+    }
+    lines.push(
+      '下一步：1) 保持微信已登录并打开几张聊天图片（大图/原图，让微信写出 kvcomm 缓存）；' +
+      '2) 在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中勾选 Weport 并重启 Weport；' +
+      '3) 回到导出页重新点击「获取图片密钥」。'
+    )
+    return lines.join('\n')
   }
 
   async autoGetImageKeyByMemoryScan(
     userDir: string,
     onProgress?: (message: string) => void
   ): Promise<ImageKeyResult> {
+    this.imageScanDiagnostic = ''
     try {
       // 1. 查找模板文件获取密文和 XOR 密钥
       onProgress?.('正在查找模板文件...')
+      console.log('[KeyServiceMac] autoGetImageKeyByMemoryScan:', JSON.stringify({ platform: process.platform, userDir: userDir || '(empty)' }))
       let result = await this._findTemplateData(userDir, 32)
       let { ciphertext, xorKey } = result
       
@@ -879,8 +968,25 @@ export class KeyServiceMac {
         xorKey = result.xorKey
       }
       
-      if (!ciphertext) return { success: false, error: '未找到 V2 模板文件，请先在微信中查看几张图片' }
-      if (xorKey === null) return { success: false, error: '未能从模板文件中计算出有效的 XOR 密钥' }
+      if (!ciphertext) {
+        return {
+          success: false,
+          error: [
+            '未找到 V2 模板文件（*_t.dat）。',
+            userDir ? `已遍历：${userDir}` : '未提供微信数据目录。',
+            '下一步：1) 在微信中打开几张聊天图片的大图（缩略图可能没有 *_t.dat）；2) 确认设置里的「微信数据目录」指向当前账号；3) 重新点击「获取图片密钥」。'
+          ].join('\n')
+        }
+      }
+      if (xorKey === null) {
+        return {
+          success: false,
+          error: [
+            '未能从模板文件中计算出有效的 XOR 密钥。',
+            '下一步：在微信中多打开几张图片（至少 3 张不同的原图）后重新获取；若仍失败，说明该账号的图片缓存尚未写入本机。'
+          ].join('\n')
+        }
+      }
 
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
@@ -909,9 +1015,22 @@ export class KeyServiceMac {
         await new Promise(r => setTimeout(r, 5000))
       }
 
-      return { success: false, error: '60 秒内未找到 AES 密钥' }
+      const diagnostic = this.imageScanDiagnostic || '未知原因'
+      console.warn('[KeyServiceMac] image memory scan timed out:', JSON.stringify({ diagnostic, scanCount }))
+      return {
+        success: false,
+        error: [
+          `60 秒内未找到 AES 密钥（${diagnostic}）。`,
+          '下一步：1) 保持微信在前台并打开几张图片大图，然后重新点击「获取图片密钥」；',
+          '2) 这条内存扫描路径需要附加到微信进程取内存。正式版微信没有 get-task-allow 权限，' +
+            '因此它在 macOS 上通常无法成功——请不要反复重试，改用下面的磁盘路径；',
+          '3) 磁盘路径（从微信缓存读取密钥）不需要附加进程：确认微信已登录、打开过图片，' +
+            '并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport 后重试「获取图片密钥」。'
+        ].join('\n')
+      }
     } catch (e: any) {
-      return { success: false, error: `内存扫描失败: ${e.message}` }
+      console.error('[KeyServiceMac] autoGetImageKeyByMemoryScan failed:', e?.stack || e)
+      return { success: false, error: `内存扫描失败: ${e.message}\n下一步：优先改用磁盘路径（保持微信登录并打开几张图片后重新点击「获取图片密钥」）。` }
     }
   }
 
@@ -1020,6 +1139,7 @@ export class KeyServiceMac {
         if (direct.permissionError) {
           console.warn('[KeyServiceMac] task_for_pid 权限不足，切换到 osascript 提权模式')
           this._needsElevation = true
+          this.imageScanDiagnostic = 'task_for_pid 被系统拒绝（未提权的 helper 没有调试权限）'
           onProgress?.('需要管理员权限，请在弹出的对话框中输入密码...')
         }
       }
@@ -1033,13 +1153,18 @@ export class KeyServiceMac {
         }
         const elevated = await this._spawnScanHelper(helperPath, pid, ciphertextHex, true, artifactPaths)
         if (elevated.key) return elevated.key
+        this.imageScanDiagnostic = '提权后的 image_scan_helper 仍未返回密钥（可能被微信的内存保护拒绝）'
       }
     } catch (e: any) {
       console.warn('[KeyServiceMac] image_scan_helper unavailable, fallback to Mach API:', e?.message)
+      this.imageScanDiagnostic = `image_scan_helper 不可用（${e?.message || 'unknown'}）`
     }
 
     // fallback: 直接通过 Mach API 扫描内存（Electron 进程可能没有 task_for_pid 权限）
-    if (!this.ensureMachApis()) return null
+    if (!this.ensureMachApis()) {
+      this.imageScanDiagnostic = '无法加载 Mach API（libSystem 符号不可用）'
+      return null
+    }
 
     const VM_PROT_READ = 0x1
     const VM_PROT_WRITE = 0x2
@@ -1054,7 +1179,10 @@ export class KeyServiceMac {
     const taskBuf = Buffer.alloc(4)
     const attachKr = this.taskForPid(selfTask, pid, taskBuf)
     const task = taskBuf.readUInt32LE(0)
-    if (attachKr !== KERN_SUCCESS || !task) return null
+    if (attachKr !== KERN_SUCCESS || !task) {
+      this.imageScanDiagnostic = `task_for_pid 被拒绝（kern_return=${attachKr}；正式版微信不携带 get-task-allow，这一步在 macOS 上通常必然失败）`
+      return null
+    }
 
     try {
       const regions: Array<[number, number]> = []
@@ -1127,6 +1255,7 @@ export class KeyServiceMac {
           trailing = data.subarray(Math.max(0, data.length - OVERLAP))
         }
       }
+      this.imageScanDiagnostic = `已扫描 ${regions.length} 个可写区域（RAM 读取成功），未匹配到 AES 密钥`
       return null
     } finally {
       try { this.machPortDeallocate(selfTask, task) } catch { }
@@ -1321,24 +1450,34 @@ export class KeyServiceMac {
       candidates.push(v)
     }
 
-    if (accountPath) pushUnique(accountPath)
+    const collectFromRoot = (root: string) => {
+      if (!root || !existsSync(root)) return
+      try {
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue
+          const entryPath = join(root, entry.name)
+          if (!this.isAccountDirPath(entryPath)) continue
+          if (!this.isReasonableAccountId(entry.name)) continue
+          pushUnique(entryPath)
+        }
+      } catch {
+        // ignore
+      }
+    }
 
     if (accountPath) {
-      const root = this.resolveXwechatRootFromPath(accountPath)
-      if (root) {
-        if (existsSync(root)) {
-          try {
-            for (const entry of readdirSync(root, { withFileTypes: true })) {
-              if (!entry.isDirectory()) continue
-              const entryPath = join(root, entry.name)
-              if (!this.isAccountDirPath(entryPath)) continue
-              if (!this.isReasonableAccountId(entry.name)) continue
-              pushUnique(entryPath)
-            }
-          } catch {
-            // ignore
-          }
-        }
+      pushUnique(accountPath)
+      collectFromRoot(this.resolveXwechatRootFromPath(accountPath) || '')
+    }
+
+    // issue #15: dbPath 为空或不在 xwechat_files 下时，上面的推导一无所获，
+    // 于是密钥没有任何模板可校验，只能按 candidates[0] 猜测并当成"成功"返回 ——
+    // 用户看到的是一把已保存、已标记配置、但可能是错的密钥。补上 macOS 已知根目录
+    // 探测，让校验步骤真正跑起来。
+    if (candidates.length === 0) {
+      for (const root of this.macXwechatRootCandidates()) {
+        collectFromRoot(root)
+        if (candidates.length > 0) break
       }
     }
 

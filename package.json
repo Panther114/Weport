@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "0.9.11",
+  "version": "1.0.0",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -17,11 +17,15 @@
     "postinstall": "electron-builder install-app-deps && node scripts/prepare-electron-runtime.cjs",
     "dev": "node scripts/prepare-electron-runtime.cjs && vite",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
-    "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vite build && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
-    "build": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
-    "build:dir": "node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --dir --publish never",
-    "build:mac": "node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
-    "build:linux": "node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
+    "build:tui": "npm --prefix packages/weport-tui run build",
+    "qa:tui": "npm run build:tui && node scripts/qa-tui.mjs",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vitest run && vite build && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
+    "build": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
+    "build:dir": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --dir --publish never",
+    "build:mac": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
+    "build:linux": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
     "package": "node scripts/clean-dist-electron.cjs && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never"
   },
   "dependencies": {
@@ -54,14 +58,19 @@
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
+    "playwright-core": "^1.63.0",
     "sass": "^1.102.0",
     "typescript": "^6.0.3",
     "vite": "^8.1.3",
-    "vite-plugin-electron": "^1.1.0"
+    "vite-plugin-electron": "^1.1.0",
+    "vitest": "^5.0.0"
   },
   "build": {
     "appId": "com.weport.desktop",
     "productName": "Weport",
+    "releaseInfo": {
+      "releaseNotesFile": "release-notes-current.md"
+    },
     "directories": {
       "output": "release"
     },
@@ -82,7 +91,25 @@
       "NOTICE.md",
       "RELEASE_NOTES.md",
       "THIRD-PARTY-NOTICES.md",
-      "LICENSES/**/*"
+      "LICENSES/**/*",
+      "!**/*.map",
+      "!**/*.map.*",
+      "!node_modules/**/*.d.ts",
+      "!node_modules/**/*.d.mts",
+      "!node_modules/**/*.d.cts",
+      "!node_modules/**/*.md",
+      "!node_modules/**/*.markdown",
+      "!node_modules/**/{test,tests,__tests__,spec,specs,example,examples,docs,doc,benchmark,benchmarks}/**",
+      "!node_modules/echarts/**",
+      "!node_modules/zrender/**",
+      "!node_modules/echarts-for-react/**",
+      "!node_modules/lucide-react/**",
+      "!node_modules/react/**",
+      "!node_modules/react-dom/**",
+      "!node_modules/scheduler/**",
+      "!node_modules/html2canvas/**",
+      "!node_modules/marked/**",
+      "!node_modules/react-virtuoso/**"
     ],
     "mac": {
       "target": [
@@ -94,6 +121,7 @@
       "icon": "resources/icons/macos/icon.icns",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
+      "identity": "-",
       "entitlements": "electron/entitlements.mac.plist",
       "entitlementsInherit": "electron/entitlements.mac.plist",
       "extraResources": [
@@ -108,15 +136,6 @@
         {
           "from": "resources/wedecrypt/macos/${arch}",
           "to": "resources/wedecrypt/macos/${arch}"
-        },
-        {
-          "from": "resources/welive/macos/${arch}",
-          "to": "resources/welive/macos/${arch}",
-          "filter": [
-            "**/*",
-            "!**/*.framework",
-            "!**/*.framework/**/*"
-          ]
         },
         {
           "from": "electron/assets/wasm/",
@@ -245,6 +264,7 @@
       "license": "LICENSE"
     },
     "asar": true,
+    "compression": "maximum",
     "afterPack": "scripts/after-pack.cjs",
     "asarUnpack": [
       "node_modules/@hicccc77/electron-liquid-glass/**/*",

@@ -1,8 +1,20 @@
 import { randomUUID } from 'crypto'
 import { getProviderCatalogEntry } from './providerCatalog'
-import type { ProviderAdapter, ProviderProfile, ProviderStreamInput, ProviderStreamResult } from './providerTypes'
+import { extractModelIds } from './modelRegistry'
+import type { ProviderAdapter, ProviderProfile, ProviderProtocol, ProviderStreamInput, ProviderStreamResult } from './providerTypes'
 
 const DEFAULT_HEADERS = { 'Content-Type': 'application/json' }
+
+/**
+ * Default `User-Agent` for gateway requests.
+ *
+ * The OpenCode gateway operator asks clients to identify themselves (the plan
+ * records this under C1.4). It is advisory only — both `/models` and the chat
+ * endpoints answer without any auth or identification — so a policy that blocks
+ * it can only cost the header, never the request. The version is intentionally
+ * coarse: a per-release UA would be one more thing to keep in sync.
+ */
+const DEFAULT_USER_AGENT = 'Weport (+https://github.com/PantryHost/weport)'
 
 function normalizeBaseUrl(value: string): string {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -47,15 +59,24 @@ async function requestJson(url: string, init: RequestInit): Promise<any> {
   return response.json()
 }
 
-function authHeaders(profile: ProviderProfile, kind: ProviderProfile['protocol']): Record<string, string> {
+/**
+ * Headers for a request, keyed off the PROFILE's protocol rather than the
+ * resolved per-model wire protocol.
+ *
+ * That split is deliberate: a multi-protocol gateway serves several wire formats
+ * behind ONE credential, so routing a model to `/messages` must not also switch
+ * a Bearer-token gateway over to `x-api-key`. Only a profile explicitly
+ * configured as `anthropic` or `google` uses those auth schemes.
+ */
+function authHeaders(profile: ProviderProfile): Record<string, string> {
   const custom = profile.headers || {}
-  if (kind === 'anthropic') {
-    return { ...DEFAULT_HEADERS, 'x-api-key': profile.apiKey, 'anthropic-version': '2023-06-01', ...custom }
+  if (profile.protocol === 'anthropic') {
+    return { ...DEFAULT_HEADERS, 'User-Agent': DEFAULT_USER_AGENT, 'x-api-key': profile.apiKey, 'anthropic-version': '2023-06-01', ...custom }
   }
-  if (kind === 'google') {
-    return { ...DEFAULT_HEADERS, 'x-goog-api-key': profile.apiKey, ...custom }
+  if (profile.protocol === 'google') {
+    return { ...DEFAULT_HEADERS, 'User-Agent': DEFAULT_USER_AGENT, 'x-goog-api-key': profile.apiKey, ...custom }
   }
-  return { ...DEFAULT_HEADERS, ...(profile.apiKey ? { Authorization: `Bearer ${profile.apiKey}` } : {}), ...custom }
+  return { ...DEFAULT_HEADERS, 'User-Agent': DEFAULT_USER_AGENT, ...(profile.apiKey ? { Authorization: `Bearer ${profile.apiKey}` } : {}), ...custom }
 }
 
 async function* sseEvents(response: Response): AsyncGenerator<{ event: string; data: any }> {
@@ -159,7 +180,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
     if (input.maxOutputTokens !== undefined) body.max_output_tokens = input.maxOutputTokens
     if (instructions) body.instructions = instructions
     const response = await fetch(endpoint(input.profile.baseUrl, '/responses'), {
-      method: 'POST', headers: authHeaders(input.profile, 'openai'), body: JSON.stringify(body), signal: input.signal,
+      method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
     const result = emptyResult()
@@ -189,14 +210,16 @@ const openAIResponsesAdapter: ProviderAdapter = {
     result.toolCalls = Array.from(calls.values()).filter((call) => call.name).map((call) => ({ id: call.id, name: call.name, args: parseArgs(call.args) }))
     return result
   },
-  async listModels(profile, signal) { return listOpenAIModels(profile, signal) },
+  async listModels(profile, signal) { return listModelsFromEnvelope(await fetchModelEnvelope(profile, signal)) },
+  listModelsWithEnvelope(profile, signal) { return fetchModelEnvelope(profile, signal) },
 }
 
 function parseArgs(value: string): Record<string, unknown> {
   try { return JSON.parse(value || '{}') as Record<string, unknown> } catch { return { _raw: value } }
 }
 
-function openAIChatBody(input: ProviderStreamInput): Record<string, unknown> {
+/** Exported for the prefix-stability test: the wire body must be byte-identical across calls. */
+export function openAIChatBody(input: ProviderStreamInput): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: input.profile.model,
     messages: input.messages,
@@ -216,8 +239,9 @@ function openAIChatBody(input: ProviderStreamInput): Record<string, unknown> {
 
 const openAICompatibleAdapter: ProviderAdapter = {
   async stream(input) {
+    const body = openAIChatBody(input)
     const response = await fetch(endpoint(input.profile.baseUrl, '/chat/completions'), {
-      method: 'POST', headers: authHeaders(input.profile, 'openai-compatible'), body: JSON.stringify(openAIChatBody(input)), signal: input.signal,
+      method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
     const result = emptyResult()
@@ -245,13 +269,25 @@ const openAICompatibleAdapter: ProviderAdapter = {
     result.toolCalls = Array.from(calls.values()).filter((call) => call.name).map((call) => ({ id: call.id, name: call.name, args: parseArgs(call.args) }))
     return result
   },
-  async listModels(profile, signal) { return listOpenAIModels(profile, signal) },
+  async listModels(profile, signal) { return listModelsFromEnvelope(await fetchModelEnvelope(profile, signal)) },
+  listModelsWithEnvelope(profile, signal) { return fetchModelEnvelope(profile, signal) },
 }
 
-async function listOpenAIModels(profile: ProviderProfile, signal?: AbortSignal): Promise<string[]> {
-  const payload = await requestJson(endpoint(profile.baseUrl, '/models'), { method: 'GET', headers: authHeaders(profile, 'openai-compatible'), signal })
-  const rows = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : []
-  return Array.from(new Set(rows.map((item: any) => String(item?.id || item?.name || '').replace(/^models\//, '').trim()).filter(Boolean)))
+/**
+ * `GET {base}/models` for the OpenAI-shaped providers.
+ *
+ * Every OpenAI-shaped provider shares this, so discovery works for the
+ * Responses protocol too (OpenAI serves the same list on `/models`). The
+ * envelope normalization lives in `modelRegistry.extractModelIds`; the previous
+ * inline version only understood `data[]` and `models[]` and therefore returned
+ * `[]` for Together AI, Mistral, Cloudflare and Open WebUI.
+ */
+async function fetchModelEnvelope(profile: ProviderProfile, signal?: AbortSignal): Promise<unknown> {
+  return requestJson(endpoint(profile.baseUrl, '/models'), { method: 'GET', headers: authHeaders(profile), signal })
+}
+
+function listModelsFromEnvelope(envelope: unknown): string[] {
+  return extractModelIds(envelope)
 }
 
 function anthropicMessages(messages: Array<Record<string, unknown>>) {
@@ -292,7 +328,7 @@ const anthropicAdapter: ProviderAdapter = {
     if (converted.system) body.system = converted.system
     if (input.tools.length > 0) body.tools = input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }))
     const response = await fetch(endpoint(input.profile.baseUrl, '/messages'), {
-      method: 'POST', headers: authHeaders(input.profile, 'anthropic'), body: JSON.stringify(body), signal: input.signal,
+      method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
     const result = emptyResult()
@@ -317,9 +353,12 @@ const anthropicAdapter: ProviderAdapter = {
     return result
   },
   async listModels(profile, signal) {
-    const payload = await requestJson(endpoint(profile.baseUrl, '/models'), { method: 'GET', headers: authHeaders(profile, 'anthropic'), signal })
-    const rows = Array.isArray(payload?.data) ? payload.data : []
-    return Array.from(new Set(rows.map((item: any) => String(item?.id || '').trim()).filter(Boolean)))
+    return listModelsFromEnvelope(await fetchModelEnvelope(profile, signal))
+  },
+  listModelsWithEnvelope(profile, signal) {
+    // Anthropic answers `data[]`; the tolerant parser also covers gateways that
+    // speak the Messages protocol but return a bare array or `models[]`.
+    return fetchModelEnvelope(profile, signal)
   },
 }
 
@@ -364,7 +403,7 @@ const googleAdapter: ProviderAdapter = {
     if (input.maxOutputTokens !== undefined) body.generationConfig = { maxOutputTokens: input.maxOutputTokens }
     if (input.tools.length > 0) body.tools = [{ functionDeclarations: input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }]
     const url = endpoint(input.profile.baseUrl, `/models/${encodeURIComponent(input.profile.model)}:streamGenerateContent?alt=sse`)
-    const response = await fetch(url, { method: 'POST', headers: authHeaders(input.profile, 'google'), body: JSON.stringify(body), signal: input.signal })
+    const response = await fetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
     if (!response.ok) return readError(response)
     const result = emptyResult()
     for await (const item of sseEvents(response)) {
@@ -382,17 +421,35 @@ const googleAdapter: ProviderAdapter = {
     return result
   },
   async listModels(profile, signal) {
-    const payload = await requestJson(endpoint(profile.baseUrl, '/models'), { method: 'GET', headers: authHeaders(profile, 'google'), signal })
-    const rows = Array.isArray(payload?.models) ? payload.models : []
-    return Array.from(new Set(rows.map((item: any) => String(item?.name || '').replace(/^models\//, '').trim()).filter(Boolean)))
+    return listModelsFromEnvelope(await fetchModelEnvelope(profile, signal))
+  },
+  listModelsWithEnvelope(profile, signal) {
+    return fetchModelEnvelope(profile, signal)
   },
 }
 
-export function getProviderAdapter(profile: ProviderProfile): ProviderAdapter {
-  if (profile.protocol === 'openai') return openAIResponsesAdapter
-  if (profile.protocol === 'anthropic') return anthropicAdapter
-  if (profile.protocol === 'google') return googleAdapter
+/**
+ * Adapter for a wire protocol. `gemini-compatible` is the OpenAI-compatible
+ * Gemini entry point (Google's `/v1beta/openai`), so it shares the chat adapter.
+ */
+export function selectAdapter(protocol: ProviderProtocol): ProviderAdapter {
+  if (protocol === 'openai') return openAIResponsesAdapter
+  if (protocol === 'anthropic') return anthropicAdapter
+  if (protocol === 'google') return googleAdapter
   return openAICompatibleAdapter
+}
+
+/**
+ * Pick the adapter from `profile.modelProtocol` when the provider layer resolved
+ * one, falling back to the profile's own `protocol`.
+ *
+ * Multi-protocol gateways route by model, not by profile: a single OpenCode Go
+ * profile serves `deepseek-v4-flash` on `/chat/completions` and `grok-4.6` on
+ * `/responses`, and sending the latter to `/chat/completions` answers
+ * "Model grok-4.6 is not supported for format oa-compat".
+ */
+export function getProviderAdapter(profile: ProviderProfile): ProviderAdapter {
+  return selectAdapter(profile.modelProtocol || profile.protocol)
 }
 
 export function makeDefaultProfile(input: { providerId: string; protocol?: ProviderProfile['protocol']; name?: string; baseUrl?: string; model?: string; apiKey?: string }): ProviderProfile {

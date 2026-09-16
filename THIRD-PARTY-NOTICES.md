@@ -71,6 +71,35 @@ components, not CC-licensed Weport or WeFlow code. Redistribution is subject to
 the applicable Microsoft Visual Studio license terms:
 https://visualstudio.microsoft.com/license-terms/
 
+## models.dev — model metadata (MIT)
+
+- Project: https://github.com/anomalyco/models.dev
+- Data endpoint: https://models.dev/api.json
+- Copyright (c) models.dev contributors
+- License: MIT (the repository and its build tooling)
+
+Weport uses models.dev **only as a runtime data source**. No models.dev code is
+vendored, imported or shipped:
+
+- `electron/services/ai/modelRegistry.ts` fetches `https://models.dev/api.json`
+  at runtime, caches the raw payload under the app's `userData` directory
+  (`models-cache.json` + an ETag sidecar), and refreshes it with a conditional
+  `GET` on a ~24 h TTL. The cache is deletable at any time and is never
+  committed to the repository.
+- `electron/assets/models/models-dev-snapshot.json` is a build-time snapshot
+  **for offline first-launch only** (regenerate with
+  `node scripts/gen-models-snapshot.mjs`). It is data, not code.
+- The metadata is informational: model ids, per-model wire protocol, context
+  window, output limit, capabilities and published token pricing. It never
+  contains user content, and no user data is sent to models.dev.
+
+**Data-usage terms for the aggregated dataset are not documented upstream.**
+That is why the full 4.6 MB payload is treated as an expiring cache rather than
+a shipped fork, and why only the providers Weport can actually address are
+included in the offline snapshot. If upstream publishes terms that conflict with
+this usage, deleting `models-cache.json` (and the snapshot) degrades the feature
+to the static catalog in `providerCatalog.ts` with no other impact.
+
 ## Other npm dependencies
 
 Other production dependencies retain their own license metadata and license

@@ -1,0 +1,63 @@
+name: Verify macOS packaging
+# Verify-only macOS gate (issue #18 follow-up): builds the mac installer and
+# runs scripts/verify-mac-pack.sh WITHOUT publishing anything.
+# Use it to validate packaging changes from any branch — no tag, no release.
+#
+# Triggers:
+#   - Manual: Actions → "Verify macOS packaging" → Run workflow → pick branch
+#   - Automatic: PRs touching packaging-relevant files
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'scripts/after-pack.cjs'
+      - 'scripts/verify-mac-pack.sh'
+      - 'scripts/prepare-native-modes.cjs'
+      - 'scripts/prepare-host-bundle.cjs'
+      - 'electron/entitlements.mac.plist'
+      - 'resources/wcdb/macos/**'
+      - 'resources/key/macos/**'
+      - 'resources/wedecrypt/macos/**'
+      - 'resources/welive/macos/**'
+      - '.github/workflows/verify-mac-packaging.yml'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-mac-pack:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure mac helpers are executable
+        run: |
+          chmod +x resources/key/macos/universal/xkey_helper \
+            resources/key/macos/universal/xkey_helper_macos \
+            resources/key/macos/universal/image_scan_helper \
+            resources/key/macos/universal/libwx_key.dylib \
+            resources/welive/macos/arm64/welive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build macOS installer (arm64, ad-hoc signed, no publish)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build:mac
+
+      - name: Verify macOS packaging & signature
+        run: bash scripts/verify-mac-pack.sh release

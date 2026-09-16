@@ -1,0 +1,515 @@
+// =============================================================================
+// WeBot — 定时任务与笔记板
+// =============================================================================
+//
+// 依赖 src/styles/v1.scss 的令牌（--space-*、--radius-*、--control-h、accent 家族），
+// 因此必须在它之后加载。这里只写本模块自己的布局，不重复定义颜色。
+
+.webot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: 100%;
+  min-height: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  overflow-y: auto;
+}
+
+.webot-loading {
+  padding: var(--space-6);
+  color: var(--text-dim);
+}
+
+// -----------------------------------------------------------------------------
+// 视图切换
+// -----------------------------------------------------------------------------
+//
+// 顶部的「定时任务 / 笔记」切换已移除：左侧栏的 WeBot / WeBot 笔记 两项就是
+// 同一个动作。一页里出现两套等价导航，只会让人犹豫该点哪个。
+// 取而代之的是一条紧凑工具栏：左侧说明当前视图，右侧放该视图的动作。
+
+.webot-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-shrink: 0;
+
+  h2 {
+    font-size: 13.5px;
+    font-weight: 700;
+  }
+
+  .webot-toolbar-sub {
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+}
+
+.webot-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.webot-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+  font-size: 12.5px;
+  color: var(--text);
+  flex-shrink: 0;
+
+  button {
+    border: 0;
+    background: transparent;
+    color: var(--text-faint);
+    cursor: pointer;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 任务列表 + 编辑器
+// -----------------------------------------------------------------------------
+//
+// 单栏：编辑器（展开时）在上，任务卡片网格在下。
+//
+// 之前是「列表 1fr | 编辑器 420px」并排。窗口在 150% 缩放下 CSS 视口只有约
+// 1066px，页面内容宽约 750px —— 编辑器占满 420 后列表只剩约 300px，而卡片里
+// 那排 flex-shrink:0 的动作按钮宽约 220px，把标题压成了每行一个字。
+// 列表才是这一页的内容，编辑器只是偶尔打开的表单：所以列表拿满宽，编辑器
+// 用自己内部的两栏来消化宽度。
+
+.webot {
+  // 编辑器内部的两栏按**内容宽度**断点，而不是视口宽度 —— 侧栏占多少、用户
+  // 把窗口拉多宽都不影响这里的判断。
+  container-type: inline-size;
+}
+
+.webot-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+// 断点从 1100px 降到 900px：Windows 显示缩放会让 CSS 视口远小于截图像素
+// （150% 缩放下 1600px 的窗口只有约 1066 CSS px），1100 的断点在这台机器上
+// **永远**走单栏分支。这与左侧栏那个 1180→900 的修正完全同源。
+
+.webot-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--space-3);
+  align-items: stretch;
+  min-width: 0;
+}
+
+.webot-empty {
+  padding: var(--space-5);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--text-faint);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.webot-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+
+  &[data-active='true'] {
+    border-color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  // 停用的任务整体压暗（开关本身保持全亮）：列表里一眼分出哪些还在跑。
+  &[data-enabled='false'] header,
+  &[data-enabled='false'] .webot-card-meta,
+  &[data-enabled='false'] .ref-chips,
+  &[data-enabled='false'] .webot-card-actions {
+    opacity: 0.6;
+  }
+
+  header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+}
+
+.webot-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.webot-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px var(--space-3);
+  font-size: 12px;
+  color: var(--text-dim);
+
+  span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+}
+
+.webot-card-error {
+  font-size: 12px;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.webot-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
+// 删除是破坏性动作，推到最右边与「运行 / 编辑」拉开距离，避免连点删掉任务。
+.webot-card-delete {
+  margin-left: auto;
+}
+
+.webot-chip-kind {
+  margin-left: 4px;
+  font-size: 10px;
+  // 这个标签坐在 .ref-chip 的强调色淡底上：--text-faint 压在那层底上只有 2.83，
+  // 已经是"看不清"的范围（深色模式的对比度审计抓出来的）。
+  color: var(--text-dim);
+}
+
+.webot-danger {
+  color: var(--danger) !important;
+}
+
+.webot-switch {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+
+  input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  span {
+    width: 34px;
+    height: 20px;
+    border-radius: 999px;
+    background: var(--line-strong);
+    position: relative;
+    transition: background 0.16s ease;
+
+    &::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--text-faint);
+      transition: translate 0.16s ease, background 0.16s ease;
+    }
+  }
+
+  input:checked + span {
+    background: var(--accent-soft);
+
+    &::after {
+      translate: 14px 0;
+      background: var(--accent);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 编辑器
+// -----------------------------------------------------------------------------
+
+.webot-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  min-width: 0;
+}
+
+.webot-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+
+  h3 {
+    font-size: 14px;
+    font-weight: 700;
+  }
+}
+
+.webot-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: var(--space-4) var(--space-5);
+
+  // 640 是量出来的：默认窗口下 `.webot` 的内容盒约 750px，窄窗口（986 视口）
+  // 下约 670px —— 两者都还够两栏。窗口高度只有约 635 CSS px，单栏会让表单竖着
+  // 排到 1000px 高，用户得来回滚。
+  @container (max-width: 640px) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.webot-editor-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.webot-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+
+  > span {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  input[type='text'],
+  input:not([type]),
+  textarea,
+  select {
+    width: 100%;
+    padding: 8px var(--space-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+    resize: vertical;
+
+    &:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    &::placeholder {
+      color: var(--text-faint);
+    }
+  }
+}
+
+.webot-picker-anchor {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+}
+
+.webot-schedule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+
+  label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+
+  input {
+    width: 68px;
+    padding: 6px var(--space-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    text-align: center;
+
+    &:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+  }
+
+  select {
+    padding: 6px var(--space-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12.5px;
+  }
+}
+
+.webot-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.webot-radio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.webot-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  cursor: pointer;
+
+  span {
+    display: flex;
+    flex-direction: column;
+  }
+
+  strong {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  em {
+    font-style: normal;
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+}
+
+.webot-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.webot-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+// -----------------------------------------------------------------------------
+// 笔记板
+// -----------------------------------------------------------------------------
+
+.webot-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.webot-note-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--space-3);
+}
+
+.webot-note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+
+  // 未读用左侧强调条 + 淡色底：既不是"整块高亮"（那样一堆未读会很吵），
+  // 也不只靠颜色（点在有边框的一侧，灰度下也能看出来）。
+  &[data-unread='true'] {
+    border-left: 2px solid var(--accent);
+    background: var(--elevated);
+  }
+
+  &[data-status='error'] {
+    border-left-color: var(--danger);
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+
+    h4 {
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+  }
+
+  p {
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  footer {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: auto;
+  }
+}
+
+.webot-note-time,
+.webot-note-task {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.webot-note-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}

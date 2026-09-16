@@ -29,13 +29,27 @@
         }
     }
 
-    // 玻璃材质与文字颜色均由 useNotificationAdaptiveTheme 按桌面背景的实际对比度
-    // 无级计算后写入 <html> 的 --noti-* 变量（纱层方向/浓度、分区连续文字色、光晕强度）；
-    // 此处提供采样失败/过亮背景下的安全默认值：白字 + 深色文字纱层，任何背景下都可读
-    --liquid-glass-shadow: var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22));
-    --liquid-glass-tint: var(--noti-tint, rgba(255, 255, 255, 0.1));
+    // 双极性光晕：亮核 + 暗边。玻璃是**完全透明**的，文字背后没有一张实色卡可以"垫"，
+    // 于是可读性只能由文字自己承担 —— 只加暗影会在暗背景上糊掉、只加亮晕会在亮背景上糊掉，
+    // 两层同时加就与背景极性无关。自适应引擎解出确定结论时仍会用它的单极性光晕覆盖这里。
+    --noti-halo-both: 0 0 2px rgba(255, 255, 255, 0.5), 0 1px 3px rgba(0, 0, 0, 0.6);
 
-    color: var(--noti-title-color, #ffffff);
+    // 玻璃材质与文字颜色：默认由 useNotificationAdaptiveTheme 按桌面背景的实际对比度
+    // 无级计算后写入 <html> 的 --noti-* 变量（纱层方向/浓度、文字色、光晕强度）。
+    // v1.0.3 起设置页可以用 --glass-* 覆盖其中几项（填充、文字色、描边、圆角、投影），
+    // 覆盖优先级更高：var(--glass-x, var(--noti-x, 兜底))。
+    //
+    // 填充**只作用在整张卡片上**（LiquidGlass 的色调层铺满 inset:0），
+    // 文字背后**没有**任何单独的一层底 —— 用户明确要求过：
+    //   "If the user chooses to apply a background, that background will be applied
+    //    throughout the entire popup, not just behind text.
+    //    There must never be any special background behind text."
+    // 旧版 `.notification-text::before` 就是那样一层（--noti-text-scrim 的实色圆角块），
+    // 它在深色桌面上会露出一块可见的浅色方块 —— 已整块删除。
+    --liquid-glass-shadow: var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22));
+    --liquid-glass-tint: var(--glass-fill, var(--noti-tint, rgba(255, 255, 255, 0.06)));
+
+    color: var(--glass-text-color, var(--noti-title-color, #ffffff));
 
     .notification-content {
         display: flex;
@@ -53,6 +67,19 @@
         min-width: 0;
         position: relative; // 时间锚定在文本块内，贴右缘
 
+        // 这里原本有一层 `&::before` 的实色可读性底（--noti-text-scrim）。
+        // 它的出发点是"玻璃全透、文字背后没有实底"，但结果是：填充/不填充之外
+        // 又多出一块**只在文字后面**的浅色方块 —— 用户报的"文字后面还是有白底"
+        // 就是它。可读性现在由两部分承担，都在整卡层面：
+        //   1. 整卡填充（--glass-fill，设置页可控，默认 16% 白）；
+        //   2. 文字自带的双极性光晕（--noti-halo-both：亮核 + 暗边）。
+        // 不再存在任何"只垫文字"的第三层。
+
+        // 内容抬到色调层之上
+        > * {
+            position: relative;
+        }
+
         .notification-header {
             display: flex;
             justify-content: space-between;
@@ -62,8 +89,8 @@
             .notification-title {
                 font-weight: 600;
                 font-size: 14px;
-                color: var(--noti-title-color, #ffffff);
-                text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
+                color: var(--glass-text-color, var(--noti-title-color, #ffffff));
+                text-shadow: var(--noti-title-halo, var(--noti-halo-both));
                 transition: color 0.08s linear, text-shadow 0.08s linear;
                 // 单行 + 硬截断（不显示省略号）：超出宽度就在该处直接切断，
                 // 绝不与右上角时间重叠
@@ -78,21 +105,20 @@
 
             .notification-time {
                 font-size: 12px;
-                color: var(--noti-title-tertiary, rgba(255, 255, 255, 0.9));
-                text-shadow: var(--noti-title-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
+                color: var(--glass-text-color, var(--noti-title-tertiary, rgba(255, 255, 255, 0.9)));
+                text-shadow: var(--noti-title-halo, var(--noti-halo-both));
                 transition: color 0.08s linear;
                 position: absolute;
                 top: 2px; // 与标题文字对齐（标题行内文字约占上 2px 起）
                 right: 2px; // 贴右缘，尽量让出标题与正文空间
-                font-variant-numeric: tabular-nums;
             }
         }
 
         .notification-body {
             font-size: 13px;
             // 与标题同色（近黑），层级靠字重区分：标题 600、正文默认 400
-            color: var(--noti-body-color, #ffffff);
-            text-shadow: var(--noti-body-halo, 0 1px 3px rgba(0, 0, 0, 0.55));
+            color: var(--glass-text-color, var(--noti-body-color, #ffffff));
+            text-shadow: var(--noti-body-halo, var(--noti-halo-both));
             transition: color 0.08s linear, text-shadow 0.08s linear;
             line-height: 1.4;
             display: -webkit-box;

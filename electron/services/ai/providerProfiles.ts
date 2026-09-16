@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto'
 import { ConfigService } from '../config'
 import { getProviderCatalogEntry, isProviderProtocol, normalizeProviderId } from './providerCatalog'
+import { isWireProtocol } from './modelRegistry'
 import { makeDefaultProfile } from './providerAdapters'
-import type { ProviderProfile, ProviderProfileInput, ProviderProfileStore, ProviderProfileSummary } from './providerTypes'
+import type { ProviderConsumer, ProviderModelMetadata, ProviderProfile, ProviderProfileInput, ProviderProfileStore, ProviderProfileSummary } from './providerTypes'
 
 const EMPTY_STORE: ProviderProfileStore = { version: 1, activeProfileId: '', profiles: [] }
 
@@ -13,12 +14,50 @@ function maskApiKey(value: string): string {
   return `${key.slice(0, 4)}•••${key.slice(-4)}`
 }
 
+/** Positive finite token counts only; anything else is "unknown" and must not be stored as 0. */
+function optionalTokenCount(value: unknown): number | undefined {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined
+}
+
+/**
+ * Normalize resolved model metadata for storage.
+ *
+ * `cost` and `capabilities` are copied wholesale: they describe the model, never
+ * the credential, so they are safe to keep in the same blob as the API key (the
+ * blob itself is safeStorage-encrypted — see `ENCRYPTED_STRING_KEYS`) and to
+ * expose through `ProviderProfileSummary`.
+ */
+function normalizeModelMetadata(profile: ProviderProfile): Pick<
+  ProviderProfile,
+  'modelContextWindow' | 'modelMaxOutputTokens' | 'modelProtocol' | 'modelCost' | 'modelCapabilities' | 'modelReasoningOptions' | 'modelMetadataSource' | 'modelMetadataUpdatedAt'
+> {
+  return {
+    modelContextWindow: optionalTokenCount(profile.modelContextWindow),
+    modelMaxOutputTokens: optionalTokenCount(profile.modelMaxOutputTokens),
+    modelProtocol: isWireProtocol(profile.modelProtocol) ? profile.modelProtocol : undefined,
+    modelCost: profile.modelCost && typeof profile.modelCost === 'object' ? { ...profile.modelCost } : undefined,
+    modelCapabilities: profile.modelCapabilities && typeof profile.modelCapabilities === 'object'
+      ? { ...profile.modelCapabilities, modalities: { input: [...(profile.modelCapabilities.modalities?.input || [])], output: [...(profile.modelCapabilities.modalities?.output || [])] } }
+      : undefined,
+    modelReasoningOptions: Array.isArray(profile.modelReasoningOptions) ? profile.modelReasoningOptions.map((option) => ({ ...option })) : undefined,
+    modelMetadataSource: profile.modelMetadataSource ? String(profile.modelMetadataSource).slice(0, 40) : undefined,
+    modelMetadataUpdatedAt: Number(profile.modelMetadataUpdatedAt) || undefined,
+  }
+}
+
 function cloneStore(store: ProviderProfileStore): ProviderProfileStore {
   return {
     version: 1,
     activeProfileId: store.activeProfileId,
+    consumerProfiles: store.consumerProfiles ? { ...store.consumerProfiles } : undefined,
     profiles: store.profiles.map((profile) => ({
       ...profile,
+      modelCost: profile.modelCost ? { ...profile.modelCost } : undefined,
+      modelCapabilities: profile.modelCapabilities
+        ? { ...profile.modelCapabilities, modalities: { input: [...profile.modelCapabilities.modalities.input], output: [...profile.modelCapabilities.modalities.output] } }
+        : undefined,
+      modelReasoningOptions: profile.modelReasoningOptions ? profile.modelReasoningOptions.map((option) => ({ ...option })) : undefined,
       headers: profile.headers ? { ...profile.headers } : undefined,
       discovery: profile.discovery ? { ...profile.discovery, models: [...profile.discovery.models] } : undefined,
     })),
@@ -36,6 +75,16 @@ function summary(profile: ProviderProfile): ProviderProfileSummary {
     model: profile.model,
     hasApiKey: Boolean(profile.apiKey),
     apiKeyHint: maskApiKey(profile.apiKey),
+    modelContextWindow: profile.modelContextWindow,
+    modelMaxOutputTokens: profile.modelMaxOutputTokens,
+    modelProtocol: profile.modelProtocol,
+    modelCost: profile.modelCost ? { ...profile.modelCost } : undefined,
+    modelCapabilities: profile.modelCapabilities
+      ? { ...profile.modelCapabilities, modalities: { input: [...profile.modelCapabilities.modalities.input], output: [...profile.modelCapabilities.modalities.output] } }
+      : undefined,
+    modelReasoningOptions: profile.modelReasoningOptions ? profile.modelReasoningOptions.map((option) => ({ ...option })) : undefined,
+    modelMetadataSource: profile.modelMetadataSource,
+    modelMetadataUpdatedAt: profile.modelMetadataUpdatedAt,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
     discovery: profile.discovery ? { ...profile.discovery, models: [...profile.discovery.models] } : undefined,
@@ -49,7 +98,41 @@ export class ProviderProfileService {
     this.config = config
   }
 
+  /**
+   * 现有配置是否"已加密但当前进程解不开"（拿不到系统密钥存储）。
+   *
+   * 抽成方法有三个理由：要在 read / write / save 三处判断；**必须容忍实现缺失**
+   * （单元测试用的是轻量假 ConfigService，没有这个方法，把它当"可读"处理，测试才
+   * 不会被这条与它无关的守卫绊倒）；以及不让"配置对象长得像什么"泄漏到调用点。
+   */
+  private isBlobUnreadable(): boolean {
+    const inspect = (this.config as unknown as { isValueUnreadable?: (key: string) => boolean }).isValueUnreadable
+    if (typeof inspect !== 'function') return false
+    try {
+      return inspect.call(this.config, 'weportAiProfilesBlob') === true
+    } catch {
+      return false
+    }
+  }
+
   private read(): ProviderProfileStore {
+    /**
+     * 先判"磁盘上有值但当前进程解不开"，再决定要不要读。
+     *
+     * 这一步守的是一个**会抹掉用户配置**的严重缺陷：CLI/TUI 宿主进程拿不到
+     * safeStorage 时，`config.get('weportAiProfilesBlob')` 会把加密值解成空串，
+     * 下面的代码就会认定"用户从来没有配置过服务"，于是走迁移分支新建一个空
+     * profile 并**写回磁盘** —— 磁盘上原本的所有服务项与密钥一起消失（实测发生过
+     * 多次，用户看到的就是"密钥明明填过又没了"）。同时因为 `safeEncrypt` 的降级
+     * 路径，那把密钥还会被明文写回。
+     *
+     * 读不出来时的正确行为是**只读、不写**：返回空视图，让调用方报"未配置"而不是
+     * 把别人的配置改成没配置。
+     */
+    if (this.isBlobUnreadable()) {
+      console.warn('[WeportAI] provider 配置已加密但当前进程无法解密（拿不到系统密钥存储），本次只读不写')
+      return cloneStore(EMPTY_STORE)
+    }
     const raw = String(this.config.get('weportAiProfilesBlob') || '').trim()
     let store: ProviderProfileStore = cloneStore(EMPTY_STORE)
     let hasValidProfileStore = false
@@ -61,6 +144,9 @@ export class ProviderProfileService {
           store = {
             version: 1,
             activeProfileId: String(parsed.activeProfileId || ''),
+            consumerProfiles: parsed.consumerProfiles && typeof parsed.consumerProfiles === 'object'
+              ? { ...parsed.consumerProfiles }
+              : undefined,
             profiles: parsed.profiles.map((profile) => this.normalizeStoredProfile(profile as ProviderProfile)).filter(Boolean) as ProviderProfile[],
           }
         }
@@ -79,6 +165,11 @@ export class ProviderProfileService {
         this.write(store)
       }
     }
+    // 自愈：迁移出来的 profile 可能**没有密钥**（见 healKeylessProfile），补一次。
+    if (this.healKeylessProfile(store)) this.write(store)
+    // 清掉"迁移留下的名字/残骸"（见 cleanupMigratedProfiles）：
+    // 用户看到的就是一个叫「DeepSeek（已迁移）」的服务项，既不能用也不知道该不该删。
+    if (this.cleanupMigratedProfiles(store)) this.write(store)
     if (store.activeProfileId && !store.profiles.some((profile) => profile.id === store.activeProfileId)) store.activeProfileId = store.profiles[0]?.id || ''
     if (!store.activeProfileId && store.profiles[0]) {
       store.activeProfileId = store.profiles[0].id
@@ -100,6 +191,10 @@ export class ProviderProfileService {
       baseUrl: String(profile.baseUrl || catalog?.baseUrl || '').trim().replace(/\/+$/, ''),
       model: String(profile.model).trim().slice(0, 200),
       apiKey: String(profile.apiKey || ''),
+      // Resolved model metadata survives a reload: re-deriving it needs network
+      // access, and the cached values are what the context meter and the cost
+      // panel read on the first paint after a restart.
+      ...normalizeModelMetadata(profile),
       headers: profile.headers && typeof profile.headers === 'object' ? Object.fromEntries(Object.entries(profile.headers).map(([key, value]) => [String(key).slice(0, 80), String(value).slice(0, 500)])) : undefined,
       createdAt: Number(profile.createdAt) || Date.now(),
       updatedAt: Number(profile.updatedAt) || Date.now(),
@@ -125,7 +220,96 @@ export class ProviderProfileService {
     return { ...profile, id: `profile-legacy-${randomUUID().slice(0, 8)}` }
   }
 
-  private write(store: ProviderProfileStore): void {
+  /**
+   * 自愈：profile 里没有密钥，而 legacy 配置里有 —— 补进去。
+   *
+   * 修的是一个**真实出现过**的坏状态（本机 2026-09 的诊断就撞上了）：`migrateLegacyProfile()`
+   * 在 `weportAiApiKey` 还是空的时候照样会把一个没有密钥的 profile 落盘；而它一旦落盘，
+   * `read()` 就再也不走迁移分支（`hasValidProfileStore` 已经为真）。用户后来在旧版设置里
+   * 填的密钥因此永远进不了 profile，所有 AI 调用都报"未配置 AI API Key"，而配置里明明
+   * 躺着一个能解开的密钥（实测 35 字符，safeStorage 正常）。
+   *
+   * 只在**能确定是同一个服务**时才补，绝不猜：
+   *   - 恰好只有一个没有密钥的 profile（多个就说不清该给谁）；
+   *   - 它的 providerId 与 legacy baseUrl/model 推出的 provider 一致；
+   *   - baseUrl 一致（或它自己没有 baseUrl）。
+   * 用户手动添加的服务、以及已经带密钥的 profile 一律不碰。
+   */
+  private healKeylessProfile(store: ProviderProfileStore): boolean {
+    const legacyKey = String(this.config.get('weportAiApiKey') || '').trim()
+    if (!legacyKey) return false
+    const keyless = store.profiles.filter((profile) => !String(profile.apiKey || '').trim())
+    if (keyless.length !== 1) return false
+    const legacyBaseUrl = String(this.config.get('weportAiBaseUrl') || '').trim().replace(/\/+$/, '')
+    const legacyModel = String(this.config.get('weportAiModel') || '').trim()
+    const legacyProviderId = /deepseek/i.test(legacyBaseUrl) || /^deepseek/i.test(legacyModel) ? 'deepseek' : 'custom'
+    const target = keyless[0]
+    if (target.providerId !== legacyProviderId) return false
+    if (legacyBaseUrl && target.baseUrl && target.baseUrl !== legacyBaseUrl) return false
+    target.apiKey = legacyKey
+    target.updatedAt = Date.now()
+    console.log(`[WeportAI] 自愈：把 legacy weportAiApiKey 补进服务「${target.name}」（${target.providerId}/${target.model}）`)
+    return true
+  }
+
+  /**
+   * 清掉迁移留下的名字与残骸。
+   *
+   * `migrateLegacyProfile()` 给迁移出来的服务起名「DeepSeek（已迁移）」/「旧版 WeportAI
+   * 配置」—— 那是**迁移当时的说明**，但它会被永久写进用户的服务列表。用户看到的
+   * 就是一个叫「已迁移」、既不能确认能用、又不敢删的服务项（本机实测撞上过）。
+   *
+   * 两种处理，都只在能确定是同一个服务时动手：
+   *   A. 它没有密钥（本来就没法用）**且**另有至少一个带密钥的服务 → 直接删掉，
+   *      并把指向它的功能面分配改回"跟随默认"。留着只会让用户以为配置坏了。
+   *   B. 其它情况 → 只把名字换成干净的服务名，密钥/baseUrl/model 一律保留。
+   *
+   * 绝不在"它是用户唯一一个服务"时删除 —— 那会把用户的服务配置清空。
+   */
+  private cleanupMigratedProfiles(store: ProviderProfileStore): boolean {
+    const MIGRATED_NAMES = ['旧版 WeportAI 配置']
+    const isMigratedProfile = (name: string): boolean =>
+      name.includes('（已迁移）') || MIGRATED_NAMES.includes(name)
+    if (!store.profiles.some((profile) => isMigratedProfile(profile.name))) return false
+
+    const keyed = store.profiles.filter((profile) => String(profile.apiKey || '').trim())
+    const doomed = new Set<string>()
+    let changed = false
+    for (const profile of store.profiles) {
+      if (!isMigratedProfile(profile.name)) continue
+      const usable = Boolean(String(profile.apiKey || '').trim())
+      if (!usable && keyed.length > 0) {
+        // A：没密钥、且已经有能用的服务 —— 这是纯残骸
+        doomed.add(profile.id)
+        continue
+      }
+      // B：保留，只换个正常人能读懂的名字
+      const clean = profile.providerId === 'deepseek' ? 'DeepSeek' : 'WeportAI'
+      if (profile.name !== clean) {
+        profile.name = clean
+        profile.updatedAt = Date.now()
+        changed = true
+      }
+    }
+    if (doomed.size === 0) return changed
+
+    store.profiles = store.profiles.filter((profile) => !doomed.has(profile.id))
+    if (store.consumerProfiles) {
+      for (const [consumer, id] of Object.entries(store.consumerProfiles)) {
+        if (doomed.has(String(id))) delete (store.consumerProfiles as Record<string, string>)[consumer]
+      }
+    }
+    if (doomed.has(store.activeProfileId)) store.activeProfileId = store.profiles[0]?.id || ''
+    console.log(`[WeportAI] 清理了 ${doomed.size} 个迁移残骸服务（无密钥且已有可用服务）`)
+    return true
+  }
+
+  private write(store: ProviderProfileStore): void {    // 双保险：read() 已经挡过一次，写入路径自己再挡一次 —— 少写一次只是功能不可用，
+    // 误写一次是用户配置全丢。
+    if (this.isBlobUnreadable()) {
+      console.warn('[WeportAI] 拒绝写入 provider 配置：现有配置无法解密，覆盖会丢失全部服务项')
+      return
+    }
     this.config.set('weportAiProfilesBlob', JSON.stringify(store))
   }
 
@@ -138,11 +322,63 @@ export class ProviderProfileService {
     return store.profiles.find((profile) => profile.id === store.activeProfileId) || store.profiles[0] || null
   }
 
+  /**
+   * 某个功能面该用哪个服务。
+   *
+   * 没有单独指定时回落到默认服务 —— 因此绝大多数用户看到的仍然是"一个服务，
+   * 三处都用"。指定过的那一面才走自己的，互不干扰。
+   */
+  getForConsumer(consumer: ProviderConsumer): ProviderProfile | null {
+    const store = this.read()
+    const assignedId = store.consumerProfiles?.[consumer]
+    if (assignedId) {
+      const assigned = store.profiles.find((profile) => profile.id === assignedId)
+      if (assigned) return assigned
+    }
+    return store.profiles.find((profile) => profile.id === store.activeProfileId) || store.profiles[0] || null
+  }
+
+  /** 指定某个功能面使用哪个服务；`profileId` 为空表示恢复「跟随默认」。 */
+  assign(consumer: ProviderConsumer, profileId: string): boolean {
+    const store = this.read()
+    const id = String(profileId || '').trim()
+    if (id && !store.profiles.some((profile) => profile.id === id)) return false
+    const next = { ...(store.consumerProfiles || {}) }
+    if (id) next[consumer] = id
+    else delete next[consumer]
+    store.consumerProfiles = next
+    this.write(store)
+    return true
+  }
+
+  /** 三个功能面当前各自指向哪个服务（含"跟随默认"的解析结果）。 */
+  consumerAssignments(): Array<{ consumer: ProviderConsumer; profileId: string; profileName: string; followsDefault: boolean; providerId: string; model: string }> {
+    const store = this.read()
+    const consumers: ProviderConsumer[] = ['chat', 'weclone', 'webot']
+    return consumers.map((consumer) => {
+      const assignedId = String(store.consumerProfiles?.[consumer] || '')
+      const assigned = assignedId ? store.profiles.find((profile) => profile.id === assignedId) : undefined
+      const resolved = assigned || store.profiles.find((profile) => profile.id === store.activeProfileId) || store.profiles[0] || null
+      return {
+        consumer,
+        profileId: resolved?.id || '',
+        profileName: resolved?.name || '',
+        followsDefault: !assigned,
+        providerId: resolved?.providerId || '',
+        model: resolved?.model || '',
+      }
+    })
+  }
+
   getById(id: string): ProviderProfile | null {
     return this.read().profiles.find((profile) => profile.id === id) || null
   }
 
   save(input: ProviderProfileInput): ProviderProfileSummary {
+    // 写不进去就直接说清楚，别让上层以为保存成功了（CLI/TUI 宿主进程会遇到）。
+    if (this.isBlobUnreadable()) {
+      throw new Error('当前进程无法访问系统密钥存储，无法保存 AI 服务配置（请在 Weport 界面里配置）')
+    }
     const store = this.read()
     const existing = input.id ? store.profiles.find((profile) => profile.id === input.id) : undefined
     const catalog = getProviderCatalogEntry(input.providerId)
@@ -168,11 +404,40 @@ export class ProviderProfileService {
     const host = parsed.hostname.toLowerCase()
     const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
     if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && local)) throw new Error('服务地址必须使用 HTTPS（仅 localhost 可使用 HTTP）')
+    // A different model invalidates the resolved metadata. Keeping the previous
+    // model's context window would make the context meter (and the compaction
+    // trigger) describe a model the profile no longer uses.
+    const sameTarget = Boolean(existing) && existing!.model === profile.model && existing!.baseUrl === profile.baseUrl && existing!.providerId === profile.providerId
+    if (sameTarget && existing) Object.assign(profile, normalizeModelMetadata(existing))
     if (existing) store.profiles = store.profiles.map((item) => item.id === existing.id ? profile : item)
     else store.profiles.push(profile)
     if (!store.activeProfileId) store.activeProfileId = profile.id
     this.write(store)
     return summary(profile)
+  }
+
+  /**
+   * Persist metadata resolved for the profile's current model.
+   *
+   * Called after discovery/registry resolution. Only the fields in
+   * `ProviderModelMetadata` are touched, so a concurrent settings save cannot be
+   * clobbered by a stale in-memory copy of the profile.
+   */
+  setModelMetadata(id: string, metadata: Partial<ProviderModelMetadata>): boolean {
+    const store = this.read()
+    const profile = store.profiles.find((item) => item.id === id)
+    if (!profile) return false
+    profile.modelContextWindow = metadata.contextWindow
+    profile.modelMaxOutputTokens = metadata.maxOutputTokens
+    profile.modelProtocol = isWireProtocol(metadata.protocol) ? metadata.protocol : undefined
+    profile.modelCost = metadata.cost
+    profile.modelCapabilities = metadata.capabilities
+    profile.modelReasoningOptions = metadata.reasoningOptions
+    profile.modelMetadataSource = metadata.source
+    profile.modelMetadataUpdatedAt = Date.now()
+    profile.updatedAt = Date.now()
+    this.write(store)
+    return true
   }
 
   activate(id: string): boolean {
@@ -189,6 +454,15 @@ export class ProviderProfileService {
     if (next.length === store.profiles.length) return false
     store.profiles = next
     if (store.activeProfileId === id) store.activeProfileId = next[0]?.id || ''
+    // 指向已删除服务的功能面要一起清掉：留着悬空 id 会让它悄悄回落到默认服务，
+    // 而设置页仍显示"已单独指定"。
+    if (store.consumerProfiles) {
+      const remaining: Partial<Record<ProviderConsumer, string>> = {}
+      for (const [consumer, profileId] of Object.entries(store.consumerProfiles) as Array<[ProviderConsumer, string]>) {
+        if (profileId && profileId !== id) remaining[consumer] = profileId
+      }
+      store.consumerProfiles = remaining
+    }
     this.write(store)
     return true
   }

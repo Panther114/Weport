@@ -104,6 +104,7 @@ export default function SnsPage() {
   const postsRef = useRef(posts)
   postsRef.current = posts
   const feedRef = useRef<HTMLDivElement | null>(null)
+  const jumpPopoverRef = useRef<HTMLDivElement | null>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const loadingRef = useRef(false)
   const transientRetryRef = useRef(0)
@@ -704,10 +705,66 @@ export default function SnsPage() {
   useEscape(() => setDebugPost(null), !!debugPost)
   useEscape(() => setShowJumpPopover(false), showJumpPopover)
 
+  // 日历弹层点外面就关。原来只能点同一个按钮切回来或按 Esc，用户点了别处
+  // 以为关掉了，结果它一直盖在列表上——「弹窗关不掉」的来源之一。
+  useEffect(() => {
+    if (!showJumpPopover) return
+    const onDown = (e: MouseEvent) => {
+      const node = e.target as Node
+      if (jumpPopoverRef.current?.contains(node)) return
+      if ((node as HTMLElement).closest?.('.sns-sidebar-date')) return
+      setShowJumpPopover(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [showJumpPopover])
+
+  /**
+   * 发布者列表改成虚拟滚动（实测这里是本页最大的一笔开销：229 行 + 164 张头像
+   * 一次性挂上去，切页那一帧 212.7ms、3 个 long task 共 413ms）。
+   *
+   * 但侧栏是**按内容收缩**的（`.sns-sidebar { align-self: start; max-height: 100% }`，
+   * 见 v09.scss：只有 5 个发布者时不该顶出一大片空卡片）。虚拟滚动的滚动盒必须要
+   * 一个**确定的高度**，而虚拟滚动下"内容高度"读不出来 —— 行是绝对定位的，容器会
+   * 自己塌成 4px（实测过）。所以这里按数据算想要的高度，再用实测的可用空间封顶：
+   * 短列表照旧收缩，长列表封顶后自己滚。
+   */
+  const SNS_AUTHOR_ROW_STRIDE = 38 // .sns-author 36px + .sns-author-row 的 2px 行距
+  const sidebarRef = useRef<HTMLElement | null>(null)
+  const [authorListHeight, setAuthorListHeight] = useState<number | null>(null)
+
+  useLayoutEffect(() => {
+    const aside = sidebarRef.current
+    if (!aside || authorsLoading || visibleAuthors.length === 0) return
+    const measure = () => {
+      const rowH = aside.parentElement?.clientHeight ?? 0
+      if (rowH <= 0) return
+      let used = 0
+      for (const child of Array.from(aside.children)) {
+        if (child.classList.contains('sns-side-block-grow')) continue
+        used += (child as HTMLElement).offsetHeight
+      }
+      const cs = getComputedStyle(aside)
+      const chrome =
+        parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+      const gaps = 6 * Math.max(0, aside.children.length - 1) // .sns-side-block 的 gap
+      const cap = Math.max(160, Math.floor(rowH - used - chrome - gaps))
+      const wanted = Math.ceil(visibleAuthors.length * SNS_AUTHOR_ROW_STRIDE) + 4
+      setAuthorListHeight(Math.min(wanted, cap))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    if (aside.parentElement) ro.observe(aside.parentElement)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [authorsLoading, visibleAuthors.length])
+
   const selectAllAuthors = () => {
     setSelected(new Set(authors.map((a) => a.username)))
   }
-
   // Virtuoso 头尾部件
   const snsVirtuosoComponents = useMemo(
     () => ({
@@ -807,212 +864,244 @@ export default function SnsPage() {
         </div>
       )}
 
+      {/* 页面级信息与动作放在页面级：统计是「整个归档」的数字，导出/刷新也是整页
+          的动作，原来它们挤在筛选侧栏顶部，占了侧栏近三分之一高度，而侧栏真正
+          的职责只有一个 —— 筛选。标题也不在这里重复（页面头已经写着「朋友圈」）。 */}
+      <div className="sns-topbar">
+        <div className="sns-topbar-stats">
+          <div className="v09-stat">
+            <b>
+              <CountUp value={overview?.totalPosts ?? 0} />
+            </b>
+            <span>总动态</span>
+          </div>
+          <div className="v09-stat">
+            <b>
+              <CountUp value={overview?.totalFriends ?? 0} />
+            </b>
+            <span>好友</span>
+          </div>
+          {overview?.myPosts !== null && (
+            <div className="v09-stat">
+              <b>
+                <CountUp value={overview?.myPosts ?? 0} />
+              </b>
+              <span>我的动态</span>
+            </div>
+          )}
+        </div>
+        <div className="sns-topbar-actions">
+          <button
+            type="button"
+            className={`chip ${antiDelete === 'installed' ? 'chip-active' : ''}`}
+            disabled={antiDeleteBusy || antiDelete === 'unknown'}
+            onClick={() => void toggleAntiDelete()}
+            title="安装朋友圈删除拦截触发器（防删除）"
+          >
+            {antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
+            {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : '防删除'}
+          </button>
+          <button type="button" className="chip" onClick={() => setExportOpen(true)}>
+            <Download size={13} />
+            导出
+          </button>
+          <button type="button" className="chip" onClick={() => void handleRefresh()} title="刷新动态流与统计">
+            <RefreshCw size={13} className={refreshSpin ? 'spin' : ''} />
+            刷新
+          </button>
+        </div>
+      </div>
+
       <div className="sns-main">
-        {/* 筛选侧栏（含页面头部：标题 / 统计 / 操作，紧凑布局） */}
-        <aside className="sns-sidebar">
-          <div className="sns-sidebar-hero">
-            <div className="sns-sidebar-title">
-              <Images size={15} />
-              <span>朋友圈</span>
-              <span className="v09-sub">本地归档</span>
+        {/* 筛选侧栏：搜索 / 日期 / 发布者 三段，每段一条小标题。之前三段连着排，
+            看起来像一坨输入框，用户分不清哪个框管什么。 */}
+        <aside className="sns-sidebar" ref={sidebarRef}>
+          <div className="sns-side-block">
+            <div className="sns-side-label">
+              <Search size={12} />
+              搜索
             </div>
-            <div className="sns-sidebar-stats">
-              <div className="v09-stat">
-                <b>
-                  <CountUp value={overview?.totalPosts ?? 0} />
-                </b>
-                <span>总动态</span>
-              </div>
-              <div className="v09-stat">
-                <b>
-                  <CountUp value={overview?.totalFriends ?? 0} />
-                </b>
-                <span>好友</span>
-              </div>
-              {overview?.myPosts !== null && (
-                <div className="v09-stat">
-                  <b>
-                    <CountUp value={overview?.myPosts ?? 0} />
-                  </b>
-                  <span>我的动态</span>
-                </div>
-              )}
-            </div>
-            <div className="sns-sidebar-actions">
-              <button
-                type="button"
-                className={`chip ${antiDelete === 'installed' ? 'chip-active' : ''}`}
-                disabled={antiDeleteBusy || antiDelete === 'unknown'}
-                onClick={() => void toggleAntiDelete()}
-                title="安装朋友圈删除拦截触发器（防删除）"
-              >
-                {antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
-                {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : '防删除'}
-              </button>
-              <button type="button" className="chip" onClick={() => setExportOpen(true)}>
-                <Download size={13} />
-                导出
-              </button>
-              <button type="button" className="chip" onClick={() => void handleRefresh()} title="刷新动态流与统计">
-                <RefreshCw size={13} className={refreshSpin ? 'spin' : ''} />
-                刷新
-              </button>
-            </div>
-          </div>
-
-          <div className="sns-sidebar-search">
-            <Search size={14} />
-            <input
-              value={keywordDraft}
-              placeholder="搜索动态内容…"
-              onChange={(e) => setKeywordDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') applyKeyword()
-              }}
-            />
-            {keyword && (
-              <button className="sns-sidebar-clear" title="清除关键词" onClick={() => { setKeyword(''); setKeywordDraft('') }}>
-                <X size={13} />
-              </button>
-            )}
-          </div>
-          <label className="sns-search-comments" title="开启后同时搜索正文与评论（数据量大时稍慢）">
-            <input
-              type="checkbox"
-              checked={searchComments}
-              onChange={(e) => {
-                setSearchComments(e.target.checked)
-                if (keyword) setKeyword(keyword.trim() || '')
-              }}
-            />
-            <span>同时搜索评论</span>
-          </label>
-
-          <div className="sns-sidebar-date">
-            <CalendarDays size={14} />
-            <button
-              type="button"
-              className={`sns-date-jump-btn ${dateJump ? 'active' : ''}`}
-              onClick={openJumpPopover}
-              title={dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
-            >
-              {dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
-            </button>
-            {dateJump && (
-              <button className="sns-sidebar-clear" title="清除日期筛选" onClick={() => { setDateJump(null); setShowJumpPopover(false) }}>
-                <X size={13} />
-              </button>
-            )}
-            {showJumpPopover && (
-              <div className="sns-calendar-popover">
-                <div className="sns-calendar-head">
-                  <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(-1)} title="上个月">
-                    <ChevronLeft size={14} />
-                  </button>
-                  <span className="sns-calendar-title">
-                    {jumpPopoverDate.getFullYear()}年{jumpPopoverDate.getMonth() + 1}月
-                  </span>
-                  <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(1)} title="下个月">
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
-                <div className="sns-calendar-grid">
-                  {['日', '一', '二', '三', '四', '五', '六'].map((w) => (
-                    <span key={w} className="sns-calendar-weekday">
-                      {w}
-                    </span>
-                  ))}
-                  {jumpCalendarDays.map((day, idx) =>
-                    day ? (
-                      <button
-                        key={idx}
-                        type="button"
-                        className={`sns-calendar-day ${dateJump && toDayKey(dateJump.start) === toDayKey(day.getTime() / 1000) ? 'selected' : ''}`}
-                        onClick={() => jumpToDate(day)}
-                      >
-                        {day.getDate()}
-                        {(jumpDateCounts[toDayKey(day.getTime() / 1000)] || 0) > 0 && <i className="sns-calendar-dot" />}
-                      </button>
-                    ) : (
-                      <span key={idx} className="sns-calendar-empty" />
-                    ),
-                  )}
-                </div>
-                <div className="sns-calendar-foot">
-                  {jumpDateCountsLoading ? (
-                    <Loader2 size={12} className="spin" />
-                  ) : (
-                    <span>点击日期跳转到当天动态</span>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="sns-sidebar-head">
-            <span>发布者</span>
-            <div className="sns-sidebar-head-actions">
-              <button
-                className="sns-sidebar-reset"
-                title="刷新发布者列表与统计"
-                onClick={() => {
-                  void loadOverview()
-                  void loadAuthors()
+            <div className="sns-sidebar-search">
+              <Search size={14} />
+              <input
+                value={keywordDraft}
+                placeholder="搜索动态内容…"
+                onChange={(e) => setKeywordDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') applyKeyword()
                 }}
-              >
-                <RefreshCw size={12} />
-                刷新
-              </button>
-              <button className="sns-sidebar-reset" onClick={selectAllAuthors}>
-                <CheckSquare size={12} />
-                全选
-              </button>
-              {(selected.size > 0 || keyword || searchComments || dateJump) && (
-                <button className="sns-sidebar-reset" onClick={clearFilters}>
-                  <X size={12} />
-                  重置
+              />
+              {keyword && (
+                <button className="sns-sidebar-clear" title="清除关键词" onClick={() => { setKeyword(''); setKeywordDraft('') }}>
+                  <X size={13} />
                 </button>
               )}
             </div>
+            <label className="sns-search-comments" title="开启后同时搜索正文与评论（数据量大时稍慢）">
+              <input
+                type="checkbox"
+                checked={searchComments}
+                onChange={(e) => {
+                  setSearchComments(e.target.checked)
+                  if (keyword) setKeyword(keyword.trim() || '')
+                }}
+              />
+              <span>同时搜索评论</span>
+            </label>
           </div>
 
-          <div className="sns-author-search">
-            <Search size={13} />
-            <input
-              value={authorSearch}
-              placeholder="搜索发布者"
-              spellCheck={false}
-              onChange={(e) => setAuthorSearch(e.target.value)}
-            />
-            {authorSearch && (
+          <div className="sns-side-block">
+            <div className="sns-side-label">
+              <CalendarDays size={12} />
+              日期
+            </div>
+            <div className="sns-sidebar-date">
               <button
-                className="sns-author-search-clear"
-                title="清除发布者搜索"
-                onClick={() => setAuthorSearch('')}
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
-
-          <div className="sns-author-list">
-            {authorsLoading && <div className="wp-loading">加载发布者…</div>}
-            {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
-            {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
-              <div className="wp-empty">无匹配发布者</div>
-            )}
-            {visibleAuthors.map((a) => (
-              <button
-                key={a.username}
                 type="button"
-                className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
-                onClick={() => toggleAuthor(a.username)}
+                className={`sns-date-jump-btn ${dateJump ? 'active' : ''}`}
+                onClick={openJumpPopover}
+                title={dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
               >
-                <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
-                <span className="sns-author-name">{a.displayName}</span>
-                <span className="sns-author-count">{a.postCount ?? ''}</span>
+                {dateJump ? new Date(dateJump.start * 1000).toLocaleDateString('zh-CN') : '按日期跳转'}
               </button>
-            ))}
+              {dateJump && (
+                <button className="sns-sidebar-clear" title="清除日期筛选" onClick={() => { setDateJump(null); setShowJumpPopover(false) }}>
+                  <X size={13} />
+                </button>
+              )}
+              {showJumpPopover && (
+                <div className="sns-calendar-popover" ref={jumpPopoverRef}>
+                  <div className="sns-calendar-head">
+                    <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(-1)} title="上个月">
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span className="sns-calendar-title">
+                      {jumpPopoverDate.getFullYear()}年{jumpPopoverDate.getMonth() + 1}月
+                    </span>
+                    <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(1)} title="下个月">
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                  <div className="sns-calendar-grid">
+                    {['日', '一', '二', '三', '四', '五', '六'].map((w) => (
+                      <span key={w} className="sns-calendar-weekday">
+                        {w}
+                      </span>
+                    ))}
+                    {jumpCalendarDays.map((day, idx) =>
+                      day ? (
+                        <button
+                          key={idx}
+                          type="button"
+                          className={`sns-calendar-day ${dateJump && toDayKey(dateJump.start) === toDayKey(day.getTime() / 1000) ? 'selected' : ''}`}
+                          onClick={() => jumpToDate(day)}
+                        >
+                          {day.getDate()}
+                          {(jumpDateCounts[toDayKey(day.getTime() / 1000)] || 0) > 0 && <i className="sns-calendar-dot" />}
+                        </button>
+                      ) : (
+                        <span key={idx} className="sns-calendar-empty" />
+                      ),
+                    )}
+                  </div>
+                  <div className="sns-calendar-foot">
+                    {jumpDateCountsLoading ? (
+                      <Loader2 size={12} className="spin" />
+                    ) : (
+                      <span>点击日期跳转到当天动态</span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="sns-side-block sns-side-block-grow">
+            <div className="sns-side-label">
+              <Users2 size={12} />
+              发布者
+              <div className="sns-side-label-actions">
+                <button
+                  className="sns-sidebar-reset"
+                  title="刷新发布者列表与统计"
+                  onClick={() => {
+                    void loadOverview()
+                    void loadAuthors()
+                  }}
+                >
+                  <RefreshCw size={12} />
+                  刷新
+                </button>
+                <button className="sns-sidebar-reset" onClick={selectAllAuthors}>
+                  <CheckSquare size={12} />
+                  全选
+                </button>
+                {(selected.size > 0 || keyword || searchComments || dateJump) && (
+                  <button className="sns-sidebar-reset" onClick={clearFilters}>
+                    <X size={12} />
+                    重置
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="sns-author-search">
+              <Search size={13} />
+              <input
+                value={authorSearch}
+                placeholder="搜索发布者"
+                spellCheck={false}
+                onChange={(e) => setAuthorSearch(e.target.value)}
+              />
+              {authorSearch && (
+                <button
+                  className="sns-author-search-clear"
+                  title="清除发布者搜索"
+                  onClick={() => setAuthorSearch('')}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            {authorsLoading || visibleAuthors.length === 0 ? (
+              <div className="sns-author-list sns-author-list-state">
+                {authorsLoading && <div className="wp-loading">加载发布者…</div>}
+                {!authorsLoading && authors.length === 0 && <div className="wp-empty">未找到朋友圈数据</div>}
+                {!authorsLoading && authors.length > 0 && visibleAuthors.length === 0 && (
+                  <div className="wp-empty">无匹配发布者</div>
+                )}
+              </div>
+            ) : (
+              /**
+               * 发布者列表必须虚拟滚动：实测这个侧栏是「朋友圈」切页最大的一笔开销
+               * （229 行 + 164 张头像一次性挂上去，单帧 212.7ms、3 个 long task 共 413ms）。
+               * 动态流早在用 Virtuoso，侧栏却一直全量渲染 —— 行数完全由朋友圈历史决定，
+               * 越用越卡。虚拟滚动不改变交互（搜索、全选、单选、滚动位置都照旧），
+               * 只是不再把 200+ 行同时留在 DOM 里。
+               */
+              <Virtuoso
+                className="sns-author-list"
+                style={authorListHeight ? { height: `${authorListHeight}px` } : undefined}
+                data={visibleAuthors}
+                computeItemKey={(_, a) => a.username}
+                defaultItemHeight={38}
+                increaseViewportBy={{ top: 200, bottom: 400 }}
+                itemContent={(_, a) => (
+                  <div className="sns-author-row">
+                    <button
+                      type="button"
+                      className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
+                      onClick={() => toggleAuthor(a.username)}
+                    >
+                      <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
+                      <span className="sns-author-name">{a.displayName}</span>
+                      <span className="sns-author-count">{a.postCount ?? ''}</span>
+                    </button>
+                  </div>
+                )}
+              />
+            )}
           </div>
         </aside>
 

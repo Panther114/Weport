@@ -47,7 +47,9 @@ export interface AnalyticsWordCloudProps {
   className?: string
 }
 
-const DEFAULT_PALETTE = ['var(--accent)', 'var(--accent-2)', 'var(--accent-3)', 'var(--accent-4)', 'var(--accent-5)', 'var(--accent-6)']
+// 词云用整条强调色阶上色，但**只用能当文字用的那几档**：色阶最深的 --accent-4 / -deep
+// 是给进度条与面积填充准备的，当文字压在深色面板上只有 3.4 对比度（对比度审计抓到的）。
+const DEFAULT_PALETTE = ['var(--accent)', 'var(--accent-2)', 'var(--accent-3)', 'var(--accent-5)', 'var(--accent-6)', 'var(--accent)']
 const DEFAULT_FONT_FAMILY = 'Weport, Segoe UI, Microsoft YaHei UI, Microsoft YaHei, system-ui, sans-serif'
 const DEFAULT_SIZE = { width: 560, height: 300 }
 

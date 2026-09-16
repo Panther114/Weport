@@ -13,7 +13,11 @@
   --line-strong: #3a3a4a;
   --text: #f2f2f5;
   --text-dim: #b6b6c0;
-  --text-faint: #6e6e7a;
+  /* 三级文字里最淡的一档。原来 #6e6e7a 压在面板底色（#17171d）上只有 3.6、
+     压在卡内块（#1e1e26）上 3.3 —— 而全应用最多的"提示 / 次要信息"文字都在
+     这一档，实际观感就是"灰到看不清"。提到 #8b8b98 后在各层表面上都能过 4.5。
+     （对比度审计 3.0-4.5 警告带里，这一档原本占了 800 多条中的绝大多数。） */
+  --text-faint: #8b8b98;
   --ok: #9fe8a8;
   --warn: #ffd27e;
   --danger: #e5484d;
@@ -23,38 +27,13 @@
   --font-mono: Consolas, "Cascadia Mono", "JetBrains Mono", monospace;
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
-
-  /* 彩色主题（默认）：提升饱和度与对比度的浅蓝家族，克制但更通透 */
-  --accent: #5b8eff;
-  --accent-2: #6ea8ff;
-  --accent-3: #8ab4ff;
-  --accent-4: #3d5bff;
-  --accent-5: #7ec0ff;
-  --accent-6: #a6cfff;
-  --accent-strong: #5b8eff;
-  --accent-deep: #3658ff;
-  --accent-soft: rgba(91, 142, 255, 0.16);
-  --accent-softer: rgba(91, 142, 255, 0.09);
-  --accent-glow: rgba(91, 142, 255, 0.28);
-  --accent-grad: linear-gradient(165deg, rgba(91, 142, 255, 0.24), rgba(91, 142, 255, 0.04));
-  --accent-grad-strong: linear-gradient(165deg, rgba(91, 142, 255, 0.36), rgba(54, 88, 255, 0.12));
 }
 
-/* 黑白主题：全部 accent 退化为中性灰阶（背景保持不变） */
-:root[data-theme="mono"] {
-  --accent: #f4f4f5;
-  --accent-2: #d4d4da;
-  --accent-3: #b8b8c0;
-  --accent-4: #9a9aa4;
-  --accent-5: #7e7e88;
-  --accent-6: #63636d;
-  --accent-strong: #f4f4f5;
-  --accent-deep: #d4d4da;
-  --accent-soft: rgba(244, 244, 245, 0.1);
-  --accent-softer: rgba(244, 244, 245, 0.05);
-  --accent-grad: linear-gradient(160deg, rgba(244, 244, 245, 0.12), rgba(244, 244, 245, 0.03));
-  --accent-grad-strong: linear-gradient(160deg, rgba(244, 244, 245, 0.2), rgba(160, 160, 170, 0.08));
-}
+/* 强调色家族与明暗两档 moved to styles/theme.scss（在本文件之后加载）：
+   这里原来写死了浅蓝的 --accent 家族和 `[data-theme="mono"]` 灰阶覆盖，而
+   设置页的「强调色」色块写的是 data-accent —— 没有任何规则读它。现在两种
+   控制合成一个模型（data-mode × data-accent），令牌全部由 theme.scss 从
+   --accent-raw 推导。 */
 
 * {
   box-sizing: border-box;
@@ -935,9 +914,24 @@ button:disabled {
   white-space: nowrap;
 }
 
-.account-item div {
+/* 只让**文本列**吃掉剩余宽度。
+ *
+ * 这里原来是裸的 `.account-item div { flex: 1 }`，而 `<Avatar>` 的根节点就是一个
+ * `<div>` —— 于是头像被拉成 `flex: 1`：宽 223px、高 22px，也就是用户看到的
+ * "图标被拉伸变形"。正确做法是点名文本列，而不是按标签名一网打尽。
+ *
+ * `:not()` 里列出不该被拉伸的节点：头像容器（任何形状）、图标槽位，以及本身
+ * 就是一个网格/弹性容器的行。 */
+.account-item div:not(.avatar-component):not(.avatar-placeholder):not(.avatar-loading):not(.avatar-skeleton):not(.ar-kind) {
   min-width: 0;
   flex: 1;
+}
+
+/* 头像与类型图标永远保持正方形、且不参与弹性伸缩 —— 内联的 width/height 是
+ * 尺寸真源，这里只负责挡住会造成变形的 flex 行为。 */
+.account-item .avatar-component,
+.account-item .ar-kind {
+  flex: 0 0 auto;
 }
 
 .account-item span {
@@ -949,22 +943,70 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* 上面那条 `display: block` 是给**文本行**写的（一行超长就省略号截断），但它按
+ * 标签名命中，把行里所有 span 都改成了块级，于是三种"本来靠 display 才干活的"
+ * 子元素全被压坏：
+ *  - `.ar-kind` —— 22×22 图标槽位，靠 inline-flex 居中那个 12px 图标。变成 block
+ *    后居中失效，图标贴左上角，看着就是歪的/变形；
+ *  - `.account-avatar.fallback` —— 字母头像，靠 flex 居中字母。变成 block 后字母
+ *    也不再居中（而且它的 height 仍生效，字符基线一偏移就更明显）；
+ *  - `.badge`（当前 / 选择 / 已安装）—— 行内胶囊，变成块级后自己占一整行。
+ * 这里按类名把它们的布局身份收回来。与上面账号列表的 `div` 修复是同一个根因：
+ * **按标签名批量设布局，会连"本身就是组件的元素"一起改掉**。*/
+.account-item .ar-kind {
+  display: inline-flex;
+}
+
+.account-item .account-avatar.fallback {
+  display: flex;
+}
+
+.account-item .badge {
+  display: inline-block;
+}
+
 .account-item.static {
   cursor: default;
 }
 
-/* 防撤回列表：更紧凑的单行布局，占满剩余高度 */
+/* 防撤回列表：更紧凑的单行布局，占满剩余高度。
+ *
+ * 行高压缩（v1.0）：用户要求**图标大小与字号都不动，只压掉多余的垂直空间**。
+ * 原来一行 = padding 3px×2 + 内容 22px + 边框 = 40px；列表里 192 个会话要滚很久。
+ * 现在把内边距压到 1px、行间距归零、按钮高度收窄，单行落到 ~26px —— 同样高度
+ * 多显示出将近一半的会话。字号、图标 SVG、头像尺寸全部保持原样。 */
 .anti-revoke-list {
   max-height: calc(100vh - 300px);
   min-height: 280px;
-  gap: 2px;
+  gap: 0;
   margin-top: 12px;
   transition: max-height 0.2s ease;
 }
 
 .anti-revoke-list .account-item {
-  padding: 3px 10px;
-  gap: 8px;
+  padding: 1px 8px;
+  gap: 6px;
+  border-radius: 4px;
+  /* **不能收缩**。`.anti-revoke-list` 是定高（max-height: calc(100vh - 300px)）
+   * 的 flex 列容器，而 flex 子项默认 flex-shrink: 1 —— 192 行会被"平摊"进
+   * 350px，每行算出来只有 3.3px，头像被裁掉只剩一条边。
+   * 之前 min-height: 0 让它们可以收缩到内容以下，正是塌陷的直接原因。
+   * 紧凑列表靠的是**每行更矮**（见下面的 padding / 按钮高度），不是靠行被压缩。 */
+  flex: 0 0 auto;
+  height: auto;
+}
+
+/* 行内按钮跟着收窄：默认按钮高度会把这一行重新撑回 30px 以上 */
+.anti-revoke-list .account-item > button {
+  padding: 2px 8px;
+  min-height: 20px;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.anti-revoke-list .account-item .avatar-component {
+  width: 18px;
+  height: 18px;
 }
 
 .anti-revoke-list .ar-name {
@@ -1040,10 +1082,12 @@ button:disabled {
   border: 1px solid var(--line-strong);
 }
 
-.account-item[data-active="true"] .account-avatar.fallback {
-  color: rgba(0, 0, 0, 0.6);
-  border-color: rgba(0, 0, 0, 0.2);
-}
+/* `.account-item[data-active="true"] .account-avatar.fallback { color: rgba(0,0,0,.6) }`
+   removed: it belonged to the old #fff-background design. v1.scss replaced the
+   selected row with an accent-tinted background, but this rule has specificity
+   (0,4,0) and kept forcing black text onto it - measured contrast 1.02, i.e. the
+   selected account's avatar letter was invisible. The fallback colour now comes
+   from v1.scss like every other element in the row. */
 
 .badge {
   font-size: 11px;
@@ -1174,7 +1218,7 @@ button:disabled {
 .format-grid .format-chip:nth-child(8) .fmt-head svg { color: var(--accent-4, var(--text-dim)); }
 .format-grid .format-chip:nth-child(9) .fmt-head svg { color: var(--accent-2, var(--text-dim)); }
 .format-grid .format-chip:nth-child(10) .fmt-head svg { color: var(--accent-deep, var(--text-dim)); }
-.format-chip[data-active="true"] .fmt-head svg { color: #000; }
+.format-chip[data-active="true"] .fmt-head svg { color: var(--accent); }
 
 .format-chip strong {
   font-size: 13px;
@@ -1194,12 +1238,13 @@ button:disabled {
   max-width: 100%;
 }
 
+/* 选中卡的标题/说明同样不能用黑字：选中底色是强调色淡底，不是白色。 */
 .format-chip[data-active="true"] strong {
-  color: #000;
+  color: var(--text);
 }
 
 .format-chip[data-active="true"] > span:last-child {
-  color: rgba(0, 0, 0, 0.55);
+  color: var(--text-dim);
 }
 
 /* 导出页分区结构（panel-head 已有底边线，首个分区不再画线，避免双线） */
@@ -1537,7 +1582,6 @@ button:disabled {
 .export-session-count {
   color: var(--text-faint);
   font-size: 10px;
-  font-variant-numeric: tabular-nums;
 }
 
 .export-session-empty {
@@ -1641,10 +1685,14 @@ button:disabled {
   flex-shrink: 0;
 }
 
+/* 选中卡里的字母标（A/B/C）。
+   原来写的是"白卡上的黑字"（rgba(0,0,0,.6) + 黑色描边）—— 那是 .chip[data-active]
+   还是纯白底时代的配色。选中态改成强调色淡底之后，这行黑字压在深蓝底上只有
+   1.28 对比度（等于看不见），所以改成跟随强调色的令牌。 */
 .format-chip[data-active="true"] .layout-badge {
-  background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.25);
-  color: rgba(0, 0, 0, 0.6);
+  background: var(--accent-softer);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
 }
 
 .layout-tree {
@@ -1658,12 +1706,13 @@ button:disabled {
 }
 
 .format-chip[data-active="true"] .layout-tree {
-  color: rgba(0, 0, 0, 0.55);
+  color: var(--text-dim);
 }
 
-/* 输出路径预览：浅蓝色 */
+/* 输出路径预览：用强调色（原来是写死的浅蓝 #9bd3ff —— 浅色模式下它压在白面板上
+   只有 1.6 对比度，等于看不见，而且换强调色时它不会跟着变） */
 .exp-path {
-  color: #9bd3ff;
+  color: var(--accent);
 }
 
 /* 内容（媒体）选择行 */
@@ -1952,17 +2001,25 @@ button:disabled {
   box-shadow: 0 0 8px rgba(255, 255, 255, 0.18);
 }
 
+/* 不确定进度：动 `transform` 而不是 `margin-left`。
+ *
+ * 原来用 margin-left 做扫过动画 —— 那是**布局属性**，1.4s 一个循环，每帧都会
+ * 让进度轨道的布局失效。浏览器把它记成 layout shift（实测每次 0.00002，导出期
+ * 间累计 116 次、CLS 0.003）：数值上很小，但它意味着这个动画每秒都在触发重排。
+ * transform 只走合成，不参与布局，因此不产生 layout shift，也不重排。
+ * 起点用 translateX(-100%)（自身宽度 40% 的 -250% = 轨道宽度的 -100%）。*/
 .progress-fill.indeterminate {
   width: 40% !important;
   animation: indeterminate 1.4s ease-in-out infinite;
+  will-change: transform;
 }
 
 @keyframes indeterminate {
   0% {
-    margin-left: -40%;
+    transform: translateX(-250%);
   }
   100% {
-    margin-left: 100%;
+    transform: translateX(250%);
   }
 }
 
@@ -2011,7 +2068,6 @@ button:disabled {
   min-width: 92px;
   max-width: 92px;
   text-align: right;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   line-height: 18px;
@@ -2906,7 +2962,7 @@ button:disabled {
 .ai-error-bubble {
   background: rgba(229, 72, 77, 0.12);
   border: 1px solid rgba(229, 72, 77, 0.4);
-  color: #ffb3b5;
+  color: var(--danger);
   border-radius: var(--radius-sm);
   padding: 10px 14px;
   font-size: 12.5px;
@@ -3001,16 +3057,28 @@ button:disabled {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  /* 工具调用行收紧到单行 24px。原来 8px 上下内边距 + 12.5px 字号让每次调用占
+     一屏里的三十多像素，一轮十几个调用就要滚好几屏；信息密度比"每行舒服"
+     更重要，因为调用是**过程**而不是结果。 */
+  padding: 2px 8px;
+  min-height: 24px;
   background: none;
   border: none;
   color: var(--text-dim);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
+  line-height: 1.35;
   text-align: left;
   cursor: pointer;
   transition: background 0.15s ease;
+}
+
+/* 不可展开时（既无参数也无结果）占位符保持左侧对齐一致 */
+.ai-tool-chev-placeholder {
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 
 .ai-tool-row:hover {
@@ -3073,6 +3141,108 @@ button:disabled {
   border-top: 1px solid var(--line);
   background: var(--panel);
   animation: ai-detail-in 0.15s ease;
+}
+
+/* 展开区里的「参数 / 结果」小标题：两组 pre 直接摞在一起时看不出哪段是哪段 */
+.ai-tool-detail-label {
+  padding: 6px 12px 0;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+/* 本轮速度读数：贴在助手消息末尾的极小一行，不抢正文视线 */
+.ai-msg-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -2px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.ai-msg-tps {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.ai-msg-stats.live .ai-msg-tps {
+  color: var(--accent-3);
+}
+
+/* 「回到最新」：用户上滚后浮在输入框上方，明确告诉用户跟随已暂停 */
+.ai-follow-resume {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  translate: -50% 0;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  animation: wp-enter 0.16s ease both;
+}
+
+.ai-follow-resume:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.ai-follow-live {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ai-follow-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes ai-follow-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* 顶栏里的动作型 meter（压缩上下文） */
+.ai-meter.ai-meter-action {
+  border: 1px solid var(--line-strong);
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.ai-meter.ai-meter-action:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.ai-meter.ai-meter-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 轻量提示条：压缩结果这类不该打断操作的信息 */
+.ai-notice {
+  flex: none;
+  margin: 0 16px 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: var(--accent-softer);
+  color: var(--text-dim);
+  font-size: 12px;
+  animation: wp-enter 0.16s ease both;
 }
 
 @keyframes ai-detail-in {
@@ -3388,17 +3558,17 @@ button:disabled {
   padding-top: 5px;
 }
 
-/* 思考片段 + 工具调用交错 */
+/* 思考片段 + 工具调用交错：行距收紧，一轮工具调用不再占满一屏 */
 .ai-step-stack {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .ai-step {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
 }
 
 .ai-reasoning.inline {
@@ -3408,12 +3578,12 @@ button:disabled {
 }
 
 .ai-reasoning.inline summary {
-  padding: 5px 10px;
-  font-size: 11px;
+  padding: 3px 9px;
+  font-size: 10.5px;
 }
 
 .ai-reasoning.inline pre {
-  padding: 8px 10px;
+  padding: 6px 9px;
   font-size: 10.5px;
   max-height: 180px;
 }
@@ -3551,6 +3721,26 @@ button:disabled {
   font-size: 12px;
   color: var(--text-dim);
   margin-bottom: 5px;
+}
+
+/* AI 服务设置里的输入统一用界面字体。
+ *
+ * `.path-input` 全局是等宽字体（文件路径要等宽才好读），但 AI 服务配置里
+ * 输的是"配置名 / 密钥 / 接口地址"这类普通文本，而同一个面板里的提示词
+ * textarea 用的是 `font-family: inherit` —— 于是自定义接口地址那个框
+ * 在一排控件里字形明显不同。这里按容器统一，不动全局的 .path-input。 */
+.ai-settings .path-input,
+.ai-add-dialog .path-input,
+.ai-provider-inline .path-input {
+  font-family: var(--font);
+}
+
+/* 但地址类字段保留等宽：URL 是逐字符核对的东西 */
+.ai-settings .path-input[id*='BaseUrl'],
+.ai-add-dialog .path-input[id*='BaseUrl'],
+.ai-settings .ai-provider-custom-url .path-input,
+.ai-add-dialog .ai-provider-custom-url .path-input {
+  font-family: var(--font-mono);
 }
 
 .ai-settings select.path-input {
@@ -3944,10 +4134,13 @@ button:disabled {
   display: none;
 }
 
+/* 视觉高度 38 = 图标行 + 文件名行 + 元信息行；内容必然比删除按钮高，
+   不显式给 min-height 就会被 `overflow: hidden` 压掉上下各 3px。 */
 .ai-ws-note {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-height: 38px;
   padding: 0;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
@@ -4064,24 +4257,7 @@ button:disabled {
   flex: none;
 }
 
-@media (max-width: 1100px) {
-  .ai-shell.ws-hidden {
-    grid-template-columns: 200px 1fr 0px;
-  }
-}
-
-/* 小屏适配 */
-@media (max-width: 1100px) {
-  .ai-shell {
-    grid-template-columns: 200px 1fr 220px;
-  }
-}
-
-@media (max-width: 940px) {
-  .ai-shell {
-    grid-template-columns: 190px 1fr;
-  }
-  .ai-workspace {
-    display: none;
-  }
-}
+/* 响应式断点已移到 styles/v1.scss（在本文件之后加载）：这里的三条 .ai-shell
+   媒体查询与 v1.scss 里的 .ai-shell 同优先级，被后者整体覆盖 —— 也就是说
+   1100px / 940px 两个断点实际上从未生效过，986px 视口下右栏仍然是 288px，
+   中间一栏只剩约 270px。断点必须和它要改的那条规则写在同一个文件里。 */

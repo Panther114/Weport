@@ -136,6 +136,8 @@ const SnsLinkCard: React.FC<{ card: SnsLinkCardData; thumbKey?: string }> = ({ c
             alt=""
             referrerPolicy="no-referrer"
             loading="lazy"
+            // 链接卡缩略图同理：异步解码，别把解码塞进渲染关键路径。
+            decoding="async"
             onError={() => {
               const rawThumb = card.thumb || ''
               if (thumbSrc !== rawThumb && rawThumb) {

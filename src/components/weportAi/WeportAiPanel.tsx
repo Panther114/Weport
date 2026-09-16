@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { X } from 'lucide-react'
+import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../reference/ReferencePicker'
+import { applyMention, findActiveMention, referenceKindLabel, type ChatReference } from '../../utils/mentionTrigger'
 import {
   Sparkles,
   Plus,
@@ -33,7 +36,9 @@ import AiMarkdown from './AiMarkdown'
 import './providerProfiles.css'
 
 type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number }
-type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string }
+// `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
+// ToolChip 渲染转圈而不是把它标成失败。
+type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string }
 type AiMessage = {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -41,6 +46,7 @@ type AiMessage = {
   reasoning?: string
   toolCalls?: AiToolCall[]
   createdAt: number
+  timing?: { ttftMs: number; decodeMs: number; outputTokens: number }
 }
 type AiEvent =
   | { type: 'status'; chatId: string; running: boolean }
@@ -48,60 +54,38 @@ type AiEvent =
   | { type: 'text_delta'; chatId: string; delta: string }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
   | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string }
-  | { type: 'assistant_message'; chatId: string; message: AiMessage }
+  | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: { ttftMs: number; decodeMs: number; outputTokens: number } }
   | { type: 'chat_title'; chatId: string; title: string }
   | { type: 'error'; chatId: string; message: string }
   | { type: 'done'; chatId: string; usage?: { promptTokens: number; completionTokens: number; reasoningTokens: number; totalTokens: number; promptCacheHitTokens?: number }; aborted?: boolean; context?: { promptTokens: number; cacheHitTokens: number; lastRequestTokens: number; recentRate: number; contextWindow: number } }
   | { type: 'context'; chatId: string; promptTokens: number; cacheHitTokens: number; lastRequestTokens: number; recentRate: number; contextWindow: number }
 
-type SetupInfo = {
-  hasApiKey: boolean
-  baseUrl: string
-  baseUrlError?: string
-  model: string
-  reasoningEffort: string
-  customPrompt: string
-  workspaceRoot: string
-  exportPath: string
-  dbReady: boolean
-  disabledTools: string[]
-  activeProfileId: string
-  profiles: ProviderProfileSummary[]
-  catalog: ProviderCatalogEntry[]
-}
-
-type ProviderProtocol = 'openai' | 'openai-compatible' | 'anthropic' | 'google' | 'gemini-compatible'
-type ProviderCatalogEntry = {
-  id: string
-  name: string
-  description: string
-  protocol: ProviderProtocol
-  baseUrl: string
-  defaultModel: string
-  models: string[]
-  allowCustomBaseUrl?: boolean
-  protocolOptions?: ProviderProtocol[]
-  apiKeyOptional?: boolean
-}
-type ProviderProfileSummary = {
-  id: string
-  name: string
-  displayName: string
-  providerId: string
-  protocol: ProviderProtocol
-  baseUrl: string
-  model: string
-  hasApiKey: boolean
-  apiKeyHint: string
-  updatedAt: number
-  discovery?: { models: string[]; fetchedAt: number; error?: string }
-}
-
-type AiAction = { id: string; name: string; prompt: string }
+import { type AiAction, type ProviderCatalogEntry, type ProviderModelMetadata, type ProviderProfileSummary, type ProviderProtocol, type SetupInfo } from './aiPanelTypes'
 type AiNote = { path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }
 
-type LiveTool = { id: string; name: string; friendly: string; ok?: boolean; summary?: string; running: boolean }
-type LiveState = { reasoning: string; text: string; tools: LiveTool[] }
+type LiveTool = { id: string; name: string; friendly: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; result?: string; running: boolean }
+type LiveState = { reasoning: string; text: string; tools: LiveTool[]; firstTokenAt?: number; lastTokenAt?: number }
+
+/**
+ * 输出速度读数，口径与 DSH 一致：
+ *
+ *   TPS = outputTokens / (decodeMs / 1000)
+ *
+ * 其中 `decodeMs` 只算「首 token 之后」的解码时间，不含 TTFT。用总耗时算出来的
+ * 数字会把长前缀的等待时间摊进吞吐里，慢的不像话还没有可比性。
+ *
+ * 显示规则也照搬 DSH：≥10 取整，<10 保留一位小数，负数夹到 0。
+ */
+function formatTokensPerSecond(tps: number): string {
+  const clamped = Math.max(0, tps)
+  return clamped >= 10 ? String(Math.round(clamped)) : String(Math.round(clamped * 10) / 10)
+}
+
+/** 一轮结束后的读数：`52.3 tok/s`；没有计时数据（旧记录）时返回 null。 */
+function messageTps(timing: AiMessage['timing']): number | null {
+  if (!timing || timing.decodeMs <= 0 || timing.outputTokens <= 0) return null
+  return timing.outputTokens / (timing.decodeMs / 1000)
+}
 
 const TOOL_ICON: Record<string, React.ComponentType<{ size?: number | string; strokeWidth?: number | string }>> = {
   list_sessions: Users,
@@ -123,25 +107,6 @@ const TOOL_ICON: Record<string, React.ComponentType<{ size?: number | string; st
   write_note: FilePenLine,
 }
 
-const TOOL_LABELS: Array<[string, string]> = [
-  ['list_sessions', '会话列表'],
-  ['get_social_overview', '社交活动概览'],
-  ['get_relationship_candidates', '关系候选多维筛选'],
-  ['sample_session_history', '早中近期分层抽样'],
-  ['review_prior_analyses', '回顾既往分析'],
-  ['get_group_members', '群成员名单'],
-  ['read_session_messages', '读取会话消息'],
-  ['read_day_events', '单日跨会话时间线'],
-  ['read_period_events', '区间跨会话时间线'],
-  ['search_messages', '全文搜索'],
-  ['get_session_stats', '会话统计'],
-  ['list_dates', '活跃日历'],
-  ['get_contact_info', '联系人资料'],
-  ['get_self_overview', '分析范围概览'],
-  ['list_notes', '记忆/笔记列表'],
-  ['read_note', '读取记忆/笔记'],
-  ['write_note', '写入记忆/笔记'],
-]
 
 function fmtTime(ms: number) {
   const d = new Date(ms)
@@ -149,27 +114,120 @@ function fmtTime(ms: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-/** 把大数字格式化为 1.0M / 64K / 1024 */
-function fmtTokens(n: number): string {
+/** 把大数字格式化为 1.0M / 64K / 1024。未知（undefined/0）渲染为 `—`。 */
+function fmtTokens(n: number | undefined): string {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return '—'
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
   if (n >= 1000) return `${Math.round(n / 1000)}K`
   return String(n)
 }
 
-// deepseek-v4-flash 官方价格（USD / 1M tokens，2026-08 官网定价）
-const DEEPSEEK_PRICES = {
-  inputCacheHit: 0.0028,
-  inputCacheMiss: 0.14,
-  output: 0.28,
+/**
+ * Cost of one run, priced from the model's OWN published rates.
+ *
+ * models.dev prices are USD per million tokens. The previous implementation
+ * hard-coded DeepSeek's rates in the renderer and applied them to every
+ * provider, which was wrong by 3–6× on DeepSeek itself (real V4 Pro is
+ * 0.435 / 0.87, not 0.14 / 0.28) and meaningless everywhere else.
+ *
+ * Returns `null` — rendered as `N/A`, never `$0.00` — whenever the metadata has
+ * no usable input or output price, because an unpriced model and a free model
+ * are different things.
+ */
+function estimateRunCost(
+  cost: ProviderModelMetadata['cost'] | undefined,
+  usage: { promptTokens: number; cacheHitTokens: number; completionTokens: number },
+): number | null {
+  if (!cost || cost.input === undefined || cost.output === undefined) return null
+  const prompt = Math.max(0, usage.promptTokens)
+  const cacheHit = Math.min(prompt, Math.max(0, usage.cacheHitTokens))
+  const completion = Math.max(0, usage.completionTokens)
+  const cacheRead = cost.cacheRead ?? cost.input
+  return ((prompt - cacheHit) * cost.input + cacheHit * cacheRead + completion * cost.output) / 1_000_000
 }
 
-function estimateCost(promptTokens: number, cacheHitTokens: number, completionTokens: number): number {
-  const miss = Math.max(0, promptTokens - cacheHitTokens)
+/**
+ * 取当前模型的价格。
+ *
+ * 必须走 `setup.modelCosts[模型 id]`，**不能**读 `profile.cost`：
+ * `ProviderProfileSummary` 不带 `cost` 字段，于是"有定价的模型"在顶栏显示成
+ * 「未定价」—— 一个会让人误判价格的假读数（踩过一次）。`modelCosts` 是主进程
+ * 按模型 id 解出来的权威表。
+ */
+function lookupCost(
+  setup: SetupInfo | null,
+  model: string | undefined,
+): ProviderModelMetadata['cost'] | undefined {
+  const id = String(model || '').trim()
+  if (!setup || !id) return undefined
+  const fromMap = setup.modelCosts?.[id]
+  if (fromMap) return fromMap
+  const profile = setup.profiles.find((p) => p.model === id)
+  return profile?.cost
+}
+
+/** `$0.0123`, or the literal `N/A` when the model has no published price. */
+function fmtCost(value: number | null): string {
+  return value === null ? 'N/A' : `$${value.toFixed(4)}`
+}
+
+/**
+ * 每百万 token 单价，`$0.14 / $0.28`。缺哪一项就写 `—`。
+ *
+ * 价格来自 models.dev（USD / 1M tokens），**运行时抓取、不是写死的**：
+ * 新模型和新定价自己就会进来，不需要发版。面板必须把来源与取数时间一起显示，
+ * 否则用户没办法判断这个数字是不是过期了。
+ */
+function fmtPrice(cost: ProviderModelMetadata['cost'] | undefined): string {
+  if (!cost || (cost.input === undefined && cost.output === undefined)) return '未定价'
+  const one = (v: number | undefined) => (v === undefined ? '—' : `$${v}`)
+  return `${one(cost.input)} / ${one(cost.output)}`
+}
+
+function costTooltip(cost: ProviderModelMetadata['cost'] | undefined): string | undefined {
+  const c = cost
+  if (!c || (c.input === undefined && c.output === undefined)) {
+    return '这个模型没有公开定价（models.dev 未收录）。未定价 ≠ 免费，请以提供商账单为准。'
+  }
+  return [
+    `输入 ${c.input ?? '—'} / 输出 ${c.output ?? '—'} USD 每百万 token`,
+    c.cacheRead !== undefined ? `缓存读取 ${c.cacheRead}` : null,
+    c.cacheWrite !== undefined ? `缓存写入 ${c.cacheWrite}` : null,
+    c.reasoning !== undefined ? `推理 ${c.reasoning}` : null,
+    '来源：models.dev（运行时抓取，24 小时 TTL）',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+/**
+ * Capability chips + the real context window for the active model.
+ *
+ * Every chip is driven by resolved metadata, and a missing field simply produces
+ * no chip — the panel never claims a capability it cannot back up. There is
+ * deliberately no fallback to the global `weportAiContextWindow` here: that value
+ * is the *config* default, so showing it as the model's window would recreate the
+ * exact "128k model reported against 1M" bug this workstream removed.
+ *
+ * The protocol chip matters because a multi-protocol gateway may route this
+ * model on a different wire format than the profile's own default.
+ */
+function ModelMetaLine({ meta }: { meta: ProviderModelMetadata | null }) {
+  if (!meta) return null
+  const capabilities = meta.capabilities
+  const chips: string[] = []
+  if (meta.contextWindow && meta.contextWindow > 0) chips.push(`${fmtTokens(meta.contextWindow)} 上下文`)
+  if (capabilities?.reasoning) chips.push('思考')
+  if (capabilities?.toolCall) chips.push('工具调用')
+  if (capabilities?.attachment) chips.push('图片/文件')
+  if (meta.reasoningOptions?.some((option) => option.type === 'effort')) chips.push('推理档位')
+  if (meta.protocol) chips.push(meta.protocol)
+  if (chips.length === 0) return null
   return (
-    (miss * DEEPSEEK_PRICES.inputCacheMiss +
-      cacheHitTokens * DEEPSEEK_PRICES.inputCacheHit +
-      completionTokens * DEEPSEEK_PRICES.output) /
-    1_000_000
+    <span className="ai-bar-sub">
+      {chips.join(' · ')}
+      {meta.source && meta.source !== 'bundled' ? ` · 元数据 ${meta.source}` : ''}
+    </span>
   )
 }
 
@@ -194,10 +252,27 @@ function splitReasoning(reasoning: string, n: number): string[] {
   return chunks
 }
 
+/** 参数展开区：`{"path":"notes/x.md"}` 这种原始入参是排查工具行为最直接的证据 */
+function formatToolArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) return ''
+  const entries = Object.entries(args)
+  if (entries.length === 0) return ''
+  try {
+    return JSON.stringify(args, null, 2)
+  } catch {
+    return String(args)
+  }
+}
+
 function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
   const [open, setOpen] = useState(false)
   const Icon = TOOL_ICON[call.name] || Info
   const hasResult = typeof call.result === 'string' && call.result.length > 0
+  const argsText = formatToolArgs(call.args)
+  const hasArgs = argsText.length > 0
+  // 运行中也要能展开：工具正在跑的时候用户最想看的就是"它到底带了什么参数"。
+  // 旧实现只允许有 result 的卡片展开，于是进行中的调用点了没反应。
+  const expandable = hasResult || hasArgs
   const isMemoryWrite =
     call.name === 'write_note' &&
     (String(call.args?.path || '').startsWith('memory/') || call.friendly.includes('memory/'))
@@ -206,10 +281,16 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
       <button
         type="button"
         className={`ai-tool-row${open ? ' open' : ''}`}
-        onClick={() => hasResult && setOpen((v) => !v)}
+        onClick={() => expandable && setOpen((v) => !v)}
+        disabled={!expandable}
         aria-expanded={open}
+        title={expandable ? (open ? '收起详情' : '展开参数与结果') : undefined}
       >
-        <ChevronDown size={12} className={`ai-tool-chev${open ? ' open' : ''}`} />
+        {expandable ? (
+          <ChevronDown size={12} className={`ai-tool-chev${open ? ' open' : ''}`} />
+        ) : (
+          <span className="ai-tool-chev-placeholder" />
+        )}
         <span className="ai-tool-icon">
           <Icon size={13} strokeWidth={1.8} />
         </span>
@@ -219,16 +300,27 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
           {call.ok === true ? <CheckCircle2 size={13} /> : call.ok === false ? <XCircle size={13} /> : live ? <span className="ai-spinner" /> : null}
         </span>
       </button>
-      {open && hasResult && (
+      {open && expandable && (
         <div className="ai-tool-detail">
-          <pre>{call.result}</pre>
+          {hasArgs && (
+            <>
+              <div className="ai-tool-detail-label">参数</div>
+              <pre>{argsText}</pre>
+            </>
+          )}
+          {hasResult && (
+            <>
+              <div className="ai-tool-detail-label">结果</div>
+              <pre>{call.result}</pre>
+            </>
+          )}
         </div>
       )}
     </div>
   )
 }
 
-export default function WeportAiPanel() {
+export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () => void }) {
   const api = window.electronAPI
   const [setup, setSetup] = useState<SetupInfo | null>(null)
   const [chats, setChats] = useState<AiChatMeta[]>([])
@@ -237,6 +329,13 @@ export default function WeportAiPanel() {
   const [running, setRunning] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
   const [input, setInput] = useState('')
+  // `@` 引用：在输入框里打 `@` 会弹出会话选择器，与 WeBot 任务描述共用同一个
+  // 组件和同一套纯逻辑（utils/mentionTrigger.ts）。
+  const [mention, setMention] = useState<{ start: number; query: string; caret: number } | null>(null)
+  const [references, setReferences] = useState<ChatReference[]>([])
+  const [referenceCandidates, setReferenceCandidates] = useState<ReferenceCandidate[]>([])
+  const pickerRef = useRef<ReferencePickerHandle>(null)
+  const candidatesLoaded = useRef(false)
   const [error, setError] = useState('')
   const [usage, setUsage] = useState<{
     totalTokens: number
@@ -250,8 +349,12 @@ export default function WeportAiPanel() {
   const [notesDirty, setNotesDirty] = useState(false)
   const [workspaceDir, setWorkspaceDir] = useState('')
   const [memoryDir, setMemoryDir] = useState('')
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  /** 待删除的记忆/笔记文件：非空时弹出确认框 */
+  const [noteDeleteTarget, setNoteDeleteTarget] = useState<AiNote | null>(null)
+  const [compacting, setCompacting] = useState(false)
+  /** 轻量提示（压缩结果这类不需要打断操作的信息） */
+  const [notice, setNotice] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [dragId, setDragId] = useState<string | null>(null)
@@ -265,6 +368,10 @@ export default function WeportAiPanel() {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const stickToBottom = useRef(true)
+  /** 用户主动上滚后暂停自动跟随；`ai-thread` 右下角给一个「回到底部」的入口 */
+  const [followPaused, setFollowPaused] = useState(false)
+  /** 流式读数的重算触发器（每 400ms +1） */
+  const [nowTick, setNowTick] = useState(0)
   const actionsRef = useRef<HTMLDivElement | null>(null)
   // 用于异步回调里的会话一致性判断（openChat 的 getChat 可能晚于后续切换返回）
   const activeIdRef = useRef<string | null>(null)
@@ -306,6 +413,10 @@ export default function WeportAiPanel() {
         void api.ai.deleteChat(prev).then(() => void refreshChats())
       }
       setActiveId(id)
+      // 同步更新 ref，别等下面那个 effect：`getChat` 的响应可能在 React 提交
+      // 这次 setActiveId 之前就回来，那样第 391 行的守卫会把响应当成"过期"丢弃，
+      // 页面就永远停在空态（真机上表现为「打开 WeportAI 看不到上次的对话」）。
+      activeIdRef.current = id
       setMessages([])
       setLive(null)
       setError('')
@@ -332,7 +443,10 @@ export default function WeportAiPanel() {
               cacheHitTokens: last.context.cacheHitTokens || 0,
               lastRequestTokens: last.context.lastRequestTokens || 0,
               recentRate: last.context.recentRate || 0,
-              contextWindow: last.context.contextWindow || 1000000,
+              // A missing window means "unknown" and must render as `—`. The old
+              // `|| 1000000` fallback is what made a 128k model look like it was
+              // using 4% of its window.
+              contextWindow: last.context.contextWindow || 0,
             })
           } else {
             setCtxStats(null)
@@ -388,18 +502,38 @@ export default function WeportAiPanel() {
           setCtxStats({ promptTokens: e.promptTokens, cacheHitTokens: e.cacheHitTokens, lastRequestTokens: e.lastRequestTokens, recentRate: e.recentRate, contextWindow: e.contextWindow })
           break
         case 'reasoning_delta':
-          setLive((prev) => ({ reasoning: (prev?.reasoning || '') + e.delta, text: prev?.text || '', tools: prev?.tools || [] }))
+          setLive((prev) => {
+            const now = Date.now()
+            return {
+              reasoning: (prev?.reasoning || '') + e.delta,
+              text: prev?.text || '',
+              tools: prev?.tools || [],
+              firstTokenAt: prev?.firstTokenAt ?? now,
+              lastTokenAt: now,
+            }
+          })
           break
         case 'text_delta':
-          setLive((prev) => ({ reasoning: prev?.reasoning || '', text: (prev?.text || '') + e.delta, tools: prev?.tools || [] }))
+          setLive((prev) => {
+            const now = Date.now()
+            return {
+              reasoning: prev?.reasoning || '',
+              text: (prev?.text || '') + e.delta,
+              tools: prev?.tools || [],
+              firstTokenAt: prev?.firstTokenAt ?? now,
+              lastTokenAt: now,
+            }
+          })
           break
         case 'tool_start':
           setLive((prev) => ({
             reasoning: prev?.reasoning || '',
             text: prev?.text || '',
+            firstTokenAt: prev?.firstTokenAt,
+            lastTokenAt: prev?.lastTokenAt,
             tools: [
               ...(prev?.tools || []).filter((t) => t.id !== e.callId),
-              { id: e.callId, name: e.name, friendly: e.friendly, running: true },
+              { id: e.callId, name: e.name, friendly: e.friendly, args: e.args, running: true },
             ],
           }))
           break
@@ -407,16 +541,18 @@ export default function WeportAiPanel() {
           setLive((prev) => ({
             reasoning: prev?.reasoning || '',
             text: prev?.text || '',
+            firstTokenAt: prev?.firstTokenAt,
+            lastTokenAt: prev?.lastTokenAt,
             tools: (prev?.tools || []).map((t) =>
-              t.id === e.callId ? { ...t, ok: e.ok, summary: e.summary, running: false } : t,
+              t.id === e.callId ? { ...t, ok: e.ok, summary: e.summary, running: false, result: e.detail ?? t.result } : t,
             ),
           }))
           if (e.name === 'write_note' || e.name === 'list_notes') setNotesDirty(true)
           break
         case 'assistant_message': {
           setLive(null)
-          const msg = e as unknown as { message: AiMessage }
-          setMessages((prev) => [...prev, msg.message])
+          const msg = e as unknown as { message: AiMessage; timing?: AiMessage['timing'] }
+          setMessages((prev) => [...prev, msg.timing ? { ...msg.message, timing: msg.timing } : msg.message])
           break
         }
         case 'chat_title':
@@ -483,8 +619,38 @@ export default function WeportAiPanel() {
   const handleThreadScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    stickToBottom.current = atBottom
+    // 只有"用户自己滚上去"才切到暂停跟随；程序化滚动到底部不算改变意图。
+    setFollowPaused(!atBottom)
   }, [])
+
+  const resumeFollow = useCallback(() => {
+    stickToBottom.current = true
+    setFollowPaused(false)
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [])
+
+  // 流式期间每 400ms 让读数重新计算一次。没有这个 tick，速度只在收到新 delta
+  // 时刷新 —— 模型卡住不动时读数会定格在旧值上，看起来像还在飞速输出。
+  useEffect(() => {
+    if (!live) return
+    const timer = window.setInterval(() => setNowTick((v) => v + 1), 400)
+    return () => window.clearInterval(timer)
+  }, [live])
+
+  // 实时 TPS：与 messageTps 同口径，只是 token 数用字符数估算（流式阶段拿不到
+  // usage）。解码时间同样从首个 token 起算，不含首 token 等待。
+  const liveTps = useMemo(() => {
+    if (!live?.firstTokenAt) return null
+    const chars = (live.text?.length || 0) + (live.reasoning?.length || 0)
+    if (chars === 0) return null
+    // 用「最后一个 delta 的时间」而不是 Date.now()：模型停住时读数应当跟着停住，
+    // 而不是被一个不断变大的分母慢慢稀释成越来越小的数字。
+    const decodeMs = Math.max(1, (live.lastTokenAt || live.firstTokenAt) - live.firstTokenAt)
+    return chars / 2.5 / (decodeMs / 1000)
+  }, [live, nowTick])
 
   useEffect(() => {
     if (running) inputRef.current?.focus()
@@ -511,17 +677,78 @@ export default function WeportAiPanel() {
     if (el) el.style.height = 'auto'
   }
 
+  /**
+   * 懒加载会话候选：只有用户第一次打出 `@` 时才去读会话列表。
+   * 打开 AI 页面本身不该触发一次全量会话查询。
+   */
+  async function ensureReferenceCandidates(): Promise<void> {
+    if (candidatesLoaded.current) return
+    candidatesLoaded.current = true
+    try {
+      const raw = (await api.chat.getSessions()) as { data?: unknown[] } | unknown[]
+      const list = (Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : []) as Array<Record<string, unknown>>
+      const mapped: ReferenceCandidate[] = []
+      for (const session of list) {
+        const id = String(session.username || '').trim()
+        if (!id) continue
+        const kind: ReferenceCandidate['kind'] = id.endsWith('@chatroom')
+          ? 'group'
+          : id.startsWith('gh_')
+            ? 'official'
+            : 'private'
+        const label = String(session.displayName || session.remark || session.nickName || id)
+        mapped.push({ id, label, kind, avatarUrl: session.avatarUrl as string | undefined })
+      }
+      setReferenceCandidates(
+        mapped.sort((a, b) => {
+          if (a.kind !== b.kind) return a.kind === 'group' ? -1 : b.kind === 'group' ? 1 : 0
+          return a.label.localeCompare(b.label)
+        })
+      )
+    } catch {
+      setReferenceCandidates([])
+    }
+  }
+
+  function syncMention(value: string, caret: number): void {
+    const active = findActiveMention(value, caret)
+    if (active) void ensureReferenceCandidates()
+    setMention(active ? { ...active, caret } : null)
+  }
+
+  function pickReference(reference: ChatReference): void {
+    if (!mention) return
+    const node = inputRef.current
+    const caret = node?.selectionStart ?? mention.caret
+    const { value, caret: nextCaret } = applyMention(input, { start: mention.start, query: mention.query }, caret, reference.label)
+    handleInputChange(value)
+    setReferences((prev) => (prev.some((item) => item.id === reference.id) ? prev : [...prev, reference]))
+    setMention(null)
+    requestAnimationFrame(() => {
+      node?.focus()
+      node?.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
+
   async function handleSend(textOverride?: string) {
     const text = (textOverride ?? input).trim()
     if (!text || !activeId || running) return
     setInput('')
+    setReferences([])
     resetInputHeight()
     stickToBottom.current = true
     setError('')
     setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: 'user', content: text, createdAt: Date.now() }])
     setLive({ reasoning: '', text: '', tools: [] })
     try {
-      const res = await api.ai.send(activeId, text)
+      // 引用以**追加**的一小段提示随这条用户消息一起发出，而不是改写系统提示
+      // 或历史 —— 前者会摧毁前缀缓存，而这段提示本身就是本次新增的输入。
+      const payload = references.length > 0
+        ? `${text}\n\n（本次聚焦以下会话，请优先分析它们：${references
+            .map((reference) => `${reference.label} = ${reference.id}`)
+            .join('；')}）`
+        : text
+      const res = await api.ai.send(activeId, payload)
       if (!res.success && res.error && !running) {
         setError(res.error)
         setLive(null)
@@ -602,6 +829,35 @@ export default function WeportAiPanel() {
   const chat = useMemo(() => chats.find((c) => c.id === activeId) || null, [chats, activeId])
   const showEmptyHint = messages.length === 0 && !live
 
+  /**
+   * Metadata for the profile the run will actually use. This is what drives the
+   * capability chips and the pricing line: the panel must describe the model
+   * that is about to be called, not a hard-coded assumption.
+   */
+  const activeModelMeta = useMemo<ProviderModelMetadata | null>(() => {
+    if (!setup) return null
+    const profile = setup.profiles.find((p) => p.id === setup.activeProfileId) || setup.profiles[0]
+    return profile || null
+  }, [setup])
+
+  /** 当前模型的价格：主进程按模型 id 解出的权威表（见 lookupCost 的说明） */
+  const activeModelCost = useMemo(
+    () => lookupCost(setup, setup?.model),
+    [setup],
+  )
+
+  const runCost = useMemo(
+    () =>
+      usage
+        ? estimateRunCost(activeModelCost, {
+            promptTokens: usage.promptTokens,
+            cacheHitTokens: usage.cacheHitTokens,
+            completionTokens: usage.completionTokens,
+          })
+        : null,
+    [usage, activeModelCost],
+  )
+
   const memoryNotes = notes.filter((n) => n.scope === 'memory')
   const chatNotes = notes.filter((n) => n.scope === 'notes')
 
@@ -623,14 +879,58 @@ export default function WeportAiPanel() {
     }
   }
 
-  async function deleteNote(note: AiNote) {
-    if (!activeId) return
-    await api.ai.deleteNoteFile(activeId, note.path)
-    await refreshNotesList()
+  /**
+   * 删除记忆/笔记文件前必须确认。
+   *
+   * 这些文件是 agent 长期记忆的唯一副本（`memory/` 跨会话共享），一次误点的
+   * 代价是不可恢复的。对话删除早就有确认框，文件删除却一直是"点一下就没了"。
+   */
+  function requestDeleteNote(note: AiNote) {
+    setNoteDeleteTarget(note)
+  }
+
+  async function confirmDeleteNote() {
+    const note = noteDeleteTarget
+    setNoteDeleteTarget(null)
+    setViewingNote(null)
+    if (!note || !activeId) return
+    try {
+      await api.ai.deleteNoteFile(activeId, note.path)
+      await refreshNotesList()
+    } catch {
+      setError('删除文件失败')
+    }
+  }
+
+  /** 手动压缩上下文：与 runChat 的自动压缩共用 service 侧实现。 */
+  async function compactNow() {
+    if (!activeId || compacting) return
+    setCompacting(true)
+    try {
+      const res = await api.ai.compactChat(activeId)
+      if (!res.success) {
+        setError(res.error || '压缩失败')
+      } else if (!res.changed) {
+        pushLocalNotice('当前上下文尚未超过压缩阈值，未做改动')
+      } else {
+        pushLocalNotice(`已压缩：归档 ${res.dropped ?? 0} 条，保留 ${res.kept ?? 0} 条`)
+        const data = await api.ai.getChat(activeId)
+        setMessages(data?.messages || [])
+      }
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setCompacting(false)
+    }
   }
 
   function openMemoryFolder() {
     if (memoryDir) void api.shell.openPath(memoryDir)
+  }
+
+  function pushLocalNotice(text: string) {
+    setNotice(text)
+    window.setTimeout(() => setNotice((current) => (current === text ? '' : current)), 4000)
   }
 
   return (
@@ -730,7 +1030,12 @@ export default function WeportAiPanel() {
               <Bug size={14} />
               日志
             </button>
-            <button type="button" className="ai-settings-btn" onClick={() => setSettingsOpen(true)} title="WeportAI 设置">
+            <button
+              type="button"
+              className="ai-settings-btn"
+              onClick={onOpenSettings}
+              title="AI 服务设置（提供商 · 模型 · 密钥）"
+            >
               <Settings2 size={14} />
               设置
             </button>
@@ -740,6 +1045,73 @@ export default function WeportAiPanel() {
 
       {/* 中栏：对话 */}
       <main className="ai-main">
+        {/* 顶栏：会话标题 + 模型 + 上下文/缓存读数。原来主栏没有头，模型名塞在
+            左栏底部，用户回答不出"我现在用的是哪个模型、上下文用了多少"。 */}
+        <div className="ai-topbar">
+          <h1>{chats.find((c) => c.id === activeId)?.title || 'WeportAI'}</h1>
+          <div className="ai-topbar-meta">
+            {setup?.model ? (
+              <span className="ai-meter ai-meter-model" title={`当前 AI 服务与模型：${setup.model}`}>
+                <span className="ai-meter-label">模型</span>
+                <b>{setup.model}</b>
+              </span>
+            ) : null}
+            {ctxStats && ctxStats.contextWindow > 0 ? (
+              <span
+                className="ai-meter"
+                data-tone={ctxStats.promptTokens / ctxStats.contextWindow > 0.75 ? 'warn' : undefined}
+                title="最近一次请求的上下文占用"
+              >
+                <span className="ai-meter-label">上下文</span>
+                <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
+              </span>
+            ) : null}
+            {/* 当前模型的单价（USD / 1M tokens）。放在顶栏而不是埋在设置里：
+                "这一轮大概花了多少"必须先知道单价。未定价的模型明确写「未定价」，
+                不能显示成 $0.00 —— 未定价和免费是两件事。 */}
+            {setup?.model ? (
+              <span
+                className="ai-meter ai-meter-cost"
+                data-tone={activeModelCost ? undefined : 'warn'}
+                title={costTooltip(activeModelCost)}
+              >
+                <span className="ai-meter-label">单价</span>
+                <b>{fmtPrice(activeModelCost)}</b>
+              </span>
+            ) : null}
+            {usage ? (
+              <span className="ai-meter" data-tone="ok" title="最近一次请求的缓存命中率">
+                <span className="ai-meter-label">缓存</span>
+                <b>{usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0}%</b>
+              </span>
+            ) : null}
+            {usage ? (
+              <span className="ai-meter" title={`本轮累计花费（按上面单价估算）：${fmtCost(runCost)}`}>
+                <span className="ai-meter-label">本轮</span>
+                <b>{fmtCost(runCost)}</b>
+              </span>
+            ) : null}
+            {/* 压缩上下文的显式入口。自动压缩只在用户回合边界且超过 0.8 窗口时
+                触发，长任务中途想主动腾空间没有别的办法。 */}
+            <button
+              type="button"
+              className="ai-meter ai-meter-action"
+              onClick={() => void compactNow()}
+              disabled={!activeId || compacting || running}
+              title="把较早的轮次折叠进摘要，保留最近一段原文。归档原文不会丢失。"
+            >
+              <span className="ai-meter-label">{compacting ? '压缩中…' : '压缩'}</span>
+              <b>上下文</b>
+            </button>
+          </div>
+        </div>
+
+        {notice && (
+          <div className="ai-notice" role="status">
+            {notice}
+          </div>
+        )}
+
         {setup && !setup.hasApiKey && (
           <div className="ai-warn-banner warn">
             当前服务尚未配置 API key — 打开左下角「设置」完成提供商配置后才能使用。
@@ -812,6 +1184,16 @@ export default function WeportAiPanel() {
                     {m.content ? <AiMarkdown text={m.content} /> : null}
                   </>
                 )}
+                {/* 本轮解码速度。只在有计时数据时出现（旧记录没有），不占位。 */}
+                {(() => {
+                  const tps = messageTps(m.timing)
+                  if (tps === null) return null
+                  return (
+                    <div className="ai-msg-stats" title={`首 token ${(m.timing!.ttftMs / 1000).toFixed(1)}s · 解码 ${(m.timing!.decodeMs / 1000).toFixed(1)}s · ${m.timing!.outputTokens} tokens`}>
+                      <span className="ai-msg-tps">{formatTokensPerSecond(tps)} tok/s</span>
+                    </div>
+                  )
+                })()}
               </div>
             ),
           )}
@@ -821,7 +1203,10 @@ export default function WeportAiPanel() {
               {live.tools.length > 0 && (
                 <div className="ai-tool-stack">
                   {live.tools.map((t) => (
-                    <ToolChip key={t.id} call={{ id: t.id, name: t.name, args: {}, friendly: t.friendly, ok: t.ok ?? false }} live />
+                    <ToolChip
+                      key={t.id}
+                      call={{ id: t.id, name: t.name, args: t.args || {}, friendly: t.friendly, ok: t.ok, result: t.result }}                      live={t.running}
+                    />
                   ))}
                 </div>
               )}
@@ -851,6 +1236,14 @@ export default function WeportAiPanel() {
                   {live.tools.length > 0 ? <span className="ai-thinking-hint">（正在分析上一步结果…）</span> : <span>…</span>}
                 </div>
               )}
+              {/* 流式期间的实时读数：与 DSH 同一口径（首 token 之后的解码速度）。
+                  token 数按字符数 / CHARS_PER_TOKEN 估算 —— 流式阶段没有 usage，
+                  估算值用来给量级感知，落库后的正式读数走 messageTps。 */}
+              {liveTps !== null && (
+                <div className="ai-msg-stats live">
+                  <span className="ai-msg-tps">{formatTokensPerSecond(liveTps)} tok/s</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -860,6 +1253,50 @@ export default function WeportAiPanel() {
             </div>
           )}
         </div>
+
+        {/* 用户上滚阅读时暂停自动跟随，并给出明确的「回到最新」入口。
+            旧实现只在"离底部 < 120px"时才继续跟随，但流式输出把滚动位置一直
+            拽回底部，用户刚滚上去就被拉回来 —— 想读上面一段几乎不可能。 */}
+        {followPaused && (
+          <button type="button" className="ai-follow-resume" onClick={resumeFollow}>
+            <ChevronDown size={13} />
+            回到最新
+            {running && <span className="ai-follow-live" />}
+          </button>
+        )}
+
+        {/* 引用 chip 与选择器都放在 composer 之外：composer 是横向 flex，
+            把弹层塞进去会被裁切。 */}
+        {references.length > 0 && (
+          <div className="ref-chips ai-ref-chips">
+            {references.map((reference) => (
+              <span className="ref-chip" key={reference.id}>
+                @{reference.label}
+                <span className="ai-ref-kind">{referenceKindLabel(reference.kind)}</span>
+                <button
+                  type="button"
+                  onClick={() => setReferences((prev) => prev.filter((item) => item.id !== reference.id))}
+                  aria-label={`移除引用 ${reference.label}`}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {mention && (
+          <div className="ai-ref-picker">
+            <ReferencePicker
+              ref={pickerRef}
+              query={mention.query}
+              candidates={referenceCandidates}
+              onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
+              onPick={pickReference}
+              onClose={() => setMention(null)}
+            />
+          </div>
+        )}
 
         <div className="ai-composer">
           <div className="ai-actions-wrap" ref={actionsRef}>
@@ -901,16 +1338,27 @@ export default function WeportAiPanel() {
             ref={inputRef}
             className="ai-input"
             value={input}
-            placeholder={running ? '正在执行…' : '分析你的聊天记录…（Enter 发送，Shift+Enter 换行）'}
+            placeholder={running ? '正在执行…' : '分析你的聊天记录…'}
             rows={1}
-            onChange={(e) => handleInputChange(e.target.value)}
+            onChange={(e) => {
+              handleInputChange(e.target.value)
+              syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length)
+            }}
             onKeyDown={(e) => {
+              // 选择器优先消费按键（上下/回车/Tab/Esc）；没被消费才走发送逻辑，
+              // 否则用户没法在引用选择器打开时正常打字。
+              if (mention && pickerRef.current?.handleKeyDown(e as unknown as { key: string; preventDefault: () => void })) {
+                e.preventDefault()
+                return
+              }
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
                 void handleSend()
               } else if (e.key === 'Enter' && e.shiftKey) {
                 // Shift+Enter：插入换行，输入框自动向上扩展
                 window.requestAnimationFrame(() => handleInputChange(e.currentTarget.value))
+              } else if (mention && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
+                setMention(null)
               }
             }}
             spellCheck={false}
@@ -984,7 +1432,7 @@ export default function WeportAiPanel() {
                             </span>
                           </div>
                         </button>
-                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => void deleteNote(n)}>
+                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => requestDeleteNote(n)}>
                           <Trash2 size={11} />
                         </button>
                       </div>
@@ -1008,7 +1456,7 @@ export default function WeportAiPanel() {
                             </span>
                           </div>
                         </button>
-                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => void deleteNote(n)}>
+                        <button type="button" className="ai-ws-note-del" title="删除此文件" onClick={() => requestDeleteNote(n)}>
                           <Trash2 size={11} />
                         </button>
                       </div>
@@ -1024,23 +1472,30 @@ export default function WeportAiPanel() {
               <div className="ai-bar-label">
                 <span>上下文（最近一次请求）</span>
                 <em>
-                  {ctxStats ? `${Math.round((ctxStats.lastRequestTokens / Math.max(1, ctxStats.contextWindow)) * 100)}%` : '—'}
+                  {/* No window ⇒ no honest percentage. Render `—` rather than a
+                      number computed against a guessed 1M denominator. */}
+                  {ctxStats && ctxStats.contextWindow > 0
+                    ? `${Math.round((ctxStats.lastRequestTokens / ctxStats.contextWindow) * 100)}%`
+                    : '—'}
                 </em>
               </div>
               <div className="ai-bar">
                 <div
                   className="ai-bar-fill ctx"
                   style={{
-                    width: ctxStats
-                      ? `${Math.min(100, (ctxStats.lastRequestTokens / Math.max(1, ctxStats.contextWindow)) * 100)}%`
-                      : '0%',
+                    width:
+                      ctxStats && ctxStats.contextWindow > 0
+                        ? `${Math.min(100, (ctxStats.lastRequestTokens / ctxStats.contextWindow) * 100)}%`
+                        : '0%',
                   }}
                 />
               </div>
               <span className="ai-bar-sub">
-                {ctxStats
+                {ctxStats && ctxStats.contextWindow > 0
                   ? `${ctxStats.lastRequestTokens.toLocaleString()} / ${fmtTokens(ctxStats.contextWindow)}`
-                  : '—'}
+                  : ctxStats
+                    ? `${ctxStats.lastRequestTokens.toLocaleString()} / 未知窗口`
+                    : '—'}
               </span>
             </div>
             <div className="ai-bar-row">
@@ -1069,15 +1524,11 @@ export default function WeportAiPanel() {
             {usage && (
               <span className="ai-bar-total">
                 本次共 {usage.totalTokens.toLocaleString()} tokens
-                {usage.reasoningTokens > 0 ? `（思考 ${usage.reasoningTokens.toLocaleString()}）` : ''} · 约 $
-                {estimateCost(
-                  usage.promptTokens,
-                  usage.cacheHitTokens,
-                  usage.completionTokens,
-                ).toFixed(4)}
-                （官方价估算）
+                {usage.reasoningTokens > 0 ? `（思考 ${usage.reasoningTokens.toLocaleString()}）` : ''} · 约 {fmtCost(runCost)}
+                {runCost === null ? '（模型未公布价格）' : '（按模型官方价估算）'}
               </span>
             )}
+            <ModelMetaLine meta={activeModelMeta} />
           </div>
         </div>
       </aside>
@@ -1099,7 +1550,7 @@ export default function WeportAiPanel() {
                 type="button"
                 className="danger-btn"
                 onClick={() => {
-                  void deleteNote(viewingNote.note)
+                  requestDeleteNote(viewingNote.note)
                   setViewingNote(null)
                 }}
               >
@@ -1108,6 +1559,34 @@ export default function WeportAiPanel() {
               </button>
               <button className="secondary-btn" type="button" onClick={() => setViewingNote(null)}>
                 关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {noteDeleteTarget && (
+        <div className="modal-backdrop" onClick={() => setNoteDeleteTarget(null)}>
+          <div className="modal danger" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-del-file-title">
+            <h3 id="ai-del-file-title">
+              <Trash2 size={15} />
+              删除这个文件？
+            </h3>
+            <p>
+              <code>{noteDeleteTarget.path}</code>
+              <br />
+              {noteDeleteTarget.scope === 'memory'
+                ? '这是跨会话共享的长期记忆，删除后 agent 将不再记得其中记录的内容，且不会随对话一起恢复。'
+                : '这是本对话的草稿笔记。'}
+              此操作不可恢复。
+            </p>
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" onClick={() => setNoteDeleteTarget(null)}>
+                取消
+              </button>
+              <button className="danger-btn" type="button" onClick={() => void confirmDeleteNote()}>
+                <Trash2 size={13} />
+                确认删除
               </button>
             </div>
           </div>
@@ -1177,18 +1656,6 @@ export default function WeportAiPanel() {
           </div>
         </div>
       )}
-
-      {settingsOpen && setup && (
-        <AiSettingsModal
-          setup={setup}
-          onClose={() => setSettingsOpen(false)}
-          onChanged={(next) => setSetup(next)}
-          onSaved={(next) => {
-            setSetup(next)
-            setSettingsOpen(false)
-          }}
-        />
-      )}
     </div>
   )
 }
@@ -1214,571 +1681,4 @@ function fmtDebugLine(raw: string): string {
   }
 }
 
-function AiSettingsModal({
-  setup,
-  onClose,
-  onChanged,
-  onSaved,
-}: {
-  setup: SetupInfo
-  onClose: () => void
-  onChanged?: (next: SetupInfo) => void
-  onSaved: (next: SetupInfo) => void
-}) {
-  const api = window.electronAPI
-  const [profiles, setProfiles] = useState(setup.profiles || [])
-  const [catalog, setCatalog] = useState(setup.catalog || [])
-  const [activeProfileId, setActiveProfileId] = useState(setup.activeProfileId || '')
-  const [editingId, setEditingId] = useState<string | null>(setup.activeProfileId || setup.profiles?.[0]?.id || null)
-  const initial = setup.profiles?.find((p) => p.id === (setup.activeProfileId || setup.profiles?.[0]?.id))
-  const [draft, setDraft] = useState({
-    name: initial?.name || '新 AI 服务',
-    providerId: initial?.providerId || 'deepseek',
-    protocol: initial?.protocol || 'openai-compatible' as ProviderProtocol,
-    baseUrl: initial?.baseUrl || '',
-    model: initial?.model || '',
-    apiKey: '',
-  })
-  const [customPrompt, setCustomPrompt] = useState(setup.customPrompt)
-  const [workspaceRoot, setWorkspaceRoot] = useState(setup.workspaceRoot)
-  const [effort, setEffort] = useState(setup.reasoningEffort)
-  const [disabledTools, setDisabledTools] = useState<Set<string>>(new Set(setup.disabledTools))
-  const [actions, setActions] = useState<AiAction[]>([])
-  const [saving, setSaving] = useState(false)
-  const [clearingMemory, setClearingMemory] = useState(false)
-  const [error, setError] = useState('')
-  const [discovering, setDiscovering] = useState<string | null>(null)
-  const [fetchingModels, setFetchingModels] = useState(false)
-  const [fetchedModels, setFetchedModels] = useState<string[]>(initial?.discovery?.models || [])
-  const [modelDiscoveryDone, setModelDiscoveryDone] = useState(Boolean(initial?.discovery?.fetchedAt))
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [addOpen, setAddOpen] = useState(false)
-  const [addDraft, setAddDraft] = useState(() => {
-    const entry = (setup.catalog || []).find((item) => item.id === 'deepseek') || (setup.catalog || [])[0]
-    return {
-      name: entry?.name || '新 AI 服务',
-      providerId: entry?.id || 'deepseek',
-      protocol: (entry?.protocol || 'openai-compatible') as ProviderProtocol,
-      baseUrl: entry?.baseUrl || '',
-      model: entry?.defaultModel || '',
-      apiKey: '',
-    }
-  })
-  const [addFetchedModels, setAddFetchedModels] = useState<string[]>([])
-  const [addFetching, setAddFetching] = useState(false)
-  const [addDiscoveryDone, setAddDiscoveryDone] = useState(false)
-  const [addError, setAddError] = useState('')
-  const [addSaving, setAddSaving] = useState(false)
 
-  const selectedCatalog = catalog.find((entry) => entry.id === draft.providerId)
-  const selectedModels = Array.from(new Set([
-    ...fetchedModels,
-    ...(selectedCatalog?.models || []),
-    ...(editingId ? profiles.find((p) => p.id === editingId)?.discovery?.models || [] : []),
-    ...(draft.model ? [draft.model] : []),
-  ]))
-
-  useEffect(() => {
-    void api.ai.listActions().then((r) => setActions(r.actions || [])).catch(() => undefined)
-  }, [api])
-
-  function startEdit(profile: ProviderProfileSummary) {
-    setEditingId(profile.id)
-    setDraft({ name: profile.name, providerId: profile.providerId, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, apiKey: '' })
-    setFetchedModels(profile.discovery?.models || [])
-    setModelDiscoveryDone(Boolean(profile.discovery?.fetchedAt))
-    setError('')
-  }
-
-  function openAddDialog() {
-    const entry = catalog.find((item) => item.id === 'deepseek') || catalog[0]
-    setAddDraft({
-      name: entry?.name ? `${entry.name} · 新配置` : '新 AI 服务',
-      providerId: entry?.id || 'deepseek',
-      protocol: (entry?.protocol || 'openai-compatible') as ProviderProtocol,
-      baseUrl: entry?.baseUrl || '',
-      model: entry?.defaultModel || '',
-      apiKey: '',
-    })
-    setAddFetchedModels([])
-    setAddDiscoveryDone(false)
-    setAddError('')
-    setAddOpen(true)
-  }
-
-  function startAdd() {
-    openAddDialog()
-  }
-
-  function selectProvider(providerId: string) {
-    const entry = catalog.find((item) => item.id === providerId)
-    if (!entry) return
-    setFetchedModels([])
-    setModelDiscoveryDone(false)
-    setDraft((prev) => ({
-      ...prev,
-      providerId,
-      protocol: entry.protocolOptions?.includes(prev.protocol) ? prev.protocol : entry.protocol,
-      baseUrl: entry.baseUrl || (entry.allowCustomBaseUrl ? '' : prev.baseUrl),
-      model: entry.defaultModel || prev.model,
-      name: prev.name === '新 AI 服务' || prev.name === selectedCatalog?.name ? entry.name : prev.name,
-    }))
-  }
-
-  function selectAddProvider(providerId: string) {
-    const entry = catalog.find((item) => item.id === providerId)
-    if (!entry) return
-    setAddFetchedModels([])
-    setAddDiscoveryDone(false)
-    setAddError('')
-    setAddDraft((prev) => ({
-      ...prev,
-      providerId,
-      protocol: entry.protocolOptions?.includes(prev.protocol) ? prev.protocol : entry.protocol,
-      baseUrl: entry.baseUrl || (entry.allowCustomBaseUrl ? '' : prev.baseUrl),
-      model: entry.defaultModel || prev.model,
-      name: prev.name === '新 AI 服务' || prev.name.startsWith(catalog.find((c) => c.id === prev.providerId)?.name || '') ? (entry.name ? `${entry.name} · 新配置` : prev.name) : prev.name,
-    }))
-  }
-
-  async function fetchAddModels() {
-    setAddFetching(true)
-    setAddError('')
-    try {
-      const result = await api.ai.fetchModels({
-        providerId: addDraft.providerId,
-        protocol: addDraft.protocol,
-        baseUrl: addDraft.baseUrl.trim() || undefined,
-        apiKey: addDraft.apiKey.trim() || undefined,
-      })
-      if (!result.success || !result.models?.length) {
-        setAddFetchedModels([])
-        setAddDiscoveryDone(false)
-        setAddError(result.error || '未获取到可用模型')
-        return
-      }
-      const models = Array.from(new Set(result.models.map(String).filter(Boolean)))
-      setAddFetchedModels(models)
-      setAddDiscoveryDone(true)
-      setAddDraft((prev) => ({ ...prev, model: models.includes(prev.model) ? prev.model : models[0] || '' }))
-    } catch (e) {
-      setAddError(String(e))
-    } finally {
-      setAddFetching(false)
-    }
-  }
-
-  async function saveAddProfile() {
-    setAddSaving(true)
-    setAddError('')
-    try {
-      if (!addDraft.name.trim()) {
-        setAddError('请填写配置名称')
-        return
-      }
-      const catalogEntry = catalog.find((c) => c.id === addDraft.providerId)
-      const needsKey = catalogEntry ? catalogEntry.apiKeyOptional !== true : true
-      if (needsKey && !addDraft.apiKey.trim()) {
-        setAddError('请填写 API key（本地服务除外）')
-        return
-      }
-      if (!addDraft.model.trim()) {
-        setAddError('请选择模型（先获取模型列表）')
-        return
-      }
-      if (!addDiscoveryDone) {
-        setAddError('请先验证并获取模型列表')
-        return
-      }
-      if (addDiscoveryDone && addFetchedModels.length > 0 && !addFetchedModels.includes(addDraft.model.trim())) {
-        setAddError('请选择已获取的模型')
-        return
-      }
-      const result = await api.ai.saveProfile({
-        name: addDraft.name.trim(),
-        providerId: addDraft.providerId,
-        protocol: addDraft.protocol,
-        baseUrl: addDraft.baseUrl.trim(),
-        model: addDraft.model.trim(),
-        apiKey: addDraft.apiKey.trim() || undefined,
-      })
-      if (!result.success) {
-        setAddError(result.error || '添加提供商失败')
-        return
-      }
-      const next = await refreshSetup()
-      if (result.profile) {
-        setEditingId(result.profile.id)
-        setDraft({
-          name: result.profile.name,
-          providerId: result.profile.providerId,
-          protocol: result.profile.protocol,
-          baseUrl: result.profile.baseUrl,
-          model: result.profile.model,
-          apiKey: '',
-        })
-        setFetchedModels(result.profile.discovery?.models || [])
-        setModelDiscoveryDone(Boolean(result.profile.discovery?.fetchedAt))
-      }
-      // 使新配置立即成为当前生效项
-      if (result.profile?.id) {
-        try { await api.ai.activateProfile(result.profile.id); await refreshSetup() } catch { /* noop */ }
-      }
-      setAddOpen(false)
-      if (next.baseUrlError) setError(next.baseUrlError)
-    } catch (e) {
-      setAddError(String(e))
-    } finally {
-      setAddSaving(false)
-    }
-  }
-
-  async function refreshSetup() {
-    const next = (await api.ai.getSetup()) as unknown as SetupInfo
-    setProfiles(next.profiles || [])
-    setCatalog(next.catalog || catalog)
-    setActiveProfileId(next.activeProfileId || '')
-    if (next.baseUrlError) setError(next.baseUrlError)
-    onChanged?.(next)
-    return next
-  }
-
-  async function saveProfile(): Promise<boolean> {
-    setSaving(true)
-    setError('')
-    try {
-      if (!draft.model.trim()) {
-        setError('请选择模型')
-        return false
-      }
-      if (!editingId && !modelDiscoveryDone) {
-        setError('请先获取模型列表，再保存新的服务配置')
-        return false
-      }
-      if (modelDiscoveryDone && fetchedModels.length > 0 && !fetchedModels.includes(draft.model.trim())) {
-        setError('请选择已获取的模型')
-        return false
-      }
-      const result = await api.ai.saveProfile({
-        id: editingId || undefined,
-        name: draft.name.trim(),
-        providerId: draft.providerId,
-        protocol: draft.protocol,
-        baseUrl: draft.baseUrl.trim(),
-        model: draft.model.trim(),
-        apiKey: draft.apiKey.trim() || undefined,
-      })
-      if (!result.success) {
-        setError(result.error || '保存服务配置失败')
-        return false
-      }
-      const next = await refreshSetup()
-      if (result.profile) {
-        setEditingId(result.profile.id)
-      }
-      if (next.baseUrlError) {
-        setError(next.baseUrlError)
-        return false
-      }
-      return true
-    } catch (e) {
-      setError(String(e))
-      return false
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function fetchDraftModels() {
-    if (editingId && !draft.apiKey.trim()) {
-      await discover(editingId)
-      return
-    }
-    setFetchingModels(true)
-    setError('')
-    try {
-      const result = await api.ai.fetchModels({
-        providerId: draft.providerId,
-        protocol: draft.protocol,
-        baseUrl: draft.baseUrl.trim() || undefined,
-        apiKey: draft.apiKey.trim() || undefined,
-      })
-      if (!result.success || !result.models?.length) {
-        setFetchedModels([])
-        setModelDiscoveryDone(false)
-        setError(result.error || '未获取到可用模型')
-        return
-      }
-      const models = Array.from(new Set(result.models.map(String).filter(Boolean)))
-      setFetchedModels(models)
-      setModelDiscoveryDone(true)
-      setDraft((prev) => ({ ...prev, model: models.includes(prev.model) ? prev.model : models[0] || '' }))
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      setFetchingModels(false)
-    }
-  }
-
-  async function activate(id: string) {
-    setError('')
-    try {
-      const result = await api.ai.activateProfile(id)
-      if (!result.success) {
-        setError(result.error || '启用服务失败')
-        return
-      }
-      await refreshSetup()
-    } catch (e) {
-      setError(String(e))
-    }
-  }
-
-  async function removeProfile(id: string) {
-    if (confirmDelete !== id) {
-      setConfirmDelete(id)
-      return
-    }
-    setConfirmDelete(null)
-    setError('')
-    try {
-      const result = await api.ai.deleteProfile(id)
-      if (!result.success) {
-        setError(result.error || '删除服务失败')
-        return
-      }
-      const next = await refreshSetup()
-      if (editingId === id) {
-        const replacement = next.profiles?.[0]
-        if (replacement) startEdit(replacement)
-        else {
-          setEditingId(null)
-          setDraft({ name: '新 AI 服务', providerId: 'deepseek', protocol: 'openai-compatible' as ProviderProtocol, baseUrl: 'https://api.deepseek.com', model: '', apiKey: '' })
-          setFetchedModels([])
-          setModelDiscoveryDone(false)
-        }
-      }
-    } catch (e) {
-      setError(String(e))
-    }
-  }
-
-  async function discover(profileId: string) {
-    setDiscovering(profileId)
-    setError('')
-    try {
-      await api.ai.setSetup({ discoverProfileId: profileId })
-      for (let attempt = 0; attempt < 24; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 450))
-        const next = (await api.ai.getSetup()) as unknown as SetupInfo
-        const current = next.profiles?.find((p) => p.id === profileId)
-        setProfiles(next.profiles || [])
-        if (current?.discovery?.fetchedAt && current.discovery.fetchedAt > Date.now() - 20000) {
-          setActiveProfileId(next.activeProfileId || '')
-          setFetchedModels(current.discovery.models || [])
-          setModelDiscoveryDone(Boolean(current.discovery.models?.length))
-          if (current.discovery.error) setError(current.discovery.error)
-          break
-        }
-      }
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      setDiscovering(null)
-    }
-  }
-
-  async function saveAll() {
-    setSaving(true)
-    setError('')
-    try {
-      // 若当前无可编辑的 profile（首次使用且尚未添加），跳过 profile 保存，仅保存其他设置
-      if (editingId || profiles.length > 0) {
-        if (!(await saveProfile())) return
-      }
-      await api.ai.setSetup({
-        reasoningEffort: effort,
-        customPrompt,
-        workspaceRoot: workspaceRoot.trim() || undefined,
-        disabledTools: Array.from(disabledTools),
-      })
-      await api.ai.saveActions(actions)
-      const next = await refreshSetup()
-      onSaved(next)
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function pickWorkspace() {
-    const dir = await api.dialog.openDirectory({ title: '选择 WeportAI 工作区根目录' })
-    if (dir) setWorkspaceRoot(dir)
-  }
-
-  function toggleTool(name: string) {
-    setDisabledTools((prev) => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
-  }
-
-  function updateAction(id: string, patch: Partial<AiAction>) {
-    setActions((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)))
-  }
-
-  return (
-    <div className="modal-backdrop" onClick={() => !saving && onClose()}>
-      <div className="modal modal-wide ai-settings ai-provider-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
-        <h3 id="ai-settings-title"><Sparkles size={15} /> WeportAI 设置</h3>
-        <p className="hint">服务配置按 profile 管理。API key 只在本机加密保存，列表、摘要和 discovery 结果都不会返回原始密钥。</p>
-        {error && <div className="ai-profile-error">{error}</div>}
-
-        <div className="ai-profile-layout">
-          <section className="ai-profile-list" aria-label="AI 服务列表">
-            <div className="ai-settings-sec-head"><KeyRound size={13} /> AI 提供商</div>
-            {profiles.map((profile) => (
-              <div key={profile.id} className={`ai-profile-row${profile.id === activeProfileId ? ' active' : ''}`}>
-                <button type="button" className="ai-profile-main" onClick={() => startEdit(profile)}>
-                  <strong>{profile.name}</strong>
-                  <span>{profile.providerId} · {profile.model}</span>
-                  <small>{profile.hasApiKey ? `密钥 ${profile.apiKeyHint}` : '未配置密钥'} · {profile.protocol}</small>
-                  {profile.discovery?.error && <em className="ai-profile-discovery-error">{profile.discovery.error}</em>}
-                </button>
-                <div className="ai-profile-actions">
-                  {profile.id === activeProfileId ? <span className="ai-profile-badge">当前</span> : <button type="button" className="ghost-btn" onClick={() => void activate(profile.id)}>启用</button>}
-                  <button type="button" className="ghost-btn" onClick={() => void discover(profile.id)} disabled={discovering === profile.id}><RefreshCw size={12} /> {discovering === profile.id ? '读取中' : '发现模型'}</button>
-                  <button type="button" className="ghost-btn danger-text" onClick={() => void removeProfile(profile.id)}>{confirmDelete === profile.id ? '再次确认删除' : '删除'}</button>
-                </div>
-              </div>
-            ))}
-            <button type="button" className="secondary-btn ai-profile-add" onClick={startAdd}><Plus size={13} /> 添加新提供商</button>
-          </section>
-
-          <section className="ai-profile-editor">
-            <div className="ai-settings-sec-head"><Settings2 size={13} /> {editingId ? '编辑服务' : profiles.length === 0 ? '暂无服务' : '选择服务'}</div>
-            {profiles.length === 0 && !editingId ? (
-              <div className="ai-editor-empty">
-                <p>还没有配置任何 AI 提供商。</p>
-                <button type="button" className="primary-btn" onClick={openAddDialog}><Plus size={13} /> 添加第一个提供商</button>
-              </div>
-            ) : !editingId && profiles.length > 0 ? (
-              <div className="ai-editor-empty">
-                <p>从左侧选择一个服务进行编辑，或添加新的提供商。</p>
-                <button type="button" className="secondary-btn" onClick={() => profiles[0] && startEdit(profiles[0])}>编辑 “{profiles[0].name}”</button>
-              </div>
-            ) : (
-              <>
-                <div className="ai-settings-grid ai-provider-fields">
-                  <div className="field"><label htmlFor="aiProfileName">配置名称</label><input id="aiProfileName" className="path-input ai-input-wide" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></div>
-                  <div className="field"><label htmlFor="aiProvider">Provider</label><select id="aiProvider" className="path-input" value={draft.providerId} onChange={(e) => selectProvider(e.target.value)}>{catalog.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></div>
-                  <div className="field"><label htmlFor="aiApiKey">API key</label><input id="aiApiKey" className="path-input ai-input-wide" type="password" value={draft.apiKey} placeholder={editingId ? `已保存 ${profiles.find((p) => p.id === editingId)?.apiKeyHint || '密钥'}；留空保持不变` : (selectedCatalog?.apiKeyOptional ? '本地服务可留空' : '输入 API key')} onChange={(e) => { setDraft({ ...draft, apiKey: e.target.value }); setModelDiscoveryDone(false) }} autoComplete="off" spellCheck={false} /></div>
-                  <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></div>
-                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
-                  {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
-                </div>
-                <div className="ai-profile-discovery">
-                  <button type="button" className="ghost-btn" onClick={() => void fetchDraftModels()} disabled={saving || fetchingModels || Boolean(discovering)}><RefreshCw size={12} /> {fetchingModels || discovering ? '正在获取模型…' : '获取模型列表'}</button>
-                  <span className="ai-profile-discovery-hint">{modelDiscoveryDone ? `已获取 ${fetchedModels.length} 个模型` : '验证 API key 并读取可用模型'}</span>
-                  {editingId && profiles.find((p) => p.id === editingId)?.discovery?.error && <span className="ai-profile-discovery-error">{profiles.find((p) => p.id === editingId)?.discovery?.error}</span>}
-                </div>
-                <div className="btn-row"><button type="button" className="primary-btn" disabled={saving || (!editingId && !modelDiscoveryDone)} onClick={() => void saveProfile()}>{saving ? '保存中…' : '保存 profile'}</button></div>
-              </>
-            )}
-          </section>
-        </div>
-
-        <div className="ai-settings-section"><div className="ai-settings-sec-head"><FolderOpen size={13} /> 工作区</div><div className="field"><label htmlFor="aiWorkspaceRoot">工作区根目录</label><div className="path-row"><input id="aiWorkspaceRoot" className="path-input" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} /><button className="ghost-btn" type="button" onClick={() => void pickWorkspace()}>浏览</button></div></div></div>
-        <div className="ai-settings-section"><div className="ai-settings-sec-head"><FilePenLine size={13} /> 提示词</div><textarea id="aiCustomPrompt" className="ai-prompt-textarea" value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} rows={4} spellCheck={false} /></div>
-        <div className="ai-settings-section"><div className="ai-settings-sec-head"><Zap size={13} /> 快捷动作</div>{actions.map((a) => <div className="ai-action-edit" key={a.id}><input className="path-input ai-action-name" value={a.name} onChange={(e) => updateAction(a.id, { name: e.target.value })} /><textarea className="ai-prompt-textarea ai-action-prompt" value={a.prompt} onChange={(e) => updateAction(a.id, { prompt: e.target.value })} rows={2} /><button type="button" className="ghost-btn danger-text" onClick={() => setActions((prev) => prev.filter((item) => item.id !== a.id))}><Trash2 size={12} /></button></div>)}<button type="button" className="ghost-btn" onClick={() => setActions((prev) => [...prev, { id: `action-${Date.now()}`, name: '新动作', prompt: '' }])}><Plus size={12} /> 添加动作</button></div>
-        <div className="ai-settings-section"><div className="ai-settings-sec-head"><Settings2 size={13} /> 工具开关</div><div className="ai-tool-toggles">{TOOL_LABELS.map(([name, label]) => <label key={name} className={`ai-tool-toggle${disabledTools.has(name) ? ' off' : ''}`}><input type="checkbox" checked={!disabledTools.has(name)} onChange={() => toggleTool(name)} /><span>{label}</span><code>{name}</code></label>)}</div></div>
-        <div className="modal-actions"><button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button><button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
-      </div>
-      {addOpen && (
-        <div className="ai-add-overlay" onClick={() => !addSaving && setAddOpen(false)}>
-          <div className="ai-add-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-add-title">
-            <div className="ai-add-head">
-              <div className="ai-add-title">
-                <div className="ai-add-icon"><Sparkles size={16} /></div>
-                <div>
-                  <h3 id="ai-add-title">添加 AI 提供商</h3>
-                  <p>从目录挑选提供商，验证密钥后选择模型，创建即可启用</p>
-                </div>
-              </div>
-              <button type="button" className="icon-btn-ghost" aria-label="关闭" onClick={() => !addSaving && setAddOpen(false)}><XCircle size={16} /></button>
-            </div>
-
-            {addError && <div className="ai-profile-error" style={{ marginBottom: 12 }}>{addError}</div>}
-
-            <div className="ai-add-catalog">
-              <div className="ai-add-section-label"><span>① 选择提供商</span><small>{catalog.length} 个可用</small></div>
-              <div className="ai-add-grid">
-                {catalog.map((entry) => {
-                  const isSelected = addDraft.providerId === entry.id
-                  return (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      className={`ai-add-card${isSelected ? ' selected' : ''}`}
-                      onClick={() => selectAddProvider(entry.id)}
-                    >
-                      <div className="ai-add-card-head">
-                        <strong>{entry.name}</strong>
-                        {isSelected && <span className="ai-add-check"><CheckCircle2 size={13} /></span>}
-                      </div>
-                      <span className="ai-add-card-desc">{entry.description}</span>
-                      <span className="ai-add-card-meta">
-                        <code>{entry.protocol}</code>
-                        <span title={entry.baseUrl}>{entry.baseUrl ? entry.baseUrl.replace(/^https?:\/\//, '').slice(0, 28) || '自定义地址' : '自定义地址'}</span>
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            <div className="ai-add-form">
-              <div className="ai-add-section-label"><span>② 配置详情</span><small>带 * 为必填</small></div>
-              <div className="ai-settings-grid ai-provider-fields">
-                <div className="field"><label htmlFor="aiAddName">配置名称 *</label><input id="aiAddName" className="path-input ai-input-wide" value={addDraft.name} onChange={(e) => setAddDraft({ ...addDraft, name: e.target.value })} placeholder="例如：我的 DeepSeek" /></div>
-                <div className="field"><label htmlFor="aiAddKey">API Key {catalog.find((c) => c.id === addDraft.providerId)?.apiKeyOptional ? '(可选)' : '*'}</label>
-                  <input id="aiAddKey" className="path-input ai-input-wide" type="password" value={addDraft.apiKey} onChange={(e) => { setAddDraft({ ...addDraft, apiKey: e.target.value }); setAddDiscoveryDone(false) }} placeholder={catalog.find((c) => c.id === addDraft.providerId)?.apiKeyOptional ? '本地服务可留空' : '粘贴 API key'} autoComplete="off" spellCheck={false} />
-                </div>
-                {(catalog.find((c) => c.id === addDraft.providerId)?.allowCustomBaseUrl || addDraft.providerId === 'custom') && (
-                  <div className="field ai-provider-custom-url"><label htmlFor="aiAddBaseUrl">自定义接口地址 {catalog.find((c) => c.id === addDraft.providerId)?.id === 'azure-openai' ? '*' : ''}</label><input id="aiAddBaseUrl" className="path-input ai-input-wide" value={addDraft.baseUrl} onChange={(e) => setAddDraft({ ...addDraft, baseUrl: e.target.value })} placeholder="https://..." spellCheck={false} /></div>
-                )}
-                {(catalog.find((c) => c.id === addDraft.providerId)?.allowCustomBaseUrl || addDraft.providerId === 'custom') && (
-                  <div className="field"><label htmlFor="aiAddProtocol">协议</label><select id="aiAddProtocol" className="path-input" value={addDraft.protocol} onChange={(e) => setAddDraft({ ...addDraft, protocol: e.target.value as ProviderProtocol })}>{(catalog.find((c) => c.id === addDraft.providerId)?.protocolOptions || [catalog.find((c) => c.id === addDraft.providerId)?.protocol || addDraft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>
-                )}
-                <div className="field"><label htmlFor="aiAddModel">模型 *</label>
-                  <div className="ai-add-model-row">
-                    <select id="aiAddModel" className="path-input" value={addDraft.model} onChange={(e) => setAddDraft({ ...addDraft, model: e.target.value })} disabled={addFetchedModels.length === 0 && !(catalog.find((c) => c.id === addDraft.providerId)?.models?.length)}>
-                      <option value="">{addFetchedModels.length || catalog.find((c) => c.id === addDraft.providerId)?.models?.length ? '选择模型' : '先获取模型列表'}</option>
-                      {Array.from(new Set([...addFetchedModels, ...(catalog.find((c) => c.id === addDraft.providerId)?.models || []), ...(addDraft.model ? [addDraft.model] : [])].filter(Boolean))).map((m) => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                    <button type="button" className="ghost-btn ai-add-fetch" onClick={() => void fetchAddModels()} disabled={addFetching}>
-                      {addFetching ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
-                      {addFetching ? '获取中…' : '获取模型'}
-                    </button>
-                  </div>
-                  <span className="ai-profile-discovery-hint">{addDiscoveryDone ? `✓ 已验证 · ${addFetchedModels.length} 个模型可用` : addFetching ? '正在验证密钥并拉取模型…' : '验证 API key 后自动刷新模型列表'}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="ai-add-actions">
-              <button type="button" className="secondary-btn" disabled={addSaving} onClick={() => setAddOpen(false)}>取消</button>
-              <button type="button" className="primary-btn" disabled={addSaving || !addDiscoveryDone || !addDraft.name.trim() || !addDraft.model.trim()} onClick={() => void saveAddProfile()}>
-                {addSaving ? '创建中…' : '确认添加并启用'}
-              </button>
-            </div>
-            <p className="hint" style={{ marginTop: 8, textAlign: 'center', fontSize: 11 }}>添加后将自动设为当前提供商，可在左侧列表随时切换</p>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}

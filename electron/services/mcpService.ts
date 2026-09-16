@@ -22,6 +22,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod'
 import { ConfigService } from './config'
 import { chatService } from './chatService'
+import { getWeBotService } from './weBotRegistry'
 import { snsService } from './snsService'
 import { analyticsService } from './analyticsService'
 import { groupAnalyticsService } from './groupAnalyticsService'
@@ -66,6 +67,67 @@ class McpService {
     })
 
     server.registerTool(
+      'list_bot_notes',
+      {
+        title: '列出 WeBot 笔记',
+        description: 'WeBot 定时任务留下的笔记（只读）。每条笔记包含任务标题、结论正文、时间与引用过的会话。',
+        inputSchema: {
+          taskId: z.string().optional().describe('只返回某个任务的笔记'),
+          unreadOnly: z.boolean().optional().describe('只看未读'),
+          limit: z.number().int().min(1).max(500).optional().describe('最多返回数量，默认 200'),
+        },
+      },
+      async ({ taskId, unreadOnly, limit }) => {
+        const service = getWeBotService()
+        if (!service) return text({ success: false, error: 'WeBot 服务未启动' })
+        return text({
+          success: true,
+          notes: service.listNotes({ taskId, unreadOnly, limit: limit || 200 }),
+        })
+      },
+    )
+
+    server.registerTool(
+      'get_bot_note',
+      {
+        title: '读取单条 WeBot 笔记',
+        description: '按 id 读取一条 WeBot 笔记的完整内容（只读）',
+        inputSchema: { id: z.string().min(1).describe('笔记 id') },
+      },
+      async ({ id }) => {
+        const service = getWeBotService()
+        if (!service) return text({ success: false, error: 'WeBot 服务未启动' })
+        const note = service.getNote(id)
+        return text(note ? { success: true, note } : { success: false, error: '笔记不存在' })
+      },
+    )
+
+    server.registerTool(
+      'get_mute_report',
+      {
+        title: '会话免打扰自检',
+        description:
+          '报告「跟随微信消息免打扰」这条链路是否真的在工作：原生接口是否可用、请求了多少会话、原生返回了多少个键、其中多少条被标为免打扰。只读。',
+        inputSchema: { limit: z.number().int().min(1).max(500).optional().describe('最多返回多少个会话，默认 40') },
+      },
+      async ({ limit }) => text(await chatService.getSessionMuteReport(limit || 40)),
+    )
+
+    server.registerTool(
+      'list_bot_tasks',
+      {
+        title: '列出 WeBot 任务',
+        description: '列出 WeBot 定时任务及其下一次执行时间（只读）',
+        inputSchema: {},
+      },
+      async () => {
+        const service = getWeBotService()
+        if (!service) return text({ success: false, error: 'WeBot 服务未启动' })
+        return text({ success: true, tasks: service.listTasks() })
+      },
+    )
+
+    server.registerTool(
       'list_sessions',
       {
         title: '列出会话',
@@ -81,6 +143,7 @@ class McpService {
           lastTimestamp: s.lastTimestamp,
           messageCountHint: s.messageCountHint ?? null,
           isFolded: s.isFolded ?? false,
+          isMuted: s.isMuted ?? null,
         }))
         return text({ success: true, count: sessions.length, sessions })
       },
@@ -277,7 +340,7 @@ class McpService {
   }
 
   private async createSession(): Promise<McpHttpSession> {
-    const server = new McpServer({ name: 'weport-mcp', version: '0.9.11' })
+    const server = new McpServer({ name: 'weport-mcp', version: '1.0.0' })
     this.registerTools(server)
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
