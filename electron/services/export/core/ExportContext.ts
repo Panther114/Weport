@@ -7,7 +7,9 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
-import ExcelJS from 'exceljs'
+// 只用类型（ExcelJS.Cell 出现在下面两个公开方法的签名里）；运行时按需动态加载，
+// 避免所有导出（哪怕是 TXT）都背上 exceljs 的 ~18MB 常驻。见 ExcelFormatter.ts 说明。
+import type ExcelJS from 'exceljs'
 import { getEmojiPath } from 'wechat-emojis'
 import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'
@@ -5476,6 +5478,7 @@ export class ExportContext {
                 } = params;
         try {
           const { mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+          const { default: ExcelJS } = await import('exceljs')
           const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
             filename: outputPath,
             useStyles: true,

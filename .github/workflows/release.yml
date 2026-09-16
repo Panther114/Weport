@@ -65,6 +65,48 @@ jobs:
 
   build-mac:
     runs-on: macos-14
+    # ── Issue #18: the macOS signing contract ───────────────────────────────────
+    #
+    # v0.9.11 shipped `Weport-0.9.11-arm64.zip` with NO valid signature. `build.mac`
+    # had no `identity`, and this workflow set CSC_IDENTITY_AUTO_DISCOVERY=false, so
+    # electron-builder's `findIdentity()` returned null immediately
+    # (app-builder-lib/out/codeSign/macCodeSign.js:261-269), `sign()` returned early
+    # (app-builder-lib/out/macPackager.js:304-306) and it logged "skipped macOS
+    # application code signing". By that point the bundle had already been renamed
+    # (Contents/MacOS), had Info.plist/icon rewritten, app.asar + extraResources added,
+    # and `scripts/after-pack.cjs` had run `install_name_tool` on a shipped dylib —
+    # every one of which invalidates whatever signature the copied Electron.app
+    # arrived with. An arm64 bundle whose seal no longer matches is what Gatekeeper
+    # reports to the user as “Weport 已损坏 / is damaged” — issue #18, verbatim.
+    #
+    # Two modes, chosen from the repository secrets:
+    #   * developer-id — a real Developer ID certificate, notarized and stapled. Used
+    #     automatically once the secrets below exist. This is the ONLY mode that can
+    #     satisfy `spctl --assess` (issue #18's second symptom), i.e. the only one a
+    #     normal user can open without the unidentified-developer dance.
+    #   * adhoc — no Apple account. `build.mac.identity: "-"` is electron-builder's
+    #     documented ad-hoc opt-in (app-builder-lib/out/mac/MacTargetHelper.js:37-44)
+    #     and is what makes the bundle SEALED, so `codesign --verify --deep --strict`
+    #     passes and macOS stops calling it damaged. spctl rejects an ad-hoc signature
+    #     by design — expected, not a regression.
+    #
+    # Secrets for developer-id:
+    #   MAC_CSC_LINK              base64 of the “Developer ID Application” .p12
+    #   MAC_CSC_KEY_PASSWORD      its password
+    #   MAC_IDENTITY_QUALIFIER    substring selecting that certificate — the 10-char
+    #                             Team ID or the 40-hex SHA-1. NOT the full
+    #                             “Developer ID Application: …” name: electron-builder
+    #                             rejects a name carrying that prefix
+    #                             (codeSign/macCodeSign.js:279-283).
+    #   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID — notarization. All three
+    #                             or none: a partial set makes electron-builder throw
+    #                             InvalidConfigurationError (MacTargetHelper.js:219-241).
+    #
+    # REQUIRE_DEVELOPER_ID=true turns a missing Developer ID on a non-prerelease tag
+    # into a build failure. It is 'false' only because this repository has no
+    # certificate yet — flip it to 'true' the moment the secrets above are added.
+    env:
+      REQUIRE_DEVELOPER_ID: 'false'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -103,21 +145,169 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Which signing mode this tag gets. Read the secrets through env, never inline
+      # in `if:` — GitHub does not allow `secrets` in step-level conditions.
+      - name: "Decide macOS signing mode (issue #18)"
+        id: signing
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_IDENTITY_QUALIFIER: ${{ secrets.MAC_IDENTITY_QUALIFIER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mode=adhoc
+          notarize=false
+          if [ -n "$MAC_CSC_LINK" ] && [ -n "$MAC_CSC_KEY_PASSWORD" ] && [ -n "$MAC_IDENTITY_QUALIFIER" ]; then
+            mode=developer-id
+          fi
+          if [ "$mode" = "developer-id" ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            notarize=true
+          fi
+          # A prerelease tag (v1.0.0-rc.1) may ship ad-hoc: RC builds must not require
+          # the Apple account. A stable tag is the one users install, so say so loudly.
+          tag="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          prerelease=false
+          case "$tag" in *-*) prerelease=true ;; esac
+          if [ "$mode" = "adhoc" ] && [ "$prerelease" = "false" ]; then
+            if [ "${REQUIRE_DEVELOPER_ID}" = "true" ]; then
+              echo "::error::Stable tag $tag has no Developer ID secrets. Set MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD and MAC_IDENTITY_QUALIFIER, or set REQUIRE_DEVELOPER_ID=false to accept an ad-hoc build."
+              exit 1
+            fi
+            echo "::warning::Stable tag $tag is being built AD-HOC: without a Developer ID certificate the macOS artifact cannot be notarized and \`spctl --assess\` will keep rejecting it (issue #18). Add MAC_CSC_LINK / MAC_CSC_KEY_PASSWORD / MAC_IDENTITY_QUALIFIER (+ APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID) and set REQUIRE_DEVELOPER_ID=true."
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "macOS signing mode: $mode (notarize=$notarize, prerelease=$prerelease)"
+          {
+            echo "### macOS signing — issue #18"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| tag | \`$tag\` |"
+            echo "| signing mode | \`$mode\` |"
+            echo "| notarization | \`$notarize\` |"
+            echo "| prerelease tag | \`$prerelease\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build macOS installer (Developer ID signed + notarized)
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # Present only when notarize=true. electron-builder notarizes
+          # automatically whenever these exist and `mac.notarize` is not `false`
+          # (MacTargetHelper.notarizeIfProvided), so no package.json key is needed.
+          APPLE_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+        run: |
+          # `build.mac.identity: "-"` in package.json is a hard ad-hoc opt-in that
+          # beats CSC_LINK (MacTargetHelper.findSigningIdentity checks the qualifier
+          # first), so the Developer ID path must override it explicitly. Two flags:
+          #   identity       — select the imported certificate by substring/SHA-1.
+          #   hardenedRuntime — Apple refuses to notarize an app without it; the
+          #                    ad-hoc path keeps the package.json default of false,
+          #                    because flipping it unconditionally would change the
+          #                    runtime behaviour of the only artifact that ships today.
+          # electron-builder is the LAST command in the build:mac chain, so npm's
+          # `--` arguments land on it.
+          npm run build:mac -- \
+            --config.mac.identity="${{ secrets.MAC_IDENTITY_QUALIFIER }}" \
+            --config.mac.hardenedRuntime=true
+
       - name: Build macOS installer (arm64, ad-hoc signed)
+        if: steps.signing.outputs.mode == 'adhoc'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build:mac
 
-      # Issue #18: v0.9.11 shipped unsigned (signing silently skipped) and
-      # failed `codesign --verify --deep --strict` on user machines.
-      # This gate runs on the macOS runner BEFORE publishing — any failure
-      # blocks the release. No Apple Developer account required (ad-hoc).
+      # Issue #18: v0.9.11 shipped unsigned (signing silently skipped) and failed
+      # `codesign --verify --deep --strict` on user machines. This gate runs on the
+      # macOS runner BEFORE publishing — any failure blocks the release. It reads the
+      # produced artifacts, not the build log, so a silently-skipped signing step
+      # cannot pass it.
       - name: Verify macOS packaging & signature (issue #18 gate)
         run: bash scripts/verify-mac-pack.sh release
+
+      # The reported symptom was about the ZIP a user downloads, so verify the
+      # signatures through a real unzip, and gate Gatekeeper (spctl) + the staple.
+      - name: "Gatekeeper / notarization gate (issue #18)"
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+        run: |
+          set -uo pipefail
+          failures=0
+          fail() { echo "::error::$1"; failures=$((failures + 1)); }
+          pass() { echo "✅ $1"; }
+
+          APP="$(find release -maxdepth 3 -name 'Weport.app' -type d | head -n 1 || true)"
+          ZIP="$(ls -t release/Weport-*.zip 2>/dev/null | head -n 1 || true)"
+          DMG="$(ls -t release/Weport-*.dmg 2>/dev/null | head -n 1 || true)"
+          echo "app=$APP zip=$ZIP dmg=$DMG mode=$MODE"
+
+          if [ -z "$APP" ] || [ -z "$ZIP" ]; then
+            fail "missing produced artifact (app='$APP' zip='$ZIP')"
+            exit $failures
+          fi
+
+          # (1) The signature must SURVIVE the zip — this is what users install.
+          tmp="$(mktemp -d)"
+          unzip -q "$ZIP" -d "$tmp"
+          UNAPPLIED="$(find "$tmp" -maxdepth 3 -name 'Weport.app' -type d | head -n 1 || true)"
+          if [ -z "$UNAPPLIED" ]; then
+            fail "unzipped $ZIP contains no Weport.app"
+          elif codesign --verify --deep --strict --verbose=2 "$UNAPPLIED" 2>&1; then
+            pass "codesign --verify --deep --strict passes on the unzipped app"
+          else
+            fail "codesign --verify --deep --strict FAILED on the unzipped app (issue #18)"
+          fi
+          rm -rf "$tmp"
+
+          # (2) The seal must be present and complete, not just "signed".
+          if [ -s "$APP/Contents/_CodeSignature/CodeResources" ]; then
+            pass "bundle seal present (Contents/_CodeSignature/CodeResources)"
+          else
+            fail "missing Contents/_CodeSignature/CodeResources — 'code has no resources but signature indicates they must be present' will follow (issue #18)"
+          fi
+
+          # (3) Gatekeeper. spctl cannot accept an ad-hoc signature — that is the
+          #     documented, expected limitation of the adhoc mode, so it is a hard
+          #     gate only where a Developer ID + notarization are in play.
+          if spctl --assess --type execute --verbose=4 "$APP" 2>&1; then
+            pass "spctl --assess accepts the app"
+          elif [ "$MODE" = "developer-id" ]; then
+            fail "spctl --assess REJECTED a Developer-ID-signed app (issue #18)"
+          else
+            echo "::warning::spctl --assess rejects this app — expected for an ad-hoc signature (mode=$MODE). It is not 'damaged' (codesign passed), but users still see 'unidentified developer'."
+          fi
+
+          # (4) Notarization + staple, when credentials were available.
+          if [ "$NOTARIZE" = "true" ]; then
+            xcrun stapler validate "$APP" || fail "stapler validate failed on the .app (notarization ticket not stapled)"
+            if [ -n "$DMG" ]; then
+              xcrun stapler validate "$DMG" || fail "stapler validate failed on the .dmg"
+              spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" \
+                || fail "spctl rejected the notarized .dmg"
+            fi
+          else
+            echo "::notice::notarization was not requested for this build (NOTARIZE=$NOTARIZE)"
+          fi
+
+          echo "=== Gatekeeper gate: $failures failure(s) ==="
+          exit $failures
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          # AGENTS.md: the in-app updater only sees releases that are neither a draft
+          # nor a prerelease. Never let this default drift.
+          draft: false
+          prerelease: false
           files: |
             release/Weport-*.dmg
             release/Weport-*.zip

@@ -393,6 +393,8 @@ export class WcdbCore {
   }
 
   private formatInitProtectionError(code: number): string {
+    const logPath = this.getLogFileCandidates()[0] || '%APPDATA%\\Weport\\logs\\wcdb.log'
+    const sentinelNextStep = `；下一步：确认数据目录选的是 xwechat_files 根目录、账号与 64 位密钥属于同一账号后重试，并把日志 ${logPath} 一起反馈`
     const messages: Record<number, string> = {
       '-3001': '未找到数据库目录 (db_storage)，请确认已选择正确的微信数据目录（应包含以 wxid_ 开头的子文件夹）',
       '-3002': '未找到 session.db 文件，请确认微信已登录并且数据目录完整',
@@ -401,9 +403,16 @@ export class WcdbCore {
       '-2301': '动态库加载失败，请检查安装是否完整',
       '-2302': 'WCDB 初始化异常，请重试',
       '-2303': 'WCDB 未能成功初始化',
+      // issue #17：这两个是**客户端哨兵**，不是 WCDB / 微信返回的码。万一它们
+      // 从原生层漏到这里，也不能只回一个数字 —— 用户会当成"服务器的错误码"去查。
+      '-3999': `微信数据服务初始化失败，且未能解析出具体错误码${sentinelNextStep}`,
+      '-3998': `连接过程中出现未预期异常${sentinelNextStep}`,
     }
     const msg = messages[String(code) as unknown as keyof typeof messages]
-    return msg ? `${msg} (错误码: ${code})` : `操作失败，错误码: ${code}`
+    if (msg) return `${msg} (错误码: ${code})`
+    // issue #17：未收录的码以前只回「操作失败，错误码: X」——一串既查不到也
+    // 没法反馈的数字。现在给出下一步（去哪看日志、先检查什么）。
+    return `微信数据服务初始化失败，返回了未收录的错误码 ${code}；请确认数据目录、账号与 64 位密钥属于同一账号后重试，并把日志 ${logPath} 一起反馈`
   }
 
   private isLogEnabled(): boolean {

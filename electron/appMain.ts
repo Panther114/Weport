@@ -41,7 +41,6 @@ import { exportService } from './services/export'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { backupService } from './services/backupService'
 import { httpService } from './services/httpService'
-import { mcpService } from './services/mcpService'
 import { windowsHelloService } from './services/windowsHelloService'
 import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
@@ -89,6 +88,24 @@ let backgroundVideoService: BackgroundVideoService | null = null
 let messagePushService: MessagePushService | null = null
 let shutdownPromise: Promise<void> | null = null
 let fatalProcessError = false
+/**
+ * MCP 服务是**按需加载**的（v1.0.4）。
+ *
+ * `@modelcontextprotocol/sdk` 加上 zod 常驻约 20 MB，而"默认开启的 MCP"在绝大多数
+ * 会话里只是"一个本地端口开着、没有任何客户端连进来"。这 20 MB 因此是白付的。
+ * 改成惰性单例：真的要用（start / 查状态）时才 `import()`。
+ *
+ * 收尾路径刻意读 `mcpServiceRef` 而不是调用下面的 getter —— **没起来过的服务，
+ * 不该为了"停它"把整个 SDK 载进内存**（那正好把这次省下的又付回去）。
+ */
+let mcpServiceRef: (typeof import('./services/mcpService'))['mcpService'] | null = null
+async function getMcpService(): Promise<NonNullable<typeof mcpServiceRef>> {
+  if (!mcpServiceRef) {
+    const mod = await import('./services/mcpService')
+    mcpServiceRef = mod.mcpService
+  }
+  return mcpServiceRef
+}
 /** 是否以静默方式启动（开机自启 Run 键带 --background，主窗口保持隐藏） */
 const startHidden = process.argv.includes('--background')
 /**
@@ -144,6 +161,24 @@ function migrateLegacySettings() {
   const fresh = !store.get('dbPath') && !store.get('myWxid') && !store.get('decryptKey') && !store.get('onboardingDone')
   // 修复模式：旧版存在密钥而 store 为空时也要迁移（早期迁移可能因字段名不一致漏掉）
   const legacyPath = join(app.getPath('appData'), 'Weport', 'settings.json')
+  /**
+   * 这里曾经是 `if (!fresh && store.get('decryptKey')) return` ——
+   * 把「已经配过」等同于「decryptKey 此刻读出来非空」。而 `decryptKey` 会在三种
+   * **正常可达**的状态下读成空串：
+   *   1. 应用锁：`lock:` 值在解锁前没有明文缓存（config.ts 的 get 直接返回 ''）；
+   *   2. safeStorage 不可用（headless / 无密钥后端）；
+   *   3. 密文解不开（换了机器、DPAPI 变了）。
+   * 这三种情况下那个 early-return 被跳过，函数就会去读 v0.6.x 的
+   * `%APPDATA%\Weport\settings.json` 并**覆盖** dbPath / decryptKey / myWxid /
+   * exportPath / 通知与自启开关 —— 而且会把 `lock:` 的密钥改写成 `safe:`，
+   * 于是应用锁静默失效、数据库密钥换成旧版的。本机那份 settings.json 真的存在
+   * （含 64 位明文密钥），所以这不是理论风险。
+   *
+   * 正确的判据是「用户到底配过没有」：只要 store 里已经有 dbPath 或 myWxid，
+   * 这次启动就与旧版无关，一律不迁移 —— 与 decryptKey 能不能解密无关。
+   */
+  const alreadyConfigured = Boolean(store.get('dbPath')) || Boolean(store.get('myWxid'))
+  if (!fresh && alreadyConfigured) return
   if (!fresh && store.get('decryptKey')) return
 
   let legacy: Record<string, unknown> | null = null
@@ -1048,9 +1083,35 @@ function createWindow(autoShow: boolean): BrowserWindow {
     }
   })
 
+  // 最小化 / 隐藏同样要排进内存回收：此前只有「关闭到托盘」这一条路会
+  // scheduleMainWindowDiscard()，于是「最小化之后就不管了」的窗口会一直
+  // 占着整个渲染进程（实测托盘态 567MB，因为软件光栅；见上面 GPU 注释）。
+  // isVisible() 在最小化时已经是 false，所以 tick 本身能正确处理，
+  // 缺的只是"没人给它排期"。
+  win.on('minimize', () => {
+    // 最小化保留窗口（任务栏按钮要在），只排期卸载渲染层。
+    scheduleMainWindowDiscard('unload')
+  })
+  win.on('hide', () => {
+    scheduleMainWindowDiscard('destroy')
+  })
+  // 还原/显示时撤销回收计划；若已被回收，必须先把应用页装回来再显示 ——
+  // 否则从任务栏还原会露出一个 about:blank 白窗（只走托盘路径才盖得住）。
+  win.on('restore', () => {
+    cancelMainWindowDiscard()
+    restoreDiscardedMainWindow()
+  })
+  win.on('show', () => {
+    cancelMainWindowDiscard()
+    restoreDiscardedMainWindow()
+  })
+
   win.on('closed', () => {
     mainWindow = null
     mainWindowReady = false
+    // 主动回收（托盘态销毁窗口）不是"用户关掉了应用"：它之后会被重建。
+    // 少了这个判断，回收会命中下面那条"零窗口即退出"的兜底，把应用顺手杀掉。
+    if (mainWindowReclaimInProgress) return
     if (!isAppQuitting && process.platform !== 'darwin') {
       destroyNotificationWindow()
       if (BrowserWindow.getAllWindows().length === 0) app.quit()
@@ -1089,6 +1150,23 @@ const MAIN_WINDOW_DISCARD_DELAY_MS = Math.max(
 )
 let mainWindowDiscarded = false
 let mainWindowDiscardTimer: NodeJS.Timeout | null = null
+/**
+ * 回收方式：
+ *  - `destroy`：**销毁窗口**（托盘态）。实测 `about:blank` 只回收 ~29MB
+ *    （738MB → 738MB，渲染进程纹丝不动），因为 Chromium 不会把进程的基础设施
+ *    还给系统；销毁窗口才会真正杀掉那个渲染进程并把 GPU 侧的图层/解码器一起放掉。
+ *    恢复路径本来就存在（`showMainWindow()` 里 `!mainWindow` 分支会重建窗口，
+ *    静默启动的托盘实例走的就是它）。
+ *  - `unload`：只卸载渲染层（最小化态）。最小化的窗口**必须留着** ——
+ *    销毁它任务栏按钮就没了，用户没法从任务栏还原。
+ */
+let mainWindowDiscardMode: 'destroy' | 'unload' = 'unload'
+/**
+ * 正在主动回收窗口。`closed` 处理器里有一条"没有窗口就退出应用"的兜底 ——
+ * 那是给用户真的关掉窗口用的；主动销毁时必须跳过它，否则回收会顺手把应用杀掉
+ * （AGENTS.md 记的"零窗口即退出"就是这个坑）。
+ */
+let mainWindowReclaimInProgress = false
 
 /** 常驻诊断：隐藏窗口内存回收/恢复路径写入 userData/discard.log（每轮仅 1-2 行） */
 function discardDiag(msg: string): void {
@@ -1097,8 +1175,9 @@ function discardDiag(msg: string): void {
   } catch { /* noop */ }
 }
 
-function scheduleMainWindowDiscard(): void {
-  discardDiag(`schedule delay=${MAIN_WINDOW_DISCARD_DELAY_MS}`)
+function scheduleMainWindowDiscard(mode: 'destroy' | 'unload' = 'unload'): void {
+  mainWindowDiscardMode = mode
+  discardDiag(`schedule delay=${MAIN_WINDOW_DISCARD_DELAY_MS} mode=${mode}`)
   if (mainWindowDiscardTimer) {
     clearTimeout(mainWindowDiscardTimer)
     mainWindowDiscardTimer = null
@@ -1108,20 +1187,40 @@ function scheduleMainWindowDiscard(): void {
     // 导出中不卸载渲染层（进度事件目标需存活），导出结束后再试
     mainWindowDiscardTimer = setTimeout(() => {
       mainWindowDiscardTimer = null
-      scheduleMainWindowDiscard()
+      scheduleMainWindowDiscard(mode)
     }, MAIN_WINDOW_DISCARD_DELAY_MS)
     mainWindowDiscardTimer.unref?.()
     return
   }
   mainWindowDiscardTimer = setTimeout(() => {
     mainWindowDiscardTimer = null
-    discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode}`)
+    discardDiag(`tick visible=${mainWindow?.isVisible()} destroyed=${mainWindow?.isDestroyed() ?? true} quitting=${isAppQuitting} qa=${isAnyQaMode} mode=${mainWindowDiscardMode}`)
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
     if (isAppQuitting || isAnyQaMode) return
     if (exportTaskControlService.hasActiveTasks()) {
-      scheduleMainWindowDiscard()
+      scheduleMainWindowDiscard(mainWindowDiscardMode)
       return
     }
+    if (mainWindowDiscardMode === 'destroy') {
+      // 托盘态：整窗销毁，把渲染进程与它的 GPU 资源真正还给系统。
+      // 恢复由 showMainWindow() 的重建分支负责（托盘点击 / 二次启动）。
+      try {
+        mainWindowReclaimInProgress = true
+        mainWindowDiscarded = false
+        const win = mainWindow
+        mainWindow = null
+        mainWindowReady = false
+        win.destroy()
+        discardDiag('discard destroyed window')
+        console.log('[Weport] 主窗口隐藏超时，已销毁窗口回收内存')
+      } catch (e) {
+        discardDiag(`discard destroy failed: ${String(e)}`)
+      } finally {
+        mainWindowReclaimInProgress = false
+      }
+      return
+    }
+    // 最小化态：保留窗口（任务栏按钮要在），只卸载渲染层。
     try {
       mainWindowDiscarded = true
       void mainWindow.loadURL('about:blank').then(
@@ -1137,6 +1236,49 @@ function scheduleMainWindowDiscard(): void {
   mainWindowDiscardTimer.unref?.()
 }
 
+/** 撤销待执行的内存回收（窗口重新可见时调用） */
+function cancelMainWindowDiscard(): void {
+  if (mainWindowDiscardTimer) {
+    clearTimeout(mainWindowDiscardTimer)
+    mainWindowDiscardTimer = null
+  }
+}
+
+/**
+ * 把被回收（about:blank）的主窗口渲染层装回来并显示。
+ *
+ * 三条路径共用：托盘点击（showMainWindow）、任务栏还原（restore）、重新显示
+ * （show）。**必须共用** —— 只处理托盘那一条，从任务栏还原时会露出一个
+ * about:blank 白窗，因为那时应用页已经被卸载了。
+ *
+ * ready-to-show 在隐藏窗口的后续导航上可能不再触发，用 did-finish-load
+ * 兜底（短延时等首帧），保证恢复路径在任何情况下都能把窗口带回前台。
+ */
+function restoreDiscardedMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindowDiscarded) return
+  mainWindowDiscarded = false
+  loadMainWindowPage(mainWindow)
+  discardDiag('restore: reloading app page')
+  console.log('[Weport] 恢复主窗口渲染层')
+  let restoreTimer: NodeJS.Timeout | null = null
+  const showRestored = () => {
+    if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindowReady = true
+    mainWindow.show()
+    try {
+      mainWindow.setSkipTaskbar(false)
+    } catch { /* noop */ }
+    mainWindow.focus()
+    discardDiag('restore: window shown')
+  }
+  mainWindow.once('ready-to-show', showRestored)
+  mainWindow.webContents.once('did-finish-load', () => {
+    restoreTimer = setTimeout(showRestored, 250)
+    restoreTimer.unref?.()
+  })
+}
+
 /** 隐藏到托盘：必须同时移除任务栏按钮，否则关闭后窗口仍留在任务栏 */
 function hideMainWindowToTray() {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -1144,7 +1286,8 @@ function hideMainWindowToTray() {
     mainWindow.setSkipTaskbar(true)
   } catch { /* noop */ }
   mainWindow.hide()
-  scheduleMainWindowDiscard()
+  // 托盘态可以整窗销毁：恢复走托盘点击/二次启动，那条路会重建窗口。
+  scheduleMainWindowDiscard('destroy')
 }
 
 function showMainWindow() {
@@ -1166,30 +1309,7 @@ function showMainWindow() {
     return
   }
   if (mainWindowDiscarded) {
-    // 渲染层已被内存回收：先重载应用页，就绪后再显示（避免黑屏闪烁）。
-    // ready-to-show 在隐藏窗口的后续导航上可能不再触发，用 did-finish-load
-    // 兜底（短延时等首帧），保证恢复路径在任何情况下都能把窗口带回前台
-    mainWindowDiscarded = false
-    loadMainWindowPage(mainWindow)
-    discardDiag('restore: reloading app page')
-    console.log('[Weport] 恢复主窗口渲染层')
-    let restoreTimer: NodeJS.Timeout | null = null
-    const showRestored = () => {
-      if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
-      if (!mainWindow || mainWindow.isDestroyed()) return
-      mainWindowReady = true
-      mainWindow.show()
-      try {
-        mainWindow.setSkipTaskbar(false)
-      } catch { /* noop */ }
-      mainWindow.focus()
-      discardDiag('restore: window shown')
-    }
-    mainWindow.once('ready-to-show', showRestored)
-    mainWindow.webContents.once('did-finish-load', () => {
-      restoreTimer = setTimeout(showRestored, 250)
-      restoreTimer.unref?.()
-    })
+    restoreDiscardedMainWindow()
     return
   }
   if (!mainWindow.isVisible()) {
@@ -2003,9 +2123,52 @@ function registerIpcHandlers() {
     // 主进程做（见 backgroundVideoService）。第一次返回原文件并启动后台转码，
     // 之后返回缓存 —— 启动路径永远不等 ffmpeg。
     if (key === 'appearanceBackgroundPath') {
+      // 渲染层要**两个**值，语义不同，不能混：
+      //   appearanceBackgroundPath     → 该播哪个文件（可能是转码缓存；被拒时为空）
+      //   appearanceBackgroundSource   → 用户实际选的文件（界面显示 / 扩展名判断）
+      // 只用前者的话，一个被拒的背景会让设置页显示成"没选过背景"，
+      // 用户看到自己选的壁纸凭空消失；只用后者的话，转码缓存就白做了。
       const requested = String((configService as any)?.get(key) || '')
       if (!requested || !backgroundVideoService) return requested
-      return backgroundVideoService.resolve(requested).path
+      const info = backgroundVideoService.resolve(requested, {
+        quality: (configService as any)?.get('appearanceBackgroundVideoQuality'),
+        blurPx: (configService as any)?.get('appearanceBackgroundBlur'),
+      })
+      // 被拒的背景（超 50MB）必须**说出来**：静默把壁纸变没，用户只会以为
+      // 是自己选错了文件。原因写到配置里，设置页读到就显示一行提示。
+      // 用已有的 config 通道而不是新增 IPC —— 见 utils/appearance.ts 顶部说明。
+      void (configService as any)?.set(
+        'appearanceBackgroundRejected',
+        info.reason === 'too-large' ? 'too-large' : ''
+      )
+      return info.path
+    }
+    // 画质档位的**实际生效结果**（只读合成键，不落盘）。
+    //
+    // 为什么不把结果写进配置：这个值每次都会变（模糊一改就可能被降级），
+    // 而 configService.set 是同步落盘的 —— 为了显示一行提示去反复写配置文件
+    // 不值得。渲染层要的是"你能不能按我选的走、为什么不能"，重算一次最省事，
+    // 而且 resolve() 在命中缓存时只是 stat + 哈希 + Map 查询。
+    if (key === 'appearanceBackgroundVideoInfo') {
+      const requested = String((configService as any)?.get('appearanceBackgroundPath') || '')
+      const quality = (configService as any)?.get('appearanceBackgroundVideoQuality')
+      const blurPx = (configService as any)?.get('appearanceBackgroundBlur')
+      if (!requested || !backgroundVideoService) {
+        return { quality: 'balanced', selectedQuality: 'balanced', demoted: false, longEdge: 0, optimized: false, pending: false, reason: 'none' }
+      }
+      const info = backgroundVideoService.resolve(requested, { quality, blurPx })
+      return {
+        quality: info.quality,
+        selectedQuality: info.selectedQuality,
+        demoted: info.demoted,
+        longEdge: info.longEdge,
+        optimized: info.optimized,
+        pending: info.pending,
+        reason: info.reason || '',
+      }
+    }
+    if (key === 'appearanceBackgroundSource') {
+      return String((configService as any)?.get('appearanceBackgroundPath') || '')
     }
     return (configService as any)?.get(key)
   })
@@ -2121,11 +2284,11 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('http:stop', () => httpService.stop())
   ipcMain.handle('http:getStatus', () => httpService.getStatus())
-  ipcMain.handle('mcp:getStatus', () => mcpService.getStatus())
+  ipcMain.handle('mcp:getStatus', async () => (await getMcpService()).getStatus())
   // 客户端配置在**主进程**里拼好再交给渲染进程：mcpToken 是 safeStorage 加密的
   // 密钥，没必要为了渲染一段 JSON 把它送进渲染进程。
-  ipcMain.handle('mcp:getClientConfig', () => {
-    const status = mcpService.getStatus()
+  ipcMain.handle('mcp:getClientConfig', async () => {
+    const status = (await getMcpService()).getStatus()
     const bridge = resolveMcpBridgePath()
     const token = String(configService?.get('mcpToken') || '')
     return {
@@ -5856,7 +6019,7 @@ async function runScreenshotMode() {
   // 注意 .weclone-server-chip 只在 manage 段渲染，用它会在 hub 上误判为
   // "did not render" —— 断言必须对应当前实际渲染的那一段。
   await captureV09('weclone', 'weclone.png', ['.weclone-hub', '.analytics-hub-cards'], async () => {
-    await clickTab('人格克隆')
+    await clickTab('WeClone')
   })
 
   // WeClone 的 manage / create 两段此前从未被渲染过（hub 是唯一有截图的界面），
@@ -5864,7 +6027,7 @@ async function runScreenshotMode() {
   await captureV09('weclone-manage', 'weclone-manage.png', ['.weclone-grid', '.weclone-empty-cta'], async () => {
     await mainWindow!.webContents.executeJavaScript(
       `(() => {
-         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('管理分身'));
+         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('管理 WeClone'));
          b?.click();
          return !!b;
        })()`,
@@ -5885,7 +6048,7 @@ async function runScreenshotMode() {
     await sleep(400)
     await mainWindow!.webContents.executeJavaScript(
       `(() => {
-         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('新建分身'));
+         const b = Array.from(document.querySelectorAll('.analytics-big-card')).find((x) => x.textContent.includes('新建 WeClone'));
          b?.click();
          return !!b;
        })()`,
@@ -5992,7 +6155,7 @@ async function runScreenshotMode() {
         ['ai', 'WeportAI'],
         ['webot', 'WeBot'],
         ['webot-notes', 'WeBot 笔记'],
-        ['weclone', '人格克隆'],
+        ['weclone', 'WeClone'],
       ]
 
       let sweepIndex = 0
@@ -6928,7 +7091,9 @@ async function runCliHost() {
     // Tear down the services the engine started for the terminal session: leaving the
     // MCP/HTTP listeners and the WCDB host behind would keep a second, invisible
     // Weport alive for every TUI run.
-    try { mcpService.stop() } catch { /* noop */ }
+    // MCP/HTTP 监听与 WCDB host 都要收掉：留着等于给每次 TUI 运行留一个看不见的 Weport。
+    // 用 mcpServiceRef 而不是 getMcpService()：**没起来过的服务不需要为了停它把 SDK 载进内存**。
+    try { mcpServiceRef?.stop() } catch { /* noop */ }
     try { httpService.stop() } catch { /* noop */ }
     try { chatService.close() } catch { /* noop */ }
     void (async () => {
@@ -7194,11 +7359,27 @@ function startApp() {
     app.commandLine.appendSwitch('disk-cache-size', '16777216')
   } catch { /* noop */ }
 
-  // 静默启动（--background 托盘常驻）无窗口渲染需求：关闭硬件加速，
-  // 省掉 GPU 进程（实测 ~130MB 工作集 / ~312MB 私有提交）。
-  // 窗口显示走软件光栅（文本/列表/ECharts 足够流畅）；通知弹窗在
-  // Windows 走原生玻璃面板（D3D11 在原生侧，不受 Chromium GPU 影响）。
-  if (startHidden) {
+  // 硬件加速**不再因为 `--background` 而关闭**（v1.0.3 修正）。
+  //
+  // 旧行为：静默启动（开机自启 + 托盘常驻）时 disableHardwareAcceleration()，
+  // 依据是"隐藏窗口不需要渲染，省掉 GPU 进程 ~130MB"。
+  //
+  // 实测这个前提是错的：`--background` 是**整个进程生命周期**的开关，而用户
+  // 之后一定会把窗口打开。窗口一打开，软件光栅的代价立刻反超：
+  //
+  //   场景（16 核机器，前台播放 1080p 视频背景，见 .ui-probe/measure-video-cpu.mjs）
+  //     软件渲染 + 原始 4K 背景   CPU 1.16%（单核 18.64%）  工作集 1232MB（渲染进程 684MB）
+  //     硬件加速 + 原始 4K 背景   CPU 0.24%（单核  3.84%）  工作集  870MB（渲染进程 146MB）
+  //     软件渲染 + 1080p 缓存     CPU 0.41%                 工作集  720MB（渲染进程 218MB）
+  //     硬件加速 + 1080p 缓存     CPU 0.31%                 工作集  866MB（渲染进程 124MB）
+  //
+  // 也就是说：软件光栅把渲染进程从 ~124MB 顶到 ~684MB（+560MB），换来的只是
+  // GPU 进程少 ~200MB —— 净亏，而且 CPU 差 3-5 倍。连"纯隐藏"状态也不划算
+  // （实测隐藏态硬件加速 801MB vs 软件 941MB）。
+  //
+  // 保留显式逃生口：只有在这台机器的 GPU 驱动真的有问题时才用环境变量关掉，
+  // 不再让"启动时是隐藏的"这一个瞬时状态决定整个进程的渲染方式。
+  if (String(process.env.WEPORT_FORCE_SOFTWARE_RENDER || '') === '1') {
     try {
       app.disableHardwareAcceleration()
     } catch { /* noop */ }
@@ -7323,7 +7504,7 @@ function startApp() {
     if (configService.get('mcpEnabled') !== false) {
       const port = Number(configService.get('mcpPort') || 5032)
       const host = String(configService.get('mcpHost') || '127.0.0.1')
-      void mcpService.start(port, host)
+      void getMcpService().then((svc) => svc.start(port, host)).catch(() => { /* noop */ })
     }
 
     registerIpcHandlers()
@@ -7523,7 +7704,7 @@ try { tray?.destroy() } catch { /* noop */ }
     tray = null
     destroyNotificationWindow()
     try { await httpService.stop() } catch { /* noop */ }
-    try { await mcpService.stop() } catch { /* noop */ }
+    try { await mcpServiceRef?.stop() } catch { /* noop */ }
     // WeBot：先停调度再中止对话，避免退出过程中又派发新任务。
     try { weBotService?.stop() } catch { /* noop */ }
     // WeClone：中止正在进行的克隆生成

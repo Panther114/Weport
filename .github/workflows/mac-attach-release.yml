@@ -58,7 +58,51 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Same signing contract as release.yml — see the long comment there for the
+      # issue #18 root cause and the meaning of each secret.
+      - name: "Decide macOS signing mode (issue #18)"
+        id: signing
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_IDENTITY_QUALIFIER: ${{ secrets.MAC_IDENTITY_QUALIFIER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mode=adhoc
+          notarize=false
+          if [ -n "$MAC_CSC_LINK" ] && [ -n "$MAC_CSC_KEY_PASSWORD" ] && [ -n "$MAC_IDENTITY_QUALIFIER" ]; then
+            mode=developer-id
+          fi
+          if [ "$mode" = "developer-id" ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            notarize=true
+          fi
+          if [ "$mode" = "adhoc" ]; then
+            echo "::warning::No Developer ID secrets — this backfill is AD-HOC and \`spctl --assess\` will keep rejecting it (issue #18)."
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "macOS signing mode: $mode (notarize=$notarize)"
+
+      - name: Build macOS installer (Developer ID signed + notarized)
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+        run: |
+          # `--config.mac.identity` overrides package.json's ad-hoc `"-"`, and
+          # `hardenedRuntime=true` is required before Apple will notarize.
+          npm run build:mac -- \
+            --config.mac.identity="${{ secrets.MAC_IDENTITY_QUALIFIER }}" \
+            --config.mac.hardenedRuntime=true
+
       - name: Build macOS installer (arm64, ad-hoc signed)
+        if: steps.signing.outputs.mode == 'adhoc'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run build:mac
@@ -68,6 +112,45 @@ jobs:
       # failure anywhere. Gate it exactly like release.yml does.
       - name: Verify macOS packaging & signature (issue #18 gate)
         run: bash scripts/verify-mac-pack.sh release
+
+      - name: "Gatekeeper / notarization gate (issue #18)"
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+        run: |
+          set -uo pipefail
+          failures=0
+          fail() { echo "::error::$1"; failures=$((failures + 1)); }
+          pass() { echo "✅ $1"; }
+          APP="$(find release -maxdepth 3 -name 'Weport.app' -type d | head -n 1 || true)"
+          ZIP="$(ls -t release/Weport-*.zip 2>/dev/null | head -n 1 || true)"
+          DMG="$(ls -t release/Weport-*.dmg 2>/dev/null | head -n 1 || true)"
+          if [ -z "$APP" ] || [ -z "$ZIP" ]; then fail "missing produced artifact"; exit $failures; fi
+
+          # The signature must survive the zip — that is the artifact users install.
+          tmp="$(mktemp -d)"; unzip -q "$ZIP" -d "$tmp"
+          UNZIPPED="$(find "$tmp" -maxdepth 3 -name 'Weport.app' -type d | head -n 1 || true)"
+          if [ -z "$UNZIPPED" ]; then fail "unzipped $ZIP contains no Weport.app"
+          elif codesign --verify --deep --strict --verbose=2 "$UNZIPPED" 2>&1; then pass "codesign --verify --deep --strict passes on the unzipped app"
+          else fail "codesign --verify --deep --strict FAILED on the unzipped app (issue #18)"; fi
+          rm -rf "$tmp"
+
+          if [ -s "$APP/Contents/_CodeSignature/CodeResources" ]; then pass "bundle seal present"
+          else fail "missing Contents/_CodeSignature/CodeResources (issue #18)"; fi
+
+          if spctl --assess --type execute --verbose=4 "$APP" 2>&1; then pass "spctl --assess accepts the app"
+          elif [ "$MODE" = "developer-id" ]; then fail "spctl --assess REJECTED a Developer-ID-signed app (issue #18)"
+          else echo "::warning::spctl --assess rejects this app — expected for ad-hoc (mode=$MODE)."; fi
+
+          if [ "$NOTARIZE" = "true" ]; then
+            xcrun stapler validate "$APP" || fail "stapler validate failed on the .app"
+            if [ -n "$DMG" ]; then
+              xcrun stapler validate "$DMG" || fail "stapler validate failed on the .dmg"
+              spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" || fail "spctl rejected the notarized .dmg"
+            fi
+          fi
+          echo "=== Gatekeeper gate: $failures failure(s) ==="
+          exit $failures
 
       - name: Attach to existing release
         env:

@@ -87,6 +87,15 @@ import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPicker
 const WeportAiPanel = lazy(() => import('./components/weportAi/WeportAiPanel'))
 const AiSettingsModal = lazy(() => import('./components/weportAi/AiSettingsModal'))
 const ConnectorsPanel = lazy(() => import('./components/settings/ConnectorsPanel'))
+// 液态玻璃导航层（v1.0.4）：用本项目自己的折射引擎（lensDisplacementMap + GlassFilter）。
+// 静态引入 —— 左侧导航首屏就在，没法 lazy。刻意不用 @samasante/liquid-glass：
+// 那个库在本项目的内部尺寸测量恒为 0，材质从不生效（证据见 .ui-probe/diagnose-glass-errors.mjs）。
+import { GlassSurface } from './components/LiquidGlass/GlassSurface'
+// 通知玻璃设置面板：内部用的是真弹窗组件（NotificationToast + LiquidGlass，~230KB），
+// 必须 lazy —— 静态引入会把它拉进主窗口的启动图，正是 AGENTS.md 记过的那个坑。
+const NotificationGlassPanel = lazy(() =>
+  import('./components/settings/NotificationGlassPanel').then((m) => ({ default: m.NotificationGlassPanel }))
+)
 const WeBotModule = lazy(() => import('./pages/WeBotModule'))
 const WeClonePage = lazy(() => import('./pages/WeClonePage'))
 const AiMarkdown = lazy(() => import('./components/weportAi/AiMarkdown'))
@@ -109,15 +118,18 @@ function LazyFallback({ label }: { label: string }) {
 import {
   ACCENT_OPTIONS,
   ACCENT_STRENGTH_OPTIONS,
+  BLUR_FORCES_BALANCED_PX,
   DENSITY_OPTIONS,
   MODE_OPTIONS,
   PRESET_ACCENTS,
+  VIDEO_QUALITY_OPTIONS,
   backgroundKindOf,
   backgroundProtocolUrl,
   initAppearance,
   normalizeHexColor,
   probeBackground,
   adoptModeFromBackground,
+  refreshVideoQualityInfo,
   setAccent,
   setAccentStrength,
   setBackgroundBlur,
@@ -127,6 +139,7 @@ import {
   setDensity,
   setMode,
   setModeAuto,
+  setVideoQuality,
   useAppearance,
 } from './utils/appearance'
 import './styles/v09.scss'
@@ -294,7 +307,7 @@ const TABS: Array<{
   { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
-  { id: 'weclone', label: '人格克隆', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
+  { id: 'weclone', label: 'WeClone', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
   { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '启动、外观、AI 服务、数据与接口' },
 ]
 
@@ -400,6 +413,15 @@ export default function App() {
 
   // 视频背景只在窗口处于前台时播放：后台窗口没人看，继续解码只是白烧 GPU。
   // 焦点事件挂在 window 上（Electron 窗口失焦会同步触发 blur/focus）。
+  //
+  // **试过并被否掉的优化（v1.0.3，别再重做）**：窗口不可见时把解码器整个拆掉
+  // （`removeAttribute('src')` + `load()`），想收回视频留下的 GPU 内存。
+  // 实测无效 —— 托盘态销毁窗口之后，GPU 进程 243MB（改动后）vs 226~237MB（改动前），
+  // 在噪声范围内，没有可测量的收益；原因是那部分内存是 **GPU 进程的资源池**，
+  // 与"当前还在不在解码"无关（对照实验：全程没加载过视频的背景，同一回收流程后
+  // GPU 只有 139MB，即"这个 GPU 进程有没有解过视频"决定了它，而不是"现在解不解"），
+  // Chromium 不重启 GPU 进程就不会把它还回来。
+  // 拆解码器反而给恢复路径多加一次本地重载，所以回退了，只保留"暂停"。
   useEffect(() => {
     const sync = () => {
       const video = backgroundVideoRef.current
@@ -416,7 +438,7 @@ export default function App() {
       window.removeEventListener('blur', sync)
       document.removeEventListener('visibilitychange', sync)
     }
-  }, [appearance.backgroundPath])
+  }, [appearance.backgroundPlaybackPath])
 
   /**
    * 明暗自适应：背景变化后让主进程按背景亮度重判一次明暗。
@@ -503,6 +525,11 @@ export default function App() {
   const imageKeyRequired = api.process.platform === 'win32'
     || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
+  // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
+  // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
+  const imageKeyHint = api.process.platform === 'win32'
+    ? '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）'
+    : '未配置：导出图片前必须先获取，密钥从微信缓存推导（无需附加微信进程）。若失败：先在微信中打开几张图片大图，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport，再重试。'
 
   useEffect(() => {
     setDurationInput(String(Math.round(notificationDuration / 1000)))
@@ -802,24 +829,30 @@ export default function App() {
     setImageKeyStatus('正在从微信缓存读取图片密钥…')
     try {
       let result = await api.key.autoGetImageKey(dbPath || undefined, selectedWxid)
+      // issue #20：缓存路径的失败原因必须留住。以前它被内存扫描的报错直接覆盖，
+      // 用户只看到"60 秒内未找到 AES 密钥"——而真正的原因（密钥码与这个账号对不上、
+      // 或者两个账号同机时模板取错了账号）就永远不出现在界面上。
+      const cacheError = result.success ? '' : String(result.error || '').trim()
       if (!result.success) {
-        setImageKeyStatus('缓存读取失败，尝试内存扫描（请在微信中打开几张图片大图）…')
+        setImageKeyStatus('缓存读取失败，正在用内存扫描兜底（请先在微信中打开 2-3 张图片大图）…')
         result = await api.key.scanImageKeyFromMemory(dbPath || '')
       }
       if (result.success && typeof result.xorKey === 'number' && result.aesKey) {
         await api.config.updateWxidEntry(selectedWxid, { imageXorKey: result.xorKey, imageAesKey: result.aesKey, updatedAt: Date.now() })
         setImageKeysOk(true)
         if (result.verified === false) {
-          // keyService 未能用 *_t.dat 模板校验密钥归属（如目录里还没有图片缓存），
-          // 密钥可能属于别的账号——明确提示而不是静默当作成功。
-          pushToast('info', '图片密钥已保存（未校验）', '未能确认密钥属于当前账号；若导出图片仍失败，请先在微信中查看几张图片后重新获取', 12000)
+          // keyService 未能用本账号自己的 *_t.dat 模板校验密钥归属（目录里还没有图片
+          // 缓存，或账号目录没定位到）——明确提示而不是静默当作成功。
+          pushToast('info', '图片密钥已保存（未校验）', `未能确认密钥属于账号 ${selectedWxid}；若导出图片仍失败，请用该账号在微信中打开几张图片后重新获取`, 12000)
         } else {
-          pushToast('ok', '图片密钥获取成功', '现在可以导出图片了')
+          pushToast('ok', '图片密钥获取成功', `已按账号 ${selectedWxid} 校验并保存，现在可以导出图片了`)
         }
       } else if (result.success) {
         pushToast('err', '图片密钥不完整', '未取得完整的 XOR/AES 密钥，请重试或使用内存扫描')
       } else {
-        pushToast('err', '图片密钥获取失败', result.error || '请先在微信中查看几张图片后重试', 10000)
+        // 两条路径的说明都带上：缓存路径解释"为什么没推导出来"，内存扫描解释"下一步"。
+        const detail = [cacheError, String(result.error || '').trim()].filter(Boolean).join(' ')
+        pushToast('err', '图片密钥获取失败', detail || '请先在微信中查看几张图片后重试', 20000)
       }
     } catch (e) {
       pushToast('err', '图片密钥获取失败', String(e), 10000)
@@ -1762,6 +1795,8 @@ export default function App() {
       })
       if (!selected) return
       setBackgroundPath(selected)
+      // 新选的可能是一段视频：主进程此刻会开始后台转码，实际档位/长边要问它。
+      void refreshVideoQualityInfo()
     } catch (error) {
       pushToast('err', '选择背景失败', String((error as Error)?.message || error), 9000)
     }
@@ -1794,7 +1829,7 @@ export default function App() {
     }
   }
 
-  const backgroundKind = backgroundKindOf(appearance.backgroundPath)
+  const backgroundKind = backgroundKindOf(appearance.backgroundPlaybackPath)
 
   return (
     <div className="shell">
@@ -1808,7 +1843,7 @@ export default function App() {
           {backgroundKind === 'video' ? (
             <video
               ref={backgroundVideoRef}
-              src={backgroundProtocolUrl(appearance.backgroundPath)}
+              src={backgroundProtocolUrl(appearance.backgroundPlaybackPath)}
               autoPlay
               loop
               muted
@@ -1821,7 +1856,7 @@ export default function App() {
           ) : (
             // 同一条亮度自适应：探针与设置页都靠它决定「跟随背景」的明暗。
             <img
-              src={backgroundProtocolUrl(appearance.backgroundPath)}
+              src={backgroundProtocolUrl(appearance.backgroundPlaybackPath)}
               alt=""
               draggable={false}
               onLoad={() => void adoptModeFromBackground()}
@@ -1830,7 +1865,12 @@ export default function App() {
           <div className="app-bg-dim" />
         </div>
       )}
-      <aside className="rail" aria-label="主导航">
+      <GlassSurface
+        className="rail"
+        role="navigation"
+        aria-label="主导航"
+        surfaceId="rail"
+      >
         <div
           className="rail-brand"
           role="button"
@@ -1898,7 +1938,7 @@ export default function App() {
           <StatusChip ok={accountReady} label={accountReady ? '账号已选' : '未选账号'} />
           <StatusChip ok={keyOk} label={keyOk ? '密钥就绪' : '缺少密钥'} />
         </div>
-      </aside>
+      </GlassSurface>
 
       <header className="topbar">
         <div className="topbar-title">
@@ -2457,7 +2497,7 @@ export default function App() {
                       <span className="hint" style={{ margin: 0 }}>
                         {imageKeyStatus || (imageKeysOk
                           ? '图片密钥已配置（按账号保存）'
-                          : '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）')}
+                          : imageKeyHint)}
                       </span>
                     </div>
                   )}
@@ -2649,7 +2689,7 @@ export default function App() {
           </Suspense>
         )}
         {tab === 'weclone' && (
-          <Suspense fallback={<LazyFallback label="人格克隆" />}>
+          <Suspense fallback={<LazyFallback label="WeClone" />}>
             <WeClonePage />
           </Suspense>
         )}
@@ -2937,6 +2977,21 @@ export default function App() {
                   <span className="track" />
                 </label>
               </div>
+            </section>
+
+            {/* 通知玻璃（v1.0.3）：填充、文字色、描边、圆角、折射、投影全部可调。
+                预览用的是真弹窗组件，见 NotificationGlassPanel 顶部说明。 */}
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Sparkles size={15} />
+                  通知玻璃
+                </h2>
+                <span>卡片填充、文字色、描边与折射强度</span>
+              </div>
+              <Suspense fallback={<div className="wp-loading">正在加载玻璃设置…</div>}>
+                <NotificationGlassPanel />
+              </Suspense>
             </section>
 
             <section className="panel">
@@ -3349,11 +3404,13 @@ export default function App() {
                   <div>
                     <strong>背景</strong>
                     <span className="hint">
-                      {appearance.backgroundPath
-                        ? backgroundKindOf(appearance.backgroundPath) === 'video'
-                          ? '视频背景：窗口在前台时循环播放，切到后台自动暂停省电'
-                          : '图片背景：面板自动转为半透明以保证文字可读'
-                        : '支持图片与视频（mp4 / webm）；默认纯色'}
+                      {appearance.backgroundRejected === 'too-large'
+                        ? '这个视频超过 50MB，已停用：背景每一帧都要解码，几百 MB 的片子会让界面变卡。请换一个 ≤50MB 的循环片段。'
+                        : appearance.backgroundPath
+                          ? backgroundKindOf(appearance.backgroundPath) === 'video'
+                            ? '视频背景：窗口在前台时循环播放，切到后台自动暂停省电'
+                            : '图片背景：面板自动转为半透明以保证文字可读'
+                          : '支持图片与视频（mp4 / webm，≤50MB）；默认纯色'}
                     </span>
                   </div>
                 </div>
@@ -3403,13 +3460,70 @@ export default function App() {
                         min={0}
                         max={40}
                         value={appearance.backgroundBlur}
-                        onChange={(e) => setBackgroundBlur(Number(e.target.value))}
+                        onChange={(e) => {
+                          setBackgroundBlur(Number(e.target.value))
+                          // 模糊跨过 4px 阈值会改变实际生效的画质档位，
+                          // 提示文案必须跟着变（主进程算，别在本地猜）。
+                          void refreshVideoQualityInfo()
+                        }}
                         aria-label="背景模糊半径"
                       />
                       <span className="appearance-slider-value">{appearance.backgroundBlur}px</span>
                     </div>
                   </div>
                 </>
+              ) : null}
+
+              {backgroundKindOf(appearance.backgroundPath) === 'video' ? (
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <div>
+                      <strong>背景视频画质</strong>
+                      <span className="hint">
+                        背景每一帧都要解码，档位越高越清晰也越费资源。
+                        {appearance.videoQualityDemoted ? (
+                          <>
+                            {' '}
+                            <strong>
+                              当前已自动降到「
+                              {VIDEO_QUALITY_OPTIONS.find((o) => o.id === appearance.videoQualityEffective)?.label}
+                              」
+                            </strong>
+                            ：背景模糊 ≥{BLUR_FORCES_BALANCED_PX}px 时更高分辨率看不出差别，纯属浪费
+                            {appearance.videoDecodeEdge
+                              ? `（实际解码长边约 ${appearance.videoDecodeEdge}px）`
+                              : ''}
+                            。把模糊调低即可恢复。
+                          </>
+                        ) : appearance.videoDecodeEdge ? (
+                          ` 当前解码长边约 ${appearance.videoDecodeEdge}px。`
+                        ) : (
+                          ''
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="segmented" role="radiogroup" aria-label="背景视频画质">
+                    {VIDEO_QUALITY_OPTIONS.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={appearance.videoQuality === option.id}
+                        className="segmented-item"
+                        data-active={appearance.videoQuality === option.id}
+                        title={option.hint}
+                        onClick={() => {
+                          setVideoQuality(option.id)
+                          // 主进程才知道真实的长边与是否降级：提交后把权威值取回来。
+                          void refreshVideoQualityInfo()
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ) : null}
 
               <div className="setting-row">
@@ -3471,7 +3585,7 @@ export default function App() {
                       <Sparkles size={15} />
                       AI 服务
                     </h2>
-                    <span>提供商与密钥只在这里配置，WeportAI · WeBot · 人格克隆共用</span>
+                    <span>提供商与密钥只在这里配置，WeportAI · WeBot · WeClone 共用</span>
                   </div>
 
                   {aiSetup ? (
@@ -3510,7 +3624,7 @@ export default function App() {
                         [
                           { id: 'chat', label: 'WeportAI', hint: '手动对话与工具调用' },
                           { id: 'webot', label: 'WeBot', hint: '定时任务的后台执行' },
-                          { id: 'weclone', label: '人格克隆', hint: '生成人格档案' },
+                          { id: 'weclone', label: 'WeClone', hint: '生成人格档案' },
                         ] as const
                       ).map((row) => {
                         const current = aiAssignments.consumers.find((item) => item.consumer === row.id)

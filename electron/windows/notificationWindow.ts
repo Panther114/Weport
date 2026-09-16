@@ -57,9 +57,17 @@ function normalizeNotificationDuration(value: unknown): number {
   return Math.min(MAX_NOTIFICATION_DURATION_MS, Math.max(MIN_NOTIFICATION_DURATION_MS, Math.round(duration)));
 }
 
-// 空闲销毁：隐藏的通知窗口（含渲染进程）常驻占用 ~120MB 工作集，
-// 通知稀少时不值得养着。隐藏后闲置超时即销毁，下一条通知重新冷启动
-const IDLE_DESTROY_DELAY_MS = 3 * 60 * 1000;
+// 空闲回收：通知窗口（一整个渲染进程 + 合成层，实测 ~106-130MB）在最后一条通知
+// 之后闲置这么久就销毁，下一条通知再按需创建。3 分钟太长 —— 用户"看一眼
+// 任务管理器"的时间窗正好落在里面，而冷启动一条通知只要几百毫秒。
+//
+// v1.0.4：3 分钟 → 45s。理由是实测：本机（16GB / Intel Iris Xe 核显）弹窗渲染进程
+// 存活时整机占用 912MB = 5.66%，销毁后回到 ~462MB = 2.87% —— **这 130MB 就是
+// 用户"空闲却看到 5.7%"的主要来源之一**。45s 仍然覆盖得住"连续几条消息"的节奏
+// （每次 show 都会 cancelIdleDestroy 重新计时，所以一串通知只销毁一次），
+// 同时把"最后一条之后还白养着一个渲染进程"的时间砍掉 75%。
+const IDLE_DESTROY_DELAY_MS = 45 * 1000;
+
 let idleDestroyTimer: NodeJS.Timeout | null = null;
 
 function cancelIdleDestroy() {
@@ -731,37 +739,24 @@ export async function registerNotificationHandlers() {
     }
   });
 
-  // 启动空闲期预热：
-  // - 预创建通知窗口：首条通知免去窗口创建和渲染器冷启动
-  // - 预创建原生玻璃面板（隐藏待命）：worker 线程、D3D 设备、着色器编译、
-  //   DComp 窗口链全部离开首条通知的可见路径（原生端实测 ~150ms）；
-  //   隐藏面板零渲染零采集，常驻开销可忽略
-  // 预热仅当消息推送开启时进行：推送关闭时不会有真实弹窗（ai-insight 频道
-  // 无触发源，测试/截图走 force 按需创建），常驻的弹窗渲染进程 ~84MB 纯属浪费。
-  // 若推送中途开启，下一条通知会经 showNotification 按需冷启动，功能不受影响。
+  // 启动空闲期预热（v1.0.3 收窄）：**不再预创建通知窗口**。
+  //
+  // 旧行为：启动 3s 后无条件 createNotificationWindow()，常驻一整个渲染进程
+  // 等第一条通知。实测那是一个 **106MB 工作集**（344×115 的窗口，popup.html
+  // 完整渲染进程 + 合成层）——在"开机自启 + 托盘常驻"这个最常见的形态下，
+  // 用户打开任务管理器时看到的就是它，而它 99% 的时间什么都不做。
+  //
+  // 冷启动这条路本来就是通的、而且是被产品验证过的：showNotification 内部
+  // 会按需 createNotificationWindow()，下面这条注释原本就写着"按需冷启动，
+  // 功能不受影响"。所以这里只保留**零渲染开销**的预热（桌面采集源 id，
+  // 不创建窗口、不创建渲染进程），窗口本身交给第一条真实通知。
+  //
+  // 恢复"预创建"只需要把 createNotificationWindow() 加回来 —— 代价是那 106MB。
   const config = ConfigService.getInstance();
   const shouldPrewarm = (await config.get("messagePushEnabled")) === true;
   if (!shouldPrewarm) return;
   setTimeout(() => {
     prewarmDesktopSourceId();
-    const win = createNotificationWindow();
-    if (nativeGlass && win) {
-      const scale = screen.getPrimaryDisplay().scaleFactor;
-      const [winX, winY] = win.getPosition();
-      ensureGlassPanel(
-        {
-          x: Math.round(winX * scale),
-          y: Math.round(winY * scale),
-          width: Math.round(344 * scale),
-          height: Math.round(96 * scale),
-        },
-        toGlassParams({}, scale),
-        scale,
-        [],
-      );
-    }
-    // 预热窗口若迟迟没有通知到来，按空闲策略回收
-    scheduleIdleDestroy();
   }, 3000);
 
   // Handle resize request from renderer

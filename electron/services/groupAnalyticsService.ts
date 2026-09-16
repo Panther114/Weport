@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import ExcelJS from 'exceljs'
+// 只在"导出成员消息/群成员为 XLSX"时用得到，运行时动态加载（见 ExcelFormatter.ts）。
+import type ExcelJS from 'exceljs'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
@@ -1985,6 +1986,7 @@ class GroupAnalyticsService {
         const content = '\ufeff' + csvLines.join('\n')
         fs.writeFileSync(outputPath, content, 'utf8')
       } else {
+        const { default: ExcelJS } = await import('exceljs')
         const workbook = new ExcelJS.Workbook()
         const worksheet = workbook.addWorksheet(this.sanitizeWorksheetName('成员消息记录'))
 
@@ -2185,6 +2187,7 @@ class GroupAnalyticsService {
         const content = '\ufeff' + csvLines.join('\n')
         fs.writeFileSync(outputPath, content, 'utf8')
       } else {
+        const { default: ExcelJS } = await import('exceljs')
         const workbook = new ExcelJS.Workbook()
         const sheet = workbook.addWorksheet(this.sanitizeWorksheetName('群成员列表'))
 

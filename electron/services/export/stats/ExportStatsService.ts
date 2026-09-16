@@ -6,7 +6,7 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
-import ExcelJS from 'exceljs'
+// 同 ExportOrchestrator：未使用的 exceljs 导入已移除（启动图里少 18MB）。
 import { getEmojiPath } from 'wechat-emojis'
 import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'

@@ -1284,8 +1284,8 @@ export class WeCloneService {
     if (listed.length === 0) {
       return {
         success: false,
-        error: '本机还没有人格克隆',
-        hint: '在「人格克隆」页面点「生成克隆」—— 全程在本机完成，不需要任何服务器。',
+        error: '本机还没有 WeClone',
+        hint: '在「WeClone」页面点「生成克隆」—— 全程在本机完成，不需要任何服务器。',
       }
     }
     // 没指定就用最新那个；指定了但找不到也退回最新（比报错更不容易卡住用户）
@@ -1300,7 +1300,7 @@ export class WeCloneService {
       } catch { /* 单份缺失不致命，prompt 里对应小节为空 */ }
     }
     if (!mds.profile) {
-      return { success: false, error: '人格档案不完整（profile.md 缺失）', hint: '请在「人格克隆」里重新生成一次。' }
+      return { success: false, error: '人格档案不完整（profile.md 缺失）', hint: '请在「WeClone」里重新生成一次。' }
     }
 
     let retrieved: string[] = []
@@ -1372,7 +1372,7 @@ export class WeCloneService {
       return {
         success: false,
         error: resolved ? `服务「${resolved.name}」（${resolved.providerId}/${resolved.model}）没有可用的 API Key` : '没有可用的 AI 服务',
-        hint: '到「设置 → AI 服务」填好提供商与密钥后重试。人格克隆和 WeportAI 共用这一份配置。',
+        hint: '到「设置 → AI 服务」填好提供商与密钥后重试。WeClone 和 WeportAI 共用这一份配置。',
       }
     }
 

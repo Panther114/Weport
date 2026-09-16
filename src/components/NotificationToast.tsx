@@ -1,7 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Avatar } from './Avatar'
 import LiquidGlass, { type LiquidGlassBackdropImage } from './LiquidGlass'
 import { renderTextWithEmoji } from '../utils/renderTextWithEmoji'
+import {
+    NOTIFICATION_GLASS_DEFAULT,
+    notificationGlassRenderParams,
+    notificationGlassVars,
+    type NotificationGlass
+} from '../utils/notificationGlass'
 import './NotificationToast.scss'
 
 export interface NotificationData {
@@ -37,6 +43,11 @@ interface NotificationToastProps {
     animationEnabled?: boolean
     /** 退场动画开始的一刻触发（原生模式用来提前淡出原生面板） */
     onHideStart?: () => void
+    /**
+     * 玻璃观感（设置 → 消息通知 → 通知玻璃）。是**变量**而不是写死的观感，
+     * 因此同一份配置在弹窗与设置页预览里渲染出的结果完全一致。
+     */
+    glass?: NotificationGlass
 }
 
 /**
@@ -54,7 +65,8 @@ export function NotificationToast({
     backdropStream,
     nativeBackdrop = false,
     animationEnabled = true,
-    onHideStart
+    onHideStart,
+    glass = NOTIFICATION_GLASS_DEFAULT
 }: NotificationToastProps) {
     const [isVisible, setIsVisible] = useState(initialVisible)
     const [currentData, setCurrentData] = useState<NotificationData | null>(null)
@@ -108,9 +120,18 @@ export function NotificationToast({
 
     if (!currentData) return null
 
+    const render = notificationGlassRenderParams(glass)
+    // 变量挂在**卡片容器**上（不是 documentElement）：设置页的预览卡片用的是
+    // 同一个组件、同一组变量，因此"预览 = 真弹窗"是结构上成立的，不靠人工同步。
+    // null 值的变量直接不写（--glass-text-color 未指定时让 --noti-* 生效）。
+    const glassStyle = Object.fromEntries(
+        Object.entries(notificationGlassVars(glass)).filter(([, value]) => value !== null)
+    ) as CSSProperties
+
     return (
         <div
             className={`notification-toast-container ${isVisible ? 'visible' : ''} ${animationEnabled ? '' : 'motion-disabled'}`.trim()}
+            style={glassStyle}
             onContextMenu={(event) => {
                 event.preventDefault()
                 event.stopPropagation()
@@ -118,15 +139,14 @@ export function NotificationToast({
             }}
         >
             <LiquidGlass
-                cornerRadius={16}
+                cornerRadius={glass.radius}
                 padding="12px 10px"
-                // 与 NotificationWindow 的 GLASS_PARAMS 保持一致：原生面板按那份
-                // 参数渲染折射，两边不一致时"同一张卡片"在原生/回退两条路径上
-                // 会出现不同的玻璃厚度。纱层压薄之后这些折射参数才是观感主角。
-                blurAmount={0.4}
-                saturation={175}
-                displacementScale={100}
-                aberrationIntensity={2}
+                // 折射/模糊强度来自同一份配置，弹窗与设置页预览共用
+                // notificationGlassRenderParams()，两条路径不会算出不同的玻璃厚度。
+                blurAmount={render.blurAmount}
+                saturation={render.saturation}
+                displacementScale={render.displacementScale}
+                aberrationIntensity={render.aberrationIntensity}
                 backdropImage={backdropImage}
                 backdropStream={backdropStream}
                 nativeBackdrop={nativeBackdrop}

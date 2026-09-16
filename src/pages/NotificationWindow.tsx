@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { NotificationToast, type NotificationData } from '../components/NotificationToast'
 import type { LiquidGlassBackdropImage } from '../components/LiquidGlass'
 import {
@@ -10,15 +10,38 @@ import {
 } from './useNotificationAdaptiveTheme'
 import '../components/NotificationToast.scss'
 import './NotificationWindow.scss'
+import {
+    NOTIFICATION_GLASS_DEFAULT,
+    NOTIFICATION_GLASS_KEYS,
+    glassTextPolarity,
+    normalizeNotificationGlass,
+    notificationGlassRenderParams,
+    type NotificationGlass
+} from '../utils/notificationGlass'
 
 /**
  * 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值）。
  *
- * 纱层压到近乎全透之后，卡片的"玻璃感"就全落在折射本身了：blurSigma 6 让玻璃
+ * 纱层压到近乎全透之后，卡片的"玻璃感"就全落在折射本身了：blurSigma 让玻璃
  * 读起来是"厚玻璃"而不是"贴纸"，displacementScale/aberration 抬高一档让边缘的
  * 透镜弯曲与色散可见（之前 0.42~0.58 的厚纱层把这些全盖住了）。
+ *
+ * v1.0.3：这些值改由用户的玻璃配置换算（notificationGlassRenderParams），
+ * 本常量只作为"配置读不出来"时的兜底。
  */
 const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 6, displacementScale: 100, aberrationIntensity: 2, saturation: 175 }
+
+/** 用户配置 → 原生面板参数（与渲染层同一个换算函数，两条路径观感一致）。 */
+function nativeGlassParams(glass: NotificationGlass) {
+    const render = notificationGlassRenderParams(glass)
+    return {
+        cornerRadius: glass.radius,
+        blurSigma: render.blurSigma,
+        displacementScale: render.displacementScale,
+        aberrationIntensity: render.aberrationIntensity,
+        saturation: render.saturation
+    }
+}
 const DEFAULT_NOTIFICATION_DURATION_MS = 5000
 const MIN_NOTIFICATION_DURATION_MS = 1000
 const MAX_NOTIFICATION_DURATION_MS = 60_000
@@ -44,6 +67,9 @@ export default function NotificationWindow() {
     // 原生玻璃模式（Windows）：折射由主进程的原生面板在窗口下方提供，
     // 渲染层不开视频流、不渲染折射画布，只负责上报卡片几何与内容层
     const [nativeBackdrop, setNativeBackdrop] = useState(false)
+    // 玻璃观感（设置 → 消息通知 → 通知玻璃）。默认值 = 用户要求的那套：
+    // 浅填充 + 发丝描边（不再是那圈 1.5px 白边）。
+    const [glass, setGlass] = useState<NotificationGlass>(NOTIFICATION_GLASS_DEFAULT)
     // 事件回调里需要读取"当前展示中"的通知作为过渡的旧通知，用 ref 避免重建监听
     const notificationRef = useRef<NotificationData | null>(null)
     // 上次上报的窗口尺寸：重复上报会触发主进程 setSize，
@@ -107,6 +133,38 @@ export default function NotificationWindow() {
             return () => remove?.()
         }
     }, [])
+
+    // 玻璃观感配置：每次通知到来时重读一次，用户在设置里改完下一条就生效，
+    // 不需要重启弹窗。读失败一律退回默认值（弹窗永远不能因为配置读不出来而不显示）。
+    useEffect(() => {
+        let cancelled = false
+        const load = async () => {
+            const api = window.electronAPI
+            if (!api?.config?.get) return
+            const read = async (key: string) => {
+                try {
+                    return await api.config.get(key)
+                } catch {
+                    return undefined
+                }
+            }
+            const values = await Promise.all(
+                (Object.keys(NOTIFICATION_GLASS_KEYS) as Array<keyof NotificationGlass>).map((field) =>
+                    read(NOTIFICATION_GLASS_KEYS[field])
+                )
+            )
+            if (cancelled) return
+            const raw: Partial<Record<keyof NotificationGlass, unknown>> = {}
+            ;(Object.keys(NOTIFICATION_GLASS_KEYS) as Array<keyof NotificationGlass>).forEach((field, index) => {
+                raw[field] = values[index]
+            })
+            setGlass(normalizeNotificationGlass(raw))
+        }
+        void load()
+        return () => {
+            cancelled = true
+        }
+    }, [notification])
 
     // Clean up prevNotification after transition
     useEffect(() => {
@@ -235,8 +293,14 @@ export default function NotificationWindow() {
         ]
     }, [])
 
-    useNotificationNativeAdaptiveTheme(nativeBackdrop, cardLayout)
-    useNotificationSnapshotTheme(backdrop, cardLayout)
+    /**
+     * 文字极性由**用户的玻璃填充色**固定，不再跟随背景采样 —— 用户反馈
+     * "弹窗文字有时候是白的，确保它不要自动调整"。见 glassTextPolarity 的说明。
+     * 纱层（--noti-tint）与光晕仍然自适应：它们决定卡片显不显形，不决定文字颜色。
+     */
+    const textPolarity = useMemo(() => glassTextPolarity(glass), [glass])
+    useNotificationNativeAdaptiveTheme(nativeBackdrop, cardLayout, textPolarity)
+    useNotificationSnapshotTheme(backdrop, cardLayout, textPolarity)
 
     // 折射管线状态挂在 <html data-glass> 上：截图 QA 据此断言"弹窗真的是实时
     // 玻璃"，而不是只在代码里以为接上了（采集失败会静默退回静态快照）。
@@ -310,7 +374,8 @@ export default function NotificationWindow() {
                 // CSS px → 物理 px 的换算系数（devicePixelRatio 已含页面缩放，
                 // 主进程不能只用显示器 scaleFactor：缩放会随 file:// 域持久化）
                 dpr: window.devicePixelRatio || 1,
-                ...GLASS_PARAMS
+                // 用户在设置里改玻璃观感时要重新上报（key 里含这些值，变了就会重发）
+                ...nativeGlassParams(glass)
             }
             const key = JSON.stringify(payload)
             if (key === lastSent) return
@@ -326,7 +391,7 @@ export default function NotificationWindow() {
             cancelAnimationFrame(raf2)
             clearTimeout(timer)
         }
-    }, [nativeBackdrop, notification, position])
+    }, [nativeBackdrop, notification, position, glass])
 
     useEffect(() => {
         if (!notification && !prevNotification) return
@@ -383,6 +448,7 @@ export default function NotificationWindow() {
                             initialVisible={true}
                             backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
+                            glass={glass}
                             duration={prevNotification.notificationDuration}
                             animationEnabled={prevNotification.notificationAnimationEnabled !== false}
                         />
@@ -411,6 +477,7 @@ export default function NotificationWindow() {
                             initialVisible={true}
                             backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
+                            glass={glass}
                             duration={notification.notificationDuration}
                             animationEnabled={notification.notificationAnimationEnabled !== false}
                             // 退场动画开始的一刻同步淡出原生面板（与卡片 0.3s 渐隐节奏匹配）

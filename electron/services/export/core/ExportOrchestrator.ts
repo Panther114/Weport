@@ -5,7 +5,8 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
-import ExcelJS from 'exceljs'
+// 这里原本 import 了 exceljs 却从未使用 —— 它把 18MB 的库拉进主进程启动图。
+// XLSX 的实际写入在 ExcelFormatter / ExportContext，那里按需动态加载。
 import { getEmojiPath } from 'wechat-emojis'
 import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'

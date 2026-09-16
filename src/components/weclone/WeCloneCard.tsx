@@ -104,7 +104,7 @@ export default function WeCloneCard({ clone, onDeleteRequest, onChat }: WeCloneC
         <button
           className="primary-btn weclone-card-chat"
           type="button"
-          title="和这个分身对话（人格档案 + 本地检索，全程不上传）"
+          title="和这个 WeClone 对话（人格档案 + 本地检索，全程不上传）"
           onClick={() => onChat(clone)}
         >
           <MessageSquareText size={13} />

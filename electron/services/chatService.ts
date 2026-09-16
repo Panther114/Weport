@@ -362,6 +362,82 @@ const emojiCache: Map<string, string> = new Map()
 const emojiDownloading: Map<string, Promise<string | null>> = new Map()
 const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
 
+/**
+ * 从任意来源的错误文本里抽出错误码（`错误码: -1234`、`(错误码: -1234)`）。
+ */
+export function extractErrorCode(message?: string | null): number | null {
+  const text = String(message || '').trim()
+  if (!text) return null
+  const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{2,6})(?:\)|\b)/)
+  if (!match) return null
+  const parsed = Number(match[1])
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * 构造「初始化失败」的用户可见文案。
+ *
+ * 旧实现只返回 `错误码: -3999`：当 `getLastInitError()` 里没有可解析的
+ * 错误码时，用户拿到的就是一个既不属于 WCDB 也不属于微信的哨兵值 ——
+ * 它既不能自查，也不能反馈（issue #17 的标题就是「错误码: -3999 什么意思？」）。
+ *
+ * -3999 / -3998 都是**客户端**哨兵，不是任何一方的错误码：
+ *   -3999 = open() 失败但没能解析出具体错误码
+ *   -3998 = 连接过程中抛出未预期异常
+ * 既然哨兵本身没有信息量，就一定要把「这是什么 + 下一步做什么」一起带上；
+ * 本项目规则：失败文案必须自带下一步，否则用户只能看到一串数字。
+ *
+ * 独立成模块级函数（而不是私有方法）是为了能被单元测试直接调用 —— 断言
+ * 必须落在真实产物字符串上，而不是测试里抄一份逻辑。
+ */
+export function describeInitFailure(rawMessage?: string | null, fallbackCode = -3999): string {
+  const code = extractErrorCode(rawMessage) ?? fallbackCode
+  const detail = String(rawMessage || '').replace(/\s+/g, ' ').trim().slice(0, 400)
+  const isSentinel = code === -3999 || code === -3998
+  const sentinel =
+    code === -3999
+      ? '（微信数据服务初始化失败，且未能解析出具体错误码）'
+      : code === -3998
+        ? '（连接过程中出现未预期异常）'
+        : ''
+  // 哨兵值没有自查价值，必须给出下一步；具体错误码（-3001/-2301…）本身已经
+  // 由 wcdbCore.formatInitProtectionError 写好解决步骤，不再重复堆文案。
+  const nextStep = isSentinel ? `；下一步：确认数据目录选的是 xwechat_files 根目录、账号与 64 位密钥属于同一账号后重试；仍失败请把日志 ${wcdbLogPathHint()} 一起反馈` : ''
+  // 原始原因本身就是「错误码: -1234」时不重复拼接；否则附在破折号后面。
+  const isBareCodeOnly = /^错误码\s*[:：]\s*-?\d+$/.test(detail)
+  const alreadyCarriesCode = detail.includes(`错误码: ${code}`) || detail.includes(`错误码：${code}`)
+  if (alreadyCarriesCode) {
+    // `操作失败，错误码: -3005` 这类文本已经带了原因，再前缀一次错误码只会变成复读。
+    return `${detail}${sentinel}${nextStep}`
+  }
+  const hasExtraDetail = detail.length > 0 && !isBareCodeOnly
+  return hasExtraDetail
+    ? `错误码: ${code}${sentinel} — ${detail}${nextStep}`
+    : `错误码: ${code}${sentinel}${nextStep}`
+}
+
+/**
+ * wcdb.log 的推荐路径（用户反馈时要附上的那个文件）。
+ *
+ * **必须按平台拼**：旧实现写死 `${APPDATA}\Weport\logs\wcdb.log`，于是 macOS/Linux 用户
+ * 收到的提示是 `/Users/x\Weport\logs\wcdb.log` —— 一个不存在的混合路径，照着找必然找不到
+ * （而用户拿不到日志，这个"附上日志"的下一步就等于没有）。`wcdbCore.formatInitProtectionError`
+ * 走的是 `getLogFileCandidates()[0]`，两边必须一致。
+ */
+function wcdbLogPathHint(): string {
+  if (process.platform === 'win32') {
+    const base = process.env.APPDATA || ''
+    return base ? `${base}\\Weport\\logs\\wcdb.log` : '%APPDATA%\\Weport\\logs\\wcdb.log'
+  }
+  // macOS: ~/Library/Application Support/Weport/logs/wcdb.log
+  // Linux: ~/.config/Weport/logs/wcdb.log（Electron 的 userData 目录名与 productName 同名）
+  const home = process.env.HOME || ''
+  if (!home) return process.platform === 'darwin' ? '~/Library/Application Support/Weport/logs/wcdb.log' : '~/.config/Weport/logs/wcdb.log'
+  return process.platform === 'darwin'
+    ? `${home}/Library/Application Support/Weport/logs/wcdb.log`
+    : `${home}/.config/Weport/logs/wcdb.log`
+}
+
 class ChatService {
   private configService: ConfigService
   private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
@@ -524,38 +600,14 @@ class ChatService {
   }
 
   private extractErrorCode(message?: string | null): number | null {
-    const text = String(message || '').trim()
-    if (!text) return null
-    const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{2,6})(?:\)|\b)/)
-    if (!match) return null
-    const parsed = Number(match[1])
-    return Number.isFinite(parsed) ? parsed : null
+    return extractErrorCode(message)
   }
 
   /**
-   * 构造「初始化失败」的用户可见文案。
-   *
-   * 旧实现只返回 `错误码: -3999`：当 `getLastInitError()` 里没有可解析的
-   * 错误码时，用户拿到的就是一个既不属于 WCDB 也不属于微信的哨兵值 ——
-   * 它既不能自查，也不能反馈（issue #17 的标题就是「错误码: -3999 什么意思？」）。
-   *
-   * -3999 / -3998 都是**客户端**哨兵，不是任何一方的错误码：
-   *   -3999 = open() 失败但没能解析出具体错误码
-   *   -3998 = 连接过程中抛出未预期异常
-   * 既然哨兵本身没有信息量，就一定要把原始原因一起带上。
+   * 实例侧入口，逻辑在模块级 {@link describeInitFailure}（见那里的文档）。
    */
   private describeInitFailure(rawMessage?: string | null, fallbackCode = -3999): string {
-    const code = this.extractErrorCode(rawMessage) ?? fallbackCode
-    const detail = String(rawMessage || '').replace(/\s+/g, ' ').trim().slice(0, 400)
-    const sentinel =
-      code === -3999
-        ? '（微信数据服务初始化失败，且未能解析出具体错误码）'
-        : code === -3998
-          ? '（连接过程中出现未预期异常）'
-          : ''
-    // 原始原因本身就是「错误码: -1234」时不重复拼接；否则附在破折号后面。
-    const hasExtraDetail = detail.length > 0 && !/^错误码\s*[:：]\s*-?\d+$/.test(detail)
-    return hasExtraDetail ? `错误码: ${code}${sentinel} — ${detail}` : `错误码: ${code}${sentinel}`
+    return describeInitFailure(rawMessage, fallbackCode)
   }
 
   private async maybeShowInitFailureDialog(errorMessage: string): Promise<void> {

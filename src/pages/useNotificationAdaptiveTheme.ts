@@ -242,12 +242,19 @@ export interface ResolvedTheme {
  * 把三块区域的采样一次性解析成完整的 --noti-* 变量集。
  *
  * 纯函数：不读写 DOM，方便单独测「给定背景 → 文字色是否达标」。
+ *
+ * `opts.textPolarity` 一旦给出，文字极性就**固定**成它，不再由背景采样决定
+ * （见 resolveBand 里的说明）。纱层（--noti-tint）与光晕仍然自适应。
  */
-export function resolveNotificationTheme(raw: {
-    card: BandSample | null
-    title?: BandSample | null
-    body?: BandSample | null
-}): ResolvedTheme | null {
+export function resolveNotificationTheme(
+    raw: {
+        card: BandSample | null
+        title?: BandSample | null
+        body?: BandSample | null
+    },
+    opts?: { textPolarity?: 'dark' | 'light' }
+): ResolvedTheme | null {
+    const fixedTextPolarity = opts?.textPolarity
     if (!raw.card) return null
     const cardSample = raw.card
 
@@ -321,7 +328,20 @@ export function resolveNotificationTheme(raw: {
         const anchors = ANCHORS[key]
         const bestDark = contrastRatio(anchors.dark.strong, glassBg)
         const bestLight = contrastRatio(anchors.light.strong, glassBg)
-        const polarity: 'dark' | 'light' = bestDark >= bestLight ? 'dark' : 'light'
+        /**
+         * 文字极性：**默认由用户的玻璃填充色固定，不再跟着背景采样摆动**。
+         *
+         * 用户反馈"弹窗文字有时候是白的，确保它不要自动调整"。原来的写法是拿
+         * 采样均值合成出的 glassBg 去比 bestDark / bestLight —— 但屏幕上那张卡片
+         * 并不是 glassBg：它还要叠一层用户填充、一层桌面捕获、一层模糊。于是常见
+         * 的结果是"卡片实际渲染成浅色板，文字却被判成白字"，同一条通知在不同壁纸
+         * 上颜色还会跳。
+         *
+         * 判据换成"用户填的是什么颜色的玻璃"：白玻璃配深字、深玻璃配浅字。
+         * 同一条通知在任何壁纸上的文字色都一样，也就不会再"有时候是白的"。
+         * 用户显式指定文字色时走 --glass-text-color，与本分支无关。
+         */
+        const polarity: 'dark' | 'light' = fixedTextPolarity ?? (bestDark >= bestLight ? 'dark' : 'light')
         const tone = solveTextTone(anchors[polarity], glassBg, TARGET_CONTRAST)
 
         // 深色文字最怕暗斑、浅色文字最怕亮斑：按不利分位数亮度缩放均值色近似最不利背景
@@ -376,9 +396,11 @@ export function resolveNotificationTheme(raw: {
 
     const tertiaryAnchor = ANCHORS.tertiary[title.tone.polarity]
 
-    /* ---- 文字块共用一层 scrim：取标题/正文里更浓的那份 ---- */
-    const mask = body.scrim.alpha >= title.scrim.alpha ? body.scrim : title.scrim
-    const scrimBase = body.tone.polarity === 'dark' ? WHITE_VEIL : DARK_VEIL
+    /* ---- 文字块不再有独立 scrim ----
+     * 这里原本解一层"文字背后的实色底"（--noti-text-scrim，取标题/正文里更浓的那份）。
+     * 用户明确要求：填充要么铺满整张卡片，要么不存在，**永远不能只在文字后面**加底。
+     * 现在可读性由「整卡填充 + 文字自身的双极性光晕」承担，因此这层解算连同它的
+     * 变量一起删掉了 —— 顺带也去掉了自适应里最贵的一条属性（每次采样都要重绘）。 */
 
     const vars: Record<string, string> = {
         '--noti-tint': cssRgba(veil.color, veil.alpha),
@@ -388,9 +410,7 @@ export function resolveNotificationTheme(raw: {
         '--noti-title-tertiary': cssRgb(lerpRgb(tertiaryAnchor.relaxed, tertiaryAnchor.strong, title.tone.t)),
         '--noti-close-hover-bg': title.tone.polarity === 'dark' ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.14)',
         '--noti-body-color': cssRgb(body.tone.color),
-        '--noti-body-halo': haloFor(body.tone),
-        // 单层实色 scrim（不再是渐变）：边界由圆角承担，玻璃上不会出现浅色方块
-        '--noti-text-scrim': mask.alpha > 0 ? cssRgba(scrimBase, mask.alpha) : 'transparent'
+        '--noti-body-halo': haloFor(body.tone)
     }
 
     // 指纹只认**实际输出**：同样的变量集不重复写 DOM
@@ -467,12 +487,19 @@ export function createOneShotThemeResolver() {
          * @param raw      当前采样
          * @param layout   卡片几何（用于指纹）
          * @param dpr      设备像素比
+         * @param opts     textPolarity：固定文字极性（来自用户的玻璃填充色）。
+         *                 进指纹 —— 否则用户改了填充色时指纹不变，会被短路掉。
          * @returns 是否真的写了 DOM
          */
-        settle(raw: { card: BandSample | null; title?: BandSample | null; body?: BandSample | null }, layout: CardLayoutRect[], dpr: number): boolean {
-            const fingerprint = layoutFingerprint(layout, dpr)
+        settle(
+            raw: { card: BandSample | null; title?: BandSample | null; body?: BandSample | null },
+            layout: CardLayoutRect[],
+            dpr: number,
+            opts?: { textPolarity?: 'dark' | 'light' }
+        ): boolean {
+            const fingerprint = `${layoutFingerprint(layout, dpr)}|txt:${opts?.textPolarity ?? 'auto'}`
             if (fingerprint === lastLayout && lastResolved) return false
-            const resolved = resolveNotificationTheme(raw)
+            const resolved = resolveNotificationTheme(raw, opts)
             if (!resolved) return false
             lastLayout = fingerprint
             lastResolved = resolved
@@ -559,7 +586,12 @@ export interface NativeBandStat {
  * 够拿到稳定值即可。后续推送直接忽略 —— 那正是"逐帧改样式"的来源。
  * 采用"连续两组样本一致"作为稳定判据，避免把首帧的过渡值固化下来。
  */
-export function useNotificationNativeAdaptiveTheme(enabled: boolean, layout: () => CardLayoutRect[]) {
+export function useNotificationNativeAdaptiveTheme(
+    enabled: boolean,
+    layout: () => CardLayoutRect[],
+    /** 固定文字极性（来自用户的玻璃填充色）。见 resolveNotificationTheme 的说明。 */
+    textPolarity?: 'dark' | 'light'
+) {
     const resolverRef = useRef<ReturnType<typeof createOneShotThemeResolver> | null>(null)
     if (!resolverRef.current) resolverRef.current = createOneShotThemeResolver()
 
@@ -593,10 +625,11 @@ export function useNotificationNativeAdaptiveTheme(enabled: boolean, layout: () 
                     body: toSample(bands[String(NATIVE_BAND_IDS.body)])
                 },
                 layout(),
-                window.devicePixelRatio || 1
+                window.devicePixelRatio || 1,
+                { textPolarity }
             )
         })
-    }, [enabled, layout])
+    }, [enabled, layout, textPolarity])
 }
 
 /**
@@ -645,7 +678,9 @@ function offsetSampleOutsideWindow(
  */
 export function useNotificationSnapshotTheme(
     backdrop: { width: number; height: number; screenX: number; screenY: number; winW?: number; winH?: number; dataUrl?: string | null } | undefined,
-    layout: () => CardLayoutRect[]
+    layout: () => CardLayoutRect[],
+    /** 固定文字极性（来自用户的玻璃填充色）。见 resolveNotificationTheme 的说明。 */
+    textPolarity?: 'dark' | 'light'
 ) {
     const resolverRef = useRef<ReturnType<typeof createOneShotThemeResolver> | null>(null)
     if (!resolverRef.current) resolverRef.current = createOneShotThemeResolver()
@@ -673,12 +708,12 @@ export function useNotificationSnapshotTheme(
                 title: rects[1] ? read(rects[1]) : null,
                 body: rects[2] ? read(rects[2]) : null
             }
-            resolver.settle(raw, rects.map((r) => ({ ...r })), window.devicePixelRatio || 1)
+            resolver.settle(raw, rects.map((r) => ({ ...r })), window.devicePixelRatio || 1, { textPolarity })
         }
         img.src = backdrop.dataUrl
         return () => {
             disposed = true
             img.onload = null
         }
-    }, [backdrop, layout])
+    }, [backdrop, layout, textPolarity])
 }

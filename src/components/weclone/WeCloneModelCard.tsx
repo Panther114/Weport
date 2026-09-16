@@ -65,14 +65,14 @@ export default function WeCloneModelCard() {
           <>
             还没有可用的 AI 服务。到
             <strong>「设置 → AI 服务」</strong>
-            添加一个提供商与密钥，人格克隆会直接用它。
+            添加一个提供商与密钥，WeClone 会直接用它。
           </>
         )}
       </p>
       <p className="hint weclone-model-hint">
         <ShieldCheck size={12} />
         <span>
-          人格克隆与 WeportAI、WeBot 共用这一份配置；聊天记录、人格档案与语料始终
+          WeClone 与 WeportAI、WeBot 共用这一份配置；聊天记录、人格档案与语料始终
           <strong>只在本机</strong>，只有发给这个模型的那一次请求会出网。
         </span>
       </p>

@@ -226,12 +226,54 @@ source on a ~1280 px-wide layer decodes ~9× the pixels anything can show, which
   `backgroundVideoService.resolve()`. The renderer stays ignorant of this: it asks for a
   path and gets the path it should play.
 - First call returns the **original** file and starts a background `ffmpeg` transcode to
-  `{cache}/background-video/<sha1>.mp4` (1920 long edge, `crf 26`, `-an`, `+faststart`).
-  Later calls return the cache. Startup must never wait for ffmpeg.
+  `{cache}/background-video/<sha1>.mp4`. Later calls return the cache. Startup must never
+  wait for ffmpeg.
+- **Quality tiers (v1.0.4).** `resolve(source, { quality, blurPx })` takes the user's tier
+  (`native` | `balanced` | `compact`, default `balanced`) and the background blur radius.
+  Each tier carries **both** a long-edge target and encoder settings — resolution alone was
+  never the whole story:
+  `native` 3840 cap / crf 18 / medium · `balanced` 1920 cap / crf 26 / veryfast (the old
+  behaviour) · `compact` ≈⅔ of the display width, ≤1280 / crf 30. Measured on the author's
+  3840×2160 / 17.7 s source (1920×1080 display at 150 %): native 28.8 MB in 41 s,
+  balanced 3.4 MB in 7.1 s, compact 1.1 MB in 5.4 s.
+- **Blur ≥ 4 px forces at most `balanced`** (`BLUR_FORCES_BALANCED_PX`,
+  `resolveEffectiveQuality()`). Blur destroys the detail that the extra pixels carry, so a
+  higher tier is pure waste — the user asked for exactly this rule. Only *higher* tiers are
+  demoted: an explicit `compact` stays `compact`. `resolve()` returns
+  `{ selectedQuality, quality, demoted, longEdge }` and the settings page **must** state the
+  demotion, or the user just sees "I picked 原生 and nothing happened".
+  The renderer mirrors the threshold in `src/utils/appearance.ts` — the two constants must
+  stay in step, and the *effective* tier is always read back from the main process
+  (`appearanceBackgroundVideoInfo`, a synthetic read-only config key, deliberately not
+  persisted) because only the main process knows the display's device width.
+- **The cache key must cover the whole encode signature, not just the resolution.**
+  It hashes `size|mtime|quality|edge|crf|preset`. This is not defensive: `native` and
+  `balanced` compute the **same** edge on a 1080p display (1920), so an edge-only key makes
+  the two tiers collide and the first one transcoded silently wins. The old edge-only key
+  also meant a settings change never invalidated existing caches — the author's machine was
+  still playing a ~1.0 Mbps transcode (≈crf 29) long after the code said crf 26, which is
+  what "you reduced the quality of the background video" actually was. Changing the key
+  format fixes that class of bug for good.
+- **Never upscale.** The scale filter is
+  `scale='if(gt(iw,ih),trunc(min(iw,EDGE)/2)*2,-2)':'if(gt(iw,ih),-2,trunc(min(ih,EDGE)/2)*2)'`.
+  The previous `if(gt(iw,ih),EDGE,-2)` **upscaled** a source narrower than the target
+  (1280 → 1920): 1.25× the decode for pixels that are pure interpolation.
+  `trunc(x/2)*2` keeps the width even when the source is used as-is (odd width makes x264
+  fail outright). Verified by running all three tiers against the real 4K source.
 - **ffmpeg is not bundled** (40–100 MB for an optional nicety). It is looked up on `PATH`,
   then common install dirs, then `WEPORT_FFMPEG`. Missing ffmpeg is not an error: the
   original file is used unchanged.
-- The cache key includes size + mtime, so editing the file at the same path re-encodes.
+- A source above `MAX_SOURCE_BYTES` (50 MB) is neither transcoded nor played; the settings
+  page says why. Non-video files bypass the transcoder entirely (transcoding a PNG produced
+  a 17 KB single-frame mp4).
+- **The GPU pool is released when the window is destroyed, not when it is hidden.** Measured
+  over 2 minutes on the author's machine (`.ui-probe/measure-idle-states.mjs`): with the
+  window showing a video wallpaper the GPU process sat at **170 MB** and the app total at
+  **582 MB (3.61 %)**; after the tray reclaim destroyed the window the GPU process fell to
+  **165 MB** and the total to **462 MB (2.87 %)**. The earlier note that "having ever decoded
+  a video permanently enlarges the GPU process" overstates it: the pool survives *hiding*,
+  but window destruction does hand it back. Releasing the decoder without destroying the
+  window (`removeAttribute('src')` + `load()` on `visibilitychange`) still does nothing.
 - Measured on a 3840×2160 source at 1280×650: 48 frames >33 ms → 0, avg 17.2 → 16.7 ms.
 
 ## Agent Harness Invariants — v1.0
@@ -292,16 +334,68 @@ Two separate "the background is white" bugs, both from getting the *layer* wrong
 
 Popup glass (`NotificationToast.scss` + `useNotificationAdaptiveTheme.ts`):
 
-- **The card veil is thin on purpose** (`[0.06, 0.24]` white / `[0.1, 0.3]` dark) and is
-  solved against `VEIL_CONTRAST_BUDGET` (2.0), not 4.5. Letting the veil solve for 4.5
-  drives it to its cap and the card becomes frosted plastic — that was the `0.42–0.58`
-  era. The 4.5 budget lives on the **text colour + solved text scrim**
-  (`--noti-text-scrim` / `--noti-text-scrim-strong`).
-- Both scrim gradient stops are emitted by the engine. Do not derive one from the other
-  with `color-mix(in srgb, var(--x) 118%, transparent)` — that nests `color-mix` inside
-  `color-mix`, which Chromium rejects, and the declaration dies.
-- Each sample is a `getImageData()` — a **synchronous GPU→CPU readback**. It only
-  decides text colour, so `MIN_SAMPLE_GAP_MS` is 100 ms (was 33 ms / ~30 Hz).
+- **v1.0.3 — the "almost fully transparent" rule is SUPERSEDED, and the
+  text-only scrim is gone for good.** The earlier requirement (v1.0.1) was
+  "the card must be (almost) fully transparent" because a previous build showed
+  a black plate. The user's v1.0.3 instruction replaces it with three rules:
+  1. **There must never be a background behind the text only.** If a fill is
+     applied it covers the **whole card**, or there is no fill at all. The old
+     `.notification-text::before` (`--noti-text-scrim`) was exactly such a
+     layer — a solid rounded block visible as a pale square on a dark desktop.
+     It and its engine variable (`--noti-text-scrim`, `--noti-text-scrim-strong`)
+     were deleted. Do not reintroduce a per-band scrim; readability comes from
+     the whole-card fill plus the text's own dual-polarity halo.
+  2. **The default is NOT fully transparent** — a light fill (16 % white) so
+     dark text has something to sit on.
+  3. **The default border is a hairline** (0.5 px at 22 %), not the old 1.5 px
+     white ring + 0.5 px white inset shadow, which read as "a white outline, so
+     it does not look like glass".
+- **Glass appearance is user-configurable** via `src/utils/notificationGlass.ts`
+  (fill on/off + colour + opacity, text colour, border width/colour/opacity,
+  radius, refraction strength, shadow), surfaced as 设置 → 消息通知 → 通知玻璃
+  (`NotificationGlassPanel.tsx`, which previews with the **real** toast
+  component so preview and popup cannot drift). Everything is CSS-variable
+  driven (`--glass-fill`, `--glass-text-color`, `--glass-border-rgb`,
+  `--glass-border-alpha`, `--glass-border-width`, `--glass-ring`,
+  `--glass-shadow`), applied on the **card container** — never on
+  `document.documentElement` — so the same variables serve the popup and the
+  settings preview. User values take precedence over the adaptive engine via
+  `var(--glass-x, var(--noti-x, fallback))`; `--glass-text-color` is *removed*
+  when the user wants automatic text colour. Both the Chromium path and the
+  native D3D11 panel derive their parameters from the same
+  `notificationGlassRenderParams()`.
+- **The adaptive engine still owns the halo, not the fill.** `--noti-*` continue
+  to carry the halo/tertiary and the veil; the fill is now overridable.
+- **The text colour is NOT adaptive any more (v1.0.4).** `--noti-title-color` /
+  `--noti-body-color` used to be solved per backdrop sample, which produced the user's
+  "sometimes the popup text is white, make sure it doesn't auto-adjust". The judgement was
+  wrong in kind, not in threshold: the text polarity was decided against `glassBg`
+  (the sample composited with the engine veil), but the card on screen also carries the
+  user's fill, the desktop capture and the blur — so the common outcome was a *light* card
+  with *white* text, and the colour changed from wallpaper to wallpaper.
+  Polarity now comes from `glassTextPolarity(glass)` — a pure function of the user's fill
+  colour (white glass → dark text, dark glass → light text, no fill → dark text) —
+  passed into `resolveNotificationTheme(raw, { textPolarity })` and threaded through both
+  hooks. Use **contrast**, not a 0.5 luma threshold, to decide it: `#80c0ff` is a light
+  blue with relative luma 0.495 and a threshold rule gets it wrong (found by the test).
+  Within a fixed polarity the tone still moves slightly with contrast (dark greys 44→10),
+  which is what keeps it readable; the *polarity* must never flip. Gradients use the
+  midpoint of the two stops as the representative colour.
+  Pinned by `src/pages/notificationFixedText.test.ts` (16 assertions, pure functions,
+  no screen capture): with a fixed polarity the text must stay on one side across the whole
+  backdrop range from `#000000` to `#ffffff`. The empty-state string in the WeClone chat
+  drawer deliberately does **not** mention language switching any more.
+- **Gradient fill (v1.0.4).** `fillMode: 'solid' | 'gradient'` plus `fillGradientFrom/To`,
+  with 8 presets in `GRADIENT_PRESETS`. **Left-to-right only** (`90deg`) — the user asked for
+  that explicitly, and a card 344×114 px has no room for an angled gradient that does not
+  read as a rendering fault. `notificationGlassFillValue()` returns either
+  `rgba(...)` or `linear-gradient(90deg, rgba(a,α), rgba(b,α))` and it is safe because
+  LiquidGlass paints the tint layer with the `background` **shorthand**
+  (`index.tsx`, `background: 'var(--liquid-glass-tint)'`), so no new variable and no second
+  element is needed — which also keeps the "the fill covers the whole card or does not
+  exist" rule intact. An `alpha: 0` gradient deliberately collapses to a transparent solid.
+- `MIN_SAMPLE_GAP_MS` is 100 ms and each sample is a `getImageData()` — a
+  **synchronous GPU→CPU readback**; it only decides text colour.
 - `BACKDROP_CAPTURE_SCALE` is 0.25 (was 0.5). Capture cost is dominated by output pixels
   and the frame gets blurred to nothing anyway; this is what lets the backdrop loop run
   fast enough for the glass to track the desktop (measured frame delta 1.64 → 3.60).
@@ -312,9 +406,31 @@ Popup glass (`NotificationToast.scss` + `useNotificationAdaptiveTheme.ts`):
   main window's, and swapping the wallpaper changes nothing because the wallpaper is not
   exposed. Move the main window out of the popup's rect first (`.ui-probe/capture-glass-over-desktop.mjs`),
   then the card reads the desktop (measured 36.6 over a 30.1 desktop).
-- **Measured cost, live glass on a 1280×720 desktop:** avg **2.2%** total CPU, peak 5.3%
-  (`.ui-probe/measure-glass-cost.mjs`). Anything that pushes this past ~12% breaks the
-  "lightweight + adapts in real time" requirement — re-measure before adding per-frame work.
+- **Measured cost, live glass:** avg **1.7 %** total CPU, peak **4.3 %**, 767 MB RSS
+  on the installed build (v1.0.3; was 2.2 % / 5.3 % before the text-scrim removal —
+  the scrim was the most expensive property in the adaptive set because both of its
+  gradient stops were rewritten per sample). Anything that pushes this past ~12 %
+  breaks the "lightweight + adapts in real time" requirement — re-measure before
+  adding per-frame work. `.ui-probe/measure-glass-cost.mjs`.
+- **Verified appearance, both polarities** (v1.0.3, installed build): over a dark
+  desktop the card is a light frosted plate with white text; over a bright desktop it
+  is a *darker* frosted plate with dark text (card centre composited `189,187,185`,
+  Δluma 28 — up from 15.1 before, so the new fill made the bright case *more*
+  visible, not less). `verify-popup-transparency.mjs` now asserts the **effective**
+  fill (`--glass-fill` on the card container) rather than `--noti-tint`: the engine's
+  veil is subordinate to the user's fill, so reading the veil alone would let "the card
+  became a solid plate" pass. It also asserts the text-only `::before` layer is gone
+  and the border stays a hairline.
+- **The default fill is white (16 %) on both polarities** — a deliberate
+  simplification. It reads correctly on a bright desktop because the desktop capture
+  composited *inside* the card and the engine's dark scrim dominate the result; the
+  measurement above is the evidence. If a future change makes the bright case wash
+  out, make the fill colour polarity-aware (compose it from the engine's veil colour
+  in `resolveNotificationTheme`, where both the polarity and the user's opacity are
+  known) rather than lowering the default.
+- Settings/probe for the panel: `.ui-probe/verify-glass-settings.mjs` (10 assertions
+  incl. computed `--glass-fill` = `rgba(255,255,255,0.16)`, border 0.5px @ 0.22, no
+  text scrim, and a **live** check that dragging fill opacity changes the card).
 - The GL stream path needs a `MediaStream`; when `srcObject` fails (software rendering,
   no GPU) the pipeline reports `frames` but the canvas is **absent** and the static
   snapshot `<img>` is what you see. `data-glass` alone does not prove the WebGL path is live.
@@ -345,6 +461,36 @@ Two failure modes, both seen in the export page:
   only on phase changes.
 
 ## Performance — v1.0 (measured, do not "optimise" by intuition)
+
+**Memory: always quote the state, never a single number (v1.0.4).** The user reported
+"5.5–5.7 % idle" against an earlier "2.35 %" claim and asked what the difference was. Neither
+number was wrong, and that was exactly the problem: both were true of *different states*.
+Measured on the author's machine, 16 108 MB total RAM, Intel Iris Xe (**integrated** — the
+GPU process's memory is system RAM, not VRAM), 1920×1080 at 150 %, 4K-source video wallpaper
+(sampled over 2 minutes):
+
+| state | main | GPU | renderer(s) | utility | WCDB host | total | % |
+|---|---|---|---|---|---|---|---|
+| tray idle (window destroyed) | 161 | 165 | 0 | 44 | 92 | **462 MB** | **2.87 %** |
+| window shown + video wallpaper | 161 | 170 | 111 | 45 | 95 | **582 MB** | **3.61 %** |
+| + a notification popup alive | 161 | 258 | 111 + 131 | 45 | 95 | **~911 MB** | **5.66 %** |
+
+The third row is the reported 5.7 %, and it is the honest peak: the popup renderer is a whole
+separate Chromium renderer (~130 MB) and the GPU process grows by ~90 MB while a video is
+decoding and the popup's glass pipeline is up. "Idle" for the user meant "the app is open and
+I am looking at Task Manager", not "tray, window destroyed".
+**Rules this produced:** (1) when measuring memory, always name the state and say whether the
+window exists; (2) the four `Weport.exe` processes in Task Manager are main + GPU + renderer
++ network utility — plus a fifth `WeFlow.exe` (the WCDB host) and a sixth popup renderer when
+a notification is on screen; that is the architecture, not four copies of the app;
+(3) reductions must be aimed at a state the user actually sees.
+Reductions made in v1.0.4: the popup renderer's idle-destroy went 3 min → 45 s
+(`notificationWindow.ts`, the popup being the single largest avoidable block), and the MCP
+service became lazily imported (`mcpServiceRef` + `getMcpService()`) so
+`@modelcontextprotocol/sdk` + zod is not loaded unless MCP is actually used — note this only
+helps installs that **disable** MCP, because `mcpEnabled` defaults to `true` and a running
+service needs its SDK. Teardown paths read `mcpServiceRef` directly on purpose — calling the
+getter to stop a service that never started would load the SDK just to shut it down.
 
 Numbers below are from `.ui-probe/measure-app-perf.mjs` and
 `.ui-probe/measure-cv-ab.mjs`. Two of them cost a wasted round trip each, so they are
@@ -442,6 +588,35 @@ written down rather than rediscovered.
 
 ## Renderer Probes — Test Hygiene
 
+- **NEVER put a window on the user's screen. This is the first rule of every probe.**
+  The agent runs on the same machine the human is working on. Probes that call
+  `win.show()` / `focus()` / `setSize(1280, 800)` (and `verify-popup-transparency.mjs`,
+  which additionally creates a **synthetic full-screen backdrop window**) throw a big
+  black/maximized rectangle over whatever the user was doing. The user has asked for
+  this to stop, explicitly and angrily. Do not do it again.
+  - **Default: run hidden.** Launch with a private `--user-data-dir` and **do not**
+    call `show()`/`focus()`. Most assertions (DOM, computed style, IPC, process
+    metrics) work fine without it.
+  - If an assertion genuinely needs layout, **move the window off-screen** rather
+    than showing it (e.g. `win.setPosition(-4000, 0)`), or `showInactive()` at a small
+    size — do not let it cover the work area and do not focus it.
+  - Never create a simulated full-desktop backdrop window for a probe.
+  - **Ask the user before any run that must be visible.** If you cannot verify
+    something invisibly, say so and ask; do not "just quickly" cover their screen.
+  - Prefer the self-capturing modes that already exist (`WEPORT_SCREENSHOT_*`,
+    `capture-ui.ps1`) over driving a real visible window.
+- **A visible/backdrop-window probe is also bad evidence** — that is not only a
+  manners problem. The synthetic desktop window changes what is on screen, so the
+  capture it measures is not the real desktop: `verify-popup-transparency.mjs`
+  measured `avgAlpha` of **2.2 / 22.8 / 1.2 / 57 / 66 / 77 / 102** across consecutive
+  runs of **identical code**, entirely depending on whether the desktop grab returned
+  anything. The probe now prints `SKIP` when the composite is degenerate
+  (`avgAlpha < 5`) instead of reporting a false FAIL — a false FAIL from that noise is
+  exactly what produced the bogus "the specular highlight raised CPU to 3.0 %"
+  conclusion in this session (same code re-measured 1.7–1.8 %).
+  **Only the invariants that reproduce every run are gates**: `html`/`body`
+  transparent, hairline border, no text-only scrim, zero opaque dark fills.
+  Anything derived from a screen capture needs repeated samples before it is a claim.
 - **A CSS file imported by only one of two lazy chunks is missing for the other.** `react`
   `lazy()` splits CSS per chunk: `providerProfiles.css` was imported **only** by
   `WeportAiPanel.tsx`, so opening 设置 → AI 服务 without ever visiting the WeportAI page
@@ -474,6 +649,18 @@ written down rather than rediscovered.
 - CSS-nesting blocks (`:root[data-x] { :is(...) { … } }`) are dropped wholesale by the
   engine when malformed, and neither `tsc` nor `vite build` complains. Assert **computed
   styles** (`.ui-probe/verify-accent-strength.mjs`), not the presence of source lines.
+- **`capture-ui.ps1` has one known, pre-existing gap: `settings-ai`.** The sweep drives
+  10 pages + 8 settings sections and asserts all captures non-blank (plus placeholder
+  scan, contrast audit and a narrow/wide viewport matrix), but the `settings-ai` step
+  asserts `.ai-profile-list`, which renders only when `ai:getAssignments` returns at
+  least one profile — and **the demo handlers never fake that channel**
+  (`installScreenshotDemoHandlers` overrides `ai:getSetup` / `ai:listProviders` /
+  `ai:saveProfile` …, but not `ai:getAssignments`), so in a fresh demo userData the
+  服务分配 block has nothing to list and the capture fails. Verified not a product bug:
+  `.ui-probe/shot-ai-settings.mjs --installed` renders the real panel with the real
+  profile. Fix by faking `ai:getAssignments` with `demoAiSetup().profiles`
+  (`{ success, consumers, profiles, activeProfileId }` — the shape `setAiAssignments`
+  expects).
 - **`npx @electron/asar extract-file <asar> <path>` writes the extracted file into the
   current working directory.** Running it from the repo root to inspect the packaged
   `package.json` silently **overwrote the real one** with electron-builder's stripped stub
@@ -491,9 +678,15 @@ when hidden). Renderer: `src/pages/NotificationWindow.tsx` +
 the native glass panel is **Windows-only** — on macOS only the Chromium
 fallback path runs).
 
-**The card must be (almost) fully transparent.** The user's words were "ensure the
-glass is fully (or almost) transparent", after reporting that the notification
-background was "all black". Everything below follows from that one requirement.
+**The card's default look is a light glass fill, not a fully transparent card
+(revised in v1.0.3 — see "Glass Surfaces → Popup glass" for the current rules and
+the configurable `--glass-*` variables).** The "almost fully transparent"
+requirement below is the v1.0.1 state that fixed an all-black card; it was
+superseded because a fully transparent card leaves dark text with nothing to sit
+on, and because the 1.5px white ring that came with it read as "a white outline,
+so it does not look like glass". What still holds from that work is everything
+about *not painting an opaque plate*: no opaque backdrop snapshot, no GDI
+renderer, no near-opaque fill, `html`/`body` transparent.
 
 - **The native D3D11 panel is opt-in: `WEPORT_NATIVE_GLASS=1`.** Default off. It is a
   separate native window *underneath* the popup, and on some GPU/driver combos it paints
@@ -569,24 +762,52 @@ Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChan
 - Unlike winit, `BrowserWindow.hide()` does **not** stop the event loop, so the
   popup keeps working while tray-hidden — this is why the v0.6.x
   "minimize + hide-from-taskbar" workaround is obsolete.
-- **v0.9.3+: hidden-window memory reclamation.** When the main window stays
-  hidden to the tray for `WEPORT_DISCARD_DELAY_MS` (default 5 min), the
-  renderer is unloaded (`loadURL('about:blank')`); tray click / second
-  instance reloads the app page and shows it again (`appMain.ts`
-  `scheduleMainWindowDiscard` / `showMainWindow`). Skips while an export task
-  is running (`exportTaskControlService.hasActiveTasks`) and in all QA modes.
-  The restore path relies on `webContents` `did-finish-load` (not just
-  `ready-to-show`, which may not re-fire on hidden-window navigation). `about:blank`
-  is allowed by the `will-navigate` guard. State lives in the main process /
-  config, so nothing is lost on discard.
+- **v1.0.3: hidden-window reclamation destroys the window (tray) or unloads the
+  page (minimized).** The v0.9.3 design unloaded the renderer with
+  `loadURL('about:blank')` after `WEPORT_DISCARD_DELAY_MS` (default 5 min) — but
+  measured, that returned only ~29 MB (738 → 738 MB total; the renderer process
+  itself did not shrink), because Chromium does not hand a renderer's
+  infrastructure back. Tray-hide now **destroys** the `BrowserWindow` (freeing
+  the whole renderer + its GPU resources: measured 767 → 456 MB, i.e. 4.8 % → 2.8 %
+  of a 16 GB machine, `.ui-probe/measure-idle-states.mjs`). Two traps this must
+  keep honouring:
+  - `mainWindowReclaimInProgress` **must** guard the `win.on('closed')` handler.
+    Without it the reclaim trips the "zero windows → `app.quit()`" fallback and
+    silently kills the app. (`window-all-closed` is already safe: it returns
+    early while a tray exists.)
+  - **Minimize must not destroy the window** — that removes the taskbar button
+    and the user can no longer restore. Minimize keeps the `about:blank` unload
+    path; tray-hide destroys. Restore is `showMainWindow()`'s existing
+    `!mainWindow` branch (rebuild the window), which is also the `--background`
+    startup path, plus `restoreDiscardedMainWindow()` for the minimize case —
+    the `restore`/`show` handlers call it, otherwise restoring from the taskbar
+    shows a blank `about:blank` window.
+  - Scheduling is wired to `hide`, `minimize`, `close→tray` **and** after the
+    window is (re)created. Only `close→tray` used to schedule, so a merely
+    **minimized** window kept its full renderer forever.
 - **v0.9.3+: Chromium memory tuning (appMain.ts `startApp`, before ready):**
   `js-flags --max-old-space-size=384 --max-semi-space-size=4`, `disk-cache-size
   16MB`, `spellcheck: false` on both windows. Do NOT use
   `appendSwitch('disable-features', …)` — it *replaces* Electron's default
   disable-features list (incl. `SpareRendererForSitePerProcess`) and can spawn
-  an extra spare renderer. `--background` also calls
-  `app.disableHardwareAcceleration()` (no GPU process, ~130 MB); the native
-  glass panel is unaffected (D3D11 on the native side).
+  an extra spare renderer.
+- **Hardware acceleration is NOT disabled for `--background` (reversed in v1.0.3).**
+  The old rule ("silent start needs no rendering → drop the GPU process, ~130 MB")
+  is wrong, because `disableHardwareAcceleration()` applies to the **whole process
+  lifetime** while the user does open the window. Measured on a 16-core machine
+  with a 1080p video background (`.ui-probe/measure-video-cpu.mjs`):
+
+  | configuration | CPU (of machine) | working set | main renderer |
+  |---|---|---|---|
+  | software + original 4K | **1.16 %** | **1232 MB** | 684 MB |
+  | hardware + original 4K | 0.24 % | 870 MB | 146 MB |
+  | software + 1080p cache | 0.41 % | 720 MB | 218 MB |
+  | hardware + 1080p cache | 0.31 % | 866 MB | 124 MB |
+
+  Software rasterisation costs ~+560 MB in the renderer to save ~200 MB of GPU
+  process — a net loss in every state, including purely hidden (801 MB hardware
+  vs 941 MB software). Keep the explicit escape hatch instead:
+  `WEPORT_FORCE_SOFTWARE_RENDER=1`.
 
 ## Self-sent Message Filtering
 
@@ -832,6 +1053,15 @@ the entire changelog). Therefore:
 - Local sanity check before releasing:
   `node scripts/extract-release-notes.mjs <version>` then verify the file
   starts with `# Weport v<version>` and contains no older-version headings.
+- **The release MUST be published as the latest NON-draft, NON-prerelease
+  release with `latest.yml` attached.** The updater's feed is
+  `https://github.com/Panther114/Weport/releases/latest/download`
+  (`appMain.ts` `getUpdaterFeedUrl`), and `/releases/latest/` **skips
+  pre-releases**. If a version ships as a pre-release (or without `latest.yml`),
+  every installed copy silently stays where it is — the user sees no error and
+  no update. `release.yml` uploads `latest.yml`, but
+  `fail_on_unmatched_files: false` means a missing one does not fail the build,
+  so check the release page rather than trusting a green CI run.
 
 When releasing a new version on GitHub, write the release body as
 **concise, natural Chinese bullet points** — short plain bullets, no English
@@ -846,6 +1076,40 @@ otherwise.
   (from `# Weport vX.X.X` until the next `# Weport` heading), never the entire
   changelog file. Example: extract with `sed -n '/^# Weport v0.9.9$/,/^# Weport /p' RELEASE_NOTES.md | sed '$d'`
   or pass only the 5–6 bullets for that version to `gh release create --notes` / `gh release edit --notes`. Pushing the full file is a release-notes regression.
+
+### Release notes ARE the in-app changelog (v1.0.3)
+The same bullets are shown **inside the app** when the updater detects a new
+version, so they are a user-facing surface, not just a GitHub page. The chain is:
+
+```
+RELEASE_NOTES.md → scripts/extract-release-notes.mjs → release-notes-current.md
+  → electron-builder (build.releaseInfo.releaseNotesFile) → latest.yml `releaseNotes`
+  → autoUpdater updateInfo.releaseNotes → IPC app:updateAvailable
+  → App.tsx update card, rendered as markdown by <AiMarkdown>
+```
+
+Consequences — requirements, not style preferences:
+
+- **Write the bullets in natural, very concise technical Chinese.** One change
+  per bullet, one line each. No English filler ("This release introduces…"), no
+  marketing language, no emoji, no greeting, no closing paragraph.
+- **The update card is narrow.** Keep each bullet to roughly one rendered line,
+  put *what changed* first and *why* only when it is short. Never nest bullets,
+  and do not put tables, headings or code fences inside a version section — they
+  render badly in the card even though they look fine on GitHub.
+- **A version must have its `# Weport vX.Y.Z` section in `RELEASE_NOTES.md`
+  BEFORE packaging.** `latest.yml` is built from `release-notes-current.md`; with
+  no section the card shows a placeholder instead of real notes.
+  `scripts/extract-release-notes.mjs` therefore fails hard in CI, while the local
+  `build*` scripts pass `--allow-missing` so a work-in-progress version number
+  cannot block packaging — that mode writes an explicit "尚未填写更新说明"
+  placeholder rather than leaving a **stale previous-version** file behind, since
+  stale notes in the update card are worse than none.
+- Verify before releasing: `node scripts/extract-release-notes.mjs` (no argument
+  = the `package.json` version) must report exactly one version heading, and the
+  `latest.yml` produced by the build must contain a non-empty `releaseNotes`.
+  The strict invocation (`… <version>`, used by CI) still works.
+
 
 ## Reference Repos (on-disk only, never shipped)
 

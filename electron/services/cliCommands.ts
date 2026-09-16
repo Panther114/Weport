@@ -589,7 +589,7 @@ export function registerCliCommands(): void {
             return {
               success: false,
               error: `没有名字包含「${wanted}」的本地克隆`,
-              hint: names.length ? `本机现有：${names.join('、')}` : '先在「人格克隆」页面生成一个。',
+              hint: names.length ? `本机现有：${names.join('、')}` : '先在「WeClone」页面生成一个。',
             }
           }
           matches.sort((a, b) => String(b.generatedAt || '').localeCompare(String(a.generatedAt || '')))

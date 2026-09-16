@@ -296,7 +296,7 @@ export default function WeCloneChatDrawer({
           <div className="weclone-chat-thread" ref={threadRef}>
             {turns.length === 0 && (
               <div className="weclone-chat-empty">
-                <p>说点什么试试。它会用你聊天语料里学到的方式回答 —— 你发英文它就回英文。</p>
+                <p>说点什么试试。它会用你聊天语料里学到的方式回答。</p>
               </div>
             )}
             {turns.map((t, i) => (

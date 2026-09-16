@@ -167,6 +167,9 @@ export class ProviderProfileService {
     }
     // 自愈：迁移出来的 profile 可能**没有密钥**（见 healKeylessProfile），补一次。
     if (this.healKeylessProfile(store)) this.write(store)
+    // 清掉"迁移留下的名字/残骸"（见 cleanupMigratedProfiles）：
+    // 用户看到的就是一个叫「DeepSeek（已迁移）」的服务项，既不能用也不知道该不该删。
+    if (this.cleanupMigratedProfiles(store)) this.write(store)
     if (store.activeProfileId && !store.profiles.some((profile) => profile.id === store.activeProfileId)) store.activeProfileId = store.profiles[0]?.id || ''
     if (!store.activeProfileId && store.profiles[0]) {
       store.activeProfileId = store.profiles[0].id
@@ -249,8 +252,59 @@ export class ProviderProfileService {
     return true
   }
 
-  private write(store: ProviderProfileStore): void {
-    // 双保险：read() 已经挡过一次，写入路径自己再挡一次 —— 少写一次只是功能不可用，
+  /**
+   * 清掉迁移留下的名字与残骸。
+   *
+   * `migrateLegacyProfile()` 给迁移出来的服务起名「DeepSeek（已迁移）」/「旧版 WeportAI
+   * 配置」—— 那是**迁移当时的说明**，但它会被永久写进用户的服务列表。用户看到的
+   * 就是一个叫「已迁移」、既不能确认能用、又不敢删的服务项（本机实测撞上过）。
+   *
+   * 两种处理，都只在能确定是同一个服务时动手：
+   *   A. 它没有密钥（本来就没法用）**且**另有至少一个带密钥的服务 → 直接删掉，
+   *      并把指向它的功能面分配改回"跟随默认"。留着只会让用户以为配置坏了。
+   *   B. 其它情况 → 只把名字换成干净的服务名，密钥/baseUrl/model 一律保留。
+   *
+   * 绝不在"它是用户唯一一个服务"时删除 —— 那会把用户的服务配置清空。
+   */
+  private cleanupMigratedProfiles(store: ProviderProfileStore): boolean {
+    const MIGRATED_NAMES = ['旧版 WeportAI 配置']
+    const isMigratedProfile = (name: string): boolean =>
+      name.includes('（已迁移）') || MIGRATED_NAMES.includes(name)
+    if (!store.profiles.some((profile) => isMigratedProfile(profile.name))) return false
+
+    const keyed = store.profiles.filter((profile) => String(profile.apiKey || '').trim())
+    const doomed = new Set<string>()
+    let changed = false
+    for (const profile of store.profiles) {
+      if (!isMigratedProfile(profile.name)) continue
+      const usable = Boolean(String(profile.apiKey || '').trim())
+      if (!usable && keyed.length > 0) {
+        // A：没密钥、且已经有能用的服务 —— 这是纯残骸
+        doomed.add(profile.id)
+        continue
+      }
+      // B：保留，只换个正常人能读懂的名字
+      const clean = profile.providerId === 'deepseek' ? 'DeepSeek' : 'WeportAI'
+      if (profile.name !== clean) {
+        profile.name = clean
+        profile.updatedAt = Date.now()
+        changed = true
+      }
+    }
+    if (doomed.size === 0) return changed
+
+    store.profiles = store.profiles.filter((profile) => !doomed.has(profile.id))
+    if (store.consumerProfiles) {
+      for (const [consumer, id] of Object.entries(store.consumerProfiles)) {
+        if (doomed.has(String(id))) delete (store.consumerProfiles as Record<string, string>)[consumer]
+      }
+    }
+    if (doomed.has(store.activeProfileId)) store.activeProfileId = store.profiles[0]?.id || ''
+    console.log(`[WeportAI] 清理了 ${doomed.size} 个迁移残骸服务（无密钥且已有可用服务）`)
+    return true
+  }
+
+  private write(store: ProviderProfileStore): void {    // 双保险：read() 已经挡过一次，写入路径自己再挡一次 —— 少写一次只是功能不可用，
     // 误写一次是用户配置全丢。
     if (this.isBlobUnreadable()) {
       console.warn('[WeportAI] 拒绝写入 provider 配置：现有配置无法解密，覆盖会丢失全部服务项')

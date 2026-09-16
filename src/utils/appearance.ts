@@ -22,14 +22,70 @@ export type Mode = 'dark' | 'light'
 export type BackgroundKind = 'none' | 'image' | 'video'
 /** 强调色的用量：只影响色块浓度，不改色相。 */
 export type AccentStrength = 'soft' | 'standard' | 'vivid'
+/**
+ * 背景视频的画质档位。定义在主进程的 backgroundVideoService 里（转码参数的
+ * 唯一来源），这里镜像一份供界面使用 —— 两边必须同名。
+ */
+export type VideoQuality = 'native' | 'balanced' | 'compact'
+
+/**
+ * 模糊达到这个半径后，高于「平衡」的档位会被主进程自动压回「平衡」：
+ * 模糊已经把细节抹掉了，多解码的像素在屏幕上不存在。**必须与
+ * electron/services/backgroundVideoService.ts 的 BLUR_FORCES_BALANCED_PX 一致**，
+ * 否则界面会给出与实际行为矛盾的说明。
+ */
+export const BLUR_FORCES_BALANCED_PX = 4
+
+export const VIDEO_QUALITY_OPTIONS: ReadonlyArray<{
+  id: VideoQuality
+  label: string
+  hint: string
+}> = [
+  {
+    id: 'native',
+    label: '原生',
+    hint: '按屏幕分辨率解码、低压缩。观感最接近原片，解码量与显存占用最高',
+  },
+  {
+    id: 'balanced',
+    label: '平衡',
+    hint: '默认。长边不超过屏幕宽度，压缩率较高，画质与开销折中',
+  },
+  {
+    id: 'compact',
+    label: '精简',
+    hint: '长边约为屏幕的 2/3。最省，配合较大的背景模糊几乎看不出差别',
+  },
+]
 
 export interface Appearance {
-  /** 绝对路径；空字符串＝纯色背景。图片或视频由扩展名决定。 */
+  /** 用户选择的绝对路径（界面显示、扩展名判断都用它）；空字符串＝纯色背景。 */
   backgroundPath: string
+  /**
+   * 实际该播的路径。主进程会把视频背景换成转码后的缓存文件（见
+   * backgroundVideoService）；背景被拒（例如源文件超过 50MB）时这里是空串，
+   * 于是不渲染背景层 —— 但 `backgroundPath` 仍保留用户的选择，设置页才能
+   * 解释"为什么没生效"而不是显示成"没选过"。
+   */
+  backgroundPlaybackPath: string
+  /** 背景被拒的原因（'' = 正常）。目前只有 'too-large'。 */
+  backgroundRejected: string
   /** 遮罩强度 0-100：越高文字越清晰、背景越淡。 */
   backgroundDim: number
   /** 背景是否模糊（-1 关闭，0-40 为 blur 半径）。 */
   backgroundBlur: number
+  /** 背景视频的画质档位（只对视频背景有意义）。 */
+  videoQuality: VideoQuality
+  /**
+   * 主进程实际采用的档位。与 `videoQuality` 不同就说明被自动降级了
+   * （目前唯一的原因：背景模糊 ≥ BLUR_FORCES_BALANCED_PX）。
+   * 主进程没回答时等于 videoQuality，界面就不显示"已降级"的说明。
+   */
+  videoQualityEffective: VideoQuality
+  /** true = 因为背景模糊被自动降级，设置页要说明原因 */
+  videoQualityDemoted: boolean
+  /** 实际目标缩放长边（0 = 未知）。用来告诉用户"真正解的是多大"。 */
+  videoDecodeEdge: number
   accent: AccentId
   /** accent === 'custom' 时使用的自定义强调色（#rrggbb）。 */
   customAccent: string
@@ -46,8 +102,16 @@ export interface Appearance {
 
 export const APPEARANCE_DEFAULT: Appearance = {
   backgroundPath: '',
+  backgroundPlaybackPath: '',
+  backgroundRejected: '',
   backgroundDim: 72,
-  backgroundBlur: 0,
+  // 默认 4px：既让背景退到后景、文字更干净，又不至于把画面糊成一片。
+  // 同时它正好落在"模糊 ≥4px → 高分辨率档位自动降级"的阈值上。
+  backgroundBlur: 4,
+  videoQuality: 'balanced',
+  videoQualityEffective: 'balanced',
+  videoQualityDemoted: false,
+  videoDecodeEdge: 0,
   accent: 'blue',
   customAccent: '#5b8eff',
   mode: 'dark',
@@ -98,6 +162,7 @@ const KEYS = {
   backgroundPath: 'appearanceBackgroundPath',
   backgroundDim: 'appearanceBackgroundDim',
   backgroundBlur: 'appearanceBackgroundBlur',
+  videoQuality: 'appearanceBackgroundVideoQuality',
   accent: 'appearanceAccent',
   customAccent: 'appearanceCustomAccent',
   mode: 'appearanceMode',
@@ -115,6 +180,8 @@ const isMode = (value: unknown): value is Mode => value === 'dark' || value === 
 const isDensity = (value: unknown): value is Density => value === 'comfortable' || value === 'compact'
 const isStrength = (value: unknown): value is AccentStrength =>
   ACCENT_STRENGTH_OPTIONS.some((option) => option.id === value)
+const isVideoQuality = (value: unknown): value is VideoQuality =>
+  VIDEO_QUALITY_OPTIONS.some((option) => option.id === value)
 /** #rrggbb / #rgb → #rrggbb；非法输入返回空串。 */
 export function normalizeHexColor(value: unknown): string {
   const raw = String(value || '').trim()
@@ -149,7 +216,9 @@ export function backgroundProtocolUrl(filePath: string): string {
 
 function applyDom(appearance: Appearance): void {
   const root = document.documentElement
-  const kind = backgroundKindOf(appearance.backgroundPath)
+  // 用**可播放**路径判断有没有背景：被拒的背景不该让界面进入"有背景"状态
+  // （否则面板会转半透明、遮罩会生效，而其实什么都没渲染）。
+  const kind = backgroundKindOf(appearance.backgroundPlaybackPath)
 
   // 图片与视频都由 `.app-bg` 图层渲染（见 theme.scss），所以这里不再喂 url()：
   // CSS 只需要知道"要不要压暗"和"模糊多少"。之前图片是 .shell 的
@@ -199,14 +268,81 @@ function commit(patch: Partial<Appearance>, persist: (key: string, value: unknow
 }
 
 /** 设置背景。传空字符串即恢复纯色背景。图片与视频都走这里。 */
-export const setBackgroundPath = (path: string): void =>
-  commit({ backgroundPath: String(path || '').trim() }, (key, value) => void window.electronAPI.config.set(key, value))
+export const setBackgroundPath = (path: string): void => {
+  const next = String(path || '').trim()
+  // 乐观更新：主进程可能返回一个转码缓存路径（下次 config:get 才拿得到），
+  // 先用用户选的文件把界面点亮，避免"选了没反应"。
+  commit(
+    { backgroundPath: next, backgroundPlaybackPath: next, backgroundRejected: '' },
+    (key, value) => void window.electronAPI.config.set(key, value)
+  )
+}
 
 export const setBackgroundDim = (dim: number): void =>
   commit({ backgroundDim: Math.min(100, Math.max(0, Math.round(dim || 0))) }, (key, value) => void window.electronAPI.config.set(key, value))
 
 export const setBackgroundBlur = (blur: number): void =>
   commit({ backgroundBlur: Math.min(40, Math.max(0, Math.round(blur || 0))) }, (key, value) => void window.electronAPI.config.set(key, value))
+
+/**
+ * 背景视频画质档位。
+ *
+ * 乐观更新：`videoQualityEffective` / `videoQualityDemoted` 只是**显示**用的，
+ * 真正生效的档位由主进程算（模糊 ≥4px 会把高于平衡的档位压回去）。这里先按
+ * 本地规则预判一次，界面立刻有反馈；下一次 refreshVideoQualityInfo() 再拿
+ * 主进程的权威值覆盖。
+ */
+export const setVideoQuality = (quality: VideoQuality): void => {
+  const next = isVideoQuality(quality) ? quality : APPEARANCE_DEFAULT.videoQuality
+  const demoted = current.backgroundBlur >= BLUR_FORCES_BALANCED_PX && next === 'native'
+  commit(
+    {
+      videoQuality: next,
+      videoQualityEffective: demoted ? 'balanced' : next,
+      videoQualityDemoted: demoted,
+    },
+    (key, value) => void window.electronAPI.config.set(key, value)
+  )
+}
+
+/**
+ * 从主进程取回"实际生效的档位"。改模糊/换背景/切档位之后调用。
+ *
+ * 必须问主进程而不是本地算：解码长边取决于显示器设备宽度，渲染层不知道
+ * 用户把窗口拖到了哪块屏上。拿不到就保持当前值 —— 猜一个只会让提示与实际不符。
+ */
+export async function refreshVideoQualityInfo(): Promise<void> {
+  // 不是视频背景就归零：留着上一段视频的字体信息只会在下次选中视频前
+  // 显示出一个过期的"解码长边"。
+  if (backgroundKindOf(current.backgroundPath) !== 'video') {
+    if (current.videoDecodeEdge !== 0 || current.videoQualityDemoted) {
+      current = { ...current, videoQualityEffective: current.videoQuality, videoQualityDemoted: false, videoDecodeEdge: 0 }
+      listeners.forEach((listener) => listener())
+    }
+    return
+  }
+  try {
+    const info = (await window.electronAPI.config.get('appearanceBackgroundVideoInfo')) as
+      | { quality?: unknown; demoted?: unknown; longEdge?: unknown }
+      | undefined
+    if (!info) return
+    const quality = isVideoQuality(info.quality) ? info.quality : current.videoQuality
+    const demoted = info.demoted === true
+    const longEdge = Number.isFinite(Number(info.longEdge)) ? Number(info.longEdge) : 0
+    if (
+      quality === current.videoQualityEffective &&
+      demoted === current.videoQualityDemoted &&
+      longEdge === current.videoDecodeEdge
+    ) {
+      return
+    }
+    // 只更新显示字段，不写回配置：它们是主进程算出来的结果，不是用户的选择。
+    current = { ...current, videoQualityEffective: quality, videoQualityDemoted: demoted, videoDecodeEdge: longEdge }
+    listeners.forEach((listener) => listener())
+  } catch {
+    /* 主进程还没起来 / 键不存在：保持当前显示 */
+  }
+}
 
 export const setAccent = (accent: AccentId): void =>
   commit({ accent: isAccent(accent) ? accent : 'blue' }, (key, value) => void window.electronAPI.config.set(key, value))
@@ -326,8 +462,10 @@ export async function initAppearance(): Promise<Appearance> {
     }
   }
 
-  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, accentStrength, modeAuto, legacyColorMode] = await Promise.all([
-    read(KEYS.backgroundPath),
+  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, accentStrength, modeAuto, legacyColorMode, backgroundPlaybackPath, backgroundRejected, videoQuality, videoInfo] = await Promise.all([
+    // 存的两个键：Source = 用户选的文件（界面显示），Path = 实际该播的
+    // （主进程可能换成转码缓存；被拒时为空串）。
+    read('appearanceBackgroundSource'),
     read(KEYS.backgroundDim),
     read(KEYS.backgroundBlur),
     read(KEYS.accent),
@@ -339,6 +477,11 @@ export async function initAppearance(): Promise<Appearance> {
     // v1.0 之前的「色彩主题」：colorful / mono。它现在只是强调色的一种，
     // 因此在没有新的 accent 配置时把它迁移过来，而不是丢下不管。
     read('colorMode'),
+    read(KEYS.backgroundPath),
+    read('appearanceBackgroundRejected'),
+    read(KEYS.videoQuality),
+    // 实际生效的档位由主进程回答（它知道显示器设备宽度与模糊规则）。
+    read('appearanceBackgroundVideoInfo'),
   ])
 
   const legacyAccent: AccentId | undefined =
@@ -346,12 +489,32 @@ export async function initAppearance(): Promise<Appearance> {
 
   const next: Appearance = {
     backgroundPath: typeof backgroundPath === 'string' ? backgroundPath.trim() : APPEARANCE_DEFAULT.backgroundPath,
+    // 主进程**总是**回答这个键（被拒时明确回空串），所以"是字符串"就照它用；
+    // 只有它完全没回答（undefined，例如主进程还没起来）才退回用户选的文件。
+    // 不能写成"空串就退回" —— 那正好把"被拒"重新变成一个会播放的背景。
+    backgroundPlaybackPath:
+      typeof backgroundPlaybackPath === 'string'
+        ? backgroundPlaybackPath.trim()
+        : typeof backgroundPath === 'string'
+          ? backgroundPath.trim()
+          : '',
+    backgroundRejected: typeof backgroundRejected === 'string' ? backgroundRejected : '',
     backgroundDim: Number.isFinite(Number(backgroundDim))
       ? Math.min(100, Math.max(0, Number(backgroundDim)))
       : APPEARANCE_DEFAULT.backgroundDim,
     backgroundBlur: Number.isFinite(Number(backgroundBlur))
       ? Math.min(40, Math.max(0, Number(backgroundBlur)))
       : APPEARANCE_DEFAULT.backgroundBlur,
+    videoQuality: isVideoQuality(videoQuality) ? videoQuality : APPEARANCE_DEFAULT.videoQuality,
+    videoQualityEffective: isVideoQuality((videoInfo as any)?.quality)
+      ? ((videoInfo as any).quality as VideoQuality)
+      : isVideoQuality(videoQuality)
+        ? videoQuality
+        : APPEARANCE_DEFAULT.videoQuality,
+    videoQualityDemoted: (videoInfo as any)?.demoted === true,
+    videoDecodeEdge: Number.isFinite(Number((videoInfo as any)?.longEdge))
+      ? Number((videoInfo as any).longEdge)
+      : 0,
     accent: isAccent(accent) ? accent : legacyAccent || APPEARANCE_DEFAULT.accent,
     customAccent: normalizeHexColor(customAccent) || APPEARANCE_DEFAULT.customAccent,
     mode: isMode(mode) ? mode : APPEARANCE_DEFAULT.mode,

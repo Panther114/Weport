@@ -1,19 +1,299 @@
 import { app } from 'electron'
-import { join, dirname } from 'path'
-import { existsSync, copyFileSync, mkdirSync } from 'fs'
+import { join, dirname, basename } from 'path'
+import { existsSync, copyFileSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import os from 'os'
 import crypto from 'crypto'
+import { stripAccountSuffix } from './weChatLoginOracle'
 
 const execFileAsync = promisify(execFile)
 
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
-type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
+type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string; accountDir?: string; tried?: string[] }
 type DbKeyPollResult =
   | { status: 'success'; key: string; loginRequiredDetected: boolean }
   | { status: 'process-ended'; loginRequiredDetected: boolean }
   | { status: 'timeout'; loginRequiredDetected: boolean }
+
+/** kvcomm 缓存里的一份账号密钥记录（wx_key.dll!GetImageKey 的 JSON 结构）。 */
+export type ImageKeyCacheAccount = {
+  wxid?: string
+  keys?: Array<{ code?: number; aesKey?: string; xorKey?: number }>
+}
+
+/** 上游 `GetImageKey` 的 JSON 载荷。 */
+export type ImageKeyCachePayload = { accounts?: ImageKeyCacheAccount[] }
+
+/**
+ * 一个 wxid 可能对应的几种写法。
+ *
+ * issue #20 的核心教训：图像 AES 密钥是 `md5(String(code) + canonicalWxid)` 的前
+ * 16 个十六进制字符（本机 400/400 个真实 `*_t.dat` 模板实测）。而 UI 传下来的
+ * "wxid" 其实是**磁盘目录名**，可能带微信改号后缀（`wxid_X_64b5`），自定义微信号
+ * 还可能是 `别名_4f2a`。三种清洗规则各有盲区，因此这里把「原样 / 去掉改号后缀 /
+ * 去下划线段」的写法全部列为候选，由模板校验决定谁是对的 —— 多试几个字符串的
+ * 代价是一次 md5，猜错一个字符串的代价是整个功能不可用。
+ */
+export function canonicalWxidVariants(wxid: string): string[] {
+  const variants: string[] = []
+  const push = (value: string) => {
+    const trimmed = String(value || '').trim()
+    if (!trimmed || variants.includes(trimmed)) return
+    variants.push(trimmed)
+  }
+
+  const raw = String(wxid || '').trim()
+  push(raw)
+  if (!raw) return variants
+
+  // 微信改号后缀：`wxid_X_64b5` → `wxid_X`（weChatLoginOracle 的权威规则，
+  // 已用 `all_users/login/<wxid>` 与 `key_info.db` 的 md5 交叉验证过）。
+  push(stripAccountSuffix(raw))
+  // `wxid_` 后只取第一段：`wxid_abc_64b5` → `wxid_abc`
+  if (raw.toLowerCase().startsWith('wxid_')) {
+    const match = raw.match(/^(wxid_[^_]+)/i)
+    if (match) push(match[1])
+  }
+  // 自定义微信号 + 4 位后缀：`alias_4f2a` → `alias`
+  const suffixMatch = raw.match(/^(.+)_([a-zA-Z0-9]{4})$/)
+  if (suffixMatch) push(suffixMatch[1])
+
+  return variants
+}
+
+/**
+ * 图像 AES 密钥推导（与 `wx_key.dll` 内部一致，已在本机真实模板上验证）：
+ * `md5(String(code) + wxid)` 的前 16 个十六进制字符；XOR 密钥是 `code & 0xFF`。
+ */
+export function deriveImageKeysForWxid(code: number, wxid: string): { xorKey: number; aesKey: string } {
+  const xorKey = code & 0xFF
+  const md5Full = crypto.createHash('md5').update(String(code) + String(wxid)).digest('hex')
+  return { xorKey, aesKey: md5Full.substring(0, 16) }
+}
+
+/** 一个目录看起来像不像微信账号目录（图片模板就在它下面的 msg/attach 里）。 */
+export function looksLikeWeChatAccountDir(dir: string): boolean {
+  if (!dir) return false
+  try {
+    if (!statSync(dir).isDirectory()) return false
+  } catch {
+    return false
+  }
+  return (
+    existsSync(join(dir, 'msg', 'attach')) ||
+    existsSync(join(dir, 'db_storage')) ||
+    existsSync(join(dir, 'FileStorage', 'Image')) ||
+    existsSync(join(dir, 'FileStorage', 'Image2'))
+  )
+}
+
+export type ImageKeyScope = {
+  /** 参与本账号校验的模板目录，最可信的在前。 */
+  dirs: string[]
+  /** `rootDir` 下所有看起来像账号目录的子目录（用于诊断与兜底）。 */
+  allAccountDirs: string[]
+  /** 是否成功把范围收敛到某一个账号。 */
+  scoped: boolean
+}
+
+/**
+ * 把「数据目录 + wxid」收敛到一个账号目录。
+ *
+ * issue #20：`xwechat_files` 根目录下同时存在两个账号时，旧实现把根目录直接丢给
+ * 模板扫描，于是 `*_t.dat` 可能来自**另一个账号** —— 拿 A 账号的密文去校验 B 账号
+ * 的密钥，永远不可能通过，用户看到的却是"请在微信中打开 2-3 张图片大图"。
+ * 模板（以及内存扫描要找的密钥）必须来自被选中的那个账号。
+ */
+export function resolveAccountImageDirs(rootDir: string, wxid?: string): ImageKeyScope {
+  const root = String(rootDir || '').trim().replace(/[\\/]+$/, '')
+  if (!root) return { dirs: [], allAccountDirs: [], scoped: false }
+
+  // 用户直接选了账号目录（而不是 xwechat_files 根目录）时无需再收敛。
+  if (looksLikeWeChatAccountDir(root)) {
+    return { dirs: [root], allAccountDirs: [root], scoped: true }
+  }
+
+  let entries: string[] = []
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(root, entry.name))
+      .filter((full) => looksLikeWeChatAccountDir(full))
+  } catch {
+    return { dirs: [], allAccountDirs: [], scoped: false }
+  }
+
+  const allAccountDirs = entries
+  const requested = String(wxid || '').trim()
+  if (!requested) return { dirs: [], allAccountDirs, scoped: false }
+
+  const variants = canonicalWxidVariants(requested).map((value) => value.toLowerCase())
+  const nameOf = (full: string) => basename(full).toLowerCase()
+  const exact = entries.filter((full) => variants.includes(nameOf(full)))
+  const prefixed = entries.filter(
+    (full) => !exact.includes(full) && variants.some((variant) => nameOf(full).startsWith(`${variant}_`))
+  )
+  const dirs = [...exact, ...prefixed]
+  return { dirs, allAccountDirs, scoped: dirs.length > 0 }
+}
+
+/**
+ * 上一次图片密钥提取作用在哪个账号上。
+ *
+ * `key:autoGetImageKey` 拿得到 wxid，而内存扫描的 IPC 通道（`key:scanImageKeyFromMemory`）
+ * 只带目录，不带账号。两条通道都在主进程里，因此在这里记住上一次请求，内存扫描
+ * 就能沿用同一个账号的模板 —— 这正是 issue #20 里"两个账号同机，其中一台上限超时"
+ * 的根因：扫描用的密文与内存里那份密钥不属于同一个账号。
+ */
+let lastImageKeyAccount: { requested?: string; dirs: string[] } | null = null
+
+/** 仅测试/诊断用：读取上一次记录。 */
+export function getLastImageKeyAccount(): { requested?: string; dirs: string[] } | null {
+  return lastImageKeyAccount
+}
+
+/** 与图片模板无关的候选 wxid 列表：只包含"当前请求这个账号"的几种写法。
+ *
+ * issue #20：旧实现在这里塞进了根目录下**所有**账号的目录名，于是校验循环可能
+ * 拿另一个账号的密钥通过校验，然后按当前账号保存 —— 用户拿到一把属于别人的密钥。
+ * 账号归属只能来自「选中的账号」和「收敛出来的账号目录」，不能来自"根目录下还有谁"。
+ */
+export function buildWxidCandidates(scopeDirs: string[], wxidParam?: string, rootDir?: string): string[] {
+  const candidates: string[] = []
+  const pushUnique = (value: string) => {
+    const trimmed = String(value || '').trim()
+    if (!trimmed || candidates.includes(trimmed)) return
+    candidates.push(trimmed)
+  }
+
+  for (const variant of canonicalWxidVariants(String(wxidParam || ''))) pushUnique(variant)
+  for (const dir of scopeDirs) {
+    const name = basename(dir)
+    pushUnique(name)
+    for (const variant of canonicalWxidVariants(name)) pushUnique(variant)
+  }
+  // 选中的目录本身就是账号目录时，目录名就是账号名。
+  if (rootDir && looksLikeWeChatAccountDir(String(rootDir))) {
+    const name = basename(String(rootDir).replace(/[\\/]+$/, ''))
+    pushUnique(name)
+    for (const variant of canonicalWxidVariants(name)) pushUnique(variant)
+  }
+
+  return candidates
+}
+
+/** 用 AES-128-ECB 解出的前几字节是不是图片魔数（JPEG/PNG/RIFF/WXGF/GIF）。 */
+export function verifyDerivedAesKey(aesKey: string, ciphertext: Buffer): boolean {
+  try {
+    if (!aesKey || aesKey.length < 16 || ciphertext.length !== 16) return false
+    const decipher = crypto.createDecipheriv('aes-128-ecb', Buffer.from(aesKey, 'ascii').subarray(0, 16), null)
+    decipher.setAutoPadding(false)
+    const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+    if (dec[0] === 0xFF && dec[1] === 0xD8 && dec[2] === 0xFF) return true
+    if (dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4E && dec[3] === 0x47) return true
+    if (dec[0] === 0x52 && dec[1] === 0x49 && dec[2] === 0x46 && dec[3] === 0x46) return true
+    if (dec[0] === 0x77 && dec[1] === 0x78 && dec[2] === 0x67 && dec[3] === 0x66) return true
+    if (dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+export type ImageKeySelectionInput = {
+  payload: ImageKeyCachePayload
+  scope: ImageKeyScope
+  rootDir?: string
+  wxidParam?: string
+  templates: { ciphertexts: Buffer[]; files: string[]; dirs: string[] }
+  onProgress?: (message: string) => void
+}
+
+/**
+ * 用「本账号自己的模板」校验并筛出唯一可用的图片密钥。
+ *
+ * 纯函数（不碰 DLL、不碰进程），因此可以被单元测试直接调用 —— issue #20 的回归
+ * 测试就是拿两个账号的合成目录跑这里，断言 B 账号不会拿到 A 账号的密钥。
+ *
+ * 三条硬规则：
+ * 1. 候选 wxid 只来自本账号（见 {@link buildWxidCandidates}），不来自"根目录下还有谁"；
+ * 2. 校验密文只来自本账号目录（调用方负责收敛，见 {@link resolveAccountImageDirs}）；
+ * 3. 一次都没通过就别假装成功，并说清"试了什么、下一步做什么"。
+ */
+export function selectVerifiedImageKey(options: ImageKeySelectionInput): ImageKeyResult {
+  const { payload, scope, rootDir, wxidParam, templates, onProgress } = options
+  const accounts = Array.isArray(payload.accounts) ? payload.accounts : []
+  const keyEntries = accounts
+    .flatMap((account) => (account.keys || []).map((key) => ({ wxid: String(account.wxid || ''), key })))
+    .filter((entry) => Number.isFinite(Number(entry.key?.code)))
+
+  if (keyEntries.length === 0) {
+    return {
+      success: false,
+      tried: ['读取微信 kvcomm 缓存（key_<code>_*.statistic）'],
+      error: '微信 kvcomm 缓存里没有可用的图片密钥码（缺少 key_<code>_*.statistic 文件）。'
+        + '下一步：启动并登录微信，在任意聊天里打开 2-3 张图片后重试；'
+        + '若微信刚安装或刚清过缓存，需要先在微信里收发/查看过图片才会生成密钥码'
+    }
+  }
+
+  const triedAccountNames = (scope.scoped ? scope.dirs : []).map((dir) => basename(dir))
+  const accountHint = triedAccountNames.length
+    ? `账号目录 ${triedAccountNames.join(' / ')}`
+    : (wxidParam ? `账号 ${wxidParam}` : '当前账号')
+
+  if (templates.ciphertexts.length === 0) {
+    const scanned = templates.dirs.length ? templates.dirs.join(' / ') : (rootDir ? String(rootDir) : '(未提供数据目录)')
+    return {
+      success: false,
+      tried: [accountHint, `模板扫描目录：${scanned}`],
+      error: `在${accountHint}的图片缓存目录里没有找到可用于校验的模板文件（*_t.dat）；已扫描：${scanned}。`
+        + `下一步：用这个账号在微信里打开 2-3 张图片大图（缩略图要真实生成过），再点一次「获取图片密钥」；`
+        + `若目录不对，请在连接页重新选择该账号的 xwechat_files 根目录`
+    }
+  }
+
+  // codes 的归属：优先与当前账号匹配的条目；没有匹配则退回全部条目（code 来自
+  // kvcomm，与账号无强绑定，多试几个 code 的成本只有几次 md5，校验会兜住错配）。
+  const candidates = buildWxidCandidates(scope.scoped ? scope.dirs : scope.allAccountDirs, wxidParam, rootDir)
+  if (candidates.length === 0) candidates.push('unknown')
+
+  const matchedEntries = keyEntries.filter((entry) => candidates.some(
+    (candidate) => candidate.toLowerCase() === entry.wxid.toLowerCase()
+  ))
+  const orderedEntries = [...matchedEntries, ...keyEntries.filter((entry) => !matchedEntries.includes(entry))]
+  const codes: number[] = []
+  for (const entry of orderedEntries) {
+    const code = Number(entry.key?.code)
+    if (!codes.includes(code)) codes.push(code)
+  }
+
+  onProgress?.(`正在用 ${templates.ciphertexts.length} 个模板校验 ${codes.length} 个密钥码（${accountHint}）...`)
+  let attempts = 0
+  for (const candidateWxid of candidates) {
+    for (const code of codes) {
+      const { xorKey, aesKey } = deriveImageKeysForWxid(code, candidateWxid)
+      for (const ciphertext of templates.ciphertexts) {
+        attempts++
+        if (!verifyDerivedAesKey(aesKey, ciphertext)) continue
+        onProgress?.(`密钥获取成功（wxid: ${candidateWxid}, code: ${code}）`)
+        console.log('[ImageKey] 校验命中: wxid=', candidateWxid, 'code=', code, 'dirs=', templates.dirs)
+        return { success: true, xorKey, aesKey, verified: true, accountDir: templates.dirs[0] }
+      }
+    }
+  }
+
+  const scanned = templates.dirs.length ? templates.dirs.join(' / ') : String(rootDir || '')
+  return {
+    success: false,
+    tried: [accountHint, `模板 ${templates.ciphertexts.length} 个（${scanned}）`, `候选 wxid ${candidates.length} 个`, `code ${codes.length} 个`, `共 ${attempts} 次校验`],
+    error: `kvcomm 里的密钥码与${accountHint}对不上：用该账号目录下的 ${templates.ciphertexts.length} 个图片模板`
+      + `（${scanned}）校验了 ${candidates.length} 个候选 wxid × ${codes.length} 个 code，全部失败。`
+      + `常见原因：微信当前登录的不是这个账号（两个账号同机时最容易发生）；或这个账号还没有本地图片缓存。`
+      + `下一步：切到目标账号并重新登录微信 → 用该账号打开 2-3 张聊天图片大图 → 回到 Weport 重新点「获取图片密钥」`
+  }
+}
 
 export class KeyService {
   private readonly isMac = process.platform === 'darwin'
@@ -864,75 +1144,24 @@ export class KeyService {
     return { success: false, error: '获取密钥超时', logs }
   }
 
-  private cleanWxid(wxid: string): string {
-    const first = wxid.indexOf('_')
-    if (first === -1) return wxid
-    const second = wxid.indexOf('_', first + 1)
-    if (second === -1) return wxid
-    return wxid.substring(0, second)
+  private deriveImageKeys(code: number, wxid: string): { xorKey: number; aesKey: string } {
+    return deriveImageKeysForWxid(code, wxid)
   }
 
-  private deriveImageKeys(code: number, wxid: string): { xorKey: number; aesKey: string } {
-    const cleanedWxid = this.cleanWxid(wxid)
-    const xorKey = code & 0xFF
-    const dataToHash = code.toString() + cleanedWxid
-    const md5Full = crypto.createHash('md5').update(dataToHash).digest('hex')
-    const aesKey = md5Full.substring(0, 16)
-    return { xorKey, aesKey }
+  private buildWxidCandidates(scopeDirs: string[], wxidParam?: string, rootDir?: string): string[] {
+    return buildWxidCandidates(scopeDirs, wxidParam, rootDir)
   }
 
   private verifyDerivedAesKey(aesKey: string, ciphertext: Buffer): boolean {
-    try {
-      if (!aesKey || aesKey.length < 16 || ciphertext.length !== 16) return false
-      const decipher = crypto.createDecipheriv('aes-128-ecb', Buffer.from(aesKey, 'ascii').subarray(0, 16), null)
-      decipher.setAutoPadding(false)
-      const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()])
-      if (dec[0] === 0xFF && dec[1] === 0xD8 && dec[2] === 0xFF) return true
-      if (dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4E && dec[3] === 0x47) return true
-      if (dec[0] === 0x52 && dec[1] === 0x49 && dec[2] === 0x46 && dec[3] === 0x46) return true
-      if (dec[0] === 0x77 && dec[1] === 0x78 && dec[2] === 0x67 && dec[3] === 0x66) return true
-      if (dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46) return true
-      return false
-    } catch {
-      return false
-    }
+    return verifyDerivedAesKey(aesKey, ciphertext)
   }
 
-  private async collectWxidCandidates(manualDir?: string, wxidParam?: string): Promise<string[]> {
-    const candidates: string[] = []
-    const pushUnique = (value: string) => {
-      const v = String(value || '').trim()
-      if (!v || candidates.includes(v)) return
-      candidates.push(v)
-    }
-
-    // 接受任意非空 wxidParam（wxid_ 前缀或自定义微信号），避免自定义账号被静默丢弃
-    if (wxidParam) pushUnique(wxidParam)
-
-    if (manualDir) {
-      const normalized = manualDir.replace(/[\\/]+$/, '')
-      const dirName = normalized.split(/[\\/]/).pop() ?? ''
-      if (dirName.startsWith('wxid_')) pushUnique(dirName)
-
-      const marker = normalized.match(/[\\/]xwechat_files/i) || normalized.match(/[\\/]WeChat Files/i)
-      if (marker) {
-        const root = normalized.slice(0, marker.index! + marker[0].length)
-        try {
-          const { readdirSync, statSync } = await import('fs')
-          const { join } = await import('path')
-          for (const entry of readdirSync(root)) {
-            if (!entry.startsWith('wxid_')) continue
-            const full = join(root, entry)
-            try {
-              if (statSync(full).isDirectory()) pushUnique(entry)
-            } catch { }
-          }
-        } catch { }
-      }
-    }
-
-    pushUnique('unknown')
-    return candidates
+  /**
+   * 实例侧入口：实现在模块级 {@link selectVerifiedImageKey}（见那里的三条硬规则），
+   * 独立出来是为了让回归测试直接打到真实实现上。
+   */
+  private selectVerifiedImageKey(options: ImageKeySelectionInput): ImageKeyResult {
+    return selectVerifiedImageKey(options)
   }
 
   async autoGetImageKey(
@@ -941,7 +1170,12 @@ export class KeyService {
       wxidParam?: string
   ): Promise<ImageKeyResult> {
     if (!this.ensureWin32()) return { success: false, error: '仅支持 Windows' }
-    if (!this.ensureLoaded()) return { success: false, error: 'wx_key.dll 未加载' }
+    if (!this.ensureLoaded()) {
+      return {
+        success: false,
+        error: '图片密钥组件 wx_key.dll 未加载；请确认安装完整（resources/key/win32/x64/wx_key.dll），或改用「内存扫描」获取密钥'
+      }
+    }
 
     onProgress?.('正在从缓存目录扫描图片密钥...')
 
@@ -949,61 +1183,106 @@ export class KeyService {
     const ok = this.getImageKeyDll(resultBuffer, resultBuffer.length)
 
     if (!ok) {
-      const errMsg = this.getLastErrorMsg ? this.decodeCString(this.getLastErrorMsg()) : '获取图片密钥失败'
-      return { success: false, error: errMsg }
+      const errMsg = this.getLastErrorMsg ? this.decodeCString(this.getLastErrorMsg()) : ''
+      return {
+        success: false,
+        tried: ['读取微信 kvcomm 缓存（key_<code>_*.statistic）'],
+        error: `未能从微信缓存读取图片密钥${errMsg ? `：${errMsg}` : ''}。`
+          + `下一步：确认微信已启动并登录，随意打开 2-3 张聊天图片后重试；`
+          + `若刚切换过账号，请先在微信里登录目标账号；仍失败可点「内存扫描」兜底（需先在微信中打开图片大图）`
+      }
     }
 
     const jsonStr = this.decodeUtf8(resultBuffer)
-    let parsed: any
+    let parsed: ImageKeyCachePayload
     try {
-      parsed = JSON.parse(jsonStr)
+      parsed = JSON.parse(jsonStr) as ImageKeyCachePayload
     } catch {
-      return { success: false, error: '解析密钥数据失败' }
+      return {
+        success: false,
+        tried: ['解析 wx_key.dll 返回的密钥 JSON'],
+        error: '解析微信缓存里的图片密钥数据失败（wx_key.dll 返回了非法 JSON）；请重启微信后重试，并把这一条反馈给开发者'
+      }
     }
 
-    // 从任意账号提取 code 列表（code 来自 kvcomm，与 wxid 无关，所有账号都一样）。
-    // 优先使用与调用方选定账号匹配的 DLL 条目，避免多账号机器上取错账号的 codes。
-    const accounts: any[] = parsed.accounts ?? []
-    if (!accounts.length || !accounts[0]?.keys?.length) {
-      return { success: false, error: '未找到有效的密钥码（kvcomm 缓存为空）' }
+    const accounts: ImageKeyCacheAccount[] = Array.isArray(parsed.accounts) ? parsed.accounts : []
+    if (!accounts.length || !accounts.some((account) => (account.keys || []).length)) {
+      return {
+        success: false,
+        tried: ['读取微信 kvcomm 缓存（key_<code>_*.statistic）'],
+        error: '微信缓存里没有找到图片密钥码（kvcomm 缓存为空或缺 key_<code>_*.statistic 文件）。'
+          + '下一步：启动并登录微信，在任意聊天里打开 2-3 张图片后重试；'
+          + '若微信刚装好或刚清过缓存，需要先在微信里收发/查看过图片'
+      }
     }
 
-    const wxidCandidatesPre = await this.collectWxidCandidates(manualDir, wxidParam)
-    let codes: number[] = accounts[0].keys.map((k: any) => k.code)
-    for (const cand of wxidCandidatesPre) {
-      const hit = accounts.find((a: any) => String(a.wxid || '').toLowerCase() === String(cand || '').toLowerCase())
-      if (hit?.keys?.length) { codes = hit.keys.map((k: any) => k.code); break }
-    }
-    console.log('[ImageKey] codes:', codes, 'DLL wxids:', accounts.map((a: any) => a.wxid))
+    const rootDir = String(manualDir || '').trim()
+    const scope = resolveAccountImageDirs(rootDir, wxidParam)
+    // 收敛不到账号时退回根目录扫描，但把"未收敛"如实带进后续文案 ——
+    // 这时选出来的模板可能属于别的账号，用户需要知道。
+    const templateDirs = scope.dirs.length > 0 ? scope.dirs : (rootDir && existsSync(rootDir) ? [rootDir] : [])
+    const templates = await this.collectTemplateCiphertexts(templateDirs, 8)
 
-    const wxidCandidates = wxidCandidatesPre
-    let verifyCiphertext: Buffer | null = null
-    if (manualDir && existsSync(manualDir)) {
-      const template = await this._findTemplateData(manualDir, 32)
-      verifyCiphertext = template.ciphertext
-    }
+    console.log('[ImageKey] scope:', {
+      root: rootDir,
+      wxid: wxidParam,
+      scoped: scope.scoped,
+      dirs: scope.dirs,
+      accounts: accounts.map((account) => account.wxid),
+      templates: templates.files
+    })
 
-    if (verifyCiphertext) {
-      onProgress?.(`正在校验候选 wxid（${wxidCandidates.length} 个）...`)
-      for (const candidateWxid of wxidCandidates) {
-        for (const code of codes) {
-          const { xorKey, aesKey } = this.deriveImageKeys(code, candidateWxid)
-          if (!this.verifyDerivedAesKey(aesKey, verifyCiphertext)) continue
-          onProgress?.(`密钥获取成功 (wxid: ${candidateWxid}, code: ${code})`)
-          console.log('[ImageKey] 校验命中: wxid=', candidateWxid, 'code=', code)
-          return { success: true, xorKey, aesKey, verified: true }
+    if (scope.scoped && wxidParam) lastImageKeyAccount = { requested: String(wxidParam), dirs: scope.dirs }
+    // 即使没收敛成功也要记住"用户在问哪个账号"：内存扫描兜底沿用同一个请求，
+    // 才能在归属不确定时返回 verified:false，而不是把别人的密钥当成本账号的。
+    else if (wxidParam) lastImageKeyAccount = { requested: String(wxidParam), dirs: [] }
+
+    const selection = this.selectVerifiedImageKey({
+      payload: parsed,
+      scope,
+      rootDir,
+      wxidParam,
+      templates,
+      onProgress
+    })
+
+    // 校验通过：把结果与"这份密钥属于哪个账号目录"一起交回去，UI 才知道该存给谁。
+    if (selection.success) {
+      // 收敛不到账号时（模板来自整棵根目录），归属只能算"未确认"。
+      if (!scope.scoped && wxidParam && selection.verified !== false) {
+        return {
+          ...selection,
+          verified: false,
+          error: selection.error
+            || `未能在数据目录里定位账号 ${wxidParam} 的文件夹，密钥按缓存码推导且未通过该账号的模板校验；若导出图片失败，请重新选择该账号的 xwechat_files 根目录`
         }
       }
-      return { success: false, error: '缓存 code 与当前账号 wxid 未匹配，请确认账号目录后重试，或使用内存扫描' }
+      return selection
     }
 
-    // 无模板密文可验真时回退旧策略
-    const fallbackWxid = wxidCandidates[0] || accounts[0].wxid || 'unknown'
-    const fallbackCode = codes[0]
-    const { xorKey, aesKey } = this.deriveImageKeys(fallbackCode, fallbackWxid)
-    onProgress?.(`密钥获取成功 (wxid: ${fallbackWxid}, code: ${fallbackCode})`)
-    console.log('[ImageKey] 回退计算: wxid=', fallbackWxid, 'code=', fallbackCode)
-    return { success: true, xorKey, aesKey, verified: false }
+    // 没有模板（例如该账号还没缓存过图片）时，回退到旧策略：给出"未校验"的候选，
+    // 但绝不假装它可信 —— verified:false 会让 renderer 显示「未校验」提示。
+    if (templates.ciphertexts.length === 0) {
+      const fallbackWxid = this.buildWxidCandidates(scope.scoped ? scope.dirs : scope.allAccountDirs, wxidParam, rootDir)[0]
+        || accounts[0]?.wxid
+        || 'unknown'
+      const fallbackCode = Number(accounts[0]?.keys?.[0]?.code)
+      if (Number.isFinite(fallbackCode)) {
+        const { xorKey, aesKey } = this.deriveImageKeys(fallbackCode, fallbackWxid)
+        onProgress?.(`密钥已计算（未校验，wxid: ${fallbackWxid}, code: ${fallbackCode}）`)
+        return {
+          success: true,
+          xorKey,
+          aesKey,
+          verified: false,
+          error: selection.error,
+          tried: selection.tried,
+          accountDir: scope.dirs[0]
+        }
+      }
+    }
+
+    return selection
   }
 
   // --- 内存扫描备选方案（融合 Dart+Python 优点）---
@@ -1012,79 +1291,205 @@ export class KeyService {
 
   async autoGetImageKeyByMemoryScan(
     userDir: string,
-    onProgress?: (message: string) => void
+    onProgress?: (message: string) => void,
+    wxidParam?: string
   ): Promise<ImageKeyResult> {
     if (!this.ensureWin32()) return { success: false, error: '仅支持 Windows' }
 
     try {
-      // 1. 查找模板文件获取密文和 XOR 密钥
+      // issue #20：内存扫描要找的是「当前微信进程里那把密钥」，因此用来判定的密文
+      // 必须来自**同一个账号**。IPC 通道只带目录，所以这里沿用上一次
+      // autoGetImageKey 记录的账号；没有记录时退化为扫描所有账号目录的模板
+      // （内存里那把密钥一定属于其中一个，命中后 accountDir 会告诉我们是谁）。
+      const requested = String(wxidParam || lastImageKeyAccount?.requested || '').trim()
+      const scope = resolveAccountImageDirs(userDir, requested)
+      const templateDirs = scope.dirs.length > 0 ? scope.dirs : (scope.allAccountDirs.length > 0 ? scope.allAccountDirs : [])
+      const dirsToScan = templateDirs.length > 0 ? templateDirs : (userDir && existsSync(userDir) ? [userDir] : [])
+
       onProgress?.('正在查找模板文件...')
-      let result = await this._findTemplateData(userDir, 32)
-      let { ciphertext, xorKey } = result
-      
-      // 如果找不到密钥，尝试扫描更多文件
-      if (ciphertext && xorKey === null) {
+      let templates = await this.collectTemplateCiphertexts(dirsToScan, 3)
+      if (templates.ciphertexts.length > 0 && templates.xorKey === null) {
         onProgress?.('未找到有效密钥，尝试扫描更多文件...')
-        result = await this._findTemplateData(userDir, 100)
-        xorKey = result.xorKey
+        templates = await this.collectTemplateCiphertexts(dirsToScan, 40)
       }
-      
-      if (!ciphertext) return { success: false, error: '未找到 V2 模板文件，请先在微信中查看几张图片' }
-      if (xorKey === null) return { success: false, error: '未能从模板文件中计算出有效的 XOR 密钥，请确保在微信中查看了多张不同的图片' }
+
+      const accountLabel = scope.scoped
+        ? `账号目录 ${scope.dirs.map((dir) => basename(dir)).join(' / ')}`
+        : (requested ? `账号 ${requested}` : '当前账号')
+      const scannedLabel = dirsToScan.length ? dirsToScan.join(' / ') : '(未提供数据目录)'
+
+      if (templates.ciphertexts.length === 0) {
+        return {
+          success: false,
+          tried: [`扫描模板目录：${scannedLabel}`],
+          error: `在${accountLabel}下没有找到 V2 模板文件（*_t.dat），无法确定内存里的密钥是否可用；已扫描：${scannedLabel}。`
+            + `下一步：用这个账号在微信里打开 2-3 张图片大图（等缩略图真正生成），再重试；`
+            + `若目录不对，请在连接页重新选择该账号的 xwechat_files 根目录`
+        }
+      }
+
+      let xorKey = templates.xorKey
+      if (xorKey === null) {
+        return {
+          success: false,
+          tried: [`读取 ${templates.ciphertexts.length} 个模板的尾部字节`, `扫描目录：${scannedLabel}`],
+          error: `这 ${templates.ciphertexts.length} 个 V2 模板都没能算出有效的 XOR 密钥（${scannedLabel}）。`
+            + `下一步：在微信里再打开几张**不同**的图片大图后重试；同一张图反复打开不会产生新模板`
+        }
+      }
 
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
       // 2. 找微信 PID（每轮重查，避免 60s 窗口内进程重启导致持续失败）
       let pid = await this.findWeChatPid()
-      if (!pid) return { success: false, error: '微信进程未运行，请先启动微信' }
+      if (!pid) {
+        return {
+          success: false,
+          tried: [`扫描目录：${scannedLabel}`],
+          error: '没有找到正在运行的微信进程（Weixin.exe / WeChat.exe）。'
+            + '下一步：先启动微信并登录目标账号，再回来点「内存扫描」'
+        }
+      }
 
       onProgress?.(`已找到微信进程 PID=${pid}，正在扫描内存...`)
 
       // 3. 持续轮询内存扫描，最多 60 秒
       const deadline = Date.now() + 60_000
       let scanCount = 0
+      let lastPid = pid
       while (Date.now() < deadline) {
         scanCount++
         onProgress?.(`第 ${scanCount} 次扫描内存，请在微信中打开图片大图...`)
         // 每轮重查 PID，兼容微信崩溃/重启场景
         const currentPid = await this.findWeChatPid()
-        if (currentPid) pid = currentPid
-        const aesKey = await this._scanMemoryForAesKey(pid, ciphertext, onProgress)
-        if (aesKey) {
+        if (currentPid) { pid = currentPid; lastPid = currentPid }
+        const matched = await this._scanMemoryForAesKey(pid, templates.ciphertexts, onProgress)
+        if (matched) {
+          // 哪一个模板被解开，就说明内存里那把密钥属于哪个账号目录 —— 这正是
+          // issue #20 里缺少的归属信息（旧实现只回一把密钥，UI 只能猜着存）。
+          const origin = templates.origins[matched.index]
+          const matchedDir = origin ? origin.dir : undefined
+          if (matchedDir && scope.scoped && !scope.dirs.some((dir) => dir.toLowerCase() === matchedDir.toLowerCase())) {
+            onProgress?.(`注意：命中的密钥属于 ${basename(matchedDir)}，与所选账号可能不是同一个`)
+          }
           onProgress?.('密钥获取成功')
-          return { success: true, xorKey, aesKey }
+          return {
+            success: true,
+            xorKey: xorKey as number,
+            aesKey: matched.aesKey,
+            // 「校验通过」与「归属确定」是两件事：收敛不到账号时（requested 有值但
+            // 目录没匹配上），这把密钥一定属于*某个*账号，但未必是用户选的那个 ——
+            // 这时返回 verified:false，UI 会显示「未校验」，不会静默存错账号。
+            verified: scope.scoped || !requested,
+            accountDir: matchedDir,
+            tried: [`命中模板：${origin ? origin.file : '(未知)'}`]
+          }
         }
         // 等 5 秒再试
         await new Promise(r => setTimeout(r, 5000))
       }
 
+      const accountHint = scope.scoped
+        ? `${accountLabel}（微信当前登录的账号如果与它不同，请先切换账号再试）`
+        : accountLabel
       return {
         success: false,
-        error: '60 秒内未找到 AES 密钥。\n请确保已在微信中打开 2-3 张图片大图后再试。'
+        tried: [
+          `扫描目录：${scannedLabel}`,
+          `模板 ${templates.ciphertexts.length} 个（XOR 0x${xorKey.toString(16).padStart(2, '0')}）`,
+          `微信进程 PID ${lastPid}`,
+          `内存扫描 ${scanCount} 轮 / 60 秒`
+        ],
+        error: `60 秒内没有在微信进程内存里找到能解密${accountHint}图片的 AES 密钥`
+          + `（已用 ${templates.ciphertexts.length} 个该账号的模板校验 ${lastPid} 号进程的 ${scanCount} 轮内存扫描）。`
+          + `最常见原因是"模板属于另一个账号"或"微信当前登录的不是这个账号"。`
+          + `下一步：1) 在微信里确认当前登录的就是目标账号（两个账号同机时先切换账号）；`
+          + `2) 用该账号打开 2-3 张图片大图；3) 重新点「内存扫描」`
       }
     } catch (e) {
-      return { success: false, error: `内存扫描失败: ${e}` }
+      return {
+        success: false,
+        tried: ['内存扫描'],
+        error: `内存扫描过程出错：${e instanceof Error ? e.message : String(e)}；请重试，若持续失败请把这条信息反馈给开发者`
+      }
     }
   }
 
-  private async _findTemplateData(userDir: string, limit: number = 32): Promise<{ ciphertext: Buffer | null; xorKey: number | null }> {
+  /**
+   * 收集若干个账号目录里的模板密文（每个目录取最新的 limit 个文件）。
+   *
+   * 这是 issue #20 的关键收口：旧实现只接受**一个**目录，UI 传的是 xwechat_files
+   * 根目录，于是两个账号的 `*_t.dat` 混在一起按修改时间排序取"最新"——很可能取到
+   * 另一个账号的文件，后续校验必然失败（用户看到的是 60 秒内存扫描超时）。
+   */
+  private async collectTemplateCiphertexts(
+    dirs: string[],
+    limitPerDir: number
+  ): Promise<{ ciphertexts: Buffer[]; origins: Array<{ file: string; dir: string }>; files: string[]; dirs: string[]; xorKey: number | null }> {
+    const ciphertexts: Buffer[] = []
+    const origins: Array<{ file: string; dir: string }> = []
+    const files: string[] = []
+    const usedDirs: string[] = []
+    let xorKey: number | null = null
+
+    for (const dir of dirs.slice(0, 6)) {
+      const single = await this._findTemplateData(dir, limitPerDir)
+      if (single.files.length === 0 && !single.ciphertext) continue
+      usedDirs.push(dir)
+      if (xorKey === null && single.xorKey !== null) xorKey = single.xorKey
+      for (const file of single.files) {
+        if (files.length >= 48) break
+        files.push(file)
+      }
+      for (const entry of single.entries) {
+        if (ciphertexts.length >= 24) break
+        ciphertexts.push(entry.ciphertext)
+        origins.push({ file: entry.file, dir })
+      }
+    }
+
+    return { ciphertexts, origins, files, dirs: usedDirs, xorKey }
+  }
+
+  private async _findTemplateData(
+    userDir: string,
+    limit: number = 32
+  ): Promise<{
+    ciphertext: Buffer | null
+    ciphertexts: Buffer[]
+    entries: Array<{ file: string; ciphertext: Buffer }>
+    xorKey: number | null
+    files: string[]
+  }> {
     const { readdirSync, readFileSync, statSync } = await import('fs')
-    const { join } = await import('path')
     const V2_MAGIC = Buffer.from([0x07, 0x08, 0x56, 0x32, 0x08, 0x07])
+    const empty = {
+      ciphertext: null,
+      ciphertexts: [] as Buffer[],
+      entries: [] as Array<{ file: string; ciphertext: Buffer }>,
+      xorKey: null as number | null,
+      files: [] as string[]
+    }
 
     const trimmedDir = String(userDir || '').trim()
-    if (!trimmedDir) return { ciphertext: null, xorKey: null }
+    if (!trimmedDir) return empty
     // 拒绝 UNC/网络路径与超长路径（避免主进程同步遍历挂起或触发 SMB 凭据面）
-    if (trimmedDir.startsWith('\\\\')) return { ciphertext: null, xorKey: null }
+    if (trimmedDir.startsWith('\\\\')) return empty
     try {
       const s = statSync(trimmedDir)
-      if (!s.isDirectory()) return { ciphertext: null, xorKey: null }
-    } catch { return { ciphertext: null, xorKey: null } }
+      if (!s.isDirectory()) return empty
+    } catch { return empty }
 
     // 递归收集 *_t.dat 文件（带深度与条目上限，避免整盘遍历导致假死）
+    //
+    // 注意扫描上限与"取最新"的关系（issue #20）：旧实现直接 collect(dir, limit)，
+    // 拿到的是**遍历顺序里的前 limit 个**文件，再对这 limit 个排序 —— 于是"最新"
+    // 只在随机的一小撮里成立，多账号/多会话目录下极易取到一个陈旧甚至别的账号的
+    // 模板。现在先多收一些（limit 的若干倍，设上限），再按修改时间真正取最新。
     let visitedDirs = 0
     const MAX_DIRS = 8000
     const MAX_DEPTH = 8
+    const maxCollect = Math.min(Math.max(limit * 8, 128), 1200)
     const collect = (dir: string, results: string[], maxFiles: number, depth = 0) => {
       if (results.length >= maxFiles) return
       if (depth > MAX_DEPTH) return
@@ -1100,18 +1505,22 @@ export class KeyService {
       } catch { /* 忽略无权限目录 */ }
     }
 
-    const files: string[] = []
-    collect(trimmedDir, files, limit)
+    const collected: string[] = []
+    collect(trimmedDir, collected, maxCollect)
 
-    // 按修改时间降序
-    files.sort((a, b) => {
+    // 按修改时间降序，真正取最新的 limit 个
+    collected.sort((a, b) => {
       try { return statSync(b).mtimeMs - statSync(a).mtimeMs } catch { return 0 }
     })
+    const files = collected.slice(0, Math.max(1, limit))
 
+    const ciphertexts: Buffer[] = []
     let ciphertext: Buffer | null = null
+    const entries: Array<{ file: string; ciphertext: Buffer }> = []
+    const acceptedFiles: string[] = []
     const tailCounts: Record<string, number> = {}
 
-    for (const f of files.slice(0, 32)) {
+    for (const f of files) {
       try {
         // 超大文件跳过（>10MB 可能是误命名或异常文件，避免 OOM）
         try {
@@ -1120,16 +1529,23 @@ export class KeyService {
         } catch { continue }
         const data = readFileSync(f)
         if (data.length < 8) continue
+        const isV2 = data.subarray(0, 6).equals(V2_MAGIC)
 
         // 统计末尾两字节用于 XOR 密钥
-        if (data.subarray(0, 6).equals(V2_MAGIC) && data.length >= 2) {
+        if (isV2 && data.length >= 2) {
           const key = `${data[data.length - 2]}_${data[data.length - 1]}`
           tailCounts[key] = (tailCounts[key] ?? 0) + 1
         }
 
-        // 提取密文（取第一个有效的）
-        if (!ciphertext && data.subarray(0, 6).equals(V2_MAGIC) && data.length >= 0x1F) {
-          ciphertext = data.subarray(0xF, 0x1F)
+        // 提取密文：单个模板可能损坏/截断，多收几个让校验有备选
+        if (isV2 && data.length >= 0x1F) {
+          acceptedFiles.push(f)
+          if (ciphertexts.length < 8) {
+            const slice = data.subarray(0xF, 0x1F)
+            ciphertexts.push(slice)
+            entries.push({ file: f, ciphertext: slice })
+            if (!ciphertext) ciphertext = slice
+          }
         }
       } catch { /* 忽略 */ }
     }
@@ -1141,15 +1557,19 @@ export class KeyService {
       if (count > maxCount) { maxCount = count; const [x, y] = key.split('_').map(Number); const k = x ^ 0xFF; if (k === (y ^ 0xD9)) xorKey = k }
     }
 
-    return { ciphertext, xorKey }
+    return { ciphertext, ciphertexts, entries, xorKey, files: acceptedFiles }
   }
 
   private async _scanMemoryForAesKey(
     pid: number,
-    ciphertext: Buffer,
+    ciphertexts: Buffer[],
     onProgress?: (msg: string) => void
-  ): Promise<string | null> {
+  ): Promise<{ aesKey: string; index: number } | null> {
     if (!this.ensureKernel32()) return null
+    const ciphertextList = (Array.isArray(ciphertexts) ? ciphertexts : [ciphertexts]).filter(
+      (item): item is Buffer => Buffer.isBuffer(item) && item.length === 16
+    )
+    if (ciphertextList.length === 0) return null
 
     // 直接用已加载的 kernel32 实例，用 uintptr 传地址
     const VirtualQueryEx = this.kernel32.func('VirtualQueryEx', 'size_t', ['void*', 'uintptr', 'void*', 'size_t'])
@@ -1234,12 +1654,12 @@ export class KeyService {
           const data: Buffer = trailing ? Buffer.concat([trailing, buf.subarray(0, bytesReadOut[0])]) : buf.subarray(0, bytesReadOut[0])
 
           // 搜索 ASCII 32字节密钥
-          const key = this._searchAsciiKey(data, ciphertext)
+          const key = this._searchAsciiKey(data, ciphertextList)
           if (key) { return key }
 
           // 搜索 UTF-16LE 32字节密钥（每 4 块让出一次事件循环，避免主进程长时间冻结）
           // 注：UTF-16 密钥罕见，优先 ASCII 可稍快；此处合并报告一次
-          const key16 = this._searchUtf16Key(data, ciphertext)
+          const key16 = this._searchUtf16Key(data, ciphertextList)
           if (key16) { return key16 }
 
           trailing = data.subarray(Math.max(0, data.length - OVERLAP))
@@ -1257,7 +1677,7 @@ export class KeyService {
     }
   }
 
-  private _searchAsciiKey(data: Buffer, ciphertext: Buffer): string | null {
+  private _searchAsciiKey(data: Buffer, ciphertexts: Buffer[]): { aesKey: string; index: number } | null {
     for (let i = 0; i < data.length - 34; i++) {
       if (this._isAlphaNum(data[i])) continue
       let valid = true
@@ -1267,12 +1687,13 @@ export class KeyService {
       if (!valid) continue
       if (i + 33 < data.length && this._isAlphaNum(data[i + 33])) continue
       const keyBytes = data.subarray(i + 1, i + 33)
-      if (this._verifyAesKey(keyBytes, ciphertext)) return keyBytes.toString('ascii').substring(0, 16)
+      const index = this._verifyAesKey(keyBytes, ciphertexts)
+      if (index >= 0) return { aesKey: keyBytes.toString('ascii').substring(0, 16), index }
     }
     return null
   }
 
-  private _searchUtf16Key(data: Buffer, ciphertext: Buffer): string | null {
+  private _searchUtf16Key(data: Buffer, ciphertexts: Buffer[]): { aesKey: string; index: number } | null {
     for (let i = 0; i < data.length - 65; i++) {
       let valid = true
       for (let j = 0; j < 32; j++) {
@@ -1281,7 +1702,8 @@ export class KeyService {
       if (!valid) continue
       const keyBytes = Buffer.alloc(32)
       for (let j = 0; j < 32; j++) keyBytes[j] = data[i + j * 2]
-      if (this._verifyAesKey(keyBytes, ciphertext)) return keyBytes.toString('ascii').substring(0, 16)
+      const index = this._verifyAesKey(keyBytes, ciphertexts)
+      if (index >= 0) return { aesKey: keyBytes.toString('ascii').substring(0, 16), index }
     }
     return null
   }
@@ -1290,18 +1712,24 @@ export class KeyService {
     return (b >= 0x61 && b <= 0x7A) || (b >= 0x41 && b <= 0x5A) || (b >= 0x30 && b <= 0x39)
   }
 
-  private _verifyAesKey(keyBytes: Buffer, ciphertext: Buffer): boolean {
-    try {
-      const decipher = crypto.createDecipheriv('aes-128-ecb', keyBytes.subarray(0, 16), null)
-      decipher.setAutoPadding(false)
-      const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()])
-      // 支持 JPEG / PNG / WEBP / WXGF / GIF
-      if (dec[0] === 0xFF && dec[1] === 0xD8 && dec[2] === 0xFF) return true
-      if (dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4E && dec[3] === 0x47) return true
-      if (dec[0] === 0x52 && dec[1] === 0x49 && dec[2] === 0x46 && dec[3] === 0x46) return true
-      if (dec[0] === 0x77 && dec[1] === 0x78 && dec[2] === 0x67 && dec[3] === 0x66) return true
-      if (dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46) return true
-      return false
-    } catch { return false }
+  /** 返回命中的模板下标（-1 = 都不匹配），命中下标用于把结果归属到具体账号目录。 */
+  private _verifyAesKey(keyBytes: Buffer, ciphertexts: Buffer[]): number {
+    const list = Array.isArray(ciphertexts) ? ciphertexts : [ciphertexts]
+    for (let index = 0; index < list.length; index++) {
+      const ciphertext = list[index]
+      if (!Buffer.isBuffer(ciphertext) || ciphertext.length !== 16) continue
+      try {
+        const decipher = crypto.createDecipheriv('aes-128-ecb', keyBytes.subarray(0, 16), null)
+        decipher.setAutoPadding(false)
+        const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+        // 支持 JPEG / PNG / WEBP / WXGF / GIF
+        if (dec[0] === 0xFF && dec[1] === 0xD8 && dec[2] === 0xFF) return index
+        if (dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4E && dec[3] === 0x47) return index
+        if (dec[0] === 0x52 && dec[1] === 0x49 && dec[2] === 0x46 && dec[3] === 0x46) return index
+        if (dec[0] === 0x77 && dec[1] === 0x78 && dec[2] === 0x67 && dec[3] === 0x66) return index
+        if (dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46) return index
+      } catch { /* 这个模板试不出来就换下一个 */ }
+    }
+    return -1
   }
 }

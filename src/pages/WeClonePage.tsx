@@ -248,11 +248,11 @@ export default function WeClonePage() {
             <div className="analytics-big-icon">
               <Users size={44} strokeWidth={1.4} />
             </div>
-            <div className="analytics-big-title">管理分身</div>
+            <div className="analytics-big-title">管理 WeClone</div>
             <div className="analytics-big-desc">
               {totalClones > 0
-                ? `${totalClones} 个分身 · 知识截止 ${latestCutoff || '—'} · 全部仅存本机`
-                : '查看已生成分身 · 档案预览与本机对话'}
+                ? `${totalClones} 个 WeClone · 知识截止 ${latestCutoff || '—'} · 全部仅存本机`
+                : '查看已生成的 WeClone · 档案预览与本机对话'}
             </div>
             <div className="analytics-big-arrow">
               进入管理
@@ -263,8 +263,8 @@ export default function WeClonePage() {
             <div className="analytics-big-icon">
               <Sparkles size={44} strokeWidth={1.4} />
             </div>
-            <div className="analytics-big-title">新建分身</div>
-            <div className="analytics-big-desc">扫描聊天记录 · 隐私脱敏后生成分身，可随时取消</div>
+            <div className="analytics-big-title">新建 WeClone</div>
+            <div className="analytics-big-desc">扫描聊天记录 · 隐私脱敏后生成 WeClone，可随时取消</div>
             <div className="analytics-big-arrow">
               开始生成
               <ArrowRight size={15} />
@@ -280,7 +280,7 @@ export default function WeClonePage() {
     <div className="v09-toolbar">
       <div className="v09-toolbar-title">
         <Fingerprint size={17} />
-        <span>{section === 'manage' ? '管理分身' : '新建分身'}</span>
+        <span>{section === 'manage' ? '管理 WeClone' : '新建 WeClone'}</span>
         <span className="v09-sub">
           {section === 'manage' ? '人格档案列表与分享控制' : '从聊天记录生成本地人格档案'}
         </span>
@@ -324,13 +324,13 @@ export default function WeClonePage() {
           <div className="v09-panel">
             <EmptyState
               icon={Fingerprint}
-              title="还没有人格克隆"
-              hint="前往「新建分身」，从聊天记录中提炼你的人格知识库；生成后可设为公开或链接分享。"
+              title="还没有 WeClone"
+              hint="前往「新建 WeClone」，从聊天记录中提炼你的人格知识库；生成后可设为公开或链接分享。"
             />
             <div className="weclone-empty-cta">
               <button className="primary-btn" type="button" disabled={generating} onClick={() => setSection('create')}>
                 <Sparkles size={14} />
-                去新建分身
+                去新建 WeClone
               </button>
             </div>
           </div>
@@ -402,10 +402,10 @@ export default function WeClonePage() {
 
       <div className="v09-panel weclone-generate">
         <div className="weclone-generate-main">
-          <strong>一键生成分身</strong>
+          <strong>一键生成 WeClone</strong>
           <span>
             扫描全部聊天记录，AI 提炼人格画像、关系图谱、知识库、时间线与语料样例，
-            经双重隐私脱敏后<strong>在本机</strong>生成分身，随后就能像「你本人」一样与它对话。
+            经双重隐私脱敏后<strong>在本机</strong>生成 WeClone，随后就能像「你本人」一样与它对话。
           </span>
         </div>
         <button
