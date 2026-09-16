@@ -5971,7 +5971,13 @@ async function runScreenshotMode() {
     await sleep(400)
   })
   // 7.7) 设置 → AI 服务：三个功能面各自指向哪个服务
-  await captureV09('settings-ai', 'settings-ai.png', ['.ai-profile-list'], async () => {
+  //
+  // 断言的是 `.ai-profile-layout`（AiSettingsModal 的根布局）。这里原本写的是
+  // `.ai-profile-list` —— 那个类名在 v1.0.2 的 AI 服务面板重排里已经不存在了，
+  // 于是这一步永远拿不到元素、截图永不生成，Visual Smoke 从那时起每次都是红的
+  // （`settings-ai.png missing`）。**断言一个已被重命名/删除的类名，失败信息看起来
+  // 像"面板没渲染"，实际是测试自己过期了** —— 改动 UI 类名时要一起改这里。
+  await captureV09('settings-ai', 'settings-ai.png', ['.ai-profile-layout'], async () => {
     await mainWindow!.webContents.executeJavaScript(
       `(() => {
          const b = Array.from(document.querySelectorAll('.settings-nav-item')).find((x) => x.textContent.includes('AI 服务'));
