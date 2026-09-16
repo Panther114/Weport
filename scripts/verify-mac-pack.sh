@@ -137,6 +137,12 @@ if echo "$SIGN_INFO" | grep -q 'code object is not signed at all'; then
 fi
 if echo "$SIGN_INFO" | grep -q 'Format=bundle with'; then
   pass "signed as a bundle (not a bare Mach-O)"
+elif echo "$SIGN_INFO" | grep -qE 'Format=(app )?bundle with'; then
+  # 实测 codesign -dvv 打印的是 **`Format=app bundle with Mach-O thin (arm64)`** ——
+  # 带 `app ` 前缀。旧模式只写 `Format=bundle with` 会漏配，把一个**完全正常的
+  # ad-hoc 封装签名**判成失败，于是整个 macOS job 挂掉、macOS 产物根本发不出去：
+  # 第一次 v1.0.0 发布就是这样（windows/linux 都发了，mac 被这一条正则拦下）。
+  pass "signed as a bundle (app bundle with …, not a bare Mach-O)"
 else
   fail "not signed as a bundle — 'code has no resources but signature indicates they must be present' will follow (issue #18)"
 fi
