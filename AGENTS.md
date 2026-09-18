@@ -23,8 +23,13 @@ Platform split lives in `process.platform` branches (same tree, no fork):
 - Autostart: Windows HKCU Run key vs macOS/Linux `app.setLoginItemSettings`
   (Linux → XDG autostart; see `appMain.ts` `setSystemLaunchAtStartup`).
 - Notification glass: `@hicccc77/electron-liquid-glass` is Windows-only
-  (explicitly gated on `process.platform === 'win32'`);
-  macOS/Linux use the Chromium desktop-stream fallback (already the default).
+  (explicitly gated on `process.platform === 'win32'`); macOS uses the Chromium
+  desktop-stream fallback. Linux delivers through the desktop notification
+  daemon (D-Bus via `electron/services/linuxNotify.ts`) and its popup fallback
+  must never call `desktopCapturer` — on Wayland that raises the portal dialog
+  for every message. Clicking a chat notification opens WeChat via
+  `electron/services/wechatLinux.ts` (window matched by `app_id`, not pid).
+  See [`docs/agents/platform.md`](docs/agents/platform.md).
 - WeChat data dir: Linux 微信 4.x lives at `~/xwechat_files`
   (`dbPathService.autoDetect/getDefaultPath` linux branches).
 
