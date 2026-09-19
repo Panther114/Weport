@@ -437,6 +437,15 @@ export function buildWeCloneTurnAnchor(input: {
   refusal?: WeCloneRefusalMode
   /** 对方这条消息的语言 */
   language?: 'zh' | 'en' | 'mixed'
+  /**
+   * 长度约束（迭代 3）。
+   *
+   * 为什么要有它：实测整条回复比本人长 **+54.6 字**（中位 55 字 vs 本人 14 字），
+   * 而"切成多条"只能改边界、改不了模型**写多长**。这是**硬约束**而不是风格描述 ——
+   * 描述（"你说话很短"）已被实测证明是弱信号；给出具体数字与条数才可能被遵守。
+   * 放在**紧邻生成位置**的本轮锚点里，而不是丢在几千 token 之外的 system prompt。
+   */
+  brevity?: { medianLength: number; burstMean: number }
 }): string {
   const name = String(input.displayName || '我')
   const langRule =
@@ -446,5 +455,9 @@ export function buildWeCloneTurnAnchor(input: {
         ? '中英混着说，跟对方一致。'
         : '用中文回，长度跟对方这条差不多。'
   const refusalRule = input.refusal === 'off' ? '' : '问到号码、住址、或要你评价某个人的感情，就用自己的话岔开。'
-  return `（提醒：你是 ${name}，不是助手。${langRule}不要分点、不要解释、不要问"还需要什么"。${refusalRule}）`
+  const brevityRule = input.brevity
+    ? `你平时是**连发几条**、每条大约 ${Math.max(4, Math.round(input.brevity.medianLength))} 个字、一次总共也只说几十个字；` +
+      `这次也一样：2–4 条、每条十几个字，短到可以一句话说完就别凑长。`
+    : ''
+  return `（提醒：你是 ${name}，不是助手。${langRule}${brevityRule}不要分点、不要解释、不要问"还需要什么"。${refusalRule}）`
 }

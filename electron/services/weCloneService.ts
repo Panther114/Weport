@@ -173,6 +173,13 @@ export interface WeCloneSettings {
    * 于是 on/off 两份克隆可以指向**完全相同的语料**，唯一变量就是它。
    */
   shape: 'on' | 'off'
+  /**
+   * 是否在**本轮锚点**里给出硬性长度约束（迭代 3）。
+   *
+   * 实测整条回复比本人长 +54.6 字；整形只能改边界，改不了"写多长"，所以需要
+   * 生成时的约束。做成开关是为了能单独量它 —— 与 shape 一起开时不容易归因。
+   */
+  lengthHint: 'on' | 'off'
 }
 
 /**
@@ -191,6 +198,7 @@ export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = {
   // 单条气泡 27.3 → 16.2 字（本人 17.2）、每条回复 2.53 → 4.17 条（本人 4.31），
   // 而 chrF / 抄写率不变。因此默认**开**。
   shape: 'on',
+  lengthHint: 'off',
 }
 
 /** 一条对话里的一轮 */
@@ -333,6 +341,8 @@ export interface LocalChatResult {
     exemplars?: number
     /** 整形后的消息条数（迭代 2）—— 本人连发平均 4.31 条 */
     bubbles?: number
+    /** 本轮是否带了硬性长度约束（迭代 3） */
+    lengthHint?: boolean
     /** 本轮生效的拒答行为 —— 让"它怎么什么都答"能被解释 */
     refusal?: WeCloneRefusalMode
   }
@@ -558,6 +568,7 @@ export class WeCloneService {
         refusal: raw?.refusal === 'off' ? 'off' : 'character',
         exemplars: raw?.exemplars === 'on' ? 'on' : 'off',
         shape: raw?.shape === 'off' ? 'off' : 'on',
+        lengthHint: raw?.lengthHint === 'on' ? 'on' : 'off',
       }
     } catch {
       return { ...WECLONE_SETTINGS_DEFAULT }
@@ -572,7 +583,7 @@ export class WeCloneService {
 
   setSettings(
     cloneId: string,
-    patch: { refusal?: string; exemplars?: string; shape?: string }
+    patch: { refusal?: string; exemplars?: string; shape?: string; lengthHint?: string }
   ): { success: boolean; settings?: WeCloneSettings; error?: string } {
     const dir = this.findCloneDir(String(cloneId || ''))
     if (!dir) return { success: false, error: '找不到该克隆' }
@@ -582,6 +593,8 @@ export class WeCloneService {
       exemplars:
         patch?.exemplars === 'off' ? 'off' : patch?.exemplars === 'on' ? 'on' : current.exemplars,
       shape: patch?.shape === 'off' ? 'off' : patch?.shape === 'on' ? 'on' : current.shape,
+      lengthHint:
+        patch?.lengthHint === 'off' ? 'off' : patch?.lengthHint === 'on' ? 'on' : current.lengthHint,
     }
     try {
       this.atomicWriteFile(this.settingsFile(dir), JSON.stringify(next, null, 2))
@@ -2248,10 +2261,27 @@ export class WeCloneService {
      * 离生成位置有几千 token 远 —— 长对话里人格会漂回助手的默认腔调。
      * 在最近处再放一句极短的身份提醒，是最便宜的抑制手段。
      */
+    const cloneSettings = this.readSettings(dir)
+    /**
+     * 形态 profile（长度中位、连发均值/上限）在**锚点之前**就要拿到：
+     * 迭代 3 的长度约束写在锚点里（紧邻生成位置），而锚点比示范注入更早构造。
+     */
+    let shapeProfile: VoiceShapeProfile | null = null
+    if (cloneSettings.shape === 'on' || cloneSettings.lengthHint === 'on') {
+      try {
+        shapeProfile = await this.loadShapeProfile(dir)
+      } catch (e) {
+        console.warn('[WeClone] 读取形态 profile 失败（跳过整形/长度约束）:', e)
+      }
+    }
     const anchor = buildWeCloneTurnAnchor({
       displayName: meta.displayName || meta.wxid,
       refusal,
       language: replyLanguage,
+      brevity:
+        cloneSettings.lengthHint === 'on' && shapeProfile
+          ? { medianLength: shapeProfile.medianLength, burstMean: shapeProfile.burstMean }
+          : undefined,
     })
     /**
      * 迭代 1：**真实示范**（"对方说 → 本人回"的成对样本）压进本轮 user 消息。
@@ -2262,7 +2292,6 @@ export class WeCloneService {
      */
     let exemplarBlock = ''
     let exemplarsUsed = 0
-    const cloneSettings = this.readSettings(dir)
     try {
       if (cloneSettings.exemplars !== 'off') {
         const picked = await this.buildVoiceExemplarBlock(
@@ -2380,15 +2409,12 @@ export class WeCloneService {
          */
         let shapedReply = finalReply
         let bubbles = 1
-        if (cloneSettings.shape === 'on') {
+        if (cloneSettings.shape === 'on' && shapeProfile) {
           try {
-            const profile = await this.loadShapeProfile(dir)
-            if (profile) {
-              const parts = shapeReply(finalReply, profile)
-              if (parts.length > 0) {
-                shapedReply = parts.join('\n\n')
-                bubbles = parts.length
-              }
+            const parts = shapeReply(finalReply, shapeProfile)
+            if (parts.length > 0) {
+              shapedReply = parts.join('\n\n')
+              bubbles = parts.length
             }
           } catch (e) {
             console.warn('[WeClone] 形态整形失败（保留原回复）:', e)
@@ -2410,6 +2436,7 @@ export class WeCloneService {
             voiceSamples: voiceSamples.length,
             exemplars: exemplarsUsed,
             bubbles,
+            lengthHint: cloneSettings.lengthHint === 'on',
             refusal,
           },
         }
