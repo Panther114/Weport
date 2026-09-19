@@ -70,6 +70,7 @@ import {
 } from './ai/localRetrieval'
 import { MAX_REDUCE_ROUNDS, planReduceStep } from './ai/reducePlan'
 import { decideShardAbort } from './ai/shardFailurePolicy'
+import { checkGeneratedMds } from './ai/mdQualityGate'
 import {
   cloneMapCacheDir,
   cloneMapCacheEnabled,
@@ -1873,6 +1874,26 @@ export class WeCloneService {
         },
         redact
       )
+      /**
+       * 质量门禁：**确凿的空壳必须中止**，而不是原子换名把用户原本可用的克隆覆盖掉。
+       *
+       * 实测过一次：`timeline.md` 出来只有 830 字节，内容是统计量的回声、一条日期都没有
+       * （模型被要求写大事记，交了一份统计表），而管线只检查"文件非空"，于是照样上线，
+       * 界面写着"生成完成"。见 ai/mdQualityGate.ts。
+       */
+      const mdGate = checkGeneratedMds({
+        profile: filterResult.mds.profile,
+        relationships: filterResult.mds.relationships,
+        knowledge: filterResult.mds.knowledge,
+        timeline: filterResult.mds.timeline,
+        language: filterResult.mds.language,
+      })
+      for (const w of mdGate.warned) console.warn(`[WeClone] 质量提醒：${w.reason}`)
+      if (!mdGate.ok) {
+        throw new Error(
+          `生成结果不合格，已中止（现有克隆未被改动）：${mdGate.failed.map((f) => f.reason).join('；')}`
+        )
+      }
       // MD 只在**全部审查通过之后**才落地，写进临时目录
       for (const { key, path } of this.mdFilePaths(stageDir)) {
         this.atomicWriteFile(path, filterResult.mds[key])
