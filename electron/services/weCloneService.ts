@@ -27,6 +27,7 @@ import {
   readdirSync,
   createReadStream,
   appendFileSync,
+  statSync,
 } from 'fs'
 import { createInterface } from 'readline'
 import {
@@ -68,6 +69,13 @@ import {
   tokenize,
 } from './ai/localRetrieval'
 import { MAX_REDUCE_ROUNDS, planReduceStep } from './ai/reducePlan'
+import {
+  cloneMapCacheDir,
+  cloneMapCacheEnabled,
+  cloneMapCacheKey,
+  readCloneMapCache,
+  writeCloneMapCache,
+} from './ai/cloneMapCache'
 
 export type { WeCloneRefusalMode } from './weClonePrompts'
 
@@ -417,6 +425,13 @@ export class WeCloneService {
    * 一路带着一个可变对象穿参数只会让每个签名都变脏。生成开始时清零。
    */
   private usageAccumulator = { promptTokens: 0, completionTokens: 0 }
+  /**
+   * 本次生成轮的网关会话 id。
+   *
+   * map / reduce / MD / 二审这几百次调用共用一条会话，网关才能按会话复用提示缓存 ——
+   * 实测缓存读的价格是未命中的 1/20 ~ 1/100（DeepSeek V4.1 Flash：$0.003 vs $0.15/M）。
+   */
+  private generationSession: string | null = null
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -1265,11 +1280,13 @@ export class WeCloneService {
     profile: ProviderProfile,
     systemContent: string,
     userContent: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** 网关会话 id（见 withGatewayHeaders 的说明）；缺省用当前生成轮的 id */
+    gatewaySession?: string
   ): Promise<string> {
     const result = await getProviderAdapter(profile).stream({
       // 网关识别 header 一定要带上，否则 OpenCode 直接 400
-      profile: withGatewayHeaders(profile),
+      profile: withGatewayHeaders(profile, gatewaySession ?? this.generationSession ?? undefined),
       messages: [
         { role: 'system', content: this.sanitizeForApi(systemContent) },
         { role: 'user', content: this.sanitizeForApi(userContent) },
@@ -1554,6 +1571,7 @@ export class WeCloneService {
     }
     const ctrl = new AbortController()
     this.runningController = ctrl
+    this.generationSession = newGatewaySession('gen')
     if (externalSignal) {
       const forward = () => { try { ctrl.abort() } catch { /* noop */ } }
       if (externalSignal.aborted) forward()
@@ -1593,6 +1611,10 @@ export class WeCloneService {
       report('scan', 0, '正在检查配置…')
       // 候选服务列表（首选 + 默认），每次调用按顺序重试
       const providers = this.resolveGenerationProviders()
+      // 把"这一轮到底用了哪个服务"写进日志：迭代循环里这是最常被问的问题
+      console.log(
+        `[WeClone] 生成使用：${providers.map((p) => `${p.providerId}/${p.model} @ ${p.baseUrl}`).join(' 或 ')}`
+      )
 
       const connectResult = await chatService.connect()
       if (!connectResult.success) {
@@ -1665,10 +1687,47 @@ export class WeCloneService {
         `开始逐段提炼：${shards.length} 段 × 每段约 ${Math.round(MAP_SHARD_CONTEXT_CHARS / 1000)}k 字，并发 ${MAP_CONCURRENCY}`,
         { shards: shards.length }
       )
-      const mapResult = await this.runMapPhase(shards, names, providers, signal, (done, total, message) => {
-        report('generate', 40 + (done / Math.max(1, total)) * 34, message, { done, total })
-      })
-      this.ensureNotAborted(signal)
+      /**
+       * map 阶段：**能命中缓存就直接用**。
+       *
+       * 语料没变（size/mtime 未变）时分片摘要必然一样，重跑只是白烧约 40 分钟 ——
+       * 而只要后面任何一步失败（reduce 空回复、网络抖动、取消、进程被杀），
+       * 这一轮就白跑。实测被这个坑掉过三次完整生成。详见 ai/cloneMapCache.ts。
+       */
+      const mapCacheDir = cloneMapCacheDir(this.getStagingRoot())
+      const mapCacheKey = cloneMapCacheKey(jsonlFinal, shards.length, perBucket)
+      const cached = cloneMapCacheEnabled() ? readCloneMapCache(mapCacheDir, mapCacheKey) : null
+      let mapResult: { digests: string[]; failures: number }
+      if (cached) {
+        mapResult = { digests: cached.digests, failures: cached.failures }
+        report(
+          'generate',
+          74,
+          `map 命中缓存（${cached.digests.length} 片，跳过提炼；缓存建于 ${cached.createdAt}）`,
+          { shards: cached.digests.length, cached: true }
+        )
+      } else {
+        mapResult = await this.runMapPhase(shards, names, providers, signal, (done, total, message) => {
+          report('generate', 40 + (done / Math.max(1, total)) * 34, message, { done, total })
+        })
+        this.ensureNotAborted(signal)
+        if (mapResult.digests.length > 0 && cloneMapCacheEnabled()) {
+          try {
+            const st = statSync(jsonlFinal)
+            writeCloneMapCache(mapCacheDir, {
+              key: mapCacheKey,
+              createdAt: new Date().toISOString(),
+              shardCount: shards.length,
+              digests: mapResult.digests,
+              failures: mapResult.failures,
+              corpusBytes: st.size,
+              corpusMtimeMs: Math.round(st.mtimeMs),
+            })
+          } catch {
+            /* 缓存写失败不影响生成 */
+          }
+        }
+      }
       if (mapResult.digests.length === 0) throw new Error('所有分段的提炼都失败了，请检查 AI 服务是否可用')
 
       // ---- 5. reduce：归并成整体材料 ---------------------------------------
@@ -1805,6 +1864,7 @@ export class WeCloneService {
       return { success: false, aborted, error: message }
     } finally {
       this.runningController = null
+      this.generationSession = null
     }
   }
 
@@ -2172,7 +2232,15 @@ export class WeCloneService {
     for (const [index, attempt] of attempts.entries()) {
       attemptsRun += 1
       try {
-        const reply = String(await this.callLlmWithSystem(attempt.profile, systemPrompt, transcript, input.signal)).trim()
+        const reply = String(
+          await this.callLlmWithSystem(
+            attempt.profile,
+            systemPrompt,
+            transcript,
+            input.signal,
+            gatewaySessionForChat(meta.id)
+          )
+        ).trim()
         if (!reply) {
           // 空回复按"这个服务没给出东西"处理，值得换下一个试
           lastError = `${attempt.label}（${attempt.profile.model}）返回了空内容`
@@ -2467,12 +2535,14 @@ export class WeCloneService {
     profile: ProviderProfile,
     systemContent: string,
     userContent: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** 网关会话 id：同一段对话必须稳定（提示缓存按会话复用） */
+    gatewaySession?: string
   ): Promise<string> {
     const reasoningEffort = String(this.cfgGet('weportAiReasoningEffort') || 'high')
     const result = await getProviderAdapter(profile).stream({
       // 网关识别 header 一定要带上，否则 OpenCode 直接 400
-      profile: withGatewayHeaders(profile),
+      profile: withGatewayHeaders(profile, gatewaySession),
       messages: [
         { role: 'system', content: this.sanitizeForApi(systemContent) },
         { role: 'user', content: this.sanitizeForApi(userContent) },
@@ -2505,14 +2575,38 @@ export class WeCloneService {
  * `Request is missing x-opencode-session and cannot be routed efficiently`
  * （这条实测踩过两次：先是对话标题生成，后是人格克隆聊天）。
  *
- * 头值用 profile.id —— 网关只把它当路由标识，不校验内容。
- * 用户自定义的同名 header 优先（合并顺序保证）。
+ * 头值必须是**每个对话一个、且稳定**的 id —— 这不是可选项，是网关做**路由与提示
+ * 缓存**的依据（docs/go：「Send a stable session ID in `x-opencode-session` for each
+ * conversation so we can optimize routing and prompt caching」）。
+ *
+ * 以前这里固定用 `profile.id`：能过鉴权（网关不校验内容），但**所有对话都挤在
+ * 同一条路由上**，提示缓存也没法按会话复用。现在由调用方给 id：
+ *   - 聊天：每个克隆一条（`gatewaySessionForChat`），同一段对话里稳定；
+ *   - 生成：每次生成一条（`generateClone` 里 minted），整轮 map/reduce/MD 共用。
  */
 const OPENCODE_GATEWAYS = new Set(['opencode-zen', 'opencode-go'])
 
-function withGatewayHeaders(profile: ProviderProfile): ProviderProfile {
+/** 每个克隆一条稳定的网关会话 id（键 = cloneId） */
+const chatGatewaySessions = new Map<string, string>()
+
+export function gatewaySessionForChat(cloneId: string): string {
+  const key = String(cloneId || 'default')
+  let id = chatGatewaySessions.get(key)
+  if (!id) {
+    id = newGatewaySession('chat')
+    chatGatewaySessions.set(key, id)
+  }
+  return id
+}
+
+/** 造一个新的网关会话 id（无需依赖 crypto：网关只把它当路由标识） */
+export function newGatewaySession(kind: string): string {
+  return `weport-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function withGatewayHeaders(profile: ProviderProfile, sessionId?: string): ProviderProfile {
   if (!OPENCODE_GATEWAYS.has(profile.providerId)) return profile
-  return { ...profile, headers: { 'x-opencode-session': profile.id, ...(profile.headers || {}) } }
+  return { ...profile, headers: { 'x-opencode-session': sessionId || profile.id, ...(profile.headers || {}) } }
 }
 
 /**
