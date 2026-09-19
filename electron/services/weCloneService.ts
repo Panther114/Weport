@@ -76,6 +76,14 @@ import {
   readCloneMapCache,
   writeCloneMapCache,
 } from './ai/cloneMapCache'
+import {
+  classifyFunction,
+  extractExchanges,
+  rankExemplars,
+  renderExemplarBlock,
+  replyCopiesExemplars,
+  type VoiceExchange,
+} from './ai/voiceExemplars'
 
 export type { WeCloneRefusalMode } from './weClonePrompts'
 
@@ -288,6 +296,8 @@ export interface LocalChatResult {
     replyLanguage?: 'zh' | 'en' | 'mixed'
     /** 本轮检索到的**本人原话**条数（语气样本） */
     voiceSamples?: number
+    /** 本轮注入的真实示范条数（迭代 1）—— 为 0 时回复一定滑回助手腔 */
+    exemplars?: number
     /** 本轮生效的拒答行为 —— 让"它怎么什么都答"能被解释 */
     refusal?: WeCloneRefusalMode
   }
@@ -396,6 +406,16 @@ const RETRIEVED_CONTEXT_CHAR_LIMIT = 14_000
 /** 语气样本（本人原话）：取回条数与字符上限 */
 const VOICE_TOP_K = 14
 const VOICE_CONTEXT_CHAR_LIMIT = 4_000
+/**
+ * 迭代 1：注入的**真实示范**（"对方说 → 本人回"整对）条数与字符上限。
+ *
+ * 4 条是刻意的低值：示范是"给出的语气锚点"，不是"要读的材料"。多了既挤占上下文，
+ * 又会把模型推向照抄（抄写闸门因此可能反复触发）。
+ */
+const EXEMPLAR_COUNT = 4
+const EXEMPLAR_BLOCK_CHAR_LIMIT = 2_600
+/** 抄写闸门：回复与示范重合到这个长度就重生成一次 */
+const EXEMPLAR_COPY_MIN_CHARS = 8
 /** 聊天：带上的历史轮数 */
 const CHAT_HISTORY_LIMIT = 20
 /** 聊天：模型调用超时（本地检索已预先完成，这里只等模型） */
@@ -2193,9 +2213,43 @@ export class WeCloneService {
       refusal,
       language: replyLanguage,
     })
-    const transcript = history.length
-      ? `${history.map((h) => `${h.role === 'assistant' ? selfLabel : otherLabel}: ${h.content}`).join('\n')}\n${otherLabel}: ${message}\n\n${anchor}`
-      : `${otherLabel}: ${message}\n\n${anchor}`
+    /**
+     * 迭代 1：**真实示范**（"对方说 → 本人回"的成对样本）压进本轮 user 消息。
+     *
+     * 为什么压在 user 侧、且放在当前这条消息**前面**：适配器只接受单条 user 消息，
+     * system prompt 离生成位置有几千 token；而"给真实前文让它接着写"这件事的实测
+     * 功效（≥99.9%）远高于"给它一段风格描述"（<7%）。见 ai/voiceExemplars.ts。
+     */
+    let exemplarBlock = ''
+    let exemplarsUsed = 0
+    try {
+      const picked = await this.buildVoiceExemplarBlock(dir, [
+        ...history.slice(-4).map((h) => h.content),
+        message,
+      ].filter(Boolean).join('\n'), {
+        selfLabel,
+        otherLabel,
+        recentTexts: history.map((h) => h.content),
+        limit: EXEMPLAR_COUNT,
+      })
+      exemplarBlock = picked.block
+      exemplarsUsed = picked.count
+    } catch (e) {
+      // 示范检索失败不该让聊天失败：退化成"只用档案 + 检索片段"回答
+      console.warn('[WeClone] 语气示范检索失败（继续用档案回答）:', e)
+    }
+
+    const transcript = [
+      exemplarBlock
+        ? `=== 你过去在类似情境下说过的真实对话（只参考说话方式：长度、语气、用词；不要整句照搬，也不要提起这些片段） ===\n${exemplarBlock}\n=== 现在 ===`
+        : '',
+      history.length
+        ? `${history.map((h) => `${h.role === 'assistant' ? selfLabel : otherLabel}: ${h.content}`).join('\n')}\n${otherLabel}: ${message}`
+        : `${otherLabel}: ${message}`,
+      anchor,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
 
     const startedAt = Date.now()
     /**
@@ -2246,9 +2300,39 @@ export class WeCloneService {
           lastError = `${attempt.label}（${attempt.profile.model}）返回了空内容`
           continue
         }
+        /**
+         * 抄写闸门：示范里出现过的 ≥8 字逐字片段不该原样出现在回复里。
+         *
+         * 这是"给示范"这种做法的已知代价（模型会整句照搬）。命中就带一句
+         * "换自己的说法"再生成一次，**以一次为限**：再多就成了猜谜，而且每次
+         * 都是真金白银的调用。第二次仍然照抄就照用 —— 宁可像，也不要卡住用户。
+         */
+        let finalReply = reply
+        if (exemplarBlock) {
+          const copied = replyCopiesExemplars(finalReply, exemplarBlock, EXEMPLAR_COPY_MIN_CHARS)
+          if (copied) {
+            console.warn(`[WeClone] 回复照抄了示范（${copied.slice(0, 24)}…），重生成一次`)
+            try {
+              const second = String(
+                await this.callLlmWithSystem(
+                  attempt.profile,
+                  systemPrompt,
+                  `${transcript}\n\n（提醒：上面示范里的话不要照搬，用你自己的说法重新说一遍。）`,
+                  input.signal,
+                  gatewaySessionForChat(meta.id)
+                )
+              ).trim()
+              if (second && !replyCopiesExemplars(second, exemplarBlock, EXEMPLAR_COPY_MIN_CHARS)) {
+                finalReply = second
+              }
+            } catch (e) {
+              console.warn('[WeClone] 抄写重生成失败，沿用第一次的回复:', e)
+            }
+          }
+        }
         return {
           success: true,
-          reply,
+          reply: finalReply,
           elapsedMs: Date.now() - startedAt,
           meta: {
             cloneId: meta.id,
@@ -2260,6 +2344,7 @@ export class WeCloneService {
             providerId: attempt.profile.providerId,
             replyLanguage,
             voiceSamples: voiceSamples.length,
+            exemplars: exemplarsUsed,
             refusal,
           },
         }
@@ -2311,6 +2396,150 @@ export class WeCloneService {
     }
     // 新 → 旧（后面 push 的是更新的）
     return window.reverse()
+  }
+
+  /**
+   * `exchanges.jsonl` 路径（"对方说 → 本人回"整对样本的缓存）。
+   */
+  private exchangesFile(dir: string): string {
+    return join(dir, 'exchanges.jsonl')
+  }
+
+  /**
+   * 确保示范语料存在。
+   *
+   * 抽样本是纯本地、确定性的（`extractExchanges`），但每次聊天都从 22 MB 的
+   * `chunks.jsonl` 现抽太慢，所以落一份 `exchanges.jsonl` 缓存；`exchanges.meta.json`
+   * 记住它对应的语料大小，语料换了就重建。**不改动 chunks/voice**，纯增量产物 ——
+   * 已有的克隆不必重新生成就能用上示范（这是迭代 1 能立刻验证的前提）。
+   */
+  private async ensureExchangesFile(dir: string): Promise<string | null> {
+    const chunksPath = join(dir, 'chunks.jsonl')
+    if (!existsSync(chunksPath)) return null
+    const outPath = this.exchangesFile(dir)
+    const metaPath = join(dir, 'exchanges.meta.json')
+    let corpusBytes = 0
+    try {
+      corpusBytes = statSync(chunksPath).size
+    } catch {
+      return null
+    }
+    if (existsSync(outPath) && existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as { corpusBytes?: number }
+        if (Number(meta.corpusBytes) === corpusBytes) return outPath
+      } catch {
+        /* 元数据坏了就重建 */
+      }
+    }
+    const tmp = `${outPath}.${process.pid}.tmp`
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* noop */
+    }
+    let count = 0
+    const rl = createInterface({ input: createReadStream(chunksPath, { encoding: 'utf8' }), crlfDelay: Infinity })
+    try {
+      for await (const line of rl) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        let row: WeCloneChunk
+        try {
+          row = JSON.parse(trimmed) as WeCloneChunk
+        } catch {
+          continue
+        }
+        const text = typeof row?.text === 'string' ? row.text : ''
+        if (!text) continue
+        for (const ex of extractExchanges(text)) {
+          appendFileSync(
+            tmp,
+            `${JSON.stringify({ sid: row.sid, ts: row.ts, cue: ex.cue, reply: ex.reply })}\n`,
+            'utf8'
+          )
+          count += 1
+        }
+      }
+    } finally {
+      rl.close()
+    }
+    if (count === 0) {
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* noop */
+      }
+      return null
+    }
+    renameSync(tmp, outPath)
+    try {
+      writeFileSync(metaPath, JSON.stringify({ corpusBytes, count, builtAt: new Date().toISOString() }), 'utf8')
+    } catch {
+      /* 元数据写失败只是下次重建，不影响使用 */
+    }
+    return outPath
+  }
+
+  /**
+   * 检索并渲染语气示范块（迭代 1 的核心动作）。
+   *
+   * 检索键是**情境**（对方这几句 + 我们刚才在聊什么），不是收件人 —— 用户明确要求
+   * 不要按对象自适应。预筛沿用 `localRetrieval` 的手法：正文是那一行 JSON 的子串，
+   * 所以先用 `includes` 过滤，只对可能命中的行做解析。
+   */
+  private async buildVoiceExemplarBlock(
+    dir: string,
+    query: string,
+    options: { selfLabel: string; otherLabel: string; recentTexts: string[]; limit: number }
+  ): Promise<{ block: string; count: number }> {
+    const path = await this.ensureExchangesFile(dir)
+    const q = String(query || '').trim()
+    if (!path || !q) return { block: '', count: 0 }
+    const probe = tokenize(q)
+      .filter((t) => t.length >= 2)
+      .slice(0, 12)
+    const candidates: VoiceExchange[] = []
+    const maxCandidates = 400
+    const rl = createInterface({ input: createReadStream(path, { encoding: 'utf8' }), crlfDelay: Infinity })
+    try {
+      for await (const line of rl) {
+        if (candidates.length >= maxCandidates) break
+        const t = line.trim()
+        if (!t || !t.includes('"cue"')) continue
+        let hit = probe.length === 0
+        for (const token of probe) {
+          if (t.includes(token)) {
+            hit = true
+            break
+          }
+        }
+        if (!hit) continue
+        try {
+          const row = JSON.parse(t) as VoiceExchange
+          if (row?.cue && row?.reply) candidates.push(row)
+        } catch {
+          continue
+        }
+      }
+    } finally {
+      rl.close()
+    }
+    if (candidates.length === 0) return { block: '', count: 0 }
+    // 功能提示取"对方最后一句"（示范要匹配的是"这一句在做什么事"）
+    const lastLine = q.split('\n').filter(Boolean).pop() || q
+    const picked = rankExemplars(q, candidates, {
+      limit: options.limit,
+      functionHint: classifyFunction(lastLine),
+      avoidTexts: options.recentTexts,
+    })
+    const block = renderExemplarBlock(picked, {
+      maxChars: EXEMPLAR_BLOCK_CHAR_LIMIT,
+      selfLabel: options.selfLabel,
+      otherLabel: options.otherLabel,
+      dateOf: (ts) => this.formatDay(ts),
+    })
+    return { block, count: picked.length }
   }
 
   /**
