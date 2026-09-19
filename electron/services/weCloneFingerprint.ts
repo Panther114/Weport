@@ -94,10 +94,18 @@ const ANY_PUNCTUATION = /[，。！？、；：“”‘’（）《》…—～
 /** emoji 与颜文字 */
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{1F000}-\u{1F2FF}]/u
 const KAOMOJI_RE = /[（(][^（）()]{0,12}[）)]|[/\\][（(][^）)]{2,}[）)]|[╯╰ノ゜°▽ω・´`]/u
-/** 微信的媒体占位符（"保留 [图片] 这类短标签"） */
-const MEDIA_TAG_RE = /\[(图片|视频|语音|表情|动画表情|文件|链接|位置|转账|红包|音乐|聊天记录|名片|引用)\]/
+/**
+ * 微信的媒体占位符（"保留 [图片] 这类短标签"）。
+ *
+ * **必须也认英文名的表情**：语料里真实出现的是 `[Sob]`、`[ThumbsUp]`、`[Panic]`、
+ * `[Lol]` 这类方括号英文标签，原来的中文白名单一条都不匹配 —— 于是实测"表情只占 1%"
+ * 是**漏计**，而它们其实是本人很显眼的用法（连刷 `[Sob][Sob]…`）。
+ */
+const MEDIA_TAG_RE = /\[(图片|视频|语音|表情|动画表情|文件|链接|位置|转账|红包|音乐|聊天记录|名片|引用|[A-Za-z][A-Za-z]{1,15})\]/
 
 const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff]/
+/** 整段都是汉字（用于 n-gram 收词，见下方注释） */
+const PURE_CJK_RE = /^[\u3400-\u4dbf\u4e00-\u9fff]+$/
 
 /**
  * 短语提取用的 n-gram 长度区间（只针对**汉字**片段）。
@@ -164,6 +172,47 @@ function isBoring(gram: string): boolean {
   return false
 }
 
+/**
+ * 这一段片段是不是**处理管道的产物**，而不是本人的说话习惯。
+ *
+ * 实测（真实语料，top 30 高频中文片段）里混着这些东西：
+ *   - 脱敏占位符：`已脱敏:住`、`脱敏:住址`、`住址证件]`
+ *   - 微信表情的**名字**：`破涕为笑]`、`涕为笑][`、`笑][破涕`
+ *   - 系统提示：`违规昵称f0Y`
+ * 它们全是"我们自己的管线留下的痕迹"，写进人格档案里等于在教模型说占位符。
+ */
+const ARTIFACT_TOKENS = ['已脱敏', '已过滤', '脱敏', '证件', '住址', '密码', '违规昵称', '昵称', '撤回了一条', '已被']
+export function isPipelineArtifact(gram: string): boolean {
+  if (!gram) return true
+  // 方括号是表情名/占位符的边界，跨边界的 n-gram 没有意义
+  if (gram.includes('[') || gram.includes(']')) return true
+  return ARTIFACT_TOKENS.some((t) => gram.includes(t))
+}
+
+/**
+ * 短英文标记必须**整词**匹配。
+ *
+ * 原来一律用 `includes` —— 任何含字母 k 的消息（like / work / ok）都被算成用了 `k`。
+ * 实测"每 100 条出现次数最多的标记"是 `u 30.7 次、k 20.5 次`，看着像头号口癖，
+ * 其实是子串噪声；而这两个词在这里**确实是他会用的**（u = you、k = ok），
+ * 所以正确做法是收紧判定，而不是把它们删掉。
+ */
+export function matchesMarker(raw: string, marker: string): boolean {
+  if (/^[a-z]{1,3}$/i.test(marker)) {
+    return new RegExp(`(^|[^a-z])${marker}([^a-z]|$)`, 'i').test(raw)
+  }
+  return raw.includes(marker)
+}
+
+/**
+ * 系统提示语（不是本人说的话）。
+ *
+ * 它们会进 `voice.jsonl`（提取阶段按"是自己发的"归类），但**不是他的语气** ——
+ * 实测里面混出了 `违规昵称f0Y`、`规昵称f0` 这类窗口碎片，还挤进了"口癖榜"。
+ * 与其在 n-gram 层打补丁，不如整条不计（顺便也让 sampleSize 更诚实）。
+ */
+const SYSTEM_NOTICE_RE = /违规昵称|撤回了一条消息|对方开启了好友验证|你已添加了|邀请你加入了|红包已被领完/
+
 export interface FingerprintAccumulator {
   add(text: string): void
   finish(): WeCloneFingerprint
@@ -204,6 +253,8 @@ export function createFingerprintAccumulator(options?: { maxNgrams?: number; ses
     add(text: string): void {
       const raw = String(text || '')
       if (!raw.trim()) return
+      // 系统提示不算他"说话"（见 SYSTEM_NOTICE_RE 的说明）
+      if (SYSTEM_NOTICE_RE.test(raw)) return
       sampleSize += 1
       const length = raw.length
       lengths.push(length)
@@ -220,22 +271,33 @@ export function createFingerprintAccumulator(options?: { maxNgrams?: number; ses
         else if (CJK_RE.test(ch)) cjk += 1
       }
       for (const marker of MARKERS) {
-        if (!raw.includes(marker)) continue
+        if (!matchesMarker(raw, marker)) continue
         markerCounts.set(marker, (markerCounts.get(marker) ?? 0) + 1)
       }
 
-      // n-gram：只取汉字片段（标点会把片段切开）
-      for (let i = 0; i < raw.length; i += 1) {
-        if (!CJK_RE.test(raw[i])) continue
+      /**
+       * n-gram 只从**去掉方括号标签**的文本里挖。
+       *
+       * 为什么必须先去标签：`[破涕为笑]` 这种表情名，切 4-gram 时会切出正好等于名字的
+       * `破涕为笑`（不含方括号，因此躲过"含方括号就丢弃"的规则）—— 实测它就这样进了
+       * 高频片段榜。方括号里是**表情的名字**，不是他说的话；整段剔掉，中英一致。
+       */
+      const speech = raw.replace(/\[[^\]]{1,15}\]/g, ' ')
+      // n-gram：只取**纯汉字**片段。
+      // 原来是"含一个汉字就算"，于是 `昵称f0Y`、`规昵称f0` 这类**系统提示/ID 的窗口切片**
+      // 混进了"口癖榜"（实测 top 30 里有 4 条是这种东西）。跨脚本的 3–5 字窗口几乎都是
+      // 名字或编号，不是说话方式 —— 英文那一侧本来就有整词统计，所以这里收紧不会漏掉语气。
+      for (let i = 0; i < speech.length; i += 1) {
+        if (!CJK_RE.test(speech[i])) continue
         for (let n = NGRAM_MIN; n <= NGRAM_MAX; n += 1) {
-          const gram = raw.slice(i, i + n)
+          const gram = speech.slice(i, i + n)
           if (gram.length < n) break
-          if (!CJK_RE.test(gram)) continue
+          if (!PURE_CJK_RE.test(gram)) continue
           ngramCounts.set(gram, (ngramCounts.get(gram) ?? 0) + 1)
         }
       }
       // 英文按整词 + 二元搭配统计（n-gram 滑窗在英文上只出词缀碎片）
-      const words = raw.toLowerCase().match(LATIN_WORD_RE) || []
+      const words = speech.toLowerCase().match(LATIN_WORD_RE) || []
       for (const word of words) {
         wordCounts.set(word, (wordCounts.get(word) ?? 0) + 1)
       }
@@ -269,7 +331,7 @@ export function createFingerprintAccumulator(options?: { maxNgrams?: number; ses
        * 三条一起列出来把真正的那一个淹没了。
        */
       const scored = [...ngramCounts.entries()]
-        .filter(([gram, count]) => count >= NGRAM_MIN_COUNT && !isBoring(gram))
+        .filter(([gram, count]) => count >= NGRAM_MIN_COUNT && !isBoring(gram) && !isPipelineArtifact(gram))
         .map(([gram, count]) => ({ text: gram, count, score: count * (gram.length - 1) }))
         .sort((a, b) => b.score - a.score)
 
