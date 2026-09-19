@@ -185,8 +185,12 @@ export interface WeCloneSettings {
  */
 export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = {
   refusal: 'character',
+  // 迭代 1 实测**退步**，所以默认关；见 docs/research/weclone/06-loop-log.md
   exemplars: 'off',
-  shape: 'off',
+  // 迭代 2 实测**结构性大幅改善**（同一批文本上做的成对 A/B，确定性）：
+  // 单条气泡 27.3 → 16.2 字（本人 17.2）、每条回复 2.53 → 4.17 条（本人 4.31），
+  // 而 chrF / 抄写率不变。因此默认**开**。
+  shape: 'on',
 }
 
 /** 一条对话里的一轮 */
@@ -553,7 +557,7 @@ export class WeCloneService {
       return {
         refusal: raw?.refusal === 'off' ? 'off' : 'character',
         exemplars: raw?.exemplars === 'on' ? 'on' : 'off',
-        shape: raw?.shape === 'on' ? 'on' : 'off',
+        shape: raw?.shape === 'off' ? 'off' : 'on',
       }
     } catch {
       return { ...WECLONE_SETTINGS_DEFAULT }

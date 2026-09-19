@@ -114,6 +114,21 @@ describe('shapeReply —— 切成"像本人那样的一串短消息"', () => {
     expect(ex.join('')).toContain('！')
   })
 
+  it('长度修好之前先钉住意图：~100 字的回复要切成 3–4 条、每条远短于 p90', () => {
+    // 这条测试是为了防止退回"以 p90 为上限"的写法 —— 那一版会把句子**合并**，
+    // 实测气泡 27.3 → 37 字、条数 2.53 → 1.95，与目标相反。
+    const reply =
+      '这个前端工作还真的不在我的能力范围内，我先看一下 cursor 那个方案到底怎么用。' +
+      '如果实在不行就让 Max 来做这一块。总之今天先把这个页面跑起来再说，明天再看细节。'
+    const out = shapeReply(reply, profile)
+    expect(out.length).toBeGreaterThanOrEqual(3)
+    expect(out.length).toBeLessThanOrEqual(profile.burstMax)
+    for (const b of out) {
+      // 单条应落在"中位数到 2 倍中位数"附近，而不是顶到 p90
+      expect(b.length).toBeLessThanOrEqual(profile.medianLength * 2.5)
+    }
+  })
+
   it('确定性：同一输入两次结果逐字相同', () => {
     const raw = '我今天去了一趟学校。然后遇到老师了，聊了几句关于考试的事。感觉还行。'
     expect(shapeReply(raw, profile)).toEqual(shapeReply(raw, profile))

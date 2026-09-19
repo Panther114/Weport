@@ -410,6 +410,22 @@ for (let ci = 0; ci < cases.length; ci++) {
     armTexts[arm].push(text);
     const rec = recoveryAtK(pool, target, { k, scoreAgainst: text });
     const armBpc = bpc(model, text);
+    /**
+     * Per-bubble BPC.
+     *
+     * A multi-bubble reply is ONE string here, with separators the person never
+     * types — so whole-text BPC charges it for newlines and makes a correctly
+     * split reply look less author-like (measured: 0.990 -> 1.076 after shaping,
+     * purely from the separators). Bubbles are ~target length, so the same
+     * length-matched null applies to each one; averaging per bubble measures the
+     * voice instead of the transport encoding.
+     */
+    const bubbleBpcs = splitBubbles(text)
+      .map((b) => bpc(model, b))
+      .filter((x) => Number.isFinite(x));
+    const bpcBubbles = bubbleBpcs.length
+      ? bubbleBpcs.reduce((a, b) => a + b, 0) / bubbleBpcs.length
+      : armBpc;
     row.arms[arm] = {
       chars: charLen(text),
       lengthBucket: bucketOf(charLen(text)),
@@ -417,6 +433,9 @@ for (let ci = 0; ci < cases.length; ci++) {
       ned: normEditDistance(text, target),
       chrf: chrf(text, target),
       bpc: armBpc,
+      bpcBubbles,
+      bpcBubblesVsNull:
+        Number.isFinite(bpcBubbles) && Number.isFinite(bpcNull) && bpcNull > 0 ? bpcBubbles / bpcNull : null,
       bpcVsNull: Number.isFinite(armBpc) && Number.isFinite(bpcNull) && bpcNull > 0 ? armBpc / bpcNull : null,
       recoveryRank: rec.rank,
       rr: rec.rr,
@@ -534,6 +553,11 @@ function armAggregate(arm) {
     lengthBucketAgreement: { mean: mean(bc), median: median(bc) },
     bpc: { mean: mean(bp), median: median(bp) },
     bpcVsNull: { mean: mean(bpn), median: median(bpn), shareBetterThanNull: bpn.length ? bpn.filter((x) => x < 1).length / bpn.length : null, n: bpn.length },
+    // per-bubble variant: the honest BPC for multi-bubble replies (separators excluded)
+    bpcBubblesVsNull: (() => {
+      const v = get((x) => x.bpcBubblesVsNull);
+      return { mean: mean(v), median: median(v), n: v.length, shareBetterThanNull: v.length ? v.filter((x) => x < 1).length / v.length : null };
+    })(),
     recovery: { recoveryAt1: at(1), recoveryAt5: at(5), [`recoveryAt${k}`]: at(k), mrr: mean(rr), targetInPool: present.length / Math.max(1, rows.length) },
     copyRate: { vsTrain: copyTrain, vsPersona: copyPersona },
     surface,

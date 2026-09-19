@@ -132,21 +132,36 @@ export function splitSegments(raw: string): string[] {
 /**
  * 按本人的长度分布与连发分布，把一条回复切成若干条消息。
  *
- * 规则（全部确定性）：
- *  1. 段按顺序打包成气泡，单条不超过 `p90Length`；
- *  2. 段数超过 `burstMax` 时，**多余的并进最后一条**（宁可最后一条长一点，也不删内容）；
- *  3. 单段本身超过 `2 × p90Length` 时才硬切（按逗号/空格找最近的位置）；
- *  4. 结尾是句号的去掉句号（他的句末标点率只有 3%），`?`/`！` 保留 —— 那是语义。
+ * ## 算法：先定条数，再切
+ *
+ * 第一版把气泡上限设成 **p90**，实测反而更糟（气泡 27.3 → 37 字、条数 2.53 → 1.95）：
+ * 他的 p90 很大（23% 的消息 ≥31 字，长尾到 1990 字），于是"不超过 p90"实际上等于
+ * **把句子合起来**，与目标相反。人对长度的直觉是**中位数**，不是 p90。
+ *
+ * 现在：`k = clamp(round(总长 / 中位长度), 1, 连发上限)`，再把句子按字符量**均分**成
+ * k 条。这样两个目标同时被直接瞄准 —— 单条 ≈ 中位数、条数 ≈ 他的连发。
+ *
+ * 规则（全部确定性，没有随机数）：
+ *  1. 段按顺序均分成 k 组，尽量在句子边界断开；
+ *  2. 单段超过均分目标 1.6 倍时才硬切（按逗号/顿号/空格找最近的位置）；
+ *  3. 结尾是句号的去掉句号（他只有 3% 的消息带句末标点），`?`/`！` 保留 —— 那是语义；
+ *  4. **不丢内容**：切分只换边界，字符一个不少。
  */
 export function shapeReply(raw: string, profile: VoiceShapeProfile): string[] {
   const segments = splitSegments(raw)
   if (segments.length === 0) return []
 
-  const perBubble = Math.max(8, Math.round(profile.p90Length || 30))
-  const hardLimit = Math.max(perBubble * 2, 40)
+  const median = Math.max(4, Math.round(profile.medianLength || 14))
+  const total = segments.reduce((n, s) => n + [...s].length, 0)
   const maxBubbles = Math.max(1, Math.min(8, Math.round(profile.burstMax || 4)))
+  // 先定条数：总长 / 中位长度，夹在 [1, 连发上限]
+  const k = Math.max(1, Math.min(maxBubbles, Math.round(total / median)))
+  if (k === 1) return [finalize(segments.join(''))]
 
-  // 3) 先把过长的段硬切开（很少发生；只是为了防止一条 300 字的墙）
+  const target = Math.max(6, Math.round(total / k))
+  const hardLimit = Math.round(target * 1.6)
+
+  // 2) 过长的段先硬切（很少发生；防止一条 300 字的墙）
   const pieces: string[] = []
   for (const seg of segments) {
     if ([...seg].length <= hardLimit) {
@@ -154,45 +169,50 @@ export function shapeReply(raw: string, profile: VoiceShapeProfile): string[] {
       continue
     }
     let rest = seg
-    while ([...rest].length > perBubble) {
-      // 在 perBubble 附近找最近的逗号/空格/顿号，找不到就按长度切
+    while ([...rest].length > hardLimit) {
       const chars = [...rest]
-      const window = chars.slice(Math.floor(perBubble * 0.6), perBubble)
+      const floor = Math.max(1, Math.floor(target * 0.6))
       let cut = -1
-      for (let i = window.length - 1; i >= 0; i -= 1) {
-        if (/[，,、\s]/.test(window[i])) {
-          cut = Math.floor(perBubble * 0.6) + i + 1
+      for (let i = target; i >= floor; i -= 1) {
+        if (i < chars.length && /[，,、\s]/.test(chars[i])) {
+          cut = i + 1
           break
         }
       }
-      if (cut <= 0) cut = perBubble
+      if (cut <= 0) cut = target
       pieces.push(chars.slice(0, cut).join('').trim())
       rest = chars.slice(cut).join('').trim()
     }
     if (rest) pieces.push(rest)
   }
 
-  // 1) 打包成气泡
-  const bubbles: string[] = []
+  // 1) 均分成 k 组：尽量在句子边界断开，且每组不超过目标的 1.2 倍
+  const groups: string[] = []
+  let current = ''
+  const softLimit = Math.round(target * 1.2)
   for (const piece of pieces) {
-    const current = bubbles[bubbles.length - 1]
-    if (current === undefined) {
-      bubbles.push(piece)
+    if (!current) {
+      current = piece
       continue
     }
-    // 还能塞下就并进去；否则新开一条
-    if ([...current].length + [...piece].length <= perBubble) bubbles[bubbles.length - 1] = `${current}${piece}`
-    else bubbles.push(piece)
+    // 还能塞下、且后面还有名额留给剩余内容 → 并进这一条；否则另起一条
+    const canGrow = [...current].length + [...piece].length <= softLimit
+    const roomForMore = groups.length + 1 < k
+    if (canGrow && roomForMore) current += piece
+    else {
+      groups.push(current)
+      current = piece
+    }
   }
+  if (current) groups.push(current)
 
-  // 2) 超过连发上限：把多余的并进最后一条（不丢内容）
-  if (bubbles.length > maxBubbles) {
-    const head = bubbles.slice(0, maxBubbles - 1)
-    const tail = bubbles.slice(maxBubbles - 1).join('')
-    head.push(tail)
+  // 3) 仍然超过 k 条（极长回复）：把尾巴并进最后一条，不丢内容
+  if (groups.length > k) {
+    const head = groups.slice(0, k - 1)
+    head.push(groups.slice(k - 1).join(''))
     return head.map(finalize)
   }
-  return bubbles.map(finalize)
+  return groups.map(finalize)
 }
 
 /** 4) 标点收尾策略：句号去掉（他几乎不用），问号/感叹号保留 */
