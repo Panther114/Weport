@@ -156,9 +156,26 @@ export interface WeCloneSettings {
    * - `off`：完全不设限，system prompt 里连"有些事你不说"这一节都不出现。
    */
   refusal: WeCloneRefusalMode
+  /**
+   * 是否注入**真实示范**（迭代 1：把语料里"对方说 → 本人回"的成对样本放在
+   * 生成位置前面）。
+   *
+   * 为什么按克隆存一个开关：这是**聊天时**的行为，不改变档案与语料本身 ——
+   * 也就是说"开"和"关"两个克隆可以指向**完全相同的语料**，这让 A/B 对照干净
+   * （唯一变量就是这个注入），也让用户能并排比较两种做法。
+   */
+  exemplars: 'on' | 'off'
 }
 
-export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = { refusal: 'character' }
+/**
+ * 默认设置。
+ *
+ * `exemplars: 'off'` —— **这是实测之后的决定，不是保守**。迭代 1 的示范注入在
+ * 60 例 held-out 上把主要指标都拉低了（Recovery@1 0.167 → 0.067，chrF 0.142 →
+ * 0.109，回复反而更长 55 → 67 字）。它作为**按克隆可开**的实验开关保留，
+ * 但默认必须是"没有实测支持就不改线上行为"。详见 docs/research/weclone/06-loop-log.md。
+ */
+export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = { refusal: 'character', exemplars: 'off' }
 
 /** 一条对话里的一轮 */
 export interface WeCloneChatTurn {
@@ -521,6 +538,7 @@ export class WeCloneService {
       const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<WeCloneSettings>
       return {
         refusal: raw?.refusal === 'off' ? 'off' : 'character',
+        exemplars: raw?.exemplars === 'on' ? 'on' : 'off',
       }
     } catch {
       return { ...WECLONE_SETTINGS_DEFAULT }
@@ -535,13 +553,15 @@ export class WeCloneService {
 
   setSettings(
     cloneId: string,
-    patch: { refusal?: string }
+    patch: { refusal?: string; exemplars?: string }
   ): { success: boolean; settings?: WeCloneSettings; error?: string } {
     const dir = this.findCloneDir(String(cloneId || ''))
     if (!dir) return { success: false, error: '找不到该克隆' }
     const current = this.readSettings(dir)
     const next: WeCloneSettings = {
       refusal: patch?.refusal === 'off' ? 'off' : patch?.refusal === 'character' ? 'character' : current.refusal,
+      exemplars:
+        patch?.exemplars === 'off' ? 'off' : patch?.exemplars === 'on' ? 'on' : current.exemplars,
     }
     try {
       this.atomicWriteFile(this.settingsFile(dir), JSON.stringify(next, null, 2))
@@ -2222,18 +2242,22 @@ export class WeCloneService {
      */
     let exemplarBlock = ''
     let exemplarsUsed = 0
+    const cloneSettings = this.readSettings(dir)
     try {
-      const picked = await this.buildVoiceExemplarBlock(dir, [
-        ...history.slice(-4).map((h) => h.content),
-        message,
-      ].filter(Boolean).join('\n'), {
-        selfLabel,
-        otherLabel,
-        recentTexts: history.map((h) => h.content),
-        limit: EXEMPLAR_COUNT,
-      })
-      exemplarBlock = picked.block
-      exemplarsUsed = picked.count
+      if (cloneSettings.exemplars !== 'off') {
+        const picked = await this.buildVoiceExemplarBlock(
+          dir,
+          [...history.slice(-4).map((h) => h.content), message].filter(Boolean).join('\n'),
+          {
+            selfLabel,
+            otherLabel,
+            recentTexts: history.map((h) => h.content),
+            limit: EXEMPLAR_COUNT,
+          }
+        )
+        exemplarBlock = picked.block
+        exemplarsUsed = picked.count
+      }
     } catch (e) {
       // 示范检索失败不该让聊天失败：退化成"只用档案 + 检索片段"回答
       console.warn('[WeClone] 语气示范检索失败（继续用档案回答）:', e)
