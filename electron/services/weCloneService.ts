@@ -69,6 +69,7 @@ import {
   tokenize,
 } from './ai/localRetrieval'
 import { MAX_REDUCE_ROUNDS, planReduceStep } from './ai/reducePlan'
+import { decideShardAbort } from './ai/shardFailurePolicy'
 import {
   cloneMapCacheDir,
   cloneMapCacheEnabled,
@@ -1159,8 +1160,9 @@ export class WeCloneService {
     providers: ProviderProfile[],
     signal: AbortSignal | undefined,
     onProgress: (done: number, total: number, message: string) => void
-  ): Promise<{ digests: string[]; failures: number }> {
+  ): Promise<{ digests: string[]; failures: number; hardError: string | null }> {
     let failures = 0
+    let hardError: string | null = null
     const results = await this.mapWithConcurrency(
       shards,
       MAP_CONCURRENCY,
@@ -1188,6 +1190,12 @@ export class WeCloneService {
         } catch (error) {
           if ((error as Error)?.name === 'WeCloneAbortedError' || signal?.aborted) throw error
           failures += 1
+          const message = String((error as Error)?.message || error)
+          // 记下第一个"硬失败"（额度/计费/鉴权）：它决定整次生成该不该继续，
+          // 而不是像普通网络抖动那样只降级一片（见 ai/shardFailurePolicy.ts）
+          if (!hardError && /insufficient|out of credits|quota|billing|payment|credit|unauthor|invalid api key|authentication|401|403|余额/i.test(message)) {
+            hardError = message
+          }
           console.warn(`[WeClone] 分片 ${index + 1} 提炼失败，改用本地统计兜底:`, error)
           const ownLines = chunks.filter((c) => c.talker === '我').length
           return (
@@ -1204,7 +1212,7 @@ export class WeCloneService {
     )
     // mapWithConcurrency 会把异常项置 null（中止除外，那会直接抛出）
     const digests = results.filter((r): r is string => typeof r === 'string' && r.length > 0)
-    return { digests, failures }
+    return { digests, failures, hardError }
   }
 
   /**
@@ -1770,7 +1778,7 @@ export class WeCloneService {
       const mapCacheDir = cloneMapCacheDir(this.getStagingRoot())
       const mapCacheKey = cloneMapCacheKey(jsonlFinal, shards.length, perBucket)
       const cached = cloneMapCacheEnabled() ? readCloneMapCache(mapCacheDir, mapCacheKey) : null
-      let mapResult: { digests: string[]; failures: number }
+      let mapResult: { digests: string[]; failures: number; hardError?: string | null }
       if (cached) {
         mapResult = { digests: cached.digests, failures: cached.failures }
         report(
@@ -1801,6 +1809,16 @@ export class WeCloneService {
           }
         }
       }
+      /**
+       * 该不该继续？额度/计费/鉴权这类**硬失败**必须中止，而不是降级产出空壳档案 ——
+       * 那条路径在实测里表现为"界面显示生成完成"，却把用户原本可用的克隆覆盖掉。
+       */
+      const shardDecision = decideShardAbort({
+        shardCount: shards.length,
+        failures: mapResult.failures,
+        hardError: mapResult.hardError ?? null,
+      })
+      if (shardDecision.abort) throw new Error(shardDecision.reason)
       if (mapResult.digests.length === 0) throw new Error('所有分段的提炼都失败了，请检查 AI 服务是否可用')
 
       // ---- 5. reduce：归并成整体材料 ---------------------------------------
