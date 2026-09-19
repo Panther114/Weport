@@ -41,22 +41,50 @@ export function findActiveMention(value: string, caret: number): ActiveMention |
 }
 
 /**
- * 把选中的引用写回文本：用 `@显示名` 替换掉 `@查询串`，并返回新的光标位置。
+ * 摘掉这次 `@查询串`，光标停在 `@` 原来的位置。
  *
- * 输出里保留人类可读的 `@名称`（而不是内部 id）——用户需要看得见自己引用了
- * 谁；机器可读的引用列表由调用方单独维护，两者不混在同一个字符串里。
+ * **引用只以 chip 的形式存在，输入框里不留任何痕迹。** 旧实现把 `@显示名 ` 写回
+ * 文本，于是同一个引用出现两次（输入框里一次、下面的 chip 一次）——用户的原话是
+ * "only have it show up in the space outside the input box and no longer display it
+ * two times"。文本与引用列表分成两个容器之后，各自只有一个来源：
+ *   输入框 → 用户真正想说的一句话；
+ *   chip 区 → 这次引用了谁（可单独删）。
+ * 机器可读的 id 也仍然在引用列表里，不需要藏在文本中。
  */
-export function applyMention(
+export function stripMention(
+  value: string,
+  mention: ActiveMention,
+  caret: number
+): { value: string; caret: number } {
+  const text = String(value ?? '')
+  const position = Math.max(mention.start, Math.min(caret, text.length))
+  const next = text.slice(0, mention.start) + text.slice(position)
+  return { value: next, caret: mention.start }
+}
+
+/**
+ * 在弹层的搜索框里改查询串时，把它同步回输入框里的那段 `@查询`。
+ *
+ * 查询串**只有一个来源**（输入框里的文本），弹层的搜索框只是它的另一个视图；
+ * 两边各存一份状态是必然要跑偏的（用户在弹层里打字，输入框里还留着旧查询，
+ * 之后按下回车引用的到底是哪一个？）。返回新的文本与光标位置。
+ */
+export function rewriteMentionQuery(
   value: string,
   mention: ActiveMention,
   caret: number,
-  label: string
+  query: string
 ): { value: string; caret: number } {
   const text = String(value ?? '')
-  const position = Math.max(0, Math.min(caret, text.length))
-  const insertion = `@${label} `
-  const next = text.slice(0, mention.start) + insertion + text.slice(position)
-  return { value: next, caret: mention.start + insertion.length }
+  const position = Math.max(mention.start, Math.min(caret, text.length))
+  // 查询串里不能有空白：`findActiveMention` 一旦遇到空白就认为这次引用结束了，
+  // 允许空格会让输入框显示的查询与选择器实际筛的串不是同一个。
+  const next = String(query ?? '').replace(/\s+/g, '')
+  const insertion = `@${next}`
+  return {
+    value: text.slice(0, mention.start) + insertion + text.slice(position),
+    caret: mention.start + insertion.length,
+  }
 }
 
 export type ReferenceKind = 'group' | 'private' | 'official'

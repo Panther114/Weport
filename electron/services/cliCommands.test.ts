@@ -109,3 +109,41 @@ describe('WeClone voice corpus builder', () => {
     expect(source).toContain('isUsable')
   })
 })
+
+describe('WeClone 命令面', () => {
+  /**
+   * WeClone 的命令面必须跟得上功能的扩张（v1.0.1）。
+   *
+   * 这一版给克隆加了两个用户可调开关：生成时要不要脱敏、每个克隆的敏感话题策略。
+   * 只在界面上开放它们，等于脚本与 TUI 永远够不到 —— 而「终端里也能干同样的事」
+   * 正是这一层存在的理由。用源级断言钉住命令与参数的存在，比等运行时发现便宜。
+   */
+  it('weclone.generate 暴露 redact 参数（与界面同一个开关）', () => {
+    const block = cliSource.slice(cliSource.indexOf("name: 'weclone.generate'"))
+    const argsBlock = block.slice(0, block.indexOf('run:'))
+    expect(argsBlock).toContain("name: 'redact'")
+    expect(block).toContain('weCloneService.generateClone(undefined, undefined, { redact })')
+  })
+
+  it('weclone.settings 可以读也可以写每个克隆的敏感话题策略', () => {
+    expect(declaredCommands(cliSource)).toContain('weclone.settings')
+    const block = cliSource.slice(cliSource.indexOf("name: 'weclone.settings'"))
+    expect(block).toContain("name: 'refusal'")
+    expect(block).toContain('weCloneService.getSettings')
+    expect(block).toContain('weCloneService.setSettings')
+    // 只接受这两个值：别的字符串必须被拒绝，而不是被静默当成默认值
+    expect(block).toContain("mode !== 'character' && mode !== 'off'")
+  })
+
+  it('weclone.clones 报告每个克隆的策略（脚本要能看见"它会不会答敏感问题"）', () => {
+    const block = cliSource.slice(cliSource.indexOf("name: 'weclone.clones'"))
+    expect(block).toContain('refusal: weCloneService.getSettings(c.id).settings?.refusal')
+  })
+
+  it('生成结果带上生成深度（段数 / token / 耗时 / 是否脱敏）', () => {
+    const block = cliSource.slice(cliSource.indexOf("name: 'weclone.generate'"))
+    for (const field of ['shardCount', 'shardFailures', 'tokensIn', 'tokensOut', 'elapsedMs', 'redacted']) {
+      expect(block, field).toContain(field)
+    }
+  })})
+

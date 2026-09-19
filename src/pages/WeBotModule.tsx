@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Clock, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
 import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../components/reference/ReferencePicker'
-import { applyMention, findActiveMention, referenceKindLabel, type ChatReference } from '../utils/mentionTrigger'
+import { findActiveMention, referenceKindLabel, rewriteMentionQuery, stripMention, type ChatReference } from '../utils/mentionTrigger'
+import { loadReferenceCandidates } from '../utils/sessionCandidates'
 import { CATCH_UP_OPTIONS, WEEKDAY_OPTIONS, describeNextRun, describeRelativeTime, describeSchedule } from '../utils/weBotFormat'
 import '../styles/weBot.scss'
 
@@ -9,43 +10,6 @@ export type WeBotSection = 'tasks' | 'notes'
 
 interface Props {
   section: WeBotSection
-}
-
-interface SessionLike {
-  username?: string
-  displayName?: string
-  nickName?: string
-  remark?: string
-  avatarUrl?: string
-  type?: string
-}
-
-/**
- * 把会话映射成引用候选。
- *
- * 类型判定只看 username：`@chatroom` 是群、`gh_` 是公众号，其余为私聊 ——
- * 这与 Weport 其余部分（导出、通知过滤）用的是同一套判据。
- */
-function toCandidates(sessions: SessionLike[]): ReferenceCandidate[] {
-  const mapped: ReferenceCandidate[] = []
-  for (const session of sessions) {
-    const id = String(session.username || '').trim()
-    if (!id) continue
-    const kind: ReferenceCandidate['kind'] = id.endsWith('@chatroom')
-      ? 'group'
-      : id.startsWith('gh_')
-        ? 'official'
-        : 'private'
-    const label = String(session.displayName || session.remark || session.nickName || id)
-    // 备注与显示名相同时不再重复一遍（否则每条都会写「备注：<同名>」）。
-    const subtitle = session.remark && session.remark !== label ? `备注：${session.remark}` : undefined
-    mapped.push({ id, label, kind, subtitle, avatarUrl: session.avatarUrl })
-  }
-  return mapped.sort((a, b) => {
-    // 群聊排在前面：WeBot 的典型用法是「扫描某个群」，私聊引用相对少见。
-    if (a.kind !== b.kind) return a.kind === 'group' ? -1 : b.kind === 'group' ? 1 : 0
-    return a.label.localeCompare(b.label)
-  })
 }
 
 const emptyDraft = () => ({
@@ -77,6 +41,10 @@ export default function WeBotModule({ section }: Props) {
   const [notes, setNotes] = useState<WeBotNote[]>([])
   const [runs, setRuns] = useState<WeBotRun[]>([])
   const [candidates, setCandidates] = useState<ReferenceCandidate[]>([])
+  const [candidatesState, setCandidatesState] = useState<{ loading: boolean; ok: boolean; error?: string }>({
+    loading: true,
+    ok: true,
+  })
   const [loading, setLoading] = useState(true)
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -117,17 +85,16 @@ export default function WeBotModule({ section }: Props) {
   }, [refresh])
 
   useEffect(() => {
-    // 会话列表只取一次：引用候选不需要实时刷新，而每次打开页面都去读 WCDB
-    // 会明显拖慢页面切换。
+    // 会话列表只取一次（共享缓存 60s，两个 `@` 入口共用）：引用候选不需要实时刷新，
+    // 而每次打开页面都去读 WCDB 会明显拖慢页面切换。
+    // 解包与映射统一走 utils/sessionCandidates —— 以前这里按 `data` 解包
+    // `chat:getSessions` 的 `{ sessions }` 返回，于是永远显示「先连接微信」。
     let cancelled = false
     void (async () => {
-      try {
-        const sessions = (await api.chat.getSessions()) as { data?: SessionLike[]; success?: boolean } | SessionLike[]
-        const list = Array.isArray(sessions) ? sessions : Array.isArray(sessions?.data) ? sessions.data : []
-        if (!cancelled) setCandidates(toCandidates(list))
-      } catch {
-        if (!cancelled) setCandidates([])
-      }
+      const result = await loadReferenceCandidates(() => api.chat.getSessions())
+      if (cancelled) return
+      setCandidatesState({ loading: false, ok: result.ok, error: result.error })
+      setCandidates(result.candidates)
     })()
     return () => {
       cancelled = true
@@ -274,8 +241,12 @@ export default function WeBotModule({ section }: Props) {
     if (!mention) return
     const textarea = descriptionRef.current
     const current = draft.description
-    const caret = textarea?.selectionStart ?? mention.caret
-    const { value, caret: nextCaret } = applyMention(current, { start: mention.start, query: mention.query }, caret, reference.label)
+    // 光标只有在**焦点确实还在输入框里**时才可信：用户在弹层搜索框里打过字的话，
+    // textarea.selectionStart 是上一次的旧值，用它去切文本会切错位置。
+    const caret = document.activeElement === textarea ? (textarea?.selectionStart ?? mention.caret) : mention.caret
+    // **只加 chip，不往输入框里写 `@名称`**：文本与引用列表各只有一个来源，
+    // 同一份引用不会再出现两次（用户报的"名字同时出现在输入框和下面"）。
+    const { value, caret: nextCaret } = stripMention(current, { start: mention.start, query: mention.query }, caret)
     setDraft((prev) => ({
       ...prev,
       description: value,
@@ -285,6 +256,32 @@ export default function WeBotModule({ section }: Props) {
         : [...prev.references, { id: reference.id, label: reference.label, kind: reference.kind }],
     }))
     setMention(null)
+    requestAnimationFrame(() => {
+      textarea?.focus()
+      textarea?.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
+
+  /**
+   * 弹层搜索框里改了查询串 → 改写输入框里的那段 `@查询`。
+   *
+   * 查询串的唯一来源是输入框的文本，弹层只是它的另一个视图；两边各存一份
+   * 状态最后一定会跑偏（输入框里是 `@化`、列表筛的是 `化学`）。
+   */
+  const setMentionQuery = (query: string) => {
+    if (!mention) return
+    const textarea = descriptionRef.current
+    const caret = document.activeElement === textarea ? (textarea?.selectionStart ?? mention.caret) : mention.caret
+    const { value, caret: nextCaret } = rewriteMentionQuery(
+      draft.description,
+      { start: mention.start, query: mention.query },
+      caret,
+      query
+    )
+    setDraft((prev) => ({ ...prev, description: value }))
+    setMention({ start: mention.start, query: value.slice(mention.start + 1, nextCaret), caret: nextCaret })
+    // 焦点在弹层搜索框里时**不要**把它抢回 textarea —— 用户正在那里打字。
+    if (document.activeElement?.closest?.('.ref-picker')) return
     requestAnimationFrame(() => {
       textarea?.focus()
       textarea?.setSelectionRange(nextCaret, nextCaret)
@@ -393,22 +390,30 @@ export default function WeBotModule({ section }: Props) {
                       setMention(null)
                     }
                   }}
-                  onBlur={() => {
+                  onBlur={(e) => {
+                    // 焦点落进选择器（它渲染在 body 下的浮层里，`relatedTarget`
+                    // 仍然指向那个真实的 input）时**不要**关掉它 —— 用户点搜索框
+                    // 是想在里面打字，旧版那 120ms 的延迟关闭正好把选择器收走，
+                    // 于是"搜索框点了就没了"。
+                    if ((e.relatedTarget as HTMLElement | null)?.closest?.('.ref-picker')) return
                     // 延迟关闭：点击选择器条目时会先触发 blur。
                     setTimeout(() => setMention(null), 120)
                   }}
                 />
                 {mention ? (
-                  <div className="webot-picker-anchor">
-                    <ReferencePicker
-                      ref={pickerRef}
-                      query={mention.query}
-                      candidates={candidates}
-                      onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
-                      onPick={pickReference}
-                      onClose={() => setMention(null)}
-                    />
-                  </div>
+                  <ReferencePicker
+                    ref={pickerRef}
+                    anchor={descriptionRef}
+                    query={mention.query}
+                    candidates={candidates}
+                    loading={candidatesState.loading}
+                    ok={candidatesState.ok}
+                    error={candidatesState.error}
+                    onQueryChange={setMentionQuery}
+                    onPick={pickReference}
+                    onClose={() => setMention(null)}
+                    onReturnFocus={() => descriptionRef.current?.focus()}
+                  />
                 ) : null}
               </div>
 

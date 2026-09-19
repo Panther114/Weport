@@ -4,8 +4,10 @@
     position: relative;
     width: 100%;
     box-sizing: border-box;
-    // 四周留白：容纳卡片投影，并透出窗口底层的仿桌面背景
-    padding: 8px;
+    // 四周留白：容纳卡片投影，并透出窗口底层的仿桌面背景。
+    // **具体数值由 NotificationToast 内联下发**（notificationCardPadding：
+    // 基础 8px + 用户投影需要的空间）。写死在这里会让"投影"滑块拉大之后，
+    // 多出来的部分被窗口边界裁掉 —— 那正是"投影没有反应"的成因之一。
     opacity: 0;
     transform: scale(0.96);
     transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -46,7 +48,12 @@
     //    There must never be any special background behind text."
     // 旧版 `.notification-text::before` 就是那样一层（--noti-text-scrim 的实色圆角块），
     // 它在深色桌面上会露出一块可见的浅色方块 —— 已整块删除。
-    --liquid-glass-shadow: var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22));
+    // --glass-shadow 是**用户可调的投影**（设置 → 消息通知设置 → 通知玻璃 → 投影）。
+    // 它在 shadow = 0 时被整个移除，于是这里落回自适应引擎解出的边界环
+    // （--noti-shadow）—— 卡片在亮桌面上仍然看得见。旧实现写的是
+    // `var(--noti-shadow, …)`，**从来没有读过 --glass-shadow**，
+    // 所以那个滑块怎么拖都没有任何变化。
+    --liquid-glass-shadow: var(--glass-shadow, var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22)));
     --liquid-glass-tint: var(--glass-fill, var(--noti-tint, rgba(255, 255, 255, 0.06)));
 
     color: var(--glass-text-color, var(--noti-title-color, #ffffff));
@@ -84,33 +91,52 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 8px;
             margin-bottom: 4px;
 
+            // 标题与时间都在**常规流**里（v1.0.1）：时间不再绝对定位、标题不再靠
+            // margin-right: 50px 给它让位。旧写法在长昵称下必然出事 —— 绝对定位的
+            // 时间不参与布局，标题只能被硬截断（text-overflow: clip），用户看到的
+            // 是"名字和时间撞在一起、名字被切掉半个字"。
+            // 现在两者是同一行的 flex 兄弟，时间有确定宽度、标题吃掉剩余空间，
+            // 结构上不可能重叠；剩下的空间不够时由 NotificationToast 的自适应加宽
+            // 去解决（最多 +220px），超过上限才省略号收尾。
             .notification-title {
                 font-weight: 600;
                 font-size: 14px;
                 color: var(--glass-text-color, var(--noti-title-color, #ffffff));
                 text-shadow: var(--noti-title-halo, var(--noti-halo-both));
                 transition: color 0.08s linear, text-shadow 0.08s linear;
-                // 单行 + 硬截断（不显示省略号）：超出宽度就在该处直接切断，
-                // 绝不与右上角时间重叠
                 white-space: nowrap;
                 overflow: hidden;
-                text-overflow: clip;
+                text-overflow: ellipsis;
                 line-height: 1.35;
-                flex: 1;
+                flex: 1 1 auto;
                 min-width: 0;
-                margin-right: 50px; // 给时间留出空间
+            }
+
+            // 只用于测量标题自然宽度的影子元素：不参与排版，也不可读
+            .notification-title-measure {
+                position: absolute;
+                visibility: hidden;
+                pointer-events: none;
+                white-space: nowrap;
+                font-weight: 600;
+                font-size: 14px;
+                line-height: 1.35;
+                left: -9999px;
+                top: 0;
             }
 
             .notification-time {
+                flex: 0 0 auto;
                 font-size: 12px;
-                color: var(--glass-text-color, var(--noti-title-tertiary, rgba(255, 255, 255, 0.9)));
+                // 与正文**同色**（用户要求："时间那行小字别是灰的"）。
+                // 旧版走 --noti-title-tertiary（引擎解出的三级灰），在浅色卡片上明显发灰；
+                // 层级改由字号承担（12px vs 13px），颜色不再降级。
+                color: var(--glass-text-color, var(--noti-body-color, #ffffff));
                 text-shadow: var(--noti-title-halo, var(--noti-halo-both));
                 transition: color 0.08s linear;
-                position: absolute;
-                top: 2px; // 与标题文字对齐（标题行内文字约占上 2px 起）
-                right: 2px; // 贴右缘，尽量让出标题与正文空间
             }
         }
 
@@ -122,8 +148,10 @@
             transition: color 0.08s linear, text-shadow 0.08s linear;
             line-height: 1.4;
             display: -webkit-box;
-            -webkit-line-clamp: 2;
-            line-clamp: 2;
+            // 行数上限由用户配置（v1.0.1：默认 4，旧版写死 2）。上限之内卡片
+            // 高度自然增长，超过才截断 —— 这正是"长消息能完整显示"的实现。
+            -webkit-line-clamp: var(--glass-max-lines, 2);
+            line-clamp: var(--glass-max-lines, 2);
             -webkit-box-orient: vertical;
             overflow: hidden;
             word-break: break-all;

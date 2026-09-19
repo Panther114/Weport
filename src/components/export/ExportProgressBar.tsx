@@ -1,5 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { JSX } from 'react'
+import { useLiveTask } from '../../hooks/useLiveTask'
+import { LIVE_TASK } from '../../utils/liveTask'
 /**
  * 导出进度条（吸顶块里的第二行）。
  *
@@ -76,6 +78,40 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
     })
   }, [api])
 
+  /**
+   * 切页面回来时的**恢复**（v1.0.1）。
+   *
+   * 进度事件由主进程按 ~400ms 一条推，而这个组件随导出页一起被卸载 —— 切到
+   * 「连接微信」再切回来，`progress` 是 null，进度条回到"准备中 0/0"，用户会
+   * 以为导出没在跑（它其实一直在跑）。
+   *
+   * 恢复源是模块级的 `LiveTask`（`utils/liveTaskWiring.ts` 在应用启动时就接好了
+   * IPC，比任何页面都活得久），里面有主进程快照里的 current / total / taskId。
+   * 只在本地还没有任何进度时恢复一次，之后交给实时事件 —— 否则每次快照更新都
+   * 会把界面拽回几百毫秒前的状态。
+   */
+  const live = useLiveTask(LIVE_TASK.export)
+  const restoredRef = useRef(false)
+  useEffect(() => {
+    if (restoredRef.current || progress !== null) return
+    const detail = live.detail
+    if (!detail) return
+    const total = Number(detail.total) || 0
+    const taskIdFromSnapshot = detail.taskId ? String(detail.taskId) : undefined
+    // 快照里既没有总数也没有 taskId，说明这一轮根本没开始过 —— 不要凭空造一条进度
+    if (!total && !taskIdFromSnapshot) return
+    restoredRef.current = true
+    setProgress({
+      current: Number(detail.current) || 0,
+      total,
+      phase: String(detail.phase || ''),
+      phaseLabel: String(detail.phaseLabel || ''),
+      currentSession: String(detail.currentSession || ''),
+      taskId: taskIdFromSnapshot,
+    })
+    if (taskIdFromSnapshot) setTaskId(taskIdFromSnapshot)
+  }, [live.detail, progress])
+
   // 进度条本身**不能**是 aria-live：导出期间每秒 2-3 条进度事件，读屏会把
   // 「准备中…」「收集消息 1200…」逐条念出来，把用户彻底淹没。改成只播报
   // **阶段变化**（准备 → 导出 → 完成），这才是读屏真正需要听到的信息。
@@ -145,6 +181,14 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
   // 完成态不显示会话名：那一步已经没有"正在导出的会话"了，留着只会显示上一条
   // 会话名或占位文案。失败/取消走 phase 分支，同样不留旧文案。
   const sessionLabel = complete ? '导出完成' : (progress?.currentSession || '准备中…')
+  /**
+   * "还在跑"的口径 = App 的 busy **或** 主进程快照里的 running。
+   *
+   * 后者是 v1.0.1 加的：窗口被销毁重建之后 App 的 `busy` 会回到 false，而导出
+   * 其实还在主进程里跑 —— 只看 `busy` 的话，界面上连「取消导出」都不给，
+   * 用户只能干等。
+   */
+  const active = busy || live.status === 'running'
 
   return (
     <div
@@ -171,7 +215,7 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
       </span>
       {/* 计数始终占位：total 未知时留空而不是消失，否则右侧「取消导出」会左右横跳 */}
       <span className="exp-progress-count">{total > 0 ? `${Math.min(current, total).toFixed(0)} / ${total}` : ''}</span>
-      {busy && !complete && (
+      {active && !complete && (
         <button className="ghost-btn exp-progress-cancel" type="button" disabled={!taskId} onClick={cancel}>
           取消导出
         </button>

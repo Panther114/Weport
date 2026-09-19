@@ -506,11 +506,22 @@ export function registerCliCommands(): void {
       name: 'weclone.generate',
       summary: 'Generate a personality clone from local chat history. Runs entirely on this device.',
       mutating: true,
-      run: async () => {
+      args: [
+        {
+          name: 'redact',
+          type: 'boolean',
+          description: '生成时是否移除敏感信息（默认 true）。关掉后语料保留原文，也不再做二次审查。',
+        },
+      ],
+      run: async (args) => {
         // 生成本来只能在界面里点按钮 —— 那意味着脚本与 TUI 都够不到它，也让
         // "生成一次再对着它聊天"这条端到端验证只能靠人去点。挂到命令面之后，
         // 界面 / 终端 / 以后的 MCP 走的是同一条实现（appMain 的 IPC 也调它）。
-        const result = await weCloneService.generateClone(undefined, undefined)
+        //
+        // `redact` 不传就跟随配置里的值（与界面同一个键），传了就只影响这一次 ——
+        // 命令面不该悄悄改用户的全局设置。
+        const redact = args.redact === undefined ? weCloneService.getRedactEnabled() : args.redact !== false
+        const result = await weCloneService.generateClone(undefined, undefined, { redact })
         if (!result.success) {
           return { success: false, error: result.aborted ? '已取消' : result.error || '生成失败' }
         }
@@ -522,12 +533,25 @@ export function registerCliCommands(): void {
                 id: c.id,
                 displayName: c.displayName,
                 knowledgeCutoff: c.knowledgeCutoff,
+                corpusStart: c.corpusStart,
                 messageCount: c.messageCount,
                 sessionCount: c.sessionCount,
                 chunkCount: c.chunkCount,
+                // 生成深度：让脚本也能回答"这次到底干了多少活"
+                shardCount: c.shardCount,
+                shardFailures: c.shardFailures,
+                tokensIn: c.tokensIn,
+                tokensOut: c.tokensOut,
+                elapsedMs: c.elapsedMs,
+                redacted: c.redacted,
+                truncated: c.truncated === true,
               }
             : null,
-          text: c ? `已生成克隆 ${c.id}（${c.messageCount.toLocaleString()} 条消息 / ${c.sessionCount} 个会话）` : '已生成',
+          text: c
+            ? `已生成克隆 ${c.id}（${c.messageCount.toLocaleString()} 条消息 / ${c.sessionCount} 个会话 / ` +
+              `${c.shardCount || 0} 段提炼 / ${Math.round((c.elapsedMs || 0) / 1000)}s` +
+              `${c.redacted === false ? ' / 未脱敏' : ''}${c.truncated ? ' / 已截断' : ''}）`
+            : '已生成',
         }
       },
     },
@@ -548,8 +572,56 @@ export function registerCliCommands(): void {
             knowledgeCutoff: c.knowledgeCutoff,
             messageCount: c.messageCount,
             sessionCount: c.sessionCount,
+            shardCount: c.shardCount,
+            redacted: c.redacted,
+            // 每个克隆自己的敏感话题策略 —— 脚本要能看见"它会不会答敏感问题"
+            refusal: weCloneService.getSettings(c.id).settings?.refusal,
           })),
           text: `${clones.length} 个本地克隆`,
+        }
+      },
+    },
+    {
+      name: 'weclone.settings',
+      summary: 'Read or change a clone\'s own behaviour settings (currently: how it handles sensitive topics).',
+      mutating: true,
+      args: [
+        { name: 'id', type: 'string', description: '克隆 id；留空则用最近生成的那个' },
+        {
+          name: 'refusal',
+          type: 'string',
+          description: 'character = 以本人的方式带过去（默认）；off = 完全不设限。留空则只读。',
+        },
+      ],
+      run: async (args) => {
+        const listed = await weCloneService.getClones()
+        const clones = listed.clones || []
+        if (clones.length === 0) {
+          return { success: false, error: '本机还没有 WeClone', hint: '先执行 weclone.generate' }
+        }
+        const id = String(args.id || '').trim() || clones[0].id
+        const target = clones.find((c) => c.id === id)
+        if (!target) {
+          return { success: false, error: `找不到克隆 ${id}`, hint: `本机现有：${clones.map((c) => c.id).join('、')}` }
+        }
+        const current = weCloneService.getSettings(id)
+        if (!current.success) return { success: false, error: current.error || '读取设置失败' }
+        if (args.refusal === undefined) {
+          return { success: true, data: { id, refusal: current.settings?.refusal }, text: `${id}：敏感话题 ${current.settings?.refusal}` }
+        }
+        const mode = String(args.refusal)
+        if (mode !== 'character' && mode !== 'off') {
+          return { success: false, error: `refusal 只能是 character 或 off，收到 ${mode}` }
+        }
+        const saved = weCloneService.setSettings(id, { refusal: mode })
+        if (!saved.success) return { success: false, error: saved.error || '保存失败' }
+        return {
+          success: true,
+          data: { id, refusal: saved.settings?.refusal },
+          text:
+            saved.settings?.refusal === 'off'
+              ? `${id}：敏感话题不再回避（提示词里不会出现这一节）`
+              : `${id}：敏感话题以本人的方式带过去`,
         }
       },
     },

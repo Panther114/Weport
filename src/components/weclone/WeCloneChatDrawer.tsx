@@ -117,7 +117,17 @@ export default function WeCloneChatDrawer({
         const m = res.meta
         setLastStats(
           m
-            ? `${m.model} · 本地检索命中 ${m.corpusHits} 段 · 用时 ${m.retrieveCostMs}ms`
+            ? [
+                m.model,
+                // 两路检索分开报：命中 0 段和命中 20 段是完全不同的两件事，
+                // 而"语气样本 0 条"恰好解释了"它说话怎么不像我"
+                `历史片段 ${m.corpusHits} 段`,
+                `语气样本 ${m.voiceSamples ?? 0} 条`,
+                // 敏感话题策略也摆在这里：它是**每个克隆自己的设置**，
+                // 用户看到"它怎么什么都答"时，这一句就是解释
+                m.refusal === 'off' ? '敏感话题：不设限' : '敏感话题：以本人方式带过',
+                `用时 ${m.retrieveCostMs}ms`,
+              ].join(' · ')
             : null
         )
       } else {
@@ -284,7 +294,8 @@ export default function WeCloneChatDrawer({
                   {chatId ? <span className="weclone-chat-topic"> · {chats.find((c) => c.id === chatId)?.title || '对话'}</span> : null}
                 </h3>
                 <span className="hint">
-                  人格档案与语料都在本机；每轮会先在本机检索相关聊天片段，再交给你的模型。会跟着你的语言回答。
+                  人格档案与语料都在本机；每轮先在本机检索相关历史片段，再取几条你在同一话题上
+                  说过的原话作语气参照，一起交给你的模型。会跟着你的语言回答。
                 </span>
               </div>
             </div>

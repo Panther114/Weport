@@ -190,6 +190,14 @@ interface ConfigSchema {
   // 老配置文件里残留的这三个键会在下次写入时被丢弃 —— 它们不再被读取。
   /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
   weCloneLastCutoff: string
+  /**
+   * 生成克隆时是否做敏感信息脱敏（v1.0.1）。**默认 true**。
+   *
+   * 关掉之后：扫描时不把敏感值替换成占位符、生成 prompt 里的敏感信息条款整段
+   * 消失、第二阶段的 LLM 审查也跳过。语料仍然只存本机 —— 这个开关控制的是
+   * "要不要多做一层遮蔽"，而不是"要不要把数据发出去"。
+   */
+  wecloneRedact: boolean
 
   // 连接器（第三方工具，v1.0）
   /** 连接器配置 + 凭据信封，整体 safeStorage 加密（同 weportAiProfilesBlob）。 */
@@ -391,6 +399,7 @@ export class ConfigService {
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
       weCloneLastCutoff: '',
+      wecloneRedact: true,
       weportConnectorsBlob: '',
       connectorsAllowAgent: true,
     }

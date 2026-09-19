@@ -51,6 +51,65 @@ const DEFAULT_NOTIFICATION_DURATION_MS = 3000;
 const MIN_NOTIFICATION_DURATION_MS = 1000;
 const MAX_NOTIFICATION_DURATION_MS = 60_000;
 
+/**
+ * 卡片宽度的缺省与边界（与渲染层 `src/utils/notificationGlass.ts` 的常量保持一致）。
+ *
+ * v1.0.1 起宽度是**用户可配置**的（设置 → 消息通知设置 → 通知玻璃 → 基础宽度），
+ * 而且卡片会按昵称长度自适应再加宽（渲染层算出最终宽度后通过 notification:resize
+ * 回报）。主进程只在"弹出前"需要一个初值来定位窗口 —— 它不该猜，读配置；
+ * 读不到就退回 344（v1.0.0 之前的固定宽度）。
+ */
+const DEFAULT_CARD_WIDTH = 344;
+const MIN_CARD_WIDTH = 300;
+const MAX_CARD_WIDTH = 640;
+
+function normalizeCardWidth(value: unknown): number {
+  const width = Number(value);
+  if (!Number.isFinite(width)) return DEFAULT_CARD_WIDTH;
+  return Math.round(Math.min(MAX_CARD_WIDTH, Math.max(MIN_CARD_WIDTH, width)));
+}
+
+/** 卡片四周的基础留白（与渲染层 notificationGlass.ts 的常量保持一致）。 */
+const CARD_BASE_PADDING = 8;
+
+/**
+ * 投影占用的额外留白 —— **必须与渲染层 `notificationShadowMargin` 逐值一致**。
+ *
+ * 窗口尺寸 = 卡片宽度 + 2×留白，所以弹出前定位用的宽度必须把留白算进去，
+ * 否则"投影"拉大之后首次定位会偏，要等渲染层报回尺寸才纠正（看得见的跳动）。
+ * 参数与 `notificationShadowLayers` 是同一组数：偏移 3..9、模糊 8..20，
+ * 留白 min(36, ceil(偏移 + 模糊) + 2)。
+ */
+function shadowMargin(shadow: unknown): number {
+  const t = Math.min(100, Math.max(0, Number(shadow) || 0)) / 100;
+  if (t <= 0) return 0;
+  const offsetY = Math.round(3 + t * 6);
+  const blur = Math.round(8 + t * 12);
+  return Math.min(36, Math.ceil(offsetY + blur) + 2);
+}
+
+/** 窗口的完整宽度（卡片 + 两侧留白） */
+function notificationWindowWidth(config: ConfigService): number {
+  const card = normalizeCardWidth(notifGlassGet(config, "notificationGlassWidth"));
+  const pad = CARD_BASE_PADDING + shadowMargin(notifGlassGet(config, "notificationGlassShadow"));
+  return card + pad * 2;
+}
+
+/**
+ * 读通知玻璃配置。
+ *
+ * `notificationGlass*` 不在 `ConfigSchema` 里（渲染层通过非类型化的 config IPC
+ * 读写，与外观/主题那些键同一套做法），所以这里走 `(config as any).get` —— 与
+ * appMain.ts 的 `config:get` 处理器保持一致，不为了一个键去改全局 schema。
+ */
+function notifGlassGet(config: ConfigService, key: string): unknown {
+  try {
+    return (config as unknown as { get: (k: string) => unknown }).get(key);
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeNotificationDuration(value: unknown): number {
   const duration = Number(value);
   if (!Number.isFinite(duration)) return DEFAULT_NOTIFICATION_DURATION_MS;
@@ -573,7 +632,10 @@ async function showAndSend(win: BrowserWindow, data: any) {
   // 只用 workAreaSize 会把通知压进系统栏下面
   const display = screen.getPrimaryDisplay();
   const workArea = display.workArea;
-  const winWidth = position === "top-center" ? 280 : 344;
+  // 弹出前用**用户配置的基础宽度**定位；卡片实测宽度（可能因长昵称更大）会在
+  // 渲染层上报后由 notification:resize 重算坐标，见下面的 resize 处理。
+  // top-center 过去写死 280：那是"卡片比别的角窄"的历史遗留，现在统一走配置。
+  const winWidth = notificationWindowWidth(config);
   const winHeight = 114;
   const padding = 20;
 
@@ -766,19 +828,38 @@ export async function registerNotificationHandlers() {
       const prevSize = win.getSize();
       applyWindowSize(win, Math.round(width), Math.round(height));
 
-      // 底部定位（bottom-left / bottom-right）：窗口按渲染层实测高度增高后，
-      // 必须重新贴底，否则会向下长出屏幕（此前只 setSize，Y 不再重算）。
-      const [, newH] = win.getSize();
-      if (Math.round(newH) !== Math.round(prevSize[1])) {
+      /**
+       * 尺寸变化后必须**重新贴边**（v1.0.1 起宽度也会变，不再只有高度）。
+       *
+       * 旧版只处理"高度变大 → 底部定位的窗口重新贴底"。现在卡片会因为长昵称
+       * 自适应加宽，如果只 setSize 不重算 X，右上角的卡片会从右边长出屏幕 ——
+       * 而它本来就是贴边显示的。四个边角与居中都按新尺寸重算，宽度和高度任一变化
+       * 都会走到这里。
+       */
+      const [newW, newH] = win.getSize();
+      if (Math.round(newW) !== Math.round(prevSize[0]) || Math.round(newH) !== Math.round(prevSize[1])) {
         void (async () => {
           try {
             const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
+            const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+            const padding = 20;
+            const [winX, winY] = win.getPosition();
+            let nextX = winX;
+            let nextY = winY;
+            if (position === "top-right" || position === "bottom-right") {
+              nextX = workArea.x + workArea.width - newW - padding;
+            } else if (position === "top-center") {
+              nextX = workArea.x + (workArea.width - newW) / 2;
+            } else {
+              nextX = workArea.x + padding;
+            }
             if (position === "bottom-left" || position === "bottom-right") {
-              const workArea = screen.getPrimaryDisplay().workArea;
-              const padding = 20;
-              const [winX] = win.getPosition();
-              const newY = workArea.y + workArea.height - newH - padding;
-              win.setPosition(winX, newY);
+              nextY = workArea.y + workArea.height - newH - padding;
+            } else {
+              nextY = workArea.y + padding;
+            }
+            if (Math.round(nextX) !== winX || Math.round(nextY) !== winY) {
+              win.setPosition(Math.floor(nextX), Math.floor(nextY));
             }
           } catch { /* noop */ }
         })();

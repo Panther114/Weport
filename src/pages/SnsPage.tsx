@@ -25,6 +25,7 @@ import { SnsPreviewLightbox } from '../components/sns/SnsPreviewLightbox'
 import { ContactSnsTimelineDialog } from '../components/sns/ContactSnsTimelineDialog'
 import { SnsExportDialog } from '../components/sns/SnsExportDialog'
 import { useEscape } from '../utils/useEscape'
+import FloatingLayer from '../components/ui/FloatingLayer'
 import { EmptyState } from '../components/EmptyState'
 import { isSnsVideoUrl } from '../utils/snsParse'
 
@@ -105,6 +106,8 @@ export default function SnsPage() {
   postsRef.current = posts
   const feedRef = useRef<HTMLDivElement | null>(null)
   const jumpPopoverRef = useRef<HTMLDivElement | null>(null)
+  /** 日历浮层的锚点：`.sns-sidebar-date` 是侧栏里那一刻的定位基准 */
+  const dateAnchorRef = useRef<HTMLDivElement | null>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const loadingRef = useRef(false)
   const transientRetryRef = useRef(0)
@@ -711,7 +714,9 @@ export default function SnsPage() {
     if (!showJumpPopover) return
     const onDown = (e: MouseEvent) => {
       const node = e.target as Node
+      // 浮层渲染在 body 下（不在 jumpPopoverRef 内），两处都要看
       if (jumpPopoverRef.current?.contains(node)) return
+      if ((node as HTMLElement).closest?.('.sns-calendar-layer')) return
       if ((node as HTMLElement).closest?.('.sns-sidebar-date')) return
       setShowJumpPopover(false)
     }
@@ -955,7 +960,7 @@ export default function SnsPage() {
               <CalendarDays size={12} />
               日期
             </div>
-            <div className="sns-sidebar-date">
+            <div className="sns-sidebar-date" ref={dateAnchorRef}>
               <button
                 type="button"
                 className={`sns-date-jump-btn ${dateJump ? 'active' : ''}`}
@@ -969,7 +974,17 @@ export default function SnsPage() {
                   <X size={13} />
                 </button>
               )}
-              {showJumpPopover && (
+              {/* 日历浮层渲染到 body 下：侧栏本身是 `overflow: hidden` 的卡片，
+                  挂在文档流里的弹层会被它整块裁掉，而且盖不过列表。 */}
+              <FloatingLayer
+                anchor={dateAnchorRef}
+                open={showJumpPopover}
+                placement="bottom-start"
+                gap={6}
+                width={244}
+                minHeight={220}
+                className="sns-calendar-layer"
+              >
                 <div className="sns-calendar-popover" ref={jumpPopoverRef}>
                   <div className="sns-calendar-head">
                     <button type="button" className="sns-calendar-nav" onClick={() => shiftJumpMonth(-1)} title="上个月">
@@ -1012,7 +1027,7 @@ export default function SnsPage() {
                     )}
                   </div>
                 </div>
-              )}
+              </FloatingLayer>
             </div>
           </div>
 

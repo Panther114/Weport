@@ -312,9 +312,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   weclone: {
-    generate: () => ipcRenderer.invoke('weclone:generate'),
+    generate: (opts?: { redact?: boolean }) => ipcRenderer.invoke('weclone:generate', opts),
     list: () => ipcRenderer.invoke('weclone:list'),
     get: (id: string) => ipcRenderer.invoke('weclone:get', id),
+    /** 导出（生成）时的脱敏开关，持久化在配置里 */
+    getRedact: () => ipcRenderer.invoke('weclone:getRedact'),
+    setRedact: (enabled: boolean) => ipcRenderer.invoke('weclone:setRedact', enabled),
     // 纯本地：删除就是删掉本机目录，没有 remote 参数
     delete: (id: string) => ipcRenderer.invoke('weclone:delete', id),
     // on-device 对话：人格档案 + 本地检索都在主进程完成，不上传
@@ -328,7 +331,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('weclone:saveChat', payload),
     renameChat: (cloneId: string, chatId: string, title: string) => ipcRenderer.invoke('weclone:renameChat', cloneId, chatId, title),
     deleteChat: (cloneId: string, chatId: string) => ipcRenderer.invoke('weclone:deleteChat', cloneId, chatId),
-    onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback)
+    onProgress: (callback: (payload: any) => void) => subscribe('weclone:progress', callback),
+    /**
+     * 每个克隆自己的设置（v1.0.1）：拒答行为、脱敏开关等。
+     * 存在克隆目录里的 settings.json —— 和它的档案、语料同生共死。
+     */
+    getSettings: (cloneId: string) => ipcRenderer.invoke('weclone:getSettings', cloneId),
+    setSettings: (cloneId: string, patch: { refusal?: string }) =>
+      ipcRenderer.invoke('weclone:setSettings', cloneId, patch)
+  },
+
+  /**
+   * 长任务状态快照（v1.0.1）。
+   *
+   * 渲染进程可能被整个销毁重建（托盘隐藏销毁窗口 / 最小化 unload），而克隆
+   * 生成、导出、连接都跑在主进程里。新文档启动时调一次 `status()` 就能把进度、
+   * 日志、开始时间原样拿回来 —— 否则重建后的界面看起来像什么都没发生过。
+   */
+  task: {
+    status: () => ipcRenderer.invoke('task:status')
   },
 
   process: {

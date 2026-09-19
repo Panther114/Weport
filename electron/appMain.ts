@@ -54,6 +54,7 @@ import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
 import { setWeBotService } from './services/weBotRegistry'
 import { weCloneService } from './services/weCloneService'
+import { TASK_KEY, taskStatusService } from './services/taskStatusService'
 import { connectorsService } from './services/connectors/connectorsService'
 import { registerCliCommands } from './services/cliCommands'
 import { runCommand } from './services/weportCommands'
@@ -2385,7 +2386,23 @@ function registerIpcHandlers() {
   })
 
   // 聊天
-  ipcMain.handle('chat:connect', () => chatService.connect())
+  //
+  // 连接是一条**可能很久**的操作（读密钥要走原生 helper、可能要 sudo、要等
+  // WCDB 宿主起来）。状态写进 taskStatusService，这样渲染进程被销毁重建
+  // （托盘隐藏 / 最小化）之后仍然能看到"正在连接"而不是一个空白的按钮。
+  ipcMain.handle('chat:connect', async () => {
+    taskStatusService.begin(TASK_KEY.connect, '正在连接微信数据库…')
+    try {
+      const result = await chatService.connect()
+      if (result?.success) taskStatusService.end(TASK_KEY.connect, 'done', { message: '已连接' })
+      else taskStatusService.end(TASK_KEY.connect, 'failed', { error: String(result?.error || '连接失败'), message: '连接失败' })
+      return result
+    } catch (e) {
+      const message = String((e as Error)?.message || e)
+      taskStatusService.end(TASK_KEY.connect, 'failed', { error: message, message: '连接失败' })
+      throw e
+    }
+  })
   ipcMain.handle('chat:close', () => {
     chatService.close()
     return { success: true }
@@ -2484,6 +2501,7 @@ function registerIpcHandlers() {
 
     const taskId = `export-${Date.now()}`
     const control = exportTaskControlService.createControl(taskId, outDir)
+    taskStatusService.begin(TASK_KEY.export, '准备中…', 'prepare')
     const progressEmitter = (progress: any) => {
       // 进度事件携带 taskId：渲染层靠它执行 export:cancelTask
       //
@@ -2491,6 +2509,22 @@ function registerIpcHandlers() {
       // 每 400ms 一条，而群聊名可以很长。把无界字符串塞进高频事件里，渲染层每帧都
       // 要把一行超长文本交给文本整形 + 省略号计算，观感就是"名字在抖"。三个消费方
       // （进度条 / CLI 日志 / TUI）都从这里取数，所以在最上游收敛一次即可。
+      taskStatusService.progress(TASK_KEY.export, {
+        stage: String(progress?.phase || ''),
+        progress: Number(progress?.total) > 0 ? (Number(progress?.current) / Number(progress.total)) * 100 : undefined,
+        message: String(progress?.phaseLabel || progress?.currentSession || '导出中…'),
+        // 导出每 400ms 一条事件，全部记进日志会把 200 行的环形缓冲冲干净，
+        // 也读不出东西 —— 只记进度、不记日志，日志面板本来也只显示阶段行。
+        log: false,
+        detail: {
+          taskId,
+          current: Number(progress?.current) || 0,
+          total: Number(progress?.total) || 0,
+          phase: String(progress?.phase || ''),
+          phaseLabel: String(progress?.phaseLabel || ''),
+          currentSession: boundProgressSessionLabel(progress?.currentSession),
+        },
+      })
       mainWindow?.webContents.send('export:progress', {
         ...progress,
         currentSession: boundProgressSessionLabel(progress?.currentSession),
@@ -2539,6 +2573,18 @@ function registerIpcHandlers() {
       if (fmt === 'txt' || fmt === 'json') {
         writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
       }
+      // 终态显式落下：取消 / 失败 / 完成三种收尾在界面上完全不一样，
+      // 靠"进度到 100"推断会把一次取消显示成成功。
+      const cancelled = exportTaskControlService.getState(taskId) === 'cancel_requested'
+      taskStatusService.end(
+        TASK_KEY.export,
+        cancelled ? 'aborted' : result.success && result.failCount === 0 ? 'done' : 'failed',
+        {
+          message: cancelled ? '已取消导出' : `导出完成（成功 ${result.successCount || 0}，失败 ${result.failCount || 0}）`,
+          error: result.failCount ? `${result.failCount} 个会话导出失败` : undefined,
+          detail: { taskId, successCount: result.successCount || 0, failCount: result.failCount || 0 },
+        }
+      )
       return {
         ...result,
         success: result.success && result.failCount === 0,
@@ -2547,6 +2593,7 @@ function registerIpcHandlers() {
         taskId,
       }
     } catch (e) {
+      taskStatusService.end(TASK_KEY.export, 'failed', { error: String((e as Error)?.message || e), message: '导出失败' })
       return { success: false, successCount: 0, failCount: sessionIds.length, error: String((e as Error)?.message || e) }
     } finally {
       exportTaskControlService.releaseTask(taskId)
@@ -3133,20 +3180,60 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // 这几个我保留并扩展过的接口。此处只补齐 IPC。
   // -------------------------------------------------------------------------
   const wecloneControllers = new Map<string, AbortController>()
-  ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
+  ipcMain.handle('weclone:generate', async (_e, opts?: { redact?: boolean }) => {
     const taskId = 'generate'
     if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
     const ctrl = new AbortController()
     wecloneControllers.set(taskId, ctrl)
+    // 主进程侧的状态快照（见 taskStatusService）：渲染进程可能在中途被销毁重建，
+    // 只有主进程知道这次生成跑到哪一步了。
+    taskStatusService.begin(TASK_KEY.wecloneGenerate, '正在检查配置…', 'scan')
     try {
-      return await weCloneService.generateClone(
-        (progress) => mainWindow?.webContents.send('weclone:progress', progress),
-        ctrl.signal
+      const result = await weCloneService.generateClone(
+        (progress) => {
+          taskStatusService.progress(TASK_KEY.wecloneGenerate, {
+            stage: progress.stage,
+            progress: progress.progress,
+            message: progress.message,
+            detail: progress.detail,
+          })
+          mainWindow?.webContents.send('weclone:progress', progress)
+        },
+        ctrl.signal,
+        // 脱敏开关由渲染层传下来（导出页的勾选）；不传则用配置里的值。
+        // 两者都缺就是默认「开」。
+        { redact: opts?.redact !== undefined ? opts.redact !== false : weCloneService.getRedactEnabled() }
       )
+      if (result.success) {
+        taskStatusService.end(TASK_KEY.wecloneGenerate, 'done', {
+          message: '克隆已在本地生成',
+          detail: { cloneId: result.clone?.id },
+        })
+      } else if (result.aborted) {
+        taskStatusService.end(TASK_KEY.wecloneGenerate, 'aborted', { message: '已取消' })
+      } else {
+        taskStatusService.end(TASK_KEY.wecloneGenerate, 'failed', {
+          error: String(result.error || '生成失败'),
+          message: String(result.error || '生成失败'),
+        })
+      }
+      return result
+    } catch (error) {
+      const message = String((error as Error)?.message || error)
+      taskStatusService.end(TASK_KEY.wecloneGenerate, 'failed', { error: message, message })
+      throw error
     } finally {
       wecloneControllers.delete(taskId)
     }
   })
+  /**
+   * 导出（生成）时的脱敏开关。
+   *
+   * 存在配置里而不是只放在页面 state：用户勾了「不脱敏」然后切了个页面再回来，
+   * 勾选状态不该自己变回默认。
+   */
+  ipcMain.handle('weclone:getRedact', () => ({ success: true, redact: weCloneService.getRedactEnabled() }))
+  ipcMain.handle('weclone:setRedact', (_e, enabled: boolean) => weCloneService.setRedactEnabled(enabled !== false))
   ipcMain.handle('weclone:list', () => weCloneService.getClones())
   ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
   ipcMain.handle('weclone:delete', (_e, id: string) => weCloneService.deleteClone(String(id || '')))
@@ -3163,6 +3250,14 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weCloneService.cancel()
     return { success: true }
   })
+  /**
+   * 长任务状态快照。
+   *
+   * 渲染进程侧 `utils/liveTaskWiring.ts` 在应用启动时调用一次；窗口被销毁重建
+   * （托盘隐藏 / 最小化 unload）后**新文档**会再调一次，于是进度、日志、开始
+   * 时间都能原样恢复 —— 任务本身一直活在主进程里，从来没停过。
+   */
+  ipcMain.handle('task:status', () => taskStatusService.all())
   // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
   // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
   ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))
@@ -3187,6 +3282,12 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   )
   ipcMain.handle('weclone:deleteChat', (_e, cloneId: string, chatId: string) =>
     weCloneService.deleteChat(String(cloneId || ''), String(chatId || ''))
+  )
+  // 每个克隆自己的设置（v1.0.1）：目前只有拒答行为。存在克隆目录里，
+  // 跟着它的档案与语料一起生灭。
+  ipcMain.handle('weclone:getSettings', (_e, cloneId: string) => weCloneService.getSettings(String(cloneId || '')))
+  ipcMain.handle('weclone:setSettings', (_e, cloneId: string, patch: { refusal?: string }) =>
+    weCloneService.setSettings(String(cloneId || ''), patch || {})
   )
   // v1.0：`weclone:getForcedProviderStatus` / `weclone:ensureProvider` /
   // `weclone:setForcedApiKey` 三个通道已删除 —— 人格克隆不再有自己的服务，
@@ -4306,7 +4407,12 @@ async function runV09DumpMode() {
     const r = await wc.executeJavaScript(`
       (() => {
         const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
-        const b = buttons.find((x) => x.textContent.includes(${JSON.stringify(label)}));
+        // 先精确匹配，再退回包含匹配：左侧导航里「消息通知设置」包含「设置」，
+        // 只按 includes 找会把「设置」点到「消息通知设置」上去（实测：整段设置页
+        // 巡检拿到的全是通知页的截图，而断言只报"某个类名没渲染"，很难看出原因）。
+        const exact = ${JSON.stringify(label)};
+        const b = buttons.find((x) => (x.textContent || '').trim() === exact)
+          || buttons.find((x) => (x.textContent || '').includes(exact));
         if (!b) return { ok: false, tabs: buttons.map((x) => x.textContent.trim()) };
         b.click();
         return { ok: true };
@@ -5065,7 +5171,8 @@ async function runScreenshotMode() {
   const clickTab = (label: string) =>
     (mainWindow?.webContents
       .executeJavaScript(
-        `(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
+        // 精确优先（同 runScreenshotMode 的说明）：「设置」不能被「消息通知设置」抢走
+        `(() => { const items = Array.from(document.querySelectorAll('.tab, .rail-item')); const want = ${JSON.stringify(label)}; const b = items.find((el) => (el.textContent || '').trim() === want) || items.find((el) => (el.textContent || '').includes(want)); if (b) { b.click(); return true } return false })()`,
         true,
       )
       .catch(() => false) ?? Promise.resolve(false))
@@ -5639,9 +5746,41 @@ async function runScreenshotMode() {
              let bg = { r: 0, g: 0, b: 0, a: 0 }
              let node = el
              const layers = []
+             // 通知卡片的填充（--glass-fill）画在**卡片内部**的一层覆盖元素上，
+             // 不是任何文字的祖先 backgroundColor，所以只走 backgroundColor 的
+             // 祖先链会把"浅色玻璃上的黑字"判成"压在深色面板上的黑字"（实测 1.1，
+             // 假失败）。这里把它当成文字背后的一层正常参与合成：值可能是渐变
+             // （取各 stop 的平均，与 notificationGlassRepresentativeRgba 同口径），
+             // 也可能是单色 rgba。
+             const parseFill = (raw) => {
+               if (!raw) return null
+               const stops = []
+               const re = /rgba?\\(([^)]+)\\)/g
+               let m
+               while ((m = re.exec(raw))) {
+                 const parts = m[1].split(',').map((v) => Number.parseFloat(v.trim()))
+                 if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) continue
+                 stops.push({ r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 && Number.isFinite(parts[3]) ? parts[3] : 1 })
+               }
+               if (!stops.length) return null
+               const sum = stops.reduce((acc, s) => ({ r: acc.r + s.r, g: acc.g + s.g, b: acc.b + s.b, a: acc.a + s.a }), { r: 0, g: 0, b: 0, a: 0 })
+               return { r: sum.r / stops.length, g: sum.g / stops.length, b: sum.b / stops.length, a: sum.a / stops.length }
+             }
+             // 自定义属性会**继承**：--glass-fill 定义在卡片容器上，卡内每个后代都读得到
+             // 同一个值。按元素逐个入栈会把同一层填充叠 N 次，合成结果完全失真；
+             // 只在"本元素的填充与它**父级**的不同"（也就是它自己定义了这一层）时入栈。
              while (node && node.nodeType === 1) {
-               const c = parse(getComputedStyle(node).backgroundColor)
+               const style = getComputedStyle(node)
+               const c = parse(style.backgroundColor)
                if (c && c.a > 0) layers.push(c)
+               const rawFill = style.getPropertyValue('--glass-fill').trim()
+               const parentFill = node.parentElement
+                 ? getComputedStyle(node.parentElement).getPropertyValue('--glass-fill').trim()
+                 : ''
+               if (rawFill && rawFill !== parentFill) {
+                 const fill = parseFill(rawFill)
+                 if (fill && fill.a > 0) layers.push(fill)
+               }
                if (c && c.a >= 0.99) break
                node = node.parentElement
              }

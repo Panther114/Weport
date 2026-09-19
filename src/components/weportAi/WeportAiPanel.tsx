@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../reference/ReferencePicker'
-import { applyMention, findActiveMention, referenceKindLabel, type ChatReference } from '../../utils/mentionTrigger'
+import FloatingLayer from '../ui/FloatingLayer'
+import { findActiveMention, referenceKindLabel, rewriteMentionQuery, stripMention, type ChatReference } from '../../utils/mentionTrigger'
+import { loadReferenceCandidates } from '../../utils/sessionCandidates'
 import {
   Sparkles,
   Plus,
@@ -336,6 +338,11 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [referenceCandidates, setReferenceCandidates] = useState<ReferenceCandidate[]>([])
   const pickerRef = useRef<ReferencePickerHandle>(null)
   const candidatesLoaded = useRef(false)
+  // 候选是否**成功**读到 + 失败原因：空态文案是「读失败」还是「没有会话」取决于它。
+  const [candidatesState, setCandidatesState] = useState<{ loading: boolean; ok: boolean; error?: string }>({
+    loading: false,
+    ok: true,
+  })
   const [error, setError] = useState('')
   const [usage, setUsage] = useState<{
     totalTokens: number
@@ -488,7 +495,12 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     void refreshActions()
 
     const onDocClick = (e: MouseEvent) => {
-      if (actionsRef.current && !actionsRef.current.contains(e.target as Node)) setActionsOpen(false)
+      // 菜单渲染在 body 下的浮层里（不在 actionsRef 内），所以两处都要看：
+      // 只查 actionsRef 会让"点菜单项"先把菜单关掉，点击落空。
+      const target = e.target as Node
+      if (actionsRef.current?.contains(target)) return
+      if ((target as HTMLElement)?.closest?.('.ai-actions-layer')) return
+      setActionsOpen(false)
     }
     document.addEventListener('mousedown', onDocClick)
 
@@ -680,33 +692,23 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   /**
    * 懒加载会话候选：只有用户第一次打出 `@` 时才去读会话列表。
    * 打开 AI 页面本身不该触发一次全量会话查询。
+   *
+   * 两个约束（都是用户报过的 bug）：
+   * - 解包走 `utils/sessionCandidates`，`chat:getSessions` 的返回是 `{ sessions }`
+   *   而不是 `{ data }` —— 以前按 `data` 解包，于是永远显示「先连接微信」。
+   * - **失败/空结果不算"已加载"**：用户完全可以先打开这一页、再去连微信，
+   *   若把那次失败标记成已加载，`@` 就再也不会重新读一次。
    */
-  async function ensureReferenceCandidates(): Promise<void> {
-    if (candidatesLoaded.current) return
-    candidatesLoaded.current = true
-    try {
-      const raw = (await api.chat.getSessions()) as { data?: unknown[] } | unknown[]
-      const list = (Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : []) as Array<Record<string, unknown>>
-      const mapped: ReferenceCandidate[] = []
-      for (const session of list) {
-        const id = String(session.username || '').trim()
-        if (!id) continue
-        const kind: ReferenceCandidate['kind'] = id.endsWith('@chatroom')
-          ? 'group'
-          : id.startsWith('gh_')
-            ? 'official'
-            : 'private'
-        const label = String(session.displayName || session.remark || session.nickName || id)
-        mapped.push({ id, label, kind, avatarUrl: session.avatarUrl as string | undefined })
-      }
-      setReferenceCandidates(
-        mapped.sort((a, b) => {
-          if (a.kind !== b.kind) return a.kind === 'group' ? -1 : b.kind === 'group' ? 1 : 0
-          return a.label.localeCompare(b.label)
-        })
-      )
-    } catch {
-      setReferenceCandidates([])
+  async function ensureReferenceCandidates(force = false): Promise<void> {
+    if (candidatesLoaded.current && !force) return
+    setCandidatesState((prev) => ({ ...prev, loading: true }))
+    const result = await loadReferenceCandidates(() => api.chat.getSessions())
+    setCandidatesState({ loading: false, ok: result.ok, error: result.error })
+    if (result.ok) {
+      candidatesLoaded.current = true
+      setReferenceCandidates(result.candidates)
+    } else {
+      candidatesLoaded.current = false
     }
   }
 
@@ -719,11 +721,36 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   function pickReference(reference: ChatReference): void {
     if (!mention) return
     const node = inputRef.current
-    const caret = node?.selectionStart ?? mention.caret
-    const { value, caret: nextCaret } = applyMention(input, { start: mention.start, query: mention.query }, caret, reference.label)
+    // 光标只有焦点还在输入框里时才可信：用户在弹层搜索框里打过字之后，
+    // selectionStart 是旧值，用它切文本会切错位置。
+    const caret = document.activeElement === node ? (node?.selectionStart ?? mention.caret) : mention.caret
+    // **只加 chip，不往输入框里写 `@名称`**：同一份引用此前会出现两次
+    // （输入框里一次、输入框上方的 chip 区一次），用户要的是只留 chip。
+    const { value, caret: nextCaret } = stripMention(input, { start: mention.start, query: mention.query }, caret)
     handleInputChange(value)
     setReferences((prev) => (prev.some((item) => item.id === reference.id) ? prev : [...prev, reference]))
     setMention(null)
+    requestAnimationFrame(() => {
+      node?.focus()
+      node?.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
+
+  /**
+   * 浮层搜索框改了查询串 → 改写输入框里的那段 `@查询`。
+   *
+   * 查询串的唯一来源是输入框的文本（弹层只是它的另一个视图）；两边各存一份
+   * 状态最后一定会跑偏。
+   */
+  function setMentionQuery(query: string): void {
+    if (!mention) return
+    const node = inputRef.current
+    const caret = document.activeElement === node ? (node?.selectionStart ?? mention.caret) : mention.caret
+    const { value, caret: nextCaret } = rewriteMentionQuery(input, { start: mention.start, query: mention.query }, caret, query)
+    handleInputChange(value)
+    setMention({ start: mention.start, query: value.slice(mention.start + 1, nextCaret), caret: nextCaret })
+    // 焦点在弹层搜索框里时不要抢回来 —— 用户正在那里打字。
+    if (document.activeElement?.closest?.('.ref-picker')) return
     requestAnimationFrame(() => {
       node?.focus()
       node?.setSelectionRange(nextCaret, nextCaret)
@@ -1286,16 +1313,19 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
         )}
 
         {mention && (
-          <div className="ai-ref-picker">
-            <ReferencePicker
-              ref={pickerRef}
-              query={mention.query}
-              candidates={referenceCandidates}
-              onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
-              onPick={pickReference}
-              onClose={() => setMention(null)}
-            />
-          </div>
+          <ReferencePicker
+            ref={pickerRef}
+            anchor={inputRef}
+            query={mention.query}
+            candidates={referenceCandidates}
+            loading={candidatesState.loading}
+            ok={candidatesState.ok}
+            error={candidatesState.error}
+            onQueryChange={setMentionQuery}
+            onPick={pickReference}
+            onClose={() => setMention(null)}
+            onReturnFocus={() => inputRef.current?.focus()}
+          />
         )}
 
         <div className="ai-composer">
@@ -1310,28 +1340,40 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               <Zap size={14} />
             </button>
             {actionsOpen && (
-              <div className="ai-actions-menu">
-                <div className="ai-actions-head">快捷动作（在设置中管理）</div>
-                {actions.length === 0 ? (
-                  <div className="ai-actions-empty">还没有动作 — 在设置里添加</div>
-                ) : (
-                  actions.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className="ai-action-item"
-                      onClick={() => {
-                        setInput(a.prompt)
-                        setActionsOpen(false)
-                        inputRef.current?.focus()
-                      }}
-                    >
-                      <strong>{a.name}</strong>
-                      <span>{a.prompt.slice(0, 60)}</span>
-                    </button>
-                  ))
-                )}
-              </div>
+              /* 浮层渲染到 body 下：输入条在页面底部，菜单向上展开，挂在文档流里
+                 会被主区域的滚动/裁切吃掉一半。 */
+              <FloatingLayer
+                anchor={actionsRef}
+                open
+                placement="top-start"
+                gap={8}
+                width={320}
+                minHeight={120}
+                className="ai-actions-layer"
+              >
+                <div className="ai-actions-menu">
+                  <div className="ai-actions-head">快捷动作（在设置中管理）</div>
+                  {actions.length === 0 ? (
+                    <div className="ai-actions-empty">还没有动作 — 在设置里添加</div>
+                  ) : (
+                    actions.map((a) => (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className="ai-action-item"
+                        onClick={() => {
+                          setInput(a.prompt)
+                          setActionsOpen(false)
+                          inputRef.current?.focus()
+                        }}
+                      >
+                        <strong>{a.name}</strong>
+                        <span>{a.prompt.slice(0, 60)}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </FloatingLayer>
             )}
           </div>
           <textarea

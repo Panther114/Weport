@@ -2,6 +2,16 @@ import './styles.css'
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { installLiveTaskWiring } from './utils/liveTaskWiring'
+
+/**
+ * 长任务的进度接线在**应用启动时**装好，不等任何页面挂载。
+ *
+ * 页面是 `React.lazy` + 条件渲染，切一个标签页就卸载了；托盘隐藏更会直接销毁
+ * 窗口。订阅必须活在页面之上 —— 否则"切走再切回来就看不到进度"永远修不掉
+ * （用户报的克隆生成 / 导出 / 连接微信三个场景都是这一条）。
+ */
+installLiveTaskWiring()
 
 const hash = window.location.hash
 const rootEl = document.getElementById('root')!

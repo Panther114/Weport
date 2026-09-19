@@ -27,6 +27,20 @@
   --font-mono: Consolas, "Cascadia Mono", "JetBrains Mono", monospace;
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+  /* 层级阶梯（v1.0.1）。全应用只用这一组值，不再各处写魔数：
+       --z-sticky     吸顶/吸底条
+       --z-popover    文档流内的局部浮层（内联下拉、日历）
+       --z-float      **渲染到 body 下**的浮层（components/ui/FloatingLayer）
+       --z-modal      模态遮罩
+       --z-toast      全局提示
+     浮层必须高于模态：模态里也会打开取色器/选择器，而它渲染在模态的 DOM 之外。
+     弹窗（通知）是**另一个 BrowserWindow**，不参与这套阶梯。 */
+  --z-sticky: 20;
+  --z-popover: 40;
+  --z-float: 1200;
+  --z-modal: 1000;
+  --z-toast: 1400;
 }
 
 /* 强调色家族与明暗两档 moved to styles/theme.scss（在本文件之后加载）：
@@ -2362,7 +2376,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 1000;
+  z-index: var(--z-toast, 1400);
   max-width: 340px;
   pointer-events: none;
 }
@@ -3992,18 +4006,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* 定位交给 components/ui/FloatingLayer（渲染在 body 下，视口坐标 + 自动翻转），
+   这里只管观感。 */
 .ai-actions-menu {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  width: 320px;
+  width: 100%;
   background: var(--elevated);
   border: 1px solid var(--line-strong);
   border-radius: 12px;
   box-shadow: var(--shadow-pop);
   padding: 8px;
-  z-index: 50;
-  animation: modal-in 0.15s ease;
 }
 
 .ai-actions-head {

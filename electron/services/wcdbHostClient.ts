@@ -2,9 +2,17 @@
  * WCDB 宿主进程客户端（替代 worker_threads 的传输层）。
  *
  * wcdb_api.dll 的 -1006 安全检查要求宿主可执行文件名为 WeFlow.exe（Windows）
- * / WeFlow（macOS，同名规则）。方案：在当前 exe 同目录创建硬链接
- * WeFlow[.exe] -> 当前 exe（NTFS / APFS 零磁盘开销，与 exe 同目录可复用
- * electron.dll / Electron.framework / resources）。
+ * / WeFlow（macOS，同名规则）。Windows/Linux：在当前 exe 同目录创建硬链接
+ * WeFlow[.exe] -> 当前 exe（NTFS 零磁盘开销，与 exe 同目录可复用
+ * electron.dll / 共享库 / resources）。
+ *
+ * macOS 例外：绝不在 app bundle 内创建任何文件。在 `Contents/MacOS/` 下多加
+ * 一个文件会直接破坏 bundle 密封（`codesign --verify --deep --strict` 报
+ * `file added: .../Contents/MacOS/WeFlow`，实测见 v1.0.0 用户反馈），而 CI 的
+ * `verify-mac-pack.sh` 跑在首次启动之前，拦不住这种运行期自改。因此 darwin
+ * 永远把宿主部署到 `{userData}/wcdb-host/Contents/MacOS/WeFlow`（bundle 结构
+ * + 软链回真实 Frameworks，见 createMacHostBundle），并尽力清理旧版遗留的
+ * bundle 内硬链接以自愈密封。
  *
  * 宿主以 ELECTRON_RUN_AS_NODE=1 启动（0.9.3 起）：同一个二进制以纯 Node.js
  * 运行 wcdbHost.js，不初始化 Chromium 浏览器进程 —— 省掉宿主侧 ~100MB 常驻
@@ -27,10 +35,10 @@
 import { EventEmitter } from 'events'
 import { spawn, type ChildProcess } from 'child_process'
 import { join, dirname, delimiter } from 'path'
-import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync } from 'fs'
+import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync, readlinkSync } from 'fs'
 
 /**
- * macOS 专用兜底：把宿主二进制按 bundle 结构摆好，再软链回真正的框架。
+ * macOS 宿主归宿：`{userData}/wcdb-host/Contents/MacOS/WeFlow`。
  *
  * 为什么不能只复制二进制：Electron 的可执行文件用
  * `@executable_path/../Frameworks` 解析 `Electron Framework.framework`。
@@ -44,11 +52,17 @@ import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, ut
  *   {fallback}/Contents/Info.plist            ← 复制（部分 Electron 版本会读）
  * `@executable_path` 指向 MacOS 目录，`../Frameworks` 因此能穿过软链解析成功。
  *
- * 只在 `process.execPath` 所在目录不可写时才会走到这里 —— 典型场景是从
- * 已挂载的 DMG 里直接运行，或应用带 quarantine 被 App Translocation 到了只读卷。
+ * 为什么所有 darwin 启动都走这里（而不只在 exe 目录不可写时）：
+ * 在 bundle 内（`Contents/MacOS/WeFlow`）放硬链接会破坏 bundle 密封，
+ * `codesign --verify --deep --strict` 报 `file added`，Gatekeeper 判损坏；
+ * CI 的签名门跑在首次启动之前，拦不住运行期自改。userData 不在密封范围内，
+ * 在那里放宿主永远不影响签名。
  */
 function createMacHostBundle(targetExe: string, exeDir: string, fallbackDir: string): string | null {
   try {
+    // exeDir 在打包版是 `.../Weport.app/Contents/MacOS`。用 '..' 拼 Frameworks
+    // 是刻意的：dev（node_modules/electron/dist）、打包版、DMG 挂载都满足
+    // `MacOS/../Frameworks`，而按 bundle 名回溯在 dev 下不成立。
     const appContents = join(exeDir, '..')
     const sourceFrameworks = join(appContents, 'Frameworks')
     if (!existsSync(sourceFrameworks)) return null
@@ -66,8 +80,15 @@ function createMacHostBundle(targetExe: string, exeDir: string, fallbackDir: str
     } catch { /* mtime 尽力而为 */ }
 
     const destFrameworks = join(destContents, 'Frameworks')
-    if (!existsSync(destFrameworks)) {
+    try {
+      // 悬空软链（app 更新/搬家后常见）：existsSync 跟随链接返回 false，
+      // 但路径本身存在，直接 symlink 会 EEXIST —— 先删再建。
+      unlinkSync(destFrameworks)
+    } catch { /* 不存在最好 */ }
+    try {
       symlinkSync(sourceFrameworks, destFrameworks, 'dir')
+    } catch {
+      return null
     }
 
     const sourcePlist = join(appContents, 'Info.plist')
@@ -83,13 +104,112 @@ function createMacHostBundle(targetExe: string, exeDir: string, fallbackDir: str
   }
 }
 
+/**
+ * 清理 v1.0.0 及更早版本遗留在 bundle 内的宿主硬链接。
+ *
+ * 旧版在 darwin 上与 win/linux 一样往 `Contents/MacOS/WeFlow` 写硬链接，
+ * 该文件不在密封清单里 —— 一旦存在，`codesign --verify --deep --strict`
+ * 永久失败直到它被删掉。删除它即自愈密封（密封清单本身未被改动，只是
+ * 多了一个清单外的文件）。
+ *
+ * 只删恰好叫 `WeFlow` 且与当前 exe 内容一致（size+mtime）的那个文件，
+ * 避免误删用户自己放的东西；删不掉（只读挂载）也不致命 —— 下面的解析
+ * 本来就不依赖它。
+ */
+function cleanupLegacyMacHostLink(targetExe: string, exeDir: string): void {
+  try {
+    const legacy = join(exeDir, 'WeFlow')
+    if (!existsSync(legacy)) return
+    let same = false
+    try {
+      const s = statSync(legacy)
+      const t = statSync(targetExe)
+      same = s.size === t.size && Math.floor(s.mtimeMs) === Math.floor(t.mtimeMs)
+    } catch { /* 读不到 stat 就不动它 */ }
+    if (!same) return
+    try {
+      unlinkSync(legacy)
+      console.warn('[wcdb-host] 已清理 bundle 内旧版宿主链接 Contents/MacOS/WeFlow（恢复代码签名密封）')
+    } catch (e) {
+      console.warn(`[wcdb-host] bundle 内旧版宿主链接无法删除（只读挂载？）：${String((e as Error)?.message || e)}`)
+    }
+  } catch { /* 自愈尽力而为，绝不阻塞启动 */ }
+}
+
+function getMacFallbackDir(): string {
+  const { app } = require('electron') as typeof import('electron')
+  const dir = join(app.getPath('userData'), 'wcdb-host')
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 部署（或复用）macOS 宿主。返回宿主可执行文件路径，失败返回 null。 */
+function ensureMacHost(targetExe: string, exeDir: string): string | null {
+  cleanupLegacyMacHostLink(targetExe, exeDir)
+  let fallbackDir = ''
+  try {
+    // app 仅在主进程可用；本模块只在主进程使用
+    fallbackDir = getMacFallbackDir()
+  } catch {
+    return null
+  }
+  const destHost = join(fallbackDir, 'Contents', 'MacOS', 'WeFlow')
+  // 已部署且与当前 exe 一致 → 复用（覆盖安装/更新后 exe 变化则重建；
+  // 只比大小会漏掉「新 exe 与旧版本恰好同尺寸」的更新）
+  try {
+    const s = statSync(destHost)
+    const t = statSync(targetExe)
+    if (s.size === t.size && Math.floor(s.mtimeMs) === Math.floor(t.mtimeMs)) {
+      // 软链可能在 app 更新/搬家后断掉 —— 每次都修一次，便宜且无副作用。
+      repairMacFrameworksSymlink(exeDir, fallbackDir)
+      return destHost
+    }
+  } catch { /* 不存在或读不到 → 重新部署 */ }
+  const bundledHost = createMacHostBundle(targetExe, exeDir, fallbackDir)
+  if (bundledHost) {
+    console.warn(`[wcdb-host] macOS 宿主已部署到 ${bundledHost}（bundle 内不写文件，签名密封不受影响）`)
+    return bundledHost
+  }
+  return null
+}
+
+/** app 更新/搬家后，已部署宿主的 Frameworks 软链可能断掉 —— 每次启动修一次。 */
+function repairMacFrameworksSymlink(exeDir: string, fallbackDir: string): void {
+  try {
+    const sourceFrameworks = join(exeDir, '..', 'Frameworks')
+    if (!existsSync(sourceFrameworks)) return
+    const destFrameworks = join(fallbackDir, 'Contents', 'Frameworks')
+    let stale = false
+    try {
+      const current = readlinkSync(destFrameworks)
+      stale = current !== sourceFrameworks
+    } catch {
+      stale = !existsSync(destFrameworks)
+    }
+    if (!stale) return
+    try { unlinkSync(destFrameworks) } catch { /* 可能是目录而非软链？只处理软链 */ }
+    symlinkSync(sourceFrameworks, destFrameworks, 'dir')
+  } catch { /* 尽力而为 */ }
+}
+
 function resolveHostExe(): string {
   const override = process.env.WEPORT_WCDB_HOST_EXE
   if (override && existsSync(override)) return override
 
   const target = process.execPath
-  const hostName = process.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
   const exeDir = dirname(target)
+
+  // macOS：永远走 userData bundle 结构 —— bundle 内写文件即破密封（v1.0.0 实测）。
+  // 放在 resolveHostExe 最前面：连「已存在硬链接可复用」都不检查，因为复用
+  // 本身就是 bug（那个文件就不该存在）。
+  if (process.platform === 'darwin') {
+    const macHost = ensureMacHost(target, exeDir)
+    if (macHost) return macHost
+    // userData 都拿不到（理论不可达）才退回旧行为，总比起不来强。
+    console.warn('[wcdb-host] userData 不可用，回退到 bundle 内硬链接（签名密封将被破坏）')
+  }
+
+  const hostName = process.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
   const hostPath = join(exeDir, hostName)
 
   // 已存在且大小+修改时间一致 → 直接复用（覆盖安装/更新后 exe 变化则重建链接；
@@ -108,10 +228,20 @@ function resolveHostExe(): string {
       if (existsSync(hostPath)) unlinkSync(hostPath)
       linkSync(target, hostPath)
     } catch (e) {
-      // Linux 常见：exe 目录只读（AppImage squashfs、/usr/bin、deb /opt）。
+      // Windows/Linux 常见：exe 目录只读（AppImage squashfs、/usr/bin、deb /opt）。
       // 硬链接必须同文件系统 —— 退化为复制到 userData（跨设备只能复制，
       // mtime 对齐以复用上面的「同版本跳过」检查；-1006 检查的是宿主进程
       // 自身路径名，复制出的 WeFlow 同样满足）。
+      //
+      // darwin 走不到这里：resolveHostExe 开头已返回 userData bundle 宿主，
+      // 只有 userData 都不可用（理论不可达）才会沿旧路径掉下来，此时直接报错，
+      // 不再尝试裸复制（裸二进制在 macOS 上找不到 Frameworks，必起不来）。
+      if (process.platform === 'darwin') {
+        throw new Error(
+          `无法部署 WCDB 宿主进程 (${String((e as Error)?.message || e)})。` +
+          '请确认 ~/Library/Application Support/Weport 可写。'
+        )
+      }
       let fallbackDir = ''
       try {
         // app 仅在主进程可用；本模块只在主进程使用
@@ -122,14 +252,6 @@ function resolveHostExe(): string {
         /* 无 electron（理论不可达），保持原错误 */
       }
       if (fallbackDir) {
-        // macOS 必须先按 bundle 结构摆放，否则复制的二进制找不到框架。
-        if (process.platform === 'darwin') {
-          const bundledHost = createMacHostBundle(target, exeDir, fallbackDir)
-          if (bundledHost) {
-            console.warn(`[wcdb-host] exe 目录不可写，宿主已按 bundle 结构部署到 ${bundledHost}`)
-            return bundledHost
-          }
-        }
         const copiedPath = join(fallbackDir, hostName)
         try {
           copyFileSync(target, copiedPath)
@@ -149,7 +271,7 @@ function resolveHostExe(): string {
       }
       throw new Error(
         `无法创建 WCDB 宿主进程 (${hostPath}): ${String((e as Error)?.message || e)}。` +
-        '请确认安装目录可写（Windows: NTFS / macOS: APFS / Linux: 非 AppImage 只读挂载），或以管理员身份运行。'
+        '请确认安装目录可写（Windows: NTFS / Linux: 非 AppImage 只读挂载），或以管理员身份运行。'
       )
     }
   }

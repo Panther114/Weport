@@ -11,10 +11,12 @@ import {
 import '../components/NotificationToast.scss'
 import './NotificationWindow.scss'
 import {
+    NOTIFICATION_CARD_MAX_HEIGHT,
     NOTIFICATION_GLASS_DEFAULT,
     NOTIFICATION_GLASS_KEYS,
     glassTextPolarity,
     normalizeNotificationGlass,
+    notificationCardPadding,
     notificationGlassRenderParams,
     type NotificationGlass
 } from '../utils/notificationGlass'
@@ -75,6 +77,9 @@ export default function NotificationWindow() {
     // 上次上报的窗口尺寸：重复上报会触发主进程 setSize，
     // 可见状态下反复设置尺寸会让 DWM 短暂拉伸旧帧缓冲，闪出一圈幽灵轮廓
     const lastSizeRef = useRef<{ width: number; height: number } | null>(null)
+    // 渲染层实测的卡片尺寸（含自适应加宽的宽度）。窗口必须跟着它走：卡片变宽而
+    // 窗口不变 = 右侧被裁掉；卡片变窄而窗口不变 = 留下一片拦截桌面点击的空白。
+    const [measured, setMeasured] = useState<{ width: number; height: number } | null>(null)
     // 采集源 ID：与窗口/流生命周期解耦，事件回调里读 ref
     const sourceIdRef = useRef<string | null>(null)
 
@@ -322,24 +327,40 @@ export default function NotificationWindow() {
         window.electronAPI.notification?.close()
     }
 
+    /**
+     * 窗口尺寸跟卡片走（v1.0.1）。
+     *
+     * 旧版把宽度写死成 344（top-center 写死 280），高度取 `#notification-root` 实测值；
+     * 现在卡片宽度是"用户基础宽度 + 昵称过长时的自适应增量"，只有渲染层知道，
+     * 所以这里改成：
+     *   · 宽度 = 卡片实测宽度（onMeasure 上报，未上报前先按配置的基础宽度兜底）；
+     *   · 高度 = max(root 实测高度, 卡片上报高度)，上限 NOTIFICATION_CARD_MAX_HEIGHT。
+     *
+     * 主进程收到 notification:resize 后会按弹窗位置重新贴边（右上/右下/居中），
+     * 因此加宽不会把卡片推出屏幕。
+     */
     useEffect(() => {
         if (!notification && !prevNotification) return
 
         const timer = setTimeout(() => {
-            // 窗口必须精确贴合内容高度，多余区域会拦截桌面点击
+            // 窗口必须精确贴合内容：多余区域会拦截桌面点击。
+            // 宽度 = 卡片 + 两侧留白（留白里画的是投影，见 notificationCardPadding）。
             const root = document.getElementById('notification-root')
-            if (root && window.electronAPI?.notification?.resize) {
-                const width = position === 'top-center' ? 280 : 344
-                const height = Math.min(Math.ceil(root.getBoundingClientRect().height), 300)
-                const last = lastSizeRef.current
-                if (last && last.width === width && last.height === height) return
-                lastSizeRef.current = { width, height }
-                window.electronAPI.notification.resize(width, height)
-            }
+            if (!root || !window.electronAPI?.notification?.resize) return
+            const minWidth = glass.width + notificationCardPadding(glass.shadow) * 2
+            const width = Math.max(Math.round(measured?.width ?? minWidth), minWidth)
+            const height = Math.min(
+                Math.max(Math.ceil(root.getBoundingClientRect().height), Math.round(measured?.height ?? 0)),
+                NOTIFICATION_CARD_MAX_HEIGHT
+            )
+            const last = lastSizeRef.current
+            if (last && last.width === width && last.height === height) return
+            lastSizeRef.current = { width, height }
+            window.electronAPI.notification.resize(width, height)
         }, 50)
 
         return () => clearTimeout(timer)
-    }, [notification, prevNotification, position])
+    }, [notification, prevNotification, position, measured, glass.width, glass.shadow])
 
     // 原生玻璃模式：卡片挂载后上报实测几何（窗口本地 CSS 像素 + 卡片本地亮度带），
     // 主进程据此创建/复用窗口下方的原生面板；参数与 LiquidGlass 的视觉参数一致
@@ -393,25 +414,6 @@ export default function NotificationWindow() {
         }
     }, [nativeBackdrop, notification, position, glass])
 
-    useEffect(() => {
-        if (!notification && !prevNotification) return
-
-        const timer = setTimeout(() => {
-            // 窗口必须精确贴合内容高度，多余区域会拦截桌面点击
-            const root = document.getElementById('notification-root')
-            if (root && window.electronAPI?.notification?.resize) {
-                const width = position === 'top-center' ? 280 : 344
-                const height = Math.min(Math.ceil(root.getBoundingClientRect().height), 300)
-                const last = lastSizeRef.current
-                if (last && last.width === width && last.height === height) return
-                lastSizeRef.current = { width, height }
-                window.electronAPI.notification.resize(width, height)
-            }
-        }, 50)
-
-        return () => clearTimeout(timer)
-    }, [notification, prevNotification, position])
-
     if (!notification && !prevNotification) return null
 
     return (
@@ -446,6 +448,10 @@ export default function NotificationWindow() {
                             data={prevNotification}
                             onClose={() => { }} // No-op for background item
                             initialVisible={true}
+                            // 桌面帧进玻璃：这是"折射强度 / 玻璃模糊"唯一能作用的对象
+                            // （透明窗口里 backdrop-filter 不生效）。NotificationToast
+                            // 只在用户把这两个滑块拨离 0 时才真的用它。
+                            backdropImage={backdrop}
                             backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
                             glass={glass}
@@ -475,11 +481,15 @@ export default function NotificationWindow() {
                             data={notification}
                             onClose={handleClose}
                             initialVisible={true}
+                            backdropImage={backdrop}
                             backdropStream={backdropStream}
                             nativeBackdrop={nativeBackdrop}
                             glass={glass}
                             duration={notification.notificationDuration}
                             animationEnabled={notification.notificationAnimationEnabled !== false}
+                            // 只有"当前"这条上报尺寸：旧卡片是绝对定位的过渡层，
+                            // 它的宽度不该决定窗口大小
+                            onMeasure={setMeasured}
                             // 退场动画开始的一刻同步淡出原生面板（与卡片 0.3s 渐隐节奏匹配）
                             onHideStart={nativeBackdrop ? () => window.electronAPI?.notification?.glassHide?.() : undefined}
                         />

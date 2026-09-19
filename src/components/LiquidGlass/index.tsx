@@ -69,6 +69,15 @@ export interface LiquidGlassProps {
     displacementScale?: number
     /** 磨砂程度（0~1，映射为额外的 backdrop blur 像素） */
     blurAmount?: number
+    /**
+     * 模糊像素的**最终值**（v1.0.1）。
+     *
+     * 通知卡片把"折射厚度"和"磨砂模糊"拆成了两个用户可调的档（设置 → 消息通知 →
+     * 通知玻璃），因此模糊不能再由 blurAmount 反推：这里直接收最终像素值。
+     * 两个管线的换算保持一致 —— WebGL 管线把它当 sigma、回退管线当 CSS blur()，
+     * 与改动前 `(4 + blurAmount * 32) / 2` 的取值逐值相同。不传则退回旧公式。
+     */
+    blurPx?: number
     /** 背景饱和度百分比 */
     saturation?: number
     /** 边缘色散强度 */
@@ -117,6 +126,7 @@ export default function LiquidGlass({
     children,
     displacementScale = 70,
     blurAmount = 0.0625,
+    blurPx,
     saturation = 140,
     aberrationIntensity = 2,
     elasticity = 0,
@@ -134,6 +144,11 @@ export default function LiquidGlass({
     const rawId = useId()
     // useId 可能包含 ':' 等 CSS url() 不接受的字符，需要清洗后才能用作滤镜 id
     const filterId = `liquid-glass-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`
+    // 模糊像素：显式传入优先，否则按旧的 blurAmount 公式换算（默认调用方行为不变）。
+    // 两条回退管线的比例关系保持原样：快照/视频是"对像素源直接下滤镜"，模糊半径减半
+    // 才与 backdrop 采样同观感，所以 backdrop-filter 那条路用两倍值。
+    const effectiveBlurPx = Math.max(0, blurPx ?? (4 + blurAmount * 32) / 2)
+    const backdropBlurPx = blurPx === undefined ? 4 + blurAmount * 32 : blurPx * 2
 
     const [isHovered, setIsHovered] = useState(false)
     const [isActive, setIsActive] = useState(false)
@@ -179,8 +194,8 @@ export default function LiquidGlass({
             displacementScale,
             aberrationIntensity,
             saturation,
-            // 与回退管线的 blur(${(4 + blurAmount * 32) / 2}px) 一致
-            blurSigma: (4 + blurAmount * 32) / 2,
+            // 与回退管线的 blur(${effectiveBlurPx}px) 一致
+            blurSigma: effectiveBlurPx,
             onFirstFrame: () => setStreamLive(true)
         })
         if (!renderer) {
@@ -195,7 +210,7 @@ export default function LiquidGlass({
     }, [
         useGlPipeline, backdropStream, glassSize.width, glassSize.height, cornerRadius,
         backdropImage?.screenX, backdropImage?.screenY, backdropImage?.width, backdropImage?.height,
-        anchor.x, anchor.y, displacementScale, aberrationIntensity, saturation, blurAmount
+        anchor.x, anchor.y, displacementScale, aberrationIntensity, saturation, effectiveBlurPx
     ])
 
     // 回退管线：<video> 承载流，CSS/SVG 滤镜加工
@@ -347,6 +362,16 @@ export default function LiquidGlass({
         <div
             ref={rootRef}
             className={`liquid-glass ${className}`.trim()}
+            /**
+             * 折射/模糊的**实际生效值**挂成数据属性。
+             *
+             * 和 `<html data-glass>` 同一个用途：让探针能断言"滑块真的把参数送到了玻璃"，
+             * 而不是只看控件自己的 value（控件值一直是对的，坏的是它到渲染的链路）。
+             * 设置页的预览没有桌面帧可用，`backdrop-filter` 那条路上的观感没法用像素
+             * 断言，只能靠这两个值把链路钉死。
+             */
+            data-glass-blur={effectiveBlurPx}
+            data-glass-disp={displacementScale}
             style={{
                 position: 'relative',
                 borderRadius: cornerRadius,
@@ -402,7 +427,7 @@ export default function LiquidGlass({
                                 inset: -PIXEL_SOURCE_BLEED,
                                 overflow: 'hidden',
                                 // 快照模式模糊直接作用于像素源，同参数观感重于 backdrop 采样，减半以保留折射细节
-                                filter: `blur(${(4 + blurAmount * 32) / 2}px) saturate(${saturation}%)`
+                                filter: `blur(${effectiveBlurPx}px) saturate(${saturation}%)`
                             }}
                         >
                             {backdropImage.dataUrl && !streamLive && (
@@ -431,7 +456,7 @@ export default function LiquidGlass({
                         ...overlayBase,
                         overflow: 'hidden',
                         // 与原库一致的轻模糊基线，保证玻璃通透而非磨砂
-                        backdropFilter: `blur(${4 + blurAmount * 32}px) saturate(${saturation}%)`,
+                        backdropFilter: `blur(${backdropBlurPx}px) saturate(${saturation}%)`,
                         filter: refractionFilter
                     }}
                 />

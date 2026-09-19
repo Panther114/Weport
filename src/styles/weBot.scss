@@ -332,12 +332,9 @@
   }
 }
 
-.webot-picker-anchor {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 40;
-}
+// 引用选择器不再需要锚点容器：它渲染在 body 下的浮层里（components/ui/FloatingLayer）。
+// 旧版这里是 `position: absolute; bottom: calc(100% + 6px)`，在 `.webot` 的
+// 滚动容器内向上展开时会被整块裁掉 —— 用户看到的"弹窗在顶部被切掉"。
 
 .webot-schedule-row {
   display: flex;

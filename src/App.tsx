@@ -64,6 +64,9 @@ import type { SetupInfo } from './components/weportAi/aiPanelTypes'
 import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
+import BackgroundTasks from './components/BackgroundTasks'
+import { LIVE_TASK, liveTask } from './utils/liveTask'
+import { invalidateReferenceCandidates } from './utils/sessionCandidates'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 
 /**
@@ -303,7 +306,7 @@ const TABS: Array<{
   { id: 'sns', label: '朋友圈', icon: Images, group: 'wechat', hint: '浏览与导出朋友圈动态' },
   { id: 'analytics', label: '分析', icon: LineChart, group: 'wechat', hint: '全局与群聊统计图表' },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
-  { id: 'notifications', label: '消息通知', icon: Bell, group: 'wechat', hint: '新消息与撤回弹窗提醒' },
+  { id: 'notifications', label: '消息通知设置', icon: Bell, group: 'wechat', hint: '弹窗外观、玻璃样式与接收范围都在这里（系统「设置」页里没有）' },
   { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
@@ -1147,8 +1150,43 @@ export default function App() {
     }
   }
 
-  async function runExport() {
-    if (!dbPath.trim()) {
+  /**
+   * 账号一换，`@` 的会话候选缓存必须作废。
+   *
+   * 候选是**按账号**的（每个 wxid 一套会话表），而缓存是模块级的、TTL 60 秒。
+   * 不主动清的话，切账号后的第一个 `@` 会列出上一个账号的联系人 —— 这正是
+   * "引用了不存在的人"这类难查的问题的来源。密钥/数据目录变化同理。
+   */
+  useEffect(() => {
+    invalidateReferenceCandidates()
+  }, [selectedWxid, dbPath, decryptKey])
+
+  /**
+   * 全局长任务指示器要的两个回调。
+   *
+   * 「跳转」不是锦上添花：看到角落写着"导出 62%"想去看一眼，用户得自己回忆
+   * 它在哪个标签下 —— 这个按钮把那一步省掉。取消则直接复用各功能已有的取消
+   * 通道（导出按 taskId、克隆走 weclone.cancel）。
+   */
+  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'weclone' | 'settings') => {
+    setTab(target)
+  }, [])
+
+  const handleCancelTask = useCallback(
+    (key: string) => {
+      if (key === LIVE_TASK.export) {
+        const taskId = liveTask(LIVE_TASK.export).getState().detail?.taskId
+        if (typeof taskId === 'string' && taskId) void api.export.cancelTask(taskId)
+        return
+      }
+      if (key === LIVE_TASK.wecloneGenerate) {
+        void api.weclone.cancel()
+      }
+    },
+    [api]
+  )
+
+  async function runExport() {    if (!dbPath.trim()) {
       pushToast('err', '请选择微信数据目录')
       return
     }
@@ -1337,14 +1375,23 @@ export default function App() {
     try {
       const dir = await api.dialog.openDirectory()
       if (!dir) return
+      // 备份可能要几分钟（含附件时更久），期间用户一定会去干别的 ——
+      // 记进长任务 store，左下角角标就一直在，切页面也看得见。
+      liveTask(LIVE_TASK.backup).start('正在创建备份…')
       pushToast('info', '正在创建备份…', '数据库表快照打包中，请稍候')
       const r = await api.backup.create({
         outputPath: dir,
         options: { includeImages: backupIncludeMedia, includeVideos: backupIncludeMedia, includeFiles: backupIncludeMedia },
       })
-      if (r.success) pushToast('ok', '备份完成', r.filePath || '')
-      else pushToast('err', '备份失败', r.error || '未知错误', 10000)
+      if (r.success) {
+        liveTask(LIVE_TASK.backup).update({ status: 'done', progress: 100, message: '备份完成' })
+        pushToast('ok', '备份完成', r.filePath || '')
+      } else {
+        liveTask(LIVE_TASK.backup).update({ status: 'failed', message: r.error || '备份失败', error: r.error })
+        pushToast('err', '备份失败', r.error || '未知错误', 10000)
+      }
     } catch (e) {
+      liveTask(LIVE_TASK.backup).update({ status: 'failed', message: String(e), error: String(e) })
       pushToast('err', '备份失败', String(e), 10000)
     } finally {
       setBackupBusy(false)
@@ -1358,11 +1405,18 @@ export default function App() {
         filters: [{ name: 'Weport 备份', extensions: ['zip'] }],
       })
       if (!file) return
+      liveTask(LIVE_TASK.backup).start('正在恢复备份…')
       pushToast('info', '正在恢复备份…', '将覆盖当前数据库中的对应表')
       const r = await api.backup.restore(file)
-      if (r.success) pushToast('ok', '恢复完成', '请重启应用以重新加载数据')
-      else pushToast('err', '恢复失败', r.error || '未知错误', 10000)
+      if (r.success) {
+        liveTask(LIVE_TASK.backup).update({ status: 'done', progress: 100, message: '恢复完成' })
+        pushToast('ok', '恢复完成', '请重启应用以重新加载数据')
+      } else {
+        liveTask(LIVE_TASK.backup).update({ status: 'failed', message: r.error || '恢复失败', error: r.error })
+        pushToast('err', '恢复失败', r.error || '未知错误', 10000)
+      }
     } catch (e) {
+      liveTask(LIVE_TASK.backup).update({ status: 'failed', message: String(e), error: String(e) })
       pushToast('err', '恢复失败', String(e), 10000)
     } finally {
       setBackupBusy(false)
@@ -2979,15 +3033,16 @@ export default function App() {
               </div>
             </section>
 
-            {/* 通知玻璃（v1.0.3）：填充、文字色、描边、圆角、折射、投影全部可调。
-                预览用的是真弹窗组件，见 NotificationGlassPanel 顶部说明。 */}
+            {/* 通知玻璃（v1.0.1 重做）：填充、渐变、文字色、描边、圆角、折射、模糊、
+                投影、卡片宽度与正文行数全部可调，预览用的是真弹窗组件，
+                见 NotificationGlassPanel 顶部说明。 */}
             <section className="panel">
               <div className="panel-head">
                 <h2>
                   <Sparkles size={15} />
                   通知玻璃
                 </h2>
-                <span>卡片填充、文字色、描边与折射强度</span>
+                <span>整张卡片的填充、文字、形状、材质与尺寸，改一下预览立刻变</span>
               </div>
               <Suspense fallback={<div className="wp-loading">正在加载玻璃设置…</div>}>
                 <NotificationGlassPanel />
@@ -4249,6 +4304,14 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/*
+        全局长任务指示器（v1.0.1）。
+
+        挂在 App 上而不是某个页面里：它要回答的问题正是"我切到别的页面之后，
+        刚才点的那件事还在跑吗"。任何标签页下都显示，任务结束就自己消失。
+      */}
+      <BackgroundTasks onOpen={handleOpenTaskTab} onCancel={handleCancelTask} />
     </div>
   )
 }

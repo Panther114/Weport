@@ -80,6 +80,47 @@ interface WeCloneMetaInfo {
   generatedAt: string
   piiHits?: number
   truncated?: boolean
+  /** 语料最早一条消息的日期（ISO），v1.0.1 */
+  corpusStart?: string
+  /** 生成时是否做了敏感信息脱敏 */
+  redacted?: boolean
+  /** 生成时实际用了几段时间切片（分片提炼） */
+  shardCount?: number
+  /** 分片提炼里失败的片数（失败片用本地统计兜底） */
+  shardFailures?: number
+  tokensIn?: number
+  tokensOut?: number
+  elapsedMs?: number
+}
+
+/**
+ * 单个克隆自己的设置（v1.0.1）。
+ *
+ * `refusal` 决定 system prompt 里有没有"有些事你不说"这一节：
+ * `character` = 以本人的方式带过去（默认）；`off` = 完全不设限。
+ */
+type WeCloneRefusalMode = 'character' | 'off'
+interface WeCloneSettings {
+  refusal: WeCloneRefusalMode
+}
+
+/**
+ * 长任务状态快照（v1.0.1，`api.task.status()`）。
+ *
+ * 渲染进程可能被整个销毁重建（托盘隐藏销毁窗口 / 最小化 unload），
+ * 而任务跑在主进程里 —— 这是它把进度、日志、开始时间还回来的通道。
+ */
+type LiveTaskStatusValue = 'idle' | 'running' | 'done' | 'failed' | 'aborted'
+interface LiveTaskSnapshot {
+  status: LiveTaskStatusValue
+  stage?: string
+  progress: number
+  message: string
+  logs: string[]
+  startedAt?: number
+  finishedAt?: number
+  error?: string
+  detail?: Record<string, unknown>
 }
 /** 一条克隆对话里的单轮消息（v1.0.1，本机持久化） */
 interface WeCloneChatTurn {
@@ -565,9 +606,19 @@ interface ElectronApi {
         providerId: string
         /** 本轮判定出来的对方语言：回复应当跟着它走 */
         replyLanguage?: 'zh' | 'en' | 'mixed'
+        /** 本轮检索到的本人原话条数（语气样本） */
+        voiceSamples?: number
+        /** 本轮生效的拒答行为 —— 让"它怎么什么都答"能被解释 */
+        refusal?: WeCloneRefusalMode
       }
     }>
-    generate: () => Promise<{
+    /** 导出（生成）时的脱敏开关，持久化在配置里 */
+    getRedact: () => Promise<{ success: boolean; redact: boolean }>
+    setRedact: (enabled: boolean) => Promise<{ success: boolean; redact: boolean }>
+    /** 单个克隆自己的设置（拒答行为等） */
+    getSettings: (cloneId: string) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
+    setSettings: (cloneId: string, patch: { refusal?: WeCloneRefusalMode }) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
+    generate: (opts?: { redact?: boolean }) => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo
       aborted?: boolean
@@ -581,7 +632,13 @@ interface ElectronApi {
     get: (id: string) => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo
-      mds?: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>
+      /**
+       * 五份模型产物，外加两份**算出来的**材料（v1.0.1）：
+       * `fingerprint` 是本地统计的说话习惯，`corpus` 是语料处理摘要。
+       */
+      mds?: Partial<
+        Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language' | 'fingerprint' | 'corpus', string>
+      >
       error?: string
     }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
@@ -601,6 +658,16 @@ interface ElectronApi {
     }) => Promise<{ success: boolean; chatId?: string; title?: string; error?: string }>
     renameChat: (cloneId: string, chatId: string, title: string) => Promise<{ success: boolean; title?: string; error?: string }>
     deleteChat: (cloneId: string, chatId: string) => Promise<{ success: boolean; error?: string }>
+  }
+  /**
+   * 长任务状态快照（v1.0.1）。
+   *
+   * 渲染进程可能被整个销毁重建（托盘隐藏销毁窗口 / 最小化 unload），而克隆
+   * 生成、导出、连接都跑在主进程里。新文档启动时调一次 `status()` 就能把进度、
+   * 日志、开始时间原样拿回来 —— 否则重建后的界面看起来像什么都没发生过。
+   */
+  task: {
+    status: () => Promise<Record<string, LiveTaskSnapshot>>
   }
   process: {
     platform: string
