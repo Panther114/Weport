@@ -31,6 +31,7 @@ import {
   histogramL1, charNgramDistribution, mergeDistributions, jensenShannon, copyRate,
   recoveryAtK, pairedBootstrapCI, compositeSfs, makeRng, hashString, toChars, ksStatistic,
 } from './lib.mjs';
+import { splitBubbles } from './bubbles.mjs';
 
 const SCHEMA = 'weclone-eval/report/v1';
 const CHANCE = 1 / 21; // 20 sampled train texts + the real target
@@ -464,11 +465,21 @@ function armAggregate(arm) {
   const codeSwitch = codeSwitchProfile(texts);
   const len = lengthStats(texts);
   const shares = histogramShares(texts.map(charLen));
+  // bubble-level: the person sends bursts of short messages, so per-bubble length is
+  // the honest comparison (a real target is ONE message; a clone reply is a burst).
+  const bubbles = texts.flatMap((t) => splitBubbles(t));
+  const bubbleLen = lengthStats(bubbles);
+  const bubbleShares = histogramShares(bubbles.map(charLen));
   const bigrams = mergeDistributions(texts.map((t) => charNgramDistribution(t, 2)));
   const surface = {
     lengthMean: len.mean, lengthMedian: len.median, lengthStdev: len.stdev,
     lengthBucketShares: shares,
     lengthBucketL1: histogramL1(shares, authorSurface.lengthShares),
+    bubbleLenMean: bubbleLen.mean,
+    bubbleLenMedian: bubbleLen.median,
+    bubbleBucketShares: bubbleShares,
+    bubbleBucketL1: histogramL1(bubbleShares, authorSurface.lengthShares),
+    bubblesPerReply: texts.length ? bubbles.length / texts.length : 0,
     lengthKsVsAuthor: ksStatistic(texts.map(charLen), trainTexts.slice(0, 5000).map(charLen)),
     hasPunct: punct.hasAnyPunct, endsSentencePunct: punct.endsWithSentencePunct,
     question: punct.question, ellipsis: punct.ellipsis, laugh: punct.laugh,
@@ -498,6 +509,13 @@ function armAggregate(arm) {
     lengthMean: len.mean - targetSurface.length.mean,
     lengthRelError: targetSurface.length.mean ? Math.abs((len.mean ?? 0) - targetSurface.length.mean) / targetSurface.length.mean : null,
     lengthBucketL1: histogramL1(shares, targetSurface.lengthShares),
+    // per-message comparison: targets are single messages, clone replies are bursts
+    bubbleLenMean: bubbleLen.mean,
+    bubbleLenRelError: targetSurface.length.mean
+      ? Math.abs((bubbleLen.mean ?? 0) - targetSurface.length.mean) / targetSurface.length.mean
+      : null,
+    bubbleBucketL1: histogramL1(bubbleShares, targetSurface.lengthShares),
+    bubblesPerReply: texts.length ? bubbles.length / texts.length : 0,
     hasPunct: (punct.hasAnyPunct ?? 0) - (targetSurface.punctuation.hasAnyPunct ?? 0),
     endsSentencePunct: (punct.endsWithSentencePunct ?? 0) - (targetSurface.punctuation.endsWithSentencePunct ?? 0),
     question: (punct.question ?? 0) - (targetSurface.punctuation.question ?? 0),
@@ -673,6 +691,13 @@ console.log(`  ${pad('arm', 8)}${padL('Δlen', 8)}${padL('lenRelErr', 10)}${padL
 for (const arm of armList) {
   const d = arms[arm].surfaceVsTargets;
   console.log(`  ${pad(arm, 8)}${padL(num(d.lengthMean, 1), 8)}${padL(num(d.lengthRelError), 10)}${padL(num(d.lengthBucketL1), 9)}${padL(num(d.hasPunct), 8)}${padL(num(d.endsSentencePunct), 8)}${padL(num(d.question), 8)}${padL(num(d.laugh), 8)}${padL(num(d.stickerPlaceholder), 8)}${padL(num(d.emoji), 8)}${padL(num(d.mixedRate), 8)}${padL(num(d.latinCharRatio), 8)}${padL(num(d.allCapsTokenRate), 8)}`);
+  // bubble structure: per-message length + burst size (the author: median 14 chars,
+  // 4.31 messages per burst). A whole-reply length delta hides this entirely.
+  console.log(
+    `           bubbles: meanLen ${num(d.bubbleLenMean, 1)} (relErr ${num(d.bubbleLenRelError)}) | ` +
+      `bucketL1 ${num(d.bubbleBucketL1)} | perReply ${num(d.bubblesPerReply, 2)}` +
+      `${arm === 'REAL' ? '  <- reference: 14 chars, 4.31/burst' : ''}`
+  );
 }
 console.log(`  targets baseline: mean len ${num(targetSurface.length.mean, 1)} chars, hasPunct ${num(targetSurface.punctuation.hasAnyPunct)}, ends ${num(targetSurface.punctuation.endsWithSentencePunct)}, question ${num(targetSurface.punctuation.question)}, laugh ${num(targetSurface.punctuation.laugh)}, mixed ${num(targetSurface.codeSwitch.mixedRate)}`);
 console.log('  REAL is 0 here by construction (it IS the target). bucketL1 is BUNDLE-LEVEL only.');

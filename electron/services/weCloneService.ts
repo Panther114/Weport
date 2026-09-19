@@ -84,6 +84,7 @@ import {
   replyCopiesExemplars,
   type VoiceExchange,
 } from './ai/voiceExemplars'
+import { profileFromVoice, shapeReply, type VoiceRow, type VoiceShapeProfile } from './ai/voiceShape'
 
 export type { WeCloneRefusalMode } from './weClonePrompts'
 
@@ -165,6 +166,13 @@ export interface WeCloneSettings {
    * （唯一变量就是这个注入），也让用户能并排比较两种做法。
    */
   exemplars: 'on' | 'off'
+  /**
+   * 是否做**形态整形**（迭代 2：按本人的长度分布与连发分布，把一条回复切成多条消息）。
+   *
+   * 同样按克隆存：整形不改档案、不改语料，只改"这条回复以几条消息发出去"，
+   * 于是 on/off 两份克隆可以指向**完全相同的语料**，唯一变量就是它。
+   */
+  shape: 'on' | 'off'
 }
 
 /**
@@ -175,7 +183,11 @@ export interface WeCloneSettings {
  * 0.109，回复反而更长 55 → 67 字）。它作为**按克隆可开**的实验开关保留，
  * 但默认必须是"没有实测支持就不改线上行为"。详见 docs/research/weclone/06-loop-log.md。
  */
-export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = { refusal: 'character', exemplars: 'off' }
+export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = {
+  refusal: 'character',
+  exemplars: 'off',
+  shape: 'off',
+}
 
 /** 一条对话里的一轮 */
 export interface WeCloneChatTurn {
@@ -315,6 +327,8 @@ export interface LocalChatResult {
     voiceSamples?: number
     /** 本轮注入的真实示范条数（迭代 1）—— 为 0 时回复一定滑回助手腔 */
     exemplars?: number
+    /** 整形后的消息条数（迭代 2）—— 本人连发平均 4.31 条 */
+    bubbles?: number
     /** 本轮生效的拒答行为 —— 让"它怎么什么都答"能被解释 */
     refusal?: WeCloneRefusalMode
   }
@@ -539,6 +553,7 @@ export class WeCloneService {
       return {
         refusal: raw?.refusal === 'off' ? 'off' : 'character',
         exemplars: raw?.exemplars === 'on' ? 'on' : 'off',
+        shape: raw?.shape === 'on' ? 'on' : 'off',
       }
     } catch {
       return { ...WECLONE_SETTINGS_DEFAULT }
@@ -553,7 +568,7 @@ export class WeCloneService {
 
   setSettings(
     cloneId: string,
-    patch: { refusal?: string; exemplars?: string }
+    patch: { refusal?: string; exemplars?: string; shape?: string }
   ): { success: boolean; settings?: WeCloneSettings; error?: string } {
     const dir = this.findCloneDir(String(cloneId || ''))
     if (!dir) return { success: false, error: '找不到该克隆' }
@@ -562,6 +577,7 @@ export class WeCloneService {
       refusal: patch?.refusal === 'off' ? 'off' : patch?.refusal === 'character' ? 'character' : current.refusal,
       exemplars:
         patch?.exemplars === 'off' ? 'off' : patch?.exemplars === 'on' ? 'on' : current.exemplars,
+      shape: patch?.shape === 'off' ? 'off' : patch?.shape === 'on' ? 'on' : current.shape,
     }
     try {
       this.atomicWriteFile(this.settingsFile(dir), JSON.stringify(next, null, 2))
@@ -2354,9 +2370,29 @@ export class WeCloneService {
             }
           }
         }
+        /**
+         * 迭代 2：形态整形 —— 把一条回复切成"像本人那样的一串短消息"。
+         * 只在开关打开时生效，失败就保留原回复（整形是增强，不该让聊天失败）。
+         */
+        let shapedReply = finalReply
+        let bubbles = 1
+        if (cloneSettings.shape === 'on') {
+          try {
+            const profile = await this.loadShapeProfile(dir)
+            if (profile) {
+              const parts = shapeReply(finalReply, profile)
+              if (parts.length > 0) {
+                shapedReply = parts.join('\n\n')
+                bubbles = parts.length
+              }
+            }
+          } catch (e) {
+            console.warn('[WeClone] 形态整形失败（保留原回复）:', e)
+          }
+        }
         return {
           success: true,
-          reply: finalReply,
+          reply: shapedReply,
           elapsedMs: Date.now() - startedAt,
           meta: {
             cloneId: meta.id,
@@ -2369,6 +2405,7 @@ export class WeCloneService {
             replyLanguage,
             voiceSamples: voiceSamples.length,
             exemplars: exemplarsUsed,
+            bubbles,
             refusal,
           },
         }
@@ -2503,6 +2540,62 @@ export class WeCloneService {
       /* 元数据写失败只是下次重建，不影响使用 */
     }
     return outPath
+  }
+
+  /**
+   * 读取（并缓存）本人的**消息形态 profile**：长度中位/p90、连发平均/上限、句末标点率。
+   *
+   * 缓存到 `<cloneDir>/shape.json`，按 `voice.jsonl` 大小失效 —— 与示范语料同样的
+   * 增量产物，已有克隆不必重新生成就能用上。
+   */
+  private async loadShapeProfile(dir: string): Promise<VoiceShapeProfile | null> {
+    const voicePath = join(dir, 'voice.jsonl')
+    if (!existsSync(voicePath)) return null
+    const cachePath = join(dir, 'shape.json')
+    let bytes = 0
+    try {
+      bytes = statSync(voicePath).size
+    } catch {
+      return null
+    }
+    if (existsSync(cachePath)) {
+      try {
+        const raw = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+          voiceBytes?: number
+          profile?: VoiceShapeProfile
+        }
+        if (Number(raw.voiceBytes) === bytes && Number(raw.profile?.sampleSize) > 0 && raw.profile) {
+          return raw.profile
+        }
+      } catch {
+        /* 坏了就重算 */
+      }
+    }
+    const rows: VoiceRow[] = []
+    const rl = createInterface({ input: createReadStream(voicePath, { encoding: 'utf8' }), crlfDelay: Infinity })
+    try {
+      for await (const line of rl) {
+        const t = line.trim()
+        if (!t) continue
+        try {
+          const row = JSON.parse(t) as { ts?: number; sid?: string; text?: string }
+          const text = String(row?.text || '')
+          if (text.trim()) rows.push({ ts: Number(row?.ts) || 0, sid: String(row?.sid || '?'), text })
+        } catch {
+          continue
+        }
+      }
+    } finally {
+      rl.close()
+    }
+    if (rows.length === 0) return null
+    const profile = profileFromVoice(rows)
+    try {
+      writeFileSync(cachePath, JSON.stringify({ voiceBytes: bytes, profile }), 'utf8')
+    } catch {
+      /* 缓存写失败只是下次重算 */
+    }
+    return profile
   }
 
   /**
