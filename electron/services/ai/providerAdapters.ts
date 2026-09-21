@@ -1,9 +1,56 @@
 import { randomUUID } from 'crypto'
 import { getProviderCatalogEntry } from './providerCatalog'
 import { extractModelIds } from './modelRegistry'
+import { enrichNetworkError, fetchWithRetry } from './netError'
 import type { ProviderAdapter, ProviderProfile, ProviderProtocol, ProviderStreamInput, ProviderStreamResult } from './providerTypes'
 
 const DEFAULT_HEADERS = { 'Content-Type': 'application/json' }
+
+/**
+ * 图片附件的形状（与 `weportAiService.AiMessage.images` 一致）。
+ *
+ * 这里做一次**运行时**校验而不是直接相信上游：这些对象来自工具执行结果，
+ * 形状错了会让整个请求 400，而错误信息只会说"content 无效"。
+ */
+function imageParts(value: unknown): Array<{ mimeType: string; data: string }> {
+  if (!Array.isArray(value)) return []
+  const out: Array<{ mimeType: string; data: string }> = []
+  for (const item of value) {
+    const record = item as { mimeType?: unknown; data?: unknown } | null
+    const mimeType = String(record?.mimeType || '').trim()
+    const data = String(record?.data || '').trim()
+    if (!mimeType || !data) continue
+    out.push({ mimeType, data })
+  }
+  return out
+}
+
+function imageDataUrl(image: { mimeType: string; data: string }): string {
+  return `data:${image.mimeType};base64,${image.data}`
+}
+
+/**
+ * 工具消息带图片时的 OpenAI 兼容转换。
+ *
+ * 图片必须是**独立的内容块**（`image_url`），不能拼进文本：拼进去模型只会
+ * 收到一坨 base64 字符。没有图片的消息原样透传 —— 这条路径每一步都要重发整段
+ * 前缀，多余的改写会毁掉提供商的 prefix cache。
+ */
+export function openAIChatMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return messages.map((message) => {
+    if (message.role !== 'tool') return message
+    const images = imageParts(message.images)
+    if (images.length === 0) return message
+    return {
+      role: 'tool',
+      tool_call_id: message.tool_call_id,
+      content: [
+        { type: 'text', text: String(message.content || '') },
+        ...images.map((image) => ({ type: 'image_url', image_url: { url: imageDataUrl(image) } })),
+      ],
+    }
+  })
+}
 
 /**
  * Default `User-Agent` for gateway requests.
@@ -53,8 +100,20 @@ async function readError(response: Response): Promise<never> {
   throw error
 }
 
+/**
+ * Every provider request goes through this.
+ *
+ * `fetchWithRetry` only retries connect-phase failures (DNS / connection setup)
+ * and rethrows a readable message — without it a transient DNS hiccup surfaced
+ * in a WeBot note as `fetch failed`, which tells the user nothing. See
+ * `netError.ts`.
+ */
+function providerFetch(url: string, init: RequestInit): Promise<Response> {
+  return fetchWithRetry(url, init)
+}
+
 async function requestJson(url: string, init: RequestInit): Promise<any> {
-  const response = await fetch(url, init)
+  const response = await providerFetch(url, init)
   if (!response.ok) return readError(response)
   return response.json()
 }
@@ -96,7 +155,15 @@ async function* sseEvents(response: Response): AsyncGenerator<{ event: string; d
     try { yield { event, data: JSON.parse(raw) } } catch { /* ignore malformed provider fragments */ }
   }
   while (true) {
-    const { value, done } = await reader.read()
+    // 流中途断开（ND_ERR_SOCKET / ECONNRESET）同样只抛 `terminated` 这类裸错误。
+    // 这里补一次翻译，让"回答写到一半网络断了"也能读出来是什么原因。
+    let chunk: { value?: Uint8Array; done: boolean }
+    try {
+      chunk = await reader.read()
+    } catch (error) {
+      throw enrichNetworkError(error)
+    }
+    const { value, done } = chunk
     buffer += decoder.decode(value, { stream: !done })
     const lines = buffer.split(/\r?\n/)
     buffer = lines.pop() || ''
@@ -148,7 +215,15 @@ function openAIInput(messages: Array<Record<string, unknown>>): { instructions: 
     const role = String(message.role || '')
     if (role === 'system') continue
     if (role === 'tool') {
-      input.push({ type: 'function_call_output', call_id: String(message.tool_call_id || ''), output: String(message.content || '') })
+      const images = imageParts(message.images)
+      // Responses 的函数输出接受内容块数组：`input_text` + `input_image`。
+      const output = images.length > 0
+        ? [
+            { type: 'input_text', text: String(message.content || '') },
+            ...images.map((image) => ({ type: 'input_image', image_url: imageDataUrl(image) })),
+          ]
+        : String(message.content || '')
+      input.push({ type: 'function_call_output', call_id: String(message.tool_call_id || ''), output })
       continue
     }
     if (role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -179,7 +254,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
     }
     if (input.maxOutputTokens !== undefined) body.max_output_tokens = input.maxOutputTokens
     if (instructions) body.instructions = instructions
-    const response = await fetch(endpoint(input.profile.baseUrl, '/responses'), {
+    const response = await providerFetch(endpoint(input.profile.baseUrl, '/responses'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -222,7 +297,7 @@ function parseArgs(value: string): Record<string, unknown> {
 export function openAIChatBody(input: ProviderStreamInput): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: input.profile.model,
-    messages: input.messages,
+    messages: openAIChatMessages(input.messages),
     stream: true,
   }
   if (input.maxOutputTokens !== undefined) body.max_tokens = input.maxOutputTokens
@@ -240,7 +315,7 @@ export function openAIChatBody(input: ProviderStreamInput): Record<string, unkno
 const openAICompatibleAdapter: ProviderAdapter = {
   async stream(input) {
     const body = openAIChatBody(input)
-    const response = await fetch(endpoint(input.profile.baseUrl, '/chat/completions'), {
+    const response = await providerFetch(endpoint(input.profile.baseUrl, '/chat/completions'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -290,14 +365,26 @@ function listModelsFromEnvelope(envelope: unknown): string[] {
   return extractModelIds(envelope)
 }
 
-function anthropicMessages(messages: Array<Record<string, unknown>>) {
+/** Exported for the image-path test: Anthropic carries images inside `tool_result`. */
+export function anthropicMessages(messages: Array<Record<string, unknown>>) {
   let system = ''
   const result: Array<Record<string, unknown>> = []
   for (const message of messages) {
     const role = String(message.role || '')
     if (role === 'system') { system += `${system ? '\n\n' : ''}${String(message.content || '')}`; continue }
     if (role === 'tool') {
-      result.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: String(message.tool_call_id || ''), content: String(message.content || '') }] })
+      const images = imageParts(message.images)
+      // Anthropic 的 tool_result 内容块直接接受 image block（内联 base64）。
+      const content: unknown = images.length > 0
+        ? [
+            { type: 'text', text: String(message.content || '') },
+            ...images.map((image) => ({
+              type: 'image',
+              source: { type: 'base64', media_type: image.mimeType, data: image.data },
+            })),
+          ]
+        : String(message.content || '')
+      result.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: String(message.tool_call_id || ''), content }] })
       continue
     }
     if (role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -327,7 +414,7 @@ const anthropicAdapter: ProviderAdapter = {
     body.max_tokens = input.maxOutputTokens ?? 32768
     if (converted.system) body.system = converted.system
     if (input.tools.length > 0) body.tools = input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }))
-    const response = await fetch(endpoint(input.profile.baseUrl, '/messages'), {
+    const response = await providerFetch(endpoint(input.profile.baseUrl, '/messages'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -371,7 +458,13 @@ function usageFromAnthropic(usage: any) {
   return { promptTokens: prompt, completionTokens: completion, reasoningTokens: 0, totalTokens: prompt + completion, promptCacheHitTokens: Number(usage.cache_read_input_tokens) || 0 }
 }
 
-function googleContents(messages: Array<Record<string, unknown>>) {
+/**
+ * Exported for the image-path test.
+ *
+ * Gemini's `functionResponse` cannot carry images, so this pushes an extra
+ * `user` content with `inlineData` right after the tool result.
+ */
+export function googleContents(messages: Array<Record<string, unknown>>) {
   let system = ''
   const contents: Array<Record<string, unknown>> = []
   for (const message of messages) {
@@ -381,6 +474,12 @@ function googleContents(messages: Array<Record<string, unknown>>) {
     if (role === 'tool') {
       parts.push({ functionResponse: { name: String(message.toolName || message.tool_call_id || 'tool'), response: { result: String(message.content || '') } } })
       contents.push({ role: 'user', parts })
+      // Gemini 的 functionResponse 只能放文本，图片要作为**紧随其后的一个 user
+      // content**递进去（`inlineData`）。这是它的协议差异，不是我们的形状问题。
+      const images = imageParts(message.images)
+      if (images.length > 0) {
+        contents.push({ role: 'user', parts: images.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } })) })
+      }
       continue
     }
     if (role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -403,7 +502,7 @@ const googleAdapter: ProviderAdapter = {
     if (input.maxOutputTokens !== undefined) body.generationConfig = { maxOutputTokens: input.maxOutputTokens }
     if (input.tools.length > 0) body.tools = [{ functionDeclarations: input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }]
     const url = endpoint(input.profile.baseUrl, `/models/${encodeURIComponent(input.profile.model)}:streamGenerateContent?alt=sse`)
-    const response = await fetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
+    const response = await providerFetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
     if (!response.ok) return readError(response)
     const result = emptyResult()
     for await (const item of sseEvents(response)) {

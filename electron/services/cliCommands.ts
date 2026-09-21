@@ -327,46 +327,6 @@ export function registerCliCommands(): void {
       },
     },
     {
-      name: 'ai.costs',
-      summary: 'Per-model pricing (USD per million tokens) for the configured profiles.',
-      mutating: false,
-      args: [{ name: 'models', type: 'string', description: '逗号分隔；留空返回所有已配置模型' }],
-      run: (args) => {
-        const setup = weportAiService.getSetup()
-        const costs = setup.modelCosts || {}
-        const wanted = String(args.models || '')
-          .split(',')
-          .map((value) => value.trim())
-          .filter(Boolean)
-        const modelIds = wanted.length > 0 ? wanted : Object.keys(costs)
-        const rows = modelIds.map((model) => {
-          const cost = costs[model]
-          return {
-            model,
-            // 未收录就是 null，不是 0 —— 未定价和免费是两件事
-            input: cost?.input ?? null,
-            output: cost?.output ?? null,
-            cacheRead: cost?.cacheRead ?? null,
-            cacheWrite: cost?.cacheWrite ?? null,
-            reasoning: cost?.reasoning ?? null,
-            source: cost?.source ?? null,
-          }
-        })
-        const priced = rows.filter((row) => row.input !== null || row.output !== null).length
-        return {
-          success: true,
-          data: { unit: 'USD per 1M tokens', priced, unpriced: rows.length - priced, rows },
-          text: rows
-            .map((row) =>
-              row.input === null && row.output === null
-                ? `${row.model}\t未定价`
-                : `${row.model}\tin $${row.input ?? '—'} / out $${row.output ?? '—'}`
-            )
-            .join('\n'),
-        }
-      },
-    },
-    {
       name: 'ai.chats',
       summary: 'List WeportAI conversations.',
       mutating: false,

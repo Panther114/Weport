@@ -44,6 +44,23 @@ import {
 } from './ai/prefixCache'
 import type { ProviderConsumer, ProviderProfileInput, ProviderProfileSummary, ProviderStreamResult } from './ai/providerTypes'
 import { buildFallbackTitle, hasCjk, normaliseTitle, titleEchoesSource } from './ai/chatTitle'
+import { describeNetworkFailure } from './ai/netError'
+import { imagePartFromBase64, type AiImagePart } from './ai/imageParts'
+export type { AiImagePart } from './ai/imageParts'
+
+/**
+ * 运行失败时留给用户看的错误文本。
+ *
+ * `fetch failed` 是唯一一种**消息本身完全没有信息量**的错误（undici 把 errno
+ * 藏在 `cause` 里），而它恰好是最常见的失败之一：WeBot 笔记里那句
+ * 「上次失败：fetch failed」就是它。这里做最后一次兜底展开 —— 适配层已经
+ * 翻译过一遍，但异常也可能从别的路径冒出来。
+ */
+function readRunError(error: unknown): string {
+  const message = String((error as Error)?.message || error || '').trim()
+  if (!message || /^fetch failed$/i.test(message)) return describeNetworkFailure(error)
+  return message
+}
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -86,6 +103,17 @@ export interface AiMessage {
   createdAt: number
   /** 本轮解码计时，用于消息尾部的 `N tok/s` 读数 */
   timing?: AiStepTiming
+  /**
+   * 随这条工具结果**附给模型看**的图片（base64，不含 `data:` 前缀）。
+   *
+   * 为什么挂在消息上而不是塞进文本：视觉模型的图片是独立的内容块
+   * （OpenAI 的 `image_url` / Anthropic 的 `image` / Gemini 的 `inlineData`），
+   * 把它编码成文本等于让模型去"读"一段 base64。
+   *
+   * 只存在于内存里：`persistMessages` 落盘时会把 base64 去掉（见那里的说明），
+   * 否则一次「看作业」就会让会话文件涨几 MB。
+   */
+  images?: AiImagePart[]
 }
 
 export interface AiChatMeta {
@@ -122,21 +150,8 @@ export interface AiSetupInfo {
   activeProfileId: string
   profiles: ProviderProfileSummary[]
   catalog: ReturnType<typeof getProviderCatalog>
-  /**
-   * 模型 id → 定价（USD / 百万 token）。渲染侧用它给每个模型下拉项标价。
-   *
-   * 为什么要在这里下发而不是渲染侧自己查：定价来自 models.dev 的 registry，
-   * 那是主进程持有多 MB 级 JSON + 解析缓存的模块，渲染侧拿不到。没有这一项，
-   * 「这个模型多少钱」在选模型的时候就完全不可见 —— 而选模型正是唯一该看它的时刻。
-   */
-  modelCosts?: Record<string, {
-    input?: number
-    output?: number
-    reasoning?: number
-    cacheRead?: number
-    cacheWrite?: number
-    source?: string
-  }>
+  // 定价（modelCosts）在 v1.0.1 移除：它建立在 models.dev 那张覆盖不全的定价表上，
+  // 面板显示的多是「未定价」，有值时也只是估算。token 用量照常下发。
 }
 
 export interface AiRunUsage {
@@ -152,7 +167,7 @@ export type AiEvent =
   | { type: 'reasoning_delta'; chatId: string; delta: string }
   | { type: 'text_delta'; chatId: string; delta: string }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
-  | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string }
+  | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string; imageCount?: number }
   | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: AiStepTiming }
   | { type: 'chat_title'; chatId: string; title: string }
   | { type: 'error'; chatId: string; message: string }
@@ -182,6 +197,14 @@ interface ToolHandlerContext {
   myWxid: string
   emit: EventEmitter
   getSessionName: (id: string) => string
+  /**
+   * 把图片附到**这次工具调用**的结果上，交给视觉模型看。
+   *
+   * 用回调而不是让 handler 返回结构化结果：现有的工具契约是「返回一段文本」，
+   * 改成联合类型会牵动所有二十多个工具；而图片本来就是旁路信息（文本里仍然
+   * 要写清楚附了什么）。超出上限的部分会被拒绝（见调用点）。
+   */
+  attachImages: (images: AiImagePart[]) => void
 }
 
 interface ToolDefinition {
@@ -325,6 +348,7 @@ TOOL-DISCIPLINE RULE (applies to all playbooks): read_day_events and read_period
 - Which chats exist / top chats by volume → list_sessions, get_social_overview
 - What happened across ALL chats on a day or range → read_day_events / read_period_events (ALWAYS for "what happened" questions)
 - Deep dive one chat's messages → read_session_messages with startTime/endTime slices
+- What a PICTURE shows (homework photo, screenshot, receipt, timetable) → read_chat_images (the image itself is attached to the tool result; text tools cannot see inside a picture). Ask for 1-3 images only.
 - Find a topic anywhere in history → search_messages
 - Numbers / comparisons → get_session_stats, get_social_overview, list_dates
 - Who a person is → get_contact_info (includes gender/region/signature when the DB stores them)
@@ -361,6 +385,15 @@ const clampInt = (v: unknown, min: number, max: number, fallback: number): numbe
   if (!Number.isFinite(n)) return fallback
   return Math.max(min, Math.min(max, Math.floor(n)))
 }
+
+/**
+ * 一次工具调用最多附几张图给模型。
+ *
+ * 每张图按分辨率不同要花几百到上千 token，而且**每一步都会重发整段前缀**：
+ * 附 10 张图等于把后面每一步的输入都变大一个量级。3 张足够回答"这张作业照片
+ * 是什么/群里的图说了什么"，再多应该让它分几次看。
+ */
+const MAX_TOOL_IMAGES = 3
 
 /** 归一化为 Unix 秒。接受：ISO 日期/时间字符串、Unix 秒、Unix 毫秒。0 → 0（不限） */
 function normalizeTimeSec(v: unknown): number {
@@ -715,7 +748,19 @@ class WeportAiService {
       const tmp = `${target}.${process.pid}.tmp`
       writeFileSync(
         tmp,
-        JSON.stringify({ chatId, messages, compressed, lastRun: lastRun || undefined }, null, 2),
+        // 图片只活在内存里：base64 落盘会让一个「看作业照片」的会话文件涨几 MB，
+        // 而它下次运行时**仍然会被重新读一次**（工具结果里的文字说明还在）。
+        // 这里保留张数与类型，去掉像素本身 —— 历史里能看出"当时看过几张图"。
+        JSON.stringify({
+          chatId,
+          messages: messages.map((message) =>
+            message.images?.length
+              ? { ...message, images: undefined, content: `${message.content}\n（本次附带了 ${message.images.length} 张图片，图片本身不随历史保存）` }
+              : message
+          ),
+          compressed,
+          lastRun: lastRun || undefined,
+        }, null, 2),
         'utf8'
       )
       renameSync(tmp, target)
@@ -1178,36 +1223,14 @@ class WeportAiService {
 
   getSetup(): AiSetupInfo {
     const active = this.providerProfiles.getActive()
-    // 本地（无网络）解析一次元数据，让「上下文窗口 / 能力 / 价格」面板在首屏就
-    // 有真值：registry 磁盘缓存 + bundled snapshot 已经足够，不必等一次发现请求。
+    // 本地（无网络）解析一次元数据，让「上下文窗口 / 能力」面板在首屏就有真值：
+    // registry 磁盘缓存 + bundled snapshot 已经足够，不必等一次发现请求。
     // 这里刻意不再每条 getById()——那是 N 次「读配置 + 解析 JSON」。
     const profiles = this.providerProfiles.list().map((item) =>
       item.model
         ? { ...item, ...resolvedProfileCache(this.resolveProfileModel({ id: item.id, providerId: item.providerId, protocol: item.protocol, model: item.model })) }
         : item
     )
-
-    // 定价表：每个已配置过的模型都查一遍，渲染侧据此在模型下拉里标价。
-    // 用当前 active profile 的 provider 做解析上下文，让网关类服务的模型也能
-    // 命中 registry（它们大多用上游模型 id）。
-    const modelCosts: NonNullable<AiSetupInfo['modelCosts']> = {}
-    const pricingContext = {
-      id: active?.id || 'pricing',
-      providerId: active?.providerId || 'custom',
-      protocol: active?.protocol || 'openai-compatible',
-    }
-    for (const profile of profiles) {
-      const modelId = String(profile.model || '').trim()
-      if (!modelId || modelCosts[modelId]) continue
-      try {
-        const resolved = this.resolveProfileModel({ ...pricingContext, model: modelId })
-        const cost = resolved.record?.cost
-        if (!cost) continue
-        modelCosts[modelId] = { ...cost, source: resolved.record?.provenance }
-      } catch {
-        /* 缺一个模型的定价不影响设置页 */
-      }
-    }
 
     return {
       hasApiKey: Boolean(active?.apiKey) || Boolean(active && getProviderCatalogEntry(active.providerId)?.apiKeyOptional),
@@ -1225,7 +1248,6 @@ class WeportAiService {
       activeProfileId: active?.id || '',
       profiles,
       catalog: getProviderCatalog(),
-      modelCosts,
     }
   }
 
@@ -1778,6 +1800,99 @@ class WeportAiService {
           const nextOffset = Number(result.nextOffset ?? offset + messages.length)
           const truncNote = result.hasMore ? `（还有更多；nextOffset=${nextOffset}）` : '（已到该窗口末尾）'
           return `「${name}」（${sessionTypeLabel(sessionId)}）${rangeNote}offset=${offset}，返回 ${messages.length} 条${truncNote}：\n` + lines.join('\n')
+        },
+      },
+      {
+        name: 'read_chat_images',
+        description:
+          'Look at actual PICTURES posted in one chat (homework photos, screenshots, receipts, schedules). Use this whenever the answer depends on what an image shows — text search cannot see inside a picture. Returns the images themselves to a vision-capable model, plus who sent each one and when. Pairs with read_session_messages: use that to find the time window, then this to actually look.',
+        parameters: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: 'The chat username/id from list_sessions' },
+            startTime: { type: 'string', description: 'Optional window start: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (default: beginning)' },
+            endTime: { type: 'string', description: 'Optional window end: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (default: now)' },
+            limit: { type: 'integer', minimum: 1, maximum: 3, description: `How many pictures to actually look at (default 2, max ${MAX_TOOL_IMAGES}). Each one costs tokens, so ask for what you need.` },
+          },
+          required: ['sessionId'],
+        },
+        friendly: (args, ctx) => {
+          const name = ctx.getSessionName(String(args.sessionId || ''))
+          const range = args.startTime ? `（${String(args.startTime)} 起）` : ''
+          return `看了「${name}」里的图片${range}`
+        },
+        handler: async (args, ctx) => {
+          const sessionId = String(args.sessionId || '').trim()
+          if (!sessionId) return '错误：缺少 sessionId。'
+          const limit = clampInt(args.limit, 1, MAX_TOOL_IMAGES, 2)
+          const startSec = normalizeTimeSec(args.startTime)
+          const endSec = normalizeTimeSec(args.endTime)
+          const name = ctx.getSessionName(sessionId)
+          // 不需要显式 connect：`getMessages` / `getImageData` 各自都有
+          // ensureConnected，多调一次只是多一个往返。
+
+          // 先在窗口里找图片消息。**必须重读一次消息表**：图片消息的 localId 只
+          // 存在于库里，文本工具的返回值给不出它。
+          const scanLimit = 500
+          const hasWindow = startSec > 0 && endSec > 0
+          const listed = await chatService.getMessages(
+            sessionId,
+            0,
+            scanLimit,
+            startSec > 0 ? startSec * 1000 : 0,
+            endSec > 0 ? endSec * 1000 : 0,
+            // 有完整窗口时按时间正序扫，取窗口内**最近**的（下面的 slice(-limit)）。
+            hasWindow
+          )
+          if (!listed.success) return `读取失败：${listed.error || '未知错误'}`
+          const scanned = listed.messages || []
+          const images = scanned.filter(
+            (m) => Number((m as { localType?: number }).localType) === 3 || Boolean(m.imageMd5) || Boolean(m.imageDatName)
+          )
+          if (images.length === 0) {
+            const range = startSec > 0 || endSec > 0
+              ? `${startSec ? formatTime(startSec) : '起点'} ~ ${endSec ? formatTime(endSec) : '现在'}`
+              : '全部历史'
+            return `「${name}」在 ${range} 内没有图片消息（已扫描 ${scanned.length} 条）。`
+          }
+
+          const picked = images.slice(-limit)
+          const lines: string[] = []
+          let attached = 0
+          for (const message of picked) {
+            const when = formatTime(Number(message.createTime) || 0)
+            const sender = message.isSend === 1
+              ? '我'
+              : String(message.senderDisplayName || message.senderUsername || name || '')
+            const localId = Number((message as { localId?: number }).localId)
+            if (!Number.isFinite(localId)) {
+              lines.push(`- [${when}] ${sender}：图片（缺少 localId，无法解密）`)
+              continue
+            }
+            const decoded = await chatService.getImageData(sessionId, String(localId))
+            if (!decoded.success || !decoded.data) {
+              // 失败原因是可执行的指引：多半是图片密钥没取。原样说出来，
+              // 不要让模型猜（"看不了"和"没有这张图"是两件事）。
+              lines.push(`- [${when}] ${sender}：图片无法读取（${decoded.error || '未知原因'}）`)
+              continue
+            }
+            const { part, reason } = imagePartFromBase64(decoded.data)
+            if (part && attached < MAX_TOOL_IMAGES) {
+              attached += 1
+              ctx.attachImages([part])
+              lines.push(`- [${when}] ${sender}：图片 #${attached}（见附件，请直接看图回答）`)
+            } else {
+              lines.push(`- [${when}] ${sender}：图片未附上（${reason || '超过本次上限'}）`)
+            }
+          }
+
+          const header = attached > 0
+            ? `「${name}」（${sessionTypeLabel(sessionId)}）窗口内共 ${images.length} 张图片，已附上最近 ${attached} 张给你看：`
+            : `「${name}」（${sessionTypeLabel(sessionId)}）窗口内共 ${images.length} 张图片，但一张都没能附上：`
+          const hint = attached > 0
+            ? '\n\n请基于你看到的画面回答。若附件对你的模型不可用（返回了图片相关错误），请说明并改用文字线索。'
+            : '\n\n请把无法读取的原因如实告诉用户（常见原因：图片密钥未获取、原图已被清理），不要凭猜测描述图片内容。'
+          return `${header}\n${lines.join('\n')}${hint}`
         },
       },
       {
@@ -2534,6 +2649,9 @@ class WeportAiService {
           const s = sessionMap.get(id)
           return s?.displayName || id
         },
+        // 每次工具调用都会用带 `attachImages` 的副本覆盖这一项（见下面的循环）。
+        // 这里给一个空的实现，避免任何直接调用 ctx 的路径炸掉。
+        attachImages: () => undefined,
       }
 
       let loopCount = 0
@@ -2638,6 +2756,8 @@ class WeportAiService {
           const tool = runToolsByName.get(call.name)
           let ok = false
           let result = ''
+          // 这次调用可以附给模型的图片（上限 MAX_TOOL_IMAGES 张）。
+          const callImages: AiImagePart[] = []
           if (!tool) {
             result = `错误：未知工具 ${call.name}`
           } else {
@@ -2651,7 +2771,15 @@ class WeportAiService {
               friendly: call.friendly,
             })
             try {
-              result = await tool.handler(call.args, ctx)
+              result = await tool.handler(call.args, {
+                ...ctx,
+                attachImages: (images) => {
+                  for (const image of images) {
+                    if (callImages.length >= MAX_TOOL_IMAGES) break
+                    if (image?.data && image?.mimeType) callImages.push(image)
+                  }
+                },
+              })
               ok = true
             } catch (e) {
               result = `工具执行异常：${String((e as Error)?.message || e)}`
@@ -2679,6 +2807,7 @@ class WeportAiService {
             toolCallId: call.id,
             toolName: call.name,
             createdAt: Date.now(),
+            images: callImages.length > 0 ? callImages : undefined,
           })
           this.emit({
             type: 'tool_result',
@@ -2688,6 +2817,7 @@ class WeportAiService {
             ok,
             summary: result.slice(0, 300) + (result.length > 300 ? '…' : ''),
             detail: result,
+            imageCount: callImages.length || undefined,
           })
         }
 
@@ -2718,7 +2848,7 @@ class WeportAiService {
       if (ctrl.signal.aborted) {
         aborted = true
       } else {
-        error = String((e as Error)?.message || e)
+        error = readRunError(e)
         console.warn('[WeportAI] run 异常:', e)
       }
     } finally {
@@ -2830,7 +2960,11 @@ class WeportAiService {
       } else if (m.role === 'tool') {
         const toolCallId = String(m.toolCallId || '').trim()
         if (toolCallId && completeToolCallIds.has(toolCallId)) {
-          out.push({ role: 'tool', tool_call_id: toolCallId, content: sanitizeForApi(m.content || '') })
+          const item: Record<string, unknown> = { role: 'tool', tool_call_id: toolCallId, content: sanitizeForApi(m.content || '') }
+          // 图片交给各适配器转成自己的内容块（见 providerAdapters 里的说明）：
+          // 这里保持中立形状，不预先拼成某一家协议的 JSON。
+          if (m.images?.length) item.images = m.images
+          out.push(item)
         }
       }
     }

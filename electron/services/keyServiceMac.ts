@@ -184,8 +184,31 @@ export class KeyServiceMac {
       || normalizedDetail.includes('thread_get_state_failed')
   }
 
+  /**
+   * `task_for_pid` 失败时给用户的那句话。
+   *
+   * v1.0.1 之前这里写的是「请确认当前运行程序已正确签名并包含调试 entitlements，
+   * 优先使用打包版」。
+
+   * 那句话是**错的**，而且会把人引到死路上：
+   *
+   * - `get-task-allow`（以及硬化运行时）是**被附加方**的属性。正式版微信 4.x 是
+   *   加固签名 + 沙盒进程，不带 `get-task-allow`，因此内核会拒绝**任何**调用方的
+   *   `task_for_pid` —— 包括 root、包括一个带 `com.apple.security.cs.debugger`
+   *   的、已正确签名的 Weport.app。把 Weport 签得再好，也改不了对面缺的那个
+   *   entitlement。
+   * - 「隐私与安全性 → 开发者工具」里的开关只决定系统是否信任一个调试器
+   *   （`DevToolsSecurity`），它同样不改变目标的 entitlement。
+   *
+   * 所以这条提示必须：说清原因在微信一侧、说明签名/关 SIP 都不解决问题，并把
+   * 用户指到真正能走通的路（手动填密钥 / 磁盘推导图片密钥）。
+   */
   private getSipPermissionHint(): string {
-    return '当前 macOS SIP 已开启，系统可能拒绝 task_for_pid。请优先使用已签名/已授权的 Weport.app，并在“系统设置 → 隐私与安全性 → 开发者工具”中允许 Weport；关闭 SIP 会降低系统安全性，仅在确认风险后临时使用。'
+    return [
+      '原因：微信 4.x 在 macOS 上是加固签名 + 沙盒进程，本身不带 get-task-allow，系统因此拒绝任何进程附加它（以 root 运行也一样）。',
+      '这一步与 Weport 自己的签名无关 —— 把 Weport 重新签名、或在「隐私与安全性 → 开发者工具」里放行，都不会让系统放开微信的调试端口；关闭 SIP 同样不保证成功，且会降低系统安全性，不建议。',
+      '可以走的路：①在「连接微信」里手动填入数据库密钥；②图片密钥走磁盘推导（在微信里打开几张图片大图，并给 Weport 完全磁盘访问权限后重试），它不附加进程；③密钥已经填好时，读取、导出与通知都不需要调试权限。',
+    ].join('\n')
   }
 
   async autoGetDbKey(
@@ -315,10 +338,18 @@ export class KeyServiceMac {
       || normalizedDetail.includes('no suitable module found')
   }
 
+  /**
+   * 内存扫描/Hook 类失败的恢复建议。
+   *
+   * 「降级微信到 4.1.8.100」是原 WeFlow 时代的经验值，对**内存特征扫描**这一类
+   * 失败有用（特征随版本变），所以保留；但它对 `task_for_pid` 那一类无效 ——
+   * 那边的问题是系统拒绝附加（见 getSipPermissionHint），换哪个微信版本都一样。
+   * 这里把两件事分开说，用户才不会拿着"降级微信"的步骤去撞一堵不会开的墙。
+   */
   private getMacRecoveryHint(isRepeatedFailure: boolean): string {
     const steps = isRepeatedFailure
-      ? '建议步骤：彻底退出微信 -> 重启电脑（冷启动）-> 降级微信到 4.1.8.100 -> 仅尝试一次自动获取 -> 成功后再升级微信。'
-      : '建议步骤：降级微信到 4.1.8.100 -> 重启电脑（冷启动）-> 自动获取密钥 -> 成功后再升级微信。'
+      ? '建议步骤：彻底退出微信 -> 重启电脑（冷启动）-> 再仅尝试一次自动获取；若仍失败，可尝试临时降级到微信 4.1.8.100 后再试一次（仅对"内存特征未匹配"这类失败有意义），成功获取密钥后再升级回新版。'
+      : '建议步骤：重启电脑（冷启动）-> 自动获取密钥；若失败且报的是"内存特征未匹配"，可临时降级到微信 4.1.8.100 试一次，成功后再升级回新版。'
     return `${steps}\n请不要连续重试，以免触发微信安全模式或系统内存保护。`
   }
 
@@ -401,7 +432,7 @@ export class KeyServiceMac {
       return '获取失败：helper 未返回可识别结果，请彻底退出微信后重启电脑再试。'
     }
     if (text.includes('xkey_helper not found')) {
-      return '获取失败：未找到 xkey_helper，请重新安装 WeFlow 后重试。'
+      return '获取失败：未找到 xkey_helper，请重新安装 Weport 后重试。'
     }
     return '自动获取密钥失败：环境可能受限或版本暂未适配，请稍后重试。'
   }
@@ -729,10 +760,9 @@ export class KeyServiceMac {
     if (code === 'ATTACH_FAILED') {
       const isDevElectron = process.execPath.includes('/node_modules/electron/')
       if (normalizedDetail.includes('task_for_pid:5')) {
-        if (isDevElectron) {
-          return `无法附加到微信进程（task_for_pid 被拒绝）。当前为开发环境 Electron：${process.execPath}\n建议使用打包后的 WeFlow.app（已携带调试 entitlements）再重试。`
-        }
-        return '无法附加到微信进程（task_for_pid 被系统拒绝）。请确认当前运行程序已正确签名并包含调试 entitlements，优先使用打包版 WeFlow.app。'
+        return isDevElectron
+          ? `无法附加到微信进程（系统拒绝 task_for_pid）。当前是开发环境 Electron：${process.execPath}\n补充一句实话：即使是打包版也未必能附加 —— 正式版微信不带 get-task-allow，系统会拒绝任何调用方（细节见下方说明）。`
+          : '无法附加到微信进程（系统拒绝 task_for_pid）。这不是 Weport 的签名问题，正式版微信本身不允许被附加（细节见下方说明）。'
       }
       if (normalizedDetail.includes('thread_get_state_failed')) {
         return `无法附加到进程：系统拒绝读取线程状态（${normalizedDetail}）。`
@@ -762,7 +792,7 @@ export class KeyServiceMac {
     }
     if (code === 'SCAN_FAILED') {
       if (!normalizedDetail) {
-        return '内存扫描失败：未匹配到可用特征。可能是当前微信版本更新导致，请升级 WeFlow 后重试。'
+        return '内存扫描失败：未匹配到可用特征。可能是当前微信版本更新导致，请升级 Weport 后重试。'
       }
       if (normalizedDetail.includes('Sink pattern not found')) {
         return '内存扫描失败：未匹配到目标函数特征（Sink pattern not found），当前微信版本可能暂未适配。'

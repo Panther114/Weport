@@ -12,8 +12,8 @@
 //  - 收尾必须发 `{kind:'bye'}`，否则引擎会一直等到 disconnect 才退出
 //
 // 用法：
-//   node scripts/run-cli-command.mjs ai.costs
-//   node scripts/run-cli-command.mjs ai.costs --models deepseek-v4.1-flash
+//   node scripts/run-cli-command.mjs ai.profiles
+//   node scripts/run-cli-command.mjs ai.chats
 //   node scripts/run-cli-command.mjs connectors.addTask --content "测试" --dueText tomorrow
 
 import { spawn } from 'node:child_process'

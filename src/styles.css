@@ -1946,6 +1946,37 @@ button:disabled {
   max-width: 45%;
 }
 
+/* 「跟随微信消息免打扰」命中的会话：标出来，否则用户看不出它已经被自动屏蔽。
+   有它的时候 username 不再需要 margin-left:auto 顶到右边（见 .notify-muted-chip）。 */
+.notify-muted-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent-2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* 「接收范围」那行数字 + 它的来源说明。禁用状态（还在查）会轻微变淡，
+   让用户知道数字还会变 —— 免打扰数量是异步查出来的。 */
+.notify-scope {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.notify-scope-primary[data-loading='true'] {
+  opacity: 0.7;
+}
+
+.notify-scope-detail {
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-faint);
+}
+
 /* ---------- 导出信息 / 进度 ---------- */
 .export-meta {
   background: var(--bg);
@@ -3061,6 +3092,25 @@ button:disabled {
   font-size: 10px;
   font-weight: 650;
   letter-spacing: 0.02em;
+}
+
+/* 「已把 N 张图片附给模型看」——和记忆徽标同一档的分量：它是"这次回答到底看了
+   什么"的证据，不是装饰。 */
+.ai-tool-image-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  color: var(--accent-2);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.ai-tool-image-badge svg {
+  flex: none;
 }
 
 .ai-tool-card.err {

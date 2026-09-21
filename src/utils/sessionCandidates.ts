@@ -23,6 +23,10 @@ export interface RawSessionLike {
   nickName?: unknown
   remark?: unknown
   avatarUrl?: unknown
+  /** 会话排序时间戳（chatService.getSessions 按它降序返回）。 */
+  sortTimestamp?: unknown
+  /** 排序时间戳缺失时的回退（显示用的最后消息时间）。 */
+  lastTimestamp?: unknown
 }
 
 export interface ReferenceCandidateResult {
@@ -55,7 +59,7 @@ export function sessionListFromPayload(payload: unknown): RawSessionLike[] {
 }
 
 export function toReferenceCandidates(sessions: RawSessionLike[]): ReferenceCandidate[] {
-  const mapped: ReferenceCandidate[] = []
+  const mapped: Array<{ candidate: ReferenceCandidate; recency: number }> = []
   for (const session of sessions) {
     const id = String(session?.username || '').trim()
     if (!id) continue
@@ -64,13 +68,26 @@ export function toReferenceCandidates(sessions: RawSessionLike[]): ReferenceCand
     // 备注与显示名相同时不再重复一遍（否则每条都会写「备注：<同名>」）。
     const remark = String(session.remark || '')
     const subtitle = remark && remark !== label ? `备注：${remark}` : undefined
-    mapped.push({ id, label, kind, subtitle, avatarUrl: session.avatarUrl as string | undefined })
+    const sortTimestamp = Number(session.sortTimestamp ?? (session as { sort_timestamp?: unknown }).sort_timestamp ?? 0)
+    const lastTimestamp = Number(session.lastTimestamp ?? (session as { last_timestamp?: unknown }).last_timestamp ?? 0)
+    const recency = Math.max(
+      Number.isFinite(sortTimestamp) ? sortTimestamp : 0,
+      Number.isFinite(lastTimestamp) ? lastTimestamp : 0,
+    )
+    mapped.push({
+      candidate: { id, label, kind, subtitle, avatarUrl: session.avatarUrl as string | undefined },
+      recency,
+    })
   }
-  // 群聊排前面：这两个入口的典型用法都是「引用某个群」，私聊相对少见。
-  return mapped.sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === 'group' ? -1 : b.kind === 'group' ? 1 : 0
-    return a.label.localeCompare(b.label)
-  })
+  // **按最近聊天排序，不按类型分组。**
+  //
+  // 旧实现把群聊全部排到私聊前面（"这两个入口的典型用法都是引用某个群"），
+  // 于是列表被 60 条上限截断后**一条私聊都看不到** —— 用户看到的正是
+  // 「@ 里只有群聊」。排序时间戳缺失时保持原始顺序（Array.sort 稳定），
+  // 上层（chatService.getSessions）本来就是按最近活跃降序给的。
+  return mapped
+    .sort((a, b) => b.recency - a.recency)
+    .map((entry) => entry.candidate)
 }
 
 /**

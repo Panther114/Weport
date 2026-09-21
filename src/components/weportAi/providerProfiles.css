@@ -290,50 +290,6 @@
 }
 
 /* ── 模型定价明细 ── */
-.ai-cost-detail {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  grid-column: 1 / -1;
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg);
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-
-.ai-cost-chip {
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: var(--accent-softer);
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 缺的那几项淡化：它们不代表 0，只代表模型没有这一档计费 */
-.ai-cost-chip[data-missing='true'] {
-  background: none;
-  border: 1px dashed var(--line-strong);
-  color: var(--text-faint);
-}
-
-.ai-cost-unit,
-.ai-cost-source {
-  color: var(--text-faint);
-}
-
-.ai-cost-source {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.ai-cost-none {
-  color: var(--text-faint);
-}
-
 /* ── Add provider professional dialog ── */
 .ai-add-overlay {
   position: fixed;

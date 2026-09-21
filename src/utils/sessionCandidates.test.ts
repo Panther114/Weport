@@ -50,8 +50,8 @@ describe('会话返回形状：chat:getSessions 的 { sessions } 必须被认出
     })
     expect(result.ok).toBe(true)
     expect(result.candidates).toHaveLength(3)
-    // 群聊排前面（两个入口的典型用法都是引用群）
-    expect(result.candidates[0]).toMatchObject({ id: '12345@chatroom', kind: 'group' })
+    // 三条都没有时间戳：保持调用方给的顺序（chatService 已按最近活跃排序）
+    expect(result.candidates.map((c) => c.id)).toEqual(['wxid_me', '12345@chatroom', 'gh_abc'])
   })
 
   it('success:false 是失败，不是"没有会话"', () => {
@@ -89,6 +89,51 @@ describe('候选映射', () => {
   it('没有显示名时回落到 id，绝不产生空标签', () => {
     const [only] = toReferenceCandidates([{ username: 'wxid_only' }])
     expect(only.label).toBe('wxid_only')
+  })
+})
+
+/**
+ * 排序 = 按最近聊天，私聊与群聊混排。
+ *
+ * 这条是用户报的 bug：旧实现把群聊整块排到私聊前面，`@` 面板只渲染前 60 条，
+ * 于是列表里**一条私聊都没有** —— 用户的原话是「只显示群聊」。
+ */
+describe('候选排序：按最近活跃降序，不按类型分组', () => {
+  it('私聊与群聊按时间混排（群聊不再优先）', () => {
+    const mapped = toReferenceCandidates([
+      { username: 'old@chatroom', displayName: '陈年旧群', sortTimestamp: 100 },
+      { username: 'wxid_recent', displayName: '刚聊过的同学', sortTimestamp: 900 },
+      { username: 'mid@chatroom', displayName: '中间群', sortTimestamp: 500 },
+      { username: 'wxid_older', displayName: '更早的私聊', sortTimestamp: 200 },
+    ])
+    expect(mapped.map((c) => c.id)).toEqual(['wxid_recent', 'mid@chatroom', 'wxid_older', 'old@chatroom'])
+    // 前两条里既有私聊也有群聊 —— 这正是旧实现做不到的
+    expect(mapped.slice(0, 2).map((c) => c.kind).sort()).toEqual(['group', 'private'])
+  })
+
+  it('sortTimestamp 缺失时回退到 lastTimestamp', () => {
+    const mapped = toReferenceCandidates([
+      { username: 'a', displayName: 'A', lastTimestamp: 10 },
+      { username: 'b', displayName: 'B', lastTimestamp: 50 },
+    ])
+    expect(mapped.map((c) => c.id)).toEqual(['b', 'a'])
+  })
+
+  it('两个时间戳都没有时保持原始顺序（稳定排序，上层已排好）', () => {
+    const mapped = toReferenceCandidates([
+      { username: 'first', displayName: '一' },
+      { username: 'second', displayName: '二' },
+      { username: 'third', displayName: '三' },
+    ])
+    expect(mapped.map((c) => c.id)).toEqual(['first', 'second', 'third'])
+  })
+
+  it('下划线风格的 sort_timestamp 也认（原生行直传时会出现）', () => {
+    const mapped = toReferenceCandidates([
+      { username: 'a', displayName: 'A', sort_timestamp: 10 } as never,
+      { username: 'b', displayName: 'B', sort_timestamp: 80 } as never,
+    ])
+    expect(mapped.map((c) => c.id)).toEqual(['b', 'a'])
   })
 })
 

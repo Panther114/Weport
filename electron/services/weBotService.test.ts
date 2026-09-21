@@ -41,6 +41,7 @@ function makeService(
     clock?: ReturnType<typeof makeClock>
     dispatch?: (signal: AbortSignal) => Promise<WeBotDispatchResult>
     notify?: (note: unknown) => void
+    onRunStarted?: (run: unknown) => void
   } = {}
 ) {
   const dir = makeDir()
@@ -63,6 +64,7 @@ function makeService(
       }
     },
     notify: options.notify as never,
+    onRunStarted: options.onRunStarted as never,
   })
 
   return { service, clock, dir, stats: () => ({ maxConcurrent, started }) }
@@ -125,6 +127,66 @@ describe('WeBotService — 任务 CRUD 与持久化', () => {
     expect(service.deleteTask(task.id)).toBe(true)
     expect(service.listNotes()).toHaveLength(1)
     expect(service.listNotes()[0].taskTitle).toBe('A')
+  })
+})
+
+/**
+ * 运行记录（v1.0.1）：用户要能看到任务**跑过什么**，而不只是最后一次的成败。
+ *
+ * 起因是那句「上次失败：fetch failed」——界面上只有一行截断过的错误，既没有
+ * 时间、也没有历史，用户无从判断是一次网络抖动还是配置坏了。
+ */
+describe('WeBotService — 运行记录', () => {
+  it('开始时回调一次 running 记录，结束时同一条变成 ok', async () => {
+    const clock = makeClock()
+    const seen: Array<{ id: string; status: string; taskId: string }> = []
+    const { service } = makeService({ clock, onRunStarted: (run) => seen.push(run as never) })
+    const task = service.createTask({ title: '作业整理', schedule: daily(8, 30) })
+
+    await service.runNow(task.id)
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0].status).toBe('running')
+    expect(seen[0].taskId).toBe(task.id)
+    // 同一条记录在历史里变成 ok（不是新增一条），否则日志会把一次运行算成两次
+    const runs = service.listRuns(task.id)
+    expect(runs).toHaveLength(1)
+    expect(runs[0].id).toBe(seen[0].id)
+    expect(runs[0].status).toBe('ok')
+    expect(runs[0].noteId).toBeTruthy()
+  })
+
+  it('失败时错误文本完整留档（不再只有一句话的截断），并且也有笔记', async () => {
+    const clock = makeClock()
+    const { service } = makeService({
+      clock,
+      dispatch: async () => {
+        throw new Error('网络请求失败：api.example.com 域名解析失败（ENOTFOUND）')
+      },
+    })
+    const task = service.createTask({ title: 'A', schedule: daily(8, 30) })
+    await service.runNow(task.id)
+
+    const [run] = service.listRuns(task.id)
+    expect(run.status).toBe('error')
+    expect(run.error).toContain('ENOTFOUND')
+    expect(run.durationMs).toBeGreaterThanOrEqual(0)
+    expect(run.noteId).toBeTruthy()
+    expect(service.listNotes()[0].status).toBe('error')
+  })
+
+  it('历史按任务分组时保留多次运行（listRuns 不折叠）', async () => {
+    const clock = makeClock()
+    const { service } = makeService({ clock })
+    const task = service.createTask({ title: 'A', schedule: daily(8, 30) })
+    await service.runNow(task.id)
+    clock.advance(60_000)
+    await service.runNow(task.id)
+
+    const runs = service.listRuns(task.id)
+    expect(runs).toHaveLength(2)
+    // 最新在前，界面直接按顺序渲染
+    expect(runs[0].startedAt).toBeGreaterThan(runs[1].startedAt)
   })
 })
 

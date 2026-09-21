@@ -103,6 +103,35 @@ export function referenceKindLabel(kind: ReferenceKind): string {
 }
 
 /**
+ * 键盘导航要落在**可选**的候选上。
+ *
+ * 已经引用过的会话仍然留在列表里（灰掉、标「已引用」），否则用户会以为
+ * 自己搜错了 —— 但它们不能再被选中。所以上下键必须跳过它们，否则「按回车
+ * 没反应」会出现在一个看起来正常的条目上。
+ *
+ * `delta` 为 0 表示「把当前下标夹回可选范围」（候选列表变化时用），
+ * 否则先朝该方向走一步再跳过不可选项。全部不可选时返回原下标。
+ */
+export function resolveReferenceIndex(
+  length: number,
+  current: number,
+  isDisabled: (index: number) => boolean,
+  delta = 0
+): number {
+  if (length <= 0) return 0
+  const safeCurrent = Math.min(Math.max(Math.floor(Number(current) || 0), 0), length - 1)
+  // 跳过时保持方向：往上找就必须继续往上，否则「上键」会从被灰掉的条目
+  // 反弹回用户刚离开的那一条。
+  const step = delta < 0 ? -1 : 1
+  let index = delta === 0 ? safeCurrent : (safeCurrent + step + length) % length
+  for (let hop = 0; hop < length; hop += 1) {
+    if (!isDisabled(index)) return index
+    index = (index + step + length) % length
+  }
+  return safeCurrent
+}
+
+/**
  * 按查询串筛选候选：先匹配显示名，再匹配备注/副标题，最后匹配 id。
  *
  * 排序刻意保持「前缀命中优先」——搜「化学」时把「化学 3 班」排在

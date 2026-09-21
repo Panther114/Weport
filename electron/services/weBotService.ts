@@ -89,6 +89,14 @@ export interface WeBotServiceOptions {
   dispatch: (request: WeBotDispatchRequest, signal: AbortSignal) => Promise<WeBotDispatchResult>
   /** 通知回调（任务完成/失败时弹窗）。 */
   notify?: (note: WeBotNote) => void
+  /**
+   * 一次运行**开始**时的回调。
+   *
+   * 为什么需要它：定时任务可能跑几分钟，而这期间界面上什么都不会变 ——
+   * 用户看到的是「这个任务到点了但没动静」。渲染层收到它就把这条 `running`
+   * 记录插进运行日志里（同样的形状，同样的渲染路径）。
+   */
+  onRunStarted?: (run: WeBotRun) => void
   /** 调度 tick 间隔，测试可调小。 */
   tickMs?: number
   /** 运行历史保留条数（默认 400）。 */
@@ -126,6 +134,7 @@ export class WeBotService {
   private readonly dataDir: string
   private readonly dispatchFn: WeBotServiceOptions['dispatch']
   private readonly notifyFn?: (note: WeBotNote) => void
+  private readonly onRunStartedFn?: (run: WeBotRun) => void
   private readonly tickMs: number
   private readonly maxRuns: number
   private readonly maxNotes: number
@@ -141,6 +150,7 @@ export class WeBotService {
     this.dataDir = options.dataDir
     this.dispatchFn = options.dispatch
     this.notifyFn = options.notify
+    this.onRunStartedFn = options.onRunStarted
     this.tickMs = Math.max(5_000, options.tickMs ?? 30_000)
     this.maxRuns = Math.max(1, options.maxRuns ?? MAX_RUNS)
     this.maxNotes = Math.max(1, options.maxNotes ?? MAX_NOTES)
@@ -275,6 +285,11 @@ export class WeBotService {
     task.lastRunAt = startedAt
     this.trim()
     this.persist()
+    try {
+      this.onRunStartedFn?.({ ...run })
+    } catch (error) {
+      console.warn('[WeBot] 运行开始回调失败:', error)
+    }
 
     const controller = new AbortController()
     this.running.set(run.id, controller)

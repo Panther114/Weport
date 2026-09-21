@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getProviderAdapter, openAIChatBody, selectAdapter } from './providerAdapters'
+import { anthropicMessages, getProviderAdapter, googleContents, openAIChatBody, openAIChatMessages, selectAdapter } from './providerAdapters'
 import type { ProviderProfile, ProviderStreamInput } from './providerTypes'
 
 function profile(patch: Partial<ProviderProfile> = {}): ProviderProfile {
@@ -100,5 +100,96 @@ describe('per-model protocol selects the endpoint adapter', () => {
   it('treats gemini-compatible as the OpenAI-compatible entry point', () => {
     expect(selectAdapter('gemini-compatible')).toBe(selectAdapter('openai-compatible'))
     expect(selectAdapter('google')).not.toBe(selectAdapter('openai-compatible'))
+  })
+})
+
+/**
+ * 图片（v1.0.1）：`read_chat_images` 的结果必须变成**独立的内容块**，
+ * 不能拼进文本。拼进去模型只会收到一坨 base64 字符，等于没给它看图。
+ */
+describe('工具结果里的图片 → 内容块', () => {
+  const withImage = (): Array<Record<string, unknown>> => [
+    { role: 'system', content: 'sys' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_chat_images', arguments: '{}' } }] },
+    {
+      role: 'tool',
+      tool_call_id: 'call_1',
+      content: '「化学群」已附上 1 张图片',
+      images: [{ mimeType: 'image/jpeg', data: 'AAAA' }],
+    },
+  ]
+
+  it('带图的消息转成 text + image_url 两块', () => {
+    const [toolMessage] = openAIChatMessages(withImage()).filter((message) => message.role === 'tool')
+    expect(Array.isArray(toolMessage.content)).toBe(true)
+    expect(toolMessage.content).toEqual([
+      { type: 'text', text: '「化学群」已附上 1 张图片' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+    ])
+  })
+
+  it('没有图片的消息**原样透传**（多一次改写就多一次前缀缓存失效）', () => {
+    const messages = [{ role: 'tool', tool_call_id: 'call_9', content: '纯文本结果' }]
+    expect(openAIChatMessages(messages)[0]).toBe(messages[0])
+  })
+
+  it('形状坏掉的图片被丢掉，而不是把整个请求搞成 400', () => {
+    const messages = [
+      { role: 'tool', tool_call_id: 'call_1', content: 'x', images: [{ mimeType: '', data: '' }, { mimeType: 'image/png' }, null, 'nope'] },
+    ]
+    expect(openAIChatMessages(messages)[0]).toBe(messages[0])
+    const partial = [{ role: 'tool', tool_call_id: 'call_1', content: 'x', images: [{ mimeType: 'image/png', data: 'BBBB' }, { data: 'CCCC' }] }]
+    const [converted] = openAIChatMessages(partial)
+    expect((converted.content as unknown[]).length).toBe(2)
+  })
+
+  it('非 tool 角色上的 images 字段被忽略（不会伪造出一条图片消息）', () => {
+    const messages = [{ role: 'user', content: '你好', images: [{ mimeType: 'image/png', data: 'X' }] }]
+    expect(openAIChatMessages(messages)[0]).toBe(messages[0])
+  })
+
+  it('openAIChatBody 也走同一条转换（否则图片静默丢失）', () => {
+    const body = openAIChatBody(streamInput({ messages: withImage() }))
+    const toolMessage = (body.messages as Array<Record<string, unknown>>).find((message) => message.role === 'tool')
+    expect(Array.isArray(toolMessage?.content)).toBe(true)
+  })
+
+  it('同一份输入两次转换结果逐字节一致（前缀缓存不能被打散）', () => {
+    const first = JSON.stringify(openAIChatMessages(withImage()))
+    const second = JSON.stringify(openAIChatMessages(withImage()))
+    expect(second).toBe(first)
+  })
+
+  it('Anthropic：图片进 tool_result 的 content 里', () => {
+    const converted = anthropicMessages(withImage())
+    const toolTurn = converted.messages.find((message) => Array.isArray(message.content) && (message.content as Array<Record<string, unknown>>)[0]?.type === 'tool_result')
+    const content = (toolTurn?.content as Array<Record<string, unknown>>)[0]?.content as Array<Record<string, unknown>>
+    expect(content[0]).toMatchObject({ type: 'text' })
+    expect(content[1]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } })
+  })
+
+  it('Anthropic：没有图片时 content 仍是字符串（保持原样）', () => {
+    const converted = anthropicMessages([{ role: 'tool', tool_call_id: 'c1', content: '纯文本' }])
+    const content = (converted.messages[0].content as Array<Record<string, unknown>>)[0]?.content
+    expect(content).toBe('纯文本')
+  })
+
+  it('Gemini：functionResponse 之后补一条带 inlineData 的 user 消息', () => {
+    const contents = googleContents(withImage()).contents
+    const toolTurnIndex = contents.findIndex(
+      (item) => Array.isArray((item as { parts?: unknown[] }).parts)
+        && Boolean(((item as { parts: Array<Record<string, unknown>> }).parts[0] || {}).functionResponse)
+    )
+    expect(toolTurnIndex).toBeGreaterThanOrEqual(0)
+    const parts = (contents[toolTurnIndex] as { parts: Array<Record<string, unknown>> }).parts
+    expect(parts[0]).toHaveProperty('functionResponse')
+    const imageTurn = contents[toolTurnIndex + 1] as { role: string; parts: Array<Record<string, unknown>> }
+    expect(imageTurn.role).toBe('user')
+    expect(imageTurn.parts[0]).toEqual({ inlineData: { mimeType: 'image/jpeg', data: 'AAAA' } })
+  })
+
+  it('Gemini：没有图片时不多造一条内容（协议里多一条都是噪声）', () => {
+    const contents = googleContents([{ role: 'tool', tool_call_id: 'c1', toolName: 'read_note', content: '纯文本' }]).contents
+    expect(contents).toHaveLength(1)
   })
 })

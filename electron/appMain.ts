@@ -2056,7 +2056,9 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
 
   sections.push(
     `这是 WeBot 定时任务的自动执行（${new Date().toLocaleString('zh-CN')}）。` +
-      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。'
+      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。' +
+      '如果结论取决于聊天里的**图片**（作业照片、截图、通知单），必须用 read_chat_images 真正看图后再下结论 —— ' +
+      '不要凭文件名、文字描述或猜测代替看图；图看不了就如实说明原因。'
   )
 
   // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
@@ -2076,6 +2078,13 @@ function ensureWeBotService(): WeBotService {
   weBotService = new WeBotService({
     dataDir: join(app.getPath('userData'), 'webot'),
     dispatch: dispatchWeBotTask,
+    onRunStarted: (run) => {
+      // 「到点了正在跑」这一刻也要可见：任务可能跑几分钟，界面在此之前
+      // 完全没有变化。渲染层把这条 running 记录直接插进运行日志。
+      try {
+        mainWindow?.webContents.send('webot:runStarted', run)
+      } catch { /* 窗口可能尚未创建 */ }
+    },
     notify: (note) => {
       // 复用聊天通知的那套独立置顶窗口（notificationWindow.ts），不另起一套
       // 通知系统 —— 用户已经熟悉它出现的位置与交互。
@@ -3347,13 +3356,15 @@ function demoConfigValue(key: string): unknown {
     case 'messagePushRespectWechatMute':
       return true
     case 'messagePushFilterMode':
-      return 'all'
+      // 演示用黑名单模式：截图要能看出「屏蔽 n 个会话」把跟随免打扰的会话算了进去
+      // （用户报的 bug），全部接收的话那行数字根本不显示。
+      return 'blacklist'
     case 'messagePushFilterList':
-      return []
+      return ['trip@chatroom']
     case 'notificationFilterMode':
-      return 'all'
+      return 'blacklist'
     case 'notificationFilterList':
-      return []
+      return ['trip@chatroom']
     case 'notificationEnabled':
       return false
     case 'notificationDuration':
@@ -3496,6 +3507,29 @@ function demoAntiRevokeSessions() {
   ]
 }
 
+/**
+ * 演示会话列表。
+ *
+ * 为什么截图模式必须覆盖 `chat:getSessions`：v1.0.1 起「消息通知设置」在打开时
+ * 会读一次会话与免打扰状态（那行「屏蔽 n 个会话」要把跟随免打扰的算进去），
+ * 不覆盖就会打到**真实的微信数据库**，把真实会话 id / 名字画进 README 截图。
+ *
+ * 顺序与真实返回一致：按最近活跃降序（`@` 选择器直接吃这个顺序）。
+ */
+function demoSessions() {
+  const now = Math.floor(Date.now() / 1000)
+  return [
+    { username: 'family@chatroom', displayName: '一家人', summary: '周末去郊野公园野餐', sortTimestamp: now - 120, lastTimestamp: now - 120, messageCountHint: 9163, isMuted: false, isFolded: false },
+    { username: 'wxid_zhangwei', displayName: '张伟', summary: '明天记得带实验报告', sortTimestamp: now - 900, lastTimestamp: now - 900, messageCountHint: 1284, isMuted: false, isFolded: false },
+    { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', summary: '这版先上通知设置', sortTimestamp: now - 3_600, lastTimestamp: now - 3_600, messageCountHint: 4021, isMuted: true, isFolded: true },
+    { username: 'wxid_lina', displayName: '李娜', summary: '照片洗好了', sortTimestamp: now - 5_400, lastTimestamp: now - 5_400, messageCountHint: 642, isMuted: false, isFolded: false },
+    { username: 'daily@chatroom', displayName: '工作日报群', summary: '今日日报汇总', sortTimestamp: now - 7_200, lastTimestamp: now - 7_200, messageCountHint: 2140, isMuted: true, isFolded: false },
+    { username: 'alumni@chatroom', displayName: '老同学', summary: '聚一次吧', sortTimestamp: now - 86_400, lastTimestamp: now - 86_400, messageCountHint: 3312, isMuted: true, isFolded: false },
+    { username: 'trip@chatroom', displayName: '周末郊游小分队', summary: '订了三辆车', sortTimestamp: now - 90_000, lastTimestamp: now - 90_000, messageCountHint: 420, isMuted: false, isFolded: false },
+    { username: 'parents@chatroom', displayName: '爸妈', summary: '到家说一声', sortTimestamp: now - 172_800, lastTimestamp: now - 172_800, messageCountHint: 806, isMuted: false, isFolded: false },
+  ]
+}
+
 function installScreenshotDemoHandlers() {
   // WEPORT_TRACE_AI=1 时把渲染进程实际发出的 ai:* 调用打到 stdout：截图模式里
   // "AI 页面只渲染出空态"这类问题，只有看清调用了哪些通道、拿到了什么才能定位。
@@ -3527,6 +3561,15 @@ function installScreenshotDemoHandlers() {
   override('chat:uninstallAntiRevokeTriggers', (e, sessionIds: string[]) => ({
     rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
   }))
+  // 会话列表 + 免打扰状态：通知设置的「屏蔽 n 个会话」与 `@` 选择器都读它们，
+  // 不覆盖就会读到真实微信数据（见 demoSessions 的说明）。
+  override('chat:getSessions', () => ({ success: true, sessions: demoSessions() }))
+  override('chat:getSessionStatuses', (_e, usernames: string[]) => {
+    const muted = new Set(demoSessions().filter((session) => session.isMuted).map((session) => session.username))
+    const map: Record<string, { isMuted: boolean; isFolded: boolean }> = {}
+    for (const username of usernames || []) map[String(username)] = { isMuted: muted.has(String(username)), isFolded: false }
+    return { success: true, map }
+  })
   override('ai:getSetup', () => demoAiSetup())
   override('ai:setSetup', () => ({ success: true }))
   override('ai:listProviders', () => ({ providers: demoAiSetup().catalog }))
@@ -3657,6 +3700,20 @@ function installScreenshotDemoHandlers() {
       scheduledAt: Date.now() - 3_630_000,
       startedAt: Date.now() - 3_600_000,
       finishedAt: Date.now() - 3_570_000,
+      // 最近一次失败：卡片上会显示「上次失败：<原因>」，运行记录里也能看到完整文本。
+      // v1.0.1 之前这里是一句 `fetch failed` —— 那正是用户报的 bug。
+      status: 'error' as const,
+      error: '网络请求失败：api.deepseek.com 域名解析失败（ENOTFOUND）',
+      noteId: 'note-demo-1',
+      durationMs: 900,
+    },
+    {
+      id: 'run-demo-2',
+      taskId: 'task-demo-1',
+      taskTitle: '化学群作业整理',
+      scheduledAt: Date.now() - 7_260_000,
+      startedAt: Date.now() - 7_200_000,
+      finishedAt: Date.now() - 7_170_000,
       status: 'ok' as const,
       noteId: 'note-demo-1',
       durationMs: 30_000,
@@ -6154,6 +6211,58 @@ async function runScreenshotMode() {
       true,
     ).catch(() => false)
     await sleep(500)
+  })
+
+  // WeBot 运行记录（v1.0.1）：卡片上的历史按钮展开出每次运行的时刻 / 结果 / 耗时。
+  // 断言的是具体的运行行，而不是"卡片还在" —— 后者在按钮坏了的时候照样通过。
+  // 先把上一张图留下的编辑器关掉、并把卡片滚进视口，否则截图里看不到记录行。
+  await captureV09('webot-runs', 'webot-runs.png', ['.webot-run'], async () => {
+    await clickTab('WeBot')
+    await sleep(300)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const close = Array.from(document.querySelectorAll('.webot-editor-head button')).find((x) => x.textContent.includes('关闭'));
+         close?.click();
+         return !!close;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const b = document.querySelector('.webot-card-log'); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const el = document.querySelector('.webot-runs'); el?.scrollIntoView({ block: 'center' }); return !!el; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+  })
+
+  // `@` 选择器（v1.0.1）：私聊与群聊按最近聊天混排，已引用的会话灰掉。
+  // 先引用一个，再打开一次 —— 第二张图里第一项必须是灰的（已引用），否则
+  // 「已引用还留在列表里、但不该再被选中」这条规则就没有被验证过。
+  await captureV09('mention-picker', 'mention-picker.png', ['.ref-picker-item'], async () => {
+    await clickTab('WeportAI')
+    await sleep(800)
+    const setInput = (value: string) => `(() => {
+      const el = document.querySelector('.ai-input');
+      if (!el) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`
+    await mainWindow!.webContents.executeJavaScript(setInput('@'), true).catch(() => false)
+    await sleep(700)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const first = document.querySelector('.ref-picker-item'); first?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return !!first; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(setInput('@'), true).catch(() => false)
+    await sleep(700)
   })
 
   await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {

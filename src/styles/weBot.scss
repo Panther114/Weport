@@ -174,9 +174,19 @@
 }
 
 .webot-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
   font-size: 12px;
   color: var(--danger);
   word-break: break-word;
+
+  // 「查看运行记录」跟着错误走：一行截断的错误后面必须有一步能看全上下文。
+  button {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 11.5px;
+  }
 }
 
 .webot-card-actions {
@@ -379,6 +389,107 @@
 }
 
 .webot-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+// 12 小时制的时间输入：小时下拉 + 分钟 + 上午/下午。
+// 小时是 select（1–12，不会出现 0 点或 23 点这种读法），分钟保持可输入任意值。
+.webot-clock {
+  select {
+    min-width: 62px;
+  }
+}
+
+.webot-meridiem {
+  margin-left: 2px;
+}
+
+// 运行记录：与卡片同一张脸，只是纵向排几行「什么时候 / 什么结果 / 跑了多久」。
+// 失败原因整段换行显示 —— 「上次失败：fetch failed」就是因为只留了一句
+// 没有上下文的短文本，用户无从判断。
+.webot-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.webot-runs-empty {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.webot-run {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border-left: 2px solid var(--line);
+
+  &[data-status='error'] {
+    border-left-color: var(--danger);
+  }
+
+  &[data-status='running'] {
+    border-left-color: var(--accent-2);
+  }
+
+  &[data-status='skipped'] {
+    border-left-color: var(--text-faint);
+  }
+}
+
+.webot-run-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.webot-run-time {
+  font-family: var(--font-mono);
+}
+
+.webot-run-status {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+
+  &[data-status='ok'] {
+    border-color: color-mix(in srgb, var(--accent-2) 45%, transparent);
+    color: var(--accent-2);
+  }
+
+  &[data-status='error'] {
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    color: var(--danger);
+  }
+}
+
+.webot-run-duration {
+  margin-left: auto;
+}
+
+.webot-run-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.webot-run-note {
+  margin: 0;
   font-size: 11.5px;
   color: var(--text-faint);
 }

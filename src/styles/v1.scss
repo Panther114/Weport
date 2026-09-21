@@ -967,6 +967,29 @@ textarea,
     background: var(--accent-soft);
     color: var(--text);
   }
+
+  // 已经引用过的会话：灰掉、不再有选中态、光标也说明它点不动。
+  // 留在列表里而不是删掉 —— 删掉会让「搜一个刚引用过的群」变成「没有匹配的会话」，
+  // 用户只会以为搜索坏了。
+  &[data-picked='true'] {
+    opacity: 0.45;
+    cursor: default;
+
+    &[data-active='true'] {
+      background: transparent;
+      color: var(--text-dim);
+    }
+  }
+}
+
+.ref-picker-picked {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--text-faint);
 }
 
 .ref-picker-avatar {

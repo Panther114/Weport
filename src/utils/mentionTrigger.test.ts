@@ -3,6 +3,7 @@ import {
   filterReferenceCandidates,
   findActiveMention,
   referenceKindLabel,
+  resolveReferenceIndex,
   rewriteMentionQuery,
   stripMention,
 } from './mentionTrigger'
@@ -179,5 +180,44 @@ describe('referenceKindLabel', () => {
     expect(referenceKindLabel('group')).toBe('群聊')
     expect(referenceKindLabel('private')).toBe('私聊')
     expect(referenceKindLabel('official')).toBe('公众号')
+  })
+})
+
+/**
+ * 已引用过的候选灰掉之后仍然占着列表里的位置，键盘导航必须跳过它们。
+ * 没有这层跳过，用户会在灰掉的那条上按回车 —— 什么也不会发生。
+ */
+describe('resolveReferenceIndex：跳过不可选（已引用）的候选', () => {
+  const none = () => false
+  const pickedSecond = (index: number) => index === 1
+
+  it('下键跳过被灰掉的那条', () => {
+    expect(resolveReferenceIndex(4, 0, pickedSecond, 1)).toBe(2)
+  })
+
+  it('上键跳过被灰掉的那条（并环绕）', () => {
+    expect(resolveReferenceIndex(4, 0, pickedSecond, -1)).toBe(3)
+    expect(resolveReferenceIndex(4, 2, pickedSecond, -1)).toBe(0)
+  })
+
+  it('当前下标落在灰条目上时（delta=0）夹到下一个可选项', () => {
+    expect(resolveReferenceIndex(4, 1, pickedSecond, 0)).toBe(2)
+  })
+
+  it('全部可选时就是普通的上下移动', () => {
+    expect(resolveReferenceIndex(3, 1, none, 1)).toBe(2)
+    expect(resolveReferenceIndex(3, 0, none, -1)).toBe(2)
+  })
+
+  it('全都被引用时保持原位，不会卡成死循环', () => {
+    expect(resolveReferenceIndex(3, 1, () => true, 1)).toBe(1)
+  })
+
+  it('空列表返回 0', () => {
+    expect(resolveReferenceIndex(0, 5, none, 1)).toBe(0)
+  })
+
+  it('越界的当前下标先被夹回范围', () => {
+    expect(resolveReferenceIndex(3, 99, none, 0)).toBe(2)
   })
 })

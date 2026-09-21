@@ -20,11 +20,13 @@ The harness is a DSH-derived port: it keeps DSH's cache discipline and evidence 
   starts at the **first token**, not at request start. Folding TTFT into the rate makes a
   long-prefix call look slow when it is only waiting. `AiStepTiming` carries this per step;
   `formatTokensPerSecond` (≥10 → integer, <10 → one decimal) mirrors DSH.
-- **Model pricing is live, not hard-coded.** Prices come from `https://models.dev/api.json`
-  (USD per 1M tokens, 24 h TTL, ETag, bundled snapshot as offline fallback) via
-  `modelRegistry.ts`. `getSetup()` resolves them into `modelCosts` for the renderer, which
-  prices the model dropdown and the topbar. Missing price renders as 未定价 — never `$0.00`,
-  because unpriced and free are different things.
+- **Model metadata is live, pricing estimates are gone (v1.0.1).** Context window and
+  wire protocol still come from `https://models.dev/api.json` (24 h TTL, ETag, bundled
+  snapshot as offline fallback) via `modelRegistry.ts`. The renderer's cost estimate was
+  **removed**: models.dev does not cover most of the providers this app is used with, so
+  the topbar showed 未定价 most of the time, and when it did show a number it was only an
+  estimate (cache/batch/tiered discounts are absent). Token usage stays — that is counted,
+  not estimated.
 - **Chat titles are generated, then validated.** `electron/services/ai/chatTitle.ts` holds
   the pure rules: 2–4 words, strip `标题：`/quotes/trailing punctuation, and **reject a title
   that is just the user's own message truncated** (`titleEchoesSource`) — that is the bug

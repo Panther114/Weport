@@ -67,6 +67,7 @@ import ExportProgressBar, { type ExportProgressBarHandle } from './components/ex
 import BackgroundTasks from './components/BackgroundTasks'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
+import { summarizeNotifyScope } from './utils/notifyScope'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 
 /**
@@ -396,6 +397,14 @@ export default function App() {
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
   const [muteReport, setMuteReport] = useState<Awaited<ReturnType<typeof window.electronAPI.notification.getMuteReport>> | null>(null)
   const [muteReportBusy, setMuteReportBusy] = useState(false)
+  /**
+   * 微信里标了「消息免打扰」的会话（`null` = 还不知道）。
+   *
+   * 「接收范围」那行文案要把它们算进屏蔽数 —— 打开「跟随微信消息免打扰」之后
+   * 它们确实不会弹窗，但以前的计数只算手选的会话，用户看到的是"这个开关没生效"。
+   */
+  const [mutedSessions, setMutedSessions] = useState<{ usernames: string[]; at: number } | null>(null)
+  const [mutedSessionsLoading, setMutedSessionsLoading] = useState(false)
   /** 三个功能面各自指向哪个 AI 服务（设置 → AI 服务）。 */
   const [aiAssignments, setAiAssignments] = useState<Awaited<ReturnType<typeof window.electronAPI.ai.getConsumerAssignments>> | null>(null)
   // 自定义强调色的输入框草稿：允许用户先打出半截十六进制。
@@ -525,8 +534,7 @@ export default function App() {
   const [notifyFilterBusy, setNotifyFilterBusy] = useState(false)
 
   const api = window.electronAPI
-  const imageKeyRequired = api.process.platform === 'win32'
-    || api.process.platform === 'darwin'
+  const imageKeyRequired = api.process.platform === 'win32'    || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
   // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
   // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
@@ -1565,9 +1573,52 @@ export default function App() {
     try {
       const result = await api.config.set('messagePushRespectWechatMute', on)
       if (result?.success === false) throw new Error('配置保存失败')
+      // 打开这个开关就立刻把「哪些会话被它压住了」查出来：不查的话页面头上
+      // 只会显示手选的数字，看起来像这个开关什么也没做（用户报的 bug）。
+      void refreshMutedSessions(true)
     } catch (error) {
       setRespectWechatMute(previous)
       pushToast('err', '免打扰同步设置失败', String(error))
+    }
+  }
+
+  /**
+   * 拉取「微信里标了消息免打扰」的会话列表。
+   *
+   * 为什么要单独查一次：会话对象上的 `isMuted` 只在缓存命中时才带，推送侧是
+   * 在每次同步里补查的；设置页不能拿一个"未知"当"没有免打扰"。批量走
+   * `chat:getSessionStatuses`（主进程会写回同一个缓存，推送侧随后直接用）。
+   *
+   * 单个批次失败只影响那一批：整页数字因为一次超时变成 0 是最糟的结果。
+   */
+  async function refreshMutedSessions(force = false) {
+    if (!respectWechatMute && !force) {
+      setMutedSessions(null)
+      return
+    }
+    if (!force && mutedSessions && Date.now() - mutedSessions.at < 300_000) return
+    setMutedSessionsLoading(true)
+    try {
+      const result = await api.chat.getSessions()
+      const usernames = (result?.sessions || [])
+        .map((session) => String(session?.username || '').trim())
+        .filter(Boolean)
+      const muted: string[] = []
+      const batchSize = 200
+      for (let offset = 0; offset < usernames.length; offset += batchSize) {
+        const batch = usernames.slice(offset, offset + batchSize)
+        try {
+          const statuses = await api.chat.getSessionStatuses(batch)
+          for (const username of batch) if (statuses?.map?.[username]?.isMuted === true) muted.push(username)
+        } catch { /* 这一批读不到就当未知，不影响其它批次 */ }
+      }
+      setMutedSessions({ usernames: muted, at: Date.now() })
+    } catch (error) {
+      // 读失败要保持 null（未知），不能变成"没有免打扰会话"
+      setMutedSessions(null)
+      console.warn('[Notify] 读取免打扰会话失败:', error)
+    } finally {
+      setMutedSessionsLoading(false)
     }
   }
 
@@ -1762,6 +1813,46 @@ export default function App() {
       return true
     })
   }, [notifySessions, notifyFilterType, notifyFilterSearch])
+
+  /** 微信里标了免打扰、且**不在**手选列表里的会话 —— 它们让"屏蔽 n 个"变大。 */
+  const mutedSet = useMemo(() => new Set(mutedSessions?.usernames || []), [mutedSessions])
+  const mutedExtraCount = useMemo(() => {
+    if (!mutedSessions) return null
+    const selected = new Set(notifyFilterList)
+    let count = 0
+    for (const username of mutedSessions.usernames) if (!selected.has(username)) count += 1
+    return count
+  }, [mutedSessions, notifyFilterList])
+
+  /**
+   * 「接收范围」的文案。**免打扰跟随的会话必须算进屏蔽数** —— 这是用户报的
+   * bug：开关开着、通知确实不弹了，但头上那行数字一动不动，看起来像没生效。
+   */
+  const notifyScope = useMemo(
+    () =>
+      summarizeNotifyScope({
+        mode: notifyFilterMode,
+        selectedCount: notifyFilterList.length,
+        mutedExtraCount,
+        followMute: respectWechatMute,
+      }),
+    [notifyFilterMode, notifyFilterList.length, mutedExtraCount, respectWechatMute]
+  )
+
+  /**
+   * 打开「消息通知设置」时把免打扰会话查出来（60 秒内不重复查）。
+   *
+   * 只在这一页查：它是唯一会显示这个数字的地方，而读一次状态要走原生接口 +
+   * 最多几十个会话的批量调用，不该在启动路径上做。
+   */
+  useEffect(() => {
+    if (tab !== 'notifications') return
+    if (!respectWechatMute) return
+    void refreshMutedSessions()
+    // refreshMutedSessions 每次渲染都是新函数；这里只依赖"进入这一页"与开关状态，
+    // 5 分钟 TTL 已经在函数内部挡住了重复查询。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, respectWechatMute])
 
   async function openNotifyFilter() {
     setNotifyFilterDraft(new Set(notifyFilterList))
@@ -3055,14 +3146,11 @@ export default function App() {
                   <Filter size={15} />
                   接收范围
                 </h2>
-                <span>
-                  {notifyFilterMode === 'all'
-                    ? '接收所有会话的通知'
-                    : notifyFilterMode === 'whitelist'
-                      ? `仅通知已选 ${notifyFilterList.length} 个会话`
-                      : notifyFilterMode === 'blacklist'
-                        ? `屏蔽 ${notifyFilterList.length} 个会话的通知`
-                        : '仅提醒群聊中明确 @你的消息（@所有人不触发）'}
+                <span className="notify-scope">
+                  <span className="notify-scope-primary" data-loading={mutedSessionsLoading || undefined}>
+                    {notifyScope.primary}
+                  </span>
+                  {notifyScope.detail ? <em className="notify-scope-detail">{notifyScope.detail}</em> : null}
                 </span>
               </div>
 
@@ -4217,6 +4305,11 @@ export default function App() {
                       />
                       <Avatar src={s.avatarUrl} name={s.displayName || s.username} size={22} shape={sessionTypeOf(s.username) === 'group' ? 'rounded' : 'circle'} className="notify-avatar" />
                       <span className="notify-name">{s.displayName || s.username}</span>
+                      {/* 免打扰跟随命中的会话在这里也要标出来：用户在微信里标过免打扰，
+                          但过滤对话框里看不出它已经被自动屏蔽了。 */}
+                      {respectWechatMute && mutedSet.has(s.username) ? (
+                        <span className="notify-muted-chip" title="微信里标了「消息免打扰」，跟随设置不会弹窗">免打扰</span>
+                      ) : null}
                       <span className="notify-id">{s.username}</span>
                     </label>
                   )

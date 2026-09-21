@@ -1,9 +1,10 @@
-import { useEffect, useImperativeHandle, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type RefObject } from 'react'
 import { Hash, Megaphone, Search, User, X } from 'lucide-react'
 import FloatingLayer from '../ui/FloatingLayer'
 import {
   filterReferenceCandidates,
   referenceKindLabel,
+  resolveReferenceIndex,
   type ChatReference,
   type ReferenceKind,
 } from '../../utils/mentionTrigger'
@@ -47,6 +48,13 @@ interface Props {
   onQueryChange: (query: string) => void
   onPick: (reference: ChatReference) => void
   onClose: () => void
+  /**
+   * 已经引用过的会话 id。
+   *
+   * 它们**继续留在列表里但灰掉**：直接删掉的话，用户在 `@` 里搜一个刚引用过的
+   * 群会得到「没有匹配的会话」，看起来像搜索坏了；灰掉则明确说「这个已经有了」。
+   */
+  pickedIds?: string[]
   /** 关闭后把焦点交还输入框（父级实现） */
   onReturnFocus?: () => void
   ref?: React.Ref<ReferencePickerHandle>
@@ -62,8 +70,10 @@ interface Props {
  * - **渲染到 body 下的浮层**（FloatingLayer）。旧版挂在文档流里，在 WeBot 的
  *   滚动容器（`.webot { overflow-y: auto }`）内向上展开时会被整块裁掉 ——
  *   用户看到的是"弹窗在顶部被切掉"。浮层化之后，任何祖先的 overflow 都管不到它。
- * - 候选列表由调用方提供（已按会话时间排好序）；这里只做筛选与排序，不自己
- *   读 WCDB，避免每敲一个字符就查一次数据库。
+ * - 候选列表由调用方提供（**按最近聊天排序，私聊与群聊混排**）；这里只做筛选与
+ *   排序，不自己读 WCDB，避免每敲一个字符就查一次数据库。旧版在 `sessionCandidates`
+ *   里把群聊整块排到前面，60 条上限一截断就只剩群聊 —— 用户报的就是这个。
+ * - 已经引用过的条目**灰掉但留在列表里**（见 `pickedIds`），键盘导航跳过它们。
  * - 上限 60 条：5000 个会话的账号也不会因为渲染整列而卡顿。
  * - **搜索框是真输入框**（v1.0.1）。旧版是 `readOnly` 的"展示型"输入框：
  *   点它会把焦点从输入框抢走，之后打字一个字符也进不去，用户看到的就是
@@ -80,6 +90,7 @@ export default function ReferencePicker({
   onQueryChange,
   onPick,
   onClose,
+  pickedIds,
   onReturnFocus,
   ref,
 }: Props) {
@@ -88,12 +99,14 @@ export default function ReferencePicker({
   const searchRef = useRef<HTMLInputElement | null>(null)
 
   const filtered = useMemo(() => filterReferenceCandidates(candidates, query, 60), [candidates, query])
+  const picked = useMemo(() => new Set((pickedIds || []).map((id) => String(id || '').trim()).filter(Boolean)), [pickedIds])
+  const isPicked = useCallback((index: number) => picked.has(String(filtered[index]?.id || '')), [picked, filtered])
 
   // 筛选结果变化时把选中项夹回合法范围，否则会停在一个不存在的下标上，
-  // 表现为「按回车没反应」。
+  // 表现为「按回车没反应」；已经引用过的条目同样要跳过（灰掉了就选不中）。
   useEffect(() => {
-    setActiveIndex((current) => (current >= filtered.length ? 0 : current))
-  }, [filtered])
+    setActiveIndex((current) => resolveReferenceIndex(filtered.length, current, (index) => picked.has(String(filtered[index]?.id || ''))))
+  }, [filtered, picked])
 
   useEffect(() => {
     const node = listRef.current?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
@@ -102,21 +115,19 @@ export default function ReferencePicker({
 
   /** 键盘导航：父级输入框与弹层搜索框共用同一份逻辑 */
   const navigate = (event: { key: string; preventDefault: () => void; shiftKey?: boolean }): boolean => {
-    if (event.key === 'ArrowDown') {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      setActiveIndex((current) => (filtered.length === 0 ? 0 : (current + 1) % filtered.length))
-      return true
-    }
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      setActiveIndex((current) => (filtered.length === 0 ? 0 : (current - 1 + filtered.length) % filtered.length))
+      const delta = event.key === 'ArrowDown' ? 1 : -1
+      setActiveIndex((current) => resolveReferenceIndex(filtered.length, current, isPicked, delta))
       return true
     }
     if (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) {
-      const picked = filtered[activeIndex]
-      if (!picked) return false
+      const picked_item = filtered[activeIndex]
+      if (!picked_item) return false
       event.preventDefault()
-      onPick({ id: picked.id, label: picked.label, kind: picked.kind })
+      // 已引用的条目是灰的：消费按键但不重复添加，也不会把换行/制表符打进输入框。
+      if (isPicked(activeIndex)) return true
+      onPick({ id: picked_item.id, label: picked_item.label, kind: picked_item.kind })
       onReturnFocus?.()
       return true
     }
@@ -129,7 +140,7 @@ export default function ReferencePicker({
     return false
   }
 
-  useImperativeHandle(ref, () => ({ handleKeyDown: navigate }), [filtered, activeIndex, onPick, onClose, onReturnFocus])
+  useImperativeHandle(ref, () => ({ handleKeyDown: navigate }), [filtered, activeIndex, picked, onPick, onClose, onReturnFocus])
 
   /**
    * 点击浮层内部不应关闭它。
@@ -191,19 +202,25 @@ export default function ReferencePicker({
             </div>
           ) : null}
 
-          {filtered.map((candidate, index) => (
+          {filtered.map((candidate, index) => {
+            const alreadyPicked = picked.has(String(candidate.id))
+            return (
             <button
               key={candidate.id}
               type="button"
               role="option"
               aria-selected={index === activeIndex}
+              aria-disabled={alreadyPicked || undefined}
               data-index={index}
               data-active={index === activeIndex}
+              data-picked={alreadyPicked || undefined}
               className="ref-picker-item"
+              title={alreadyPicked ? '已经引用过这个会话了' : undefined}
               // onMouseDown 而不是 onClick：失焦处理会先于 click 触发，
               // 用 mousedown 抢在失焦之前完成选择。
               onMouseDown={(e) => {
                 e.preventDefault()
+                if (alreadyPicked) return
                 onPick({ id: candidate.id, label: candidate.label, kind: candidate.kind })
                 onReturnFocus?.()
               }}
@@ -220,11 +237,13 @@ export default function ReferencePicker({
                 <span className="ref-picker-label">{candidate.label}</span>
                 {candidate.subtitle ? <span className="ref-picker-sub">{candidate.subtitle}</span> : null}
               </span>
+              {alreadyPicked ? <span className="ref-picker-picked">已引用</span> : null}
               <span className="ref-picker-kind" data-kind={candidate.kind}>
                 {referenceKindLabel(candidate.kind)}
               </span>
             </button>
-          ))}
+            )
+          })}
         </div>
       </div>
     </FloatingLayer>

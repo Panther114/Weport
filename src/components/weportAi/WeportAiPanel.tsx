@@ -16,6 +16,7 @@ import {
   Square,
   Users,
   BookOpen,
+  Images,
   User as UserIcon,
   Info,
   FilePenLine,
@@ -40,7 +41,7 @@ import './providerProfiles.css'
 type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number }
 // `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
 // ToolChip 渲染转圈而不是把它标成失败。
-type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string }
+type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string; imageCount?: number }
 type AiMessage = {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -55,7 +56,7 @@ type AiEvent =
   | { type: 'reasoning_delta'; chatId: string; delta: string }
   | { type: 'text_delta'; chatId: string; delta: string }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
-  | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string }
+  | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string; imageCount?: number }
   | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: { ttftMs: number; decodeMs: number; outputTokens: number } }
   | { type: 'chat_title'; chatId: string; title: string }
   | { type: 'error'; chatId: string; message: string }
@@ -65,7 +66,7 @@ type AiEvent =
 import { type AiAction, type ProviderCatalogEntry, type ProviderModelMetadata, type ProviderProfileSummary, type ProviderProtocol, type SetupInfo } from './aiPanelTypes'
 type AiNote = { path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }
 
-type LiveTool = { id: string; name: string; friendly: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; result?: string; running: boolean }
+type LiveTool = { id: string; name: string; friendly: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; result?: string; running: boolean; imageCount?: number }
 type LiveState = { reasoning: string; text: string; tools: LiveTool[]; firstTokenAt?: number; lastTokenAt?: number }
 
 /**
@@ -97,6 +98,7 @@ const TOOL_ICON: Record<string, React.ComponentType<{ size?: number | string; st
   review_prior_analyses: MemoryStick,
   get_group_members: Users,
   read_session_messages: BookOpen,
+  read_chat_images: Images,
   read_day_events: BookOpen,
   read_period_events: BookOpen,
   search_messages: BookOpen,
@@ -125,82 +127,17 @@ function fmtTokens(n: number | undefined): string {
 }
 
 /**
- * Cost of one run, priced from the model's OWN published rates.
+ * 定价估算**已移除**（v1.0.1）。
  *
- * models.dev prices are USD per million tokens. The previous implementation
- * hard-coded DeepSeek's rates in the renderer and applied them to every
- * provider, which was wrong by 3–6× on DeepSeek itself (real V4 Pro is
- * 0.435 / 0.87, not 0.14 / 0.28) and meaningless everywhere else.
+ * 面板上曾经有一个「单价」读数和一个「本轮花费」读数，数字来自 models.dev 的
+ * 定价表。问题是那张表对国内可用的服务商覆盖很差：用户实际在用的模型大多没有
+ * 收录，于是顶栏长期显示「未定价 / N/A」，偶尔出现的数字也只是**估算**——
+ * 缓存折扣、批处理价、阶梯价、促销价都不在里面。一个大部分时候没有值、
+ * 有值时又不可依赖的读数，比没有这个读数更糟：用户会照着它做判断。
  *
- * Returns `null` — rendered as `N/A`, never `$0.00` — whenever the metadata has
- * no usable input or output price, because an unpriced model and a free model
- * are different things.
+ * 真正的账单在服务商后台。token 用量（提示 / 补全 / 缓存命中）仍然照常显示，
+ * 那是我们自己数出来的事实，不是估算。
  */
-function estimateRunCost(
-  cost: ProviderModelMetadata['cost'] | undefined,
-  usage: { promptTokens: number; cacheHitTokens: number; completionTokens: number },
-): number | null {
-  if (!cost || cost.input === undefined || cost.output === undefined) return null
-  const prompt = Math.max(0, usage.promptTokens)
-  const cacheHit = Math.min(prompt, Math.max(0, usage.cacheHitTokens))
-  const completion = Math.max(0, usage.completionTokens)
-  const cacheRead = cost.cacheRead ?? cost.input
-  return ((prompt - cacheHit) * cost.input + cacheHit * cacheRead + completion * cost.output) / 1_000_000
-}
-
-/**
- * 取当前模型的价格。
- *
- * 必须走 `setup.modelCosts[模型 id]`，**不能**读 `profile.cost`：
- * `ProviderProfileSummary` 不带 `cost` 字段，于是"有定价的模型"在顶栏显示成
- * 「未定价」—— 一个会让人误判价格的假读数（踩过一次）。`modelCosts` 是主进程
- * 按模型 id 解出来的权威表。
- */
-function lookupCost(
-  setup: SetupInfo | null,
-  model: string | undefined,
-): ProviderModelMetadata['cost'] | undefined {
-  const id = String(model || '').trim()
-  if (!setup || !id) return undefined
-  const fromMap = setup.modelCosts?.[id]
-  if (fromMap) return fromMap
-  const profile = setup.profiles.find((p) => p.model === id)
-  return profile?.cost
-}
-
-/** `$0.0123`, or the literal `N/A` when the model has no published price. */
-function fmtCost(value: number | null): string {
-  return value === null ? 'N/A' : `$${value.toFixed(4)}`
-}
-
-/**
- * 每百万 token 单价，`$0.14 / $0.28`。缺哪一项就写 `—`。
- *
- * 价格来自 models.dev（USD / 1M tokens），**运行时抓取、不是写死的**：
- * 新模型和新定价自己就会进来，不需要发版。面板必须把来源与取数时间一起显示，
- * 否则用户没办法判断这个数字是不是过期了。
- */
-function fmtPrice(cost: ProviderModelMetadata['cost'] | undefined): string {
-  if (!cost || (cost.input === undefined && cost.output === undefined)) return '未定价'
-  const one = (v: number | undefined) => (v === undefined ? '—' : `$${v}`)
-  return `${one(cost.input)} / ${one(cost.output)}`
-}
-
-function costTooltip(cost: ProviderModelMetadata['cost'] | undefined): string | undefined {
-  const c = cost
-  if (!c || (c.input === undefined && c.output === undefined)) {
-    return '这个模型没有公开定价（models.dev 未收录）。未定价 ≠ 免费，请以提供商账单为准。'
-  }
-  return [
-    `输入 ${c.input ?? '—'} / 输出 ${c.output ?? '—'} USD 每百万 token`,
-    c.cacheRead !== undefined ? `缓存读取 ${c.cacheRead}` : null,
-    c.cacheWrite !== undefined ? `缓存写入 ${c.cacheWrite}` : null,
-    c.reasoning !== undefined ? `推理 ${c.reasoning}` : null,
-    '来源：models.dev（运行时抓取，24 小时 TTL）',
-  ]
-    .filter(Boolean)
-    .join('\n')
-}
 
 /**
  * Capability chips + the real context window for the active model.
@@ -298,6 +235,13 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
         </span>
         <span className="ai-tool-friendly">{call.friendly}</span>
         {isMemoryWrite && <span className="ai-memory-write-badge">长期记忆已修改</span>}
+        {/* 「看过图」必须看得见：用户要能确认这次回答是基于画面，而不是模型猜的。 */}
+        {call.imageCount ? (
+          <span className="ai-tool-image-badge" title={`已把 ${call.imageCount} 张图片附给模型看`}>
+            <Images size={11} strokeWidth={1.9} />
+            {call.imageCount} 张
+          </span>
+        ) : null}
         <span className="ai-tool-status">
           {call.ok === true ? <CheckCircle2 size={13} /> : call.ok === false ? <XCircle size={13} /> : live ? <span className="ai-spinner" /> : null}
         </span>
@@ -556,7 +500,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             firstTokenAt: prev?.firstTokenAt,
             lastTokenAt: prev?.lastTokenAt,
             tools: (prev?.tools || []).map((t) =>
-              t.id === e.callId ? { ...t, ok: e.ok, summary: e.summary, running: false, result: e.detail ?? t.result } : t,
+              t.id === e.callId
+                ? { ...t, ok: e.ok, summary: e.summary, running: false, result: e.detail ?? t.result, imageCount: e.imageCount }
+                : t,
             ),
           }))
           if (e.name === 'write_note' || e.name === 'list_notes') setNotesDirty(true)
@@ -867,23 +813,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     return profile || null
   }, [setup])
 
-  /** 当前模型的价格：主进程按模型 id 解出的权威表（见 lookupCost 的说明） */
-  const activeModelCost = useMemo(
-    () => lookupCost(setup, setup?.model),
-    [setup],
-  )
-
-  const runCost = useMemo(
-    () =>
-      usage
-        ? estimateRunCost(activeModelCost, {
-            promptTokens: usage.promptTokens,
-            cacheHitTokens: usage.cacheHitTokens,
-            completionTokens: usage.completionTokens,
-          })
-        : null,
-    [usage, activeModelCost],
-  )
+  /** 当前模型的价格读数已移除 —— 见文件上方「定价估算已移除」的说明。 */
 
   const memoryNotes = notes.filter((n) => n.scope === 'memory')
   const chatNotes = notes.filter((n) => n.scope === 'notes')
@@ -1093,19 +1023,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                 <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
               </span>
             ) : null}
-            {/* 当前模型的单价（USD / 1M tokens）。放在顶栏而不是埋在设置里：
-                "这一轮大概花了多少"必须先知道单价。未定价的模型明确写「未定价」，
-                不能显示成 $0.00 —— 未定价和免费是两件事。 */}
-            {setup?.model ? (
-              <span
-                className="ai-meter ai-meter-cost"
-                data-tone={activeModelCost ? undefined : 'warn'}
-                title={costTooltip(activeModelCost)}
-              >
-                <span className="ai-meter-label">单价</span>
-                <b>{fmtPrice(activeModelCost)}</b>
-              </span>
-            ) : null}
+            {/* 这里曾经还有「单价」与「本轮花费」两个读数。定价估算在 v1.0.1 移除：
+                它依赖 models.dev 的定价表，而那张表覆盖不到用户实际在用的服务商，
+                于是长期显示「未定价」，偶尔出现的数字也只是估算。token 用量仍然显示
+                —— 那是我们自己数的，不是估的。 */}
             {usage ? (
               <span className="ai-meter" data-tone="ok" title="最近一次请求的缓存命中率">
                 <span className="ai-meter-label">缓存</span>
@@ -1113,9 +1034,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               </span>
             ) : null}
             {usage ? (
-              <span className="ai-meter" title={`本轮累计花费（按上面单价估算）：${fmtCost(runCost)}`}>
+              <span className="ai-meter" title="本轮累计 token 用量（提示 / 补全）">
                 <span className="ai-meter-label">本轮</span>
-                <b>{fmtCost(runCost)}</b>
+                <b>{fmtTokens(usage.totalTokens)} tok</b>
               </span>
             ) : null}
             {/* 压缩上下文的显式入口。自动压缩只在用户回合边界且超过 0.8 窗口时
@@ -1232,7 +1153,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                   {live.tools.map((t) => (
                     <ToolChip
                       key={t.id}
-                      call={{ id: t.id, name: t.name, args: t.args || {}, friendly: t.friendly, ok: t.ok, result: t.result }}                      live={t.running}
+                      call={{ id: t.id, name: t.name, args: t.args || {}, friendly: t.friendly, ok: t.ok, result: t.result, imageCount: t.imageCount }}                      live={t.running}
                     />
                   ))}
                 </div>
@@ -1324,6 +1245,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             onQueryChange={setMentionQuery}
             onPick={pickReference}
             onClose={() => setMention(null)}
+            pickedIds={references.map((item) => item.id)}
             onReturnFocus={() => inputRef.current?.focus()}
           />
         )}
@@ -1566,8 +1488,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             {usage && (
               <span className="ai-bar-total">
                 本次共 {usage.totalTokens.toLocaleString()} tokens
-                {usage.reasoningTokens > 0 ? `（思考 ${usage.reasoningTokens.toLocaleString()}）` : ''} · 约 {fmtCost(runCost)}
-                {runCost === null ? '（模型未公布价格）' : '（按模型官方价估算）'}
+                {usage.reasoningTokens > 0 ? `（思考 ${usage.reasoningTokens.toLocaleString()}）` : ''}
+                {usage.promptTokens > 0
+                  ? ` · 提示 ${usage.promptTokens.toLocaleString()} / 补全 ${usage.completionTokens.toLocaleString()}`
+                  : ''}
               </span>
             )}
             <ModelMetaLine meta={activeModelMeta} />

@@ -743,7 +743,7 @@ export class KeyService {
     const error = this.getLastErrorMsg ? this.decodeCString(this.getLastErrorMsg()) : ''
     if (error) {
       if (error.includes('0xC0000022') || error.includes('ACCESS_DENIED') || error.includes('打开目标进程失败')) {
-        return '权限不足：无法访问微信进程。\n\n解决方法：\n1. 右键 WeFlow 图标，选择"以管理员身份运行"\n2. 关闭可能拦截的安全软件（如360、火绒等）\n3. 确保微信没有以管理员权限运行'
+        return '权限不足：无法访问微信进程。\n\n解决方法：\n1. 右键 Weport 图标，选择"以管理员身份运行"\n2. 关闭可能拦截的安全软件（如360、火绒等）\n3. 确保微信没有以管理员权限运行'
       }
       return error
     }
