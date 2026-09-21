@@ -98,6 +98,17 @@ Numbers below are from `.ui-probe/measure-app-perf.mjs` and
 `.ui-probe/measure-cv-ab.mjs`. Two of them cost a wasted round trip each, so they are
 written down rather than rediscovered.
 
+- **The popup's "lag" was latency + a wrong-size first frame, not dropped frames**
+  (`.ui-probe/probe-popup-latency.mjs`, packaged build, `WEPORT_POPUP_TRACE=1`). Frame
+  pacing never was the problem (p95 17.7 ms, jank>33 = 0 in `npm run bench`); the old order
+  `send(payload) → showInactive()` revealed the window with the *previous* card's geometry
+  and re-anchored it 50–370 ms later. After the reveal-after-measure change: cold
+  create→load 75–90 ms, payload→renderer measure→`notification:resize` 10–100 ms,
+  `setSize`+re-anchor+reveal ~6 ms, and the window is shown **once, at its final size**
+  (warm path 2–25 ms). Two traps found on the way, both are in `ui-surfaces.md`: a 0-height
+  report must be dropped, and the resize dedupe must be keyed by notification id (otherwise
+  the reveal waits for the fallback and the warm path costs +120 ms).
+
 - **The entry bundle was 1751 KB; page-level `React.lazy` took it to 181 KB.** ECharts
   (only 分析), html2canvas (only 年度报告), react-markdown (only AI panel + changelog) and
   every non-core page were in the startup graph. Measured effect: FCP 2312 → 712 ms,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { NotificationToast, type NotificationData } from '../components/NotificationToast'
 import type { LiquidGlassBackdropImage } from '../components/LiquidGlass'
 import {
@@ -32,6 +32,22 @@ import {
  * 本常量只作为"配置读不出来"时的兜底。
  */
 const GLASS_PARAMS = { cornerRadius: 16, blurSigma: 6, displacementScale: 100, aberrationIntensity: 2, saturation: 175 }
+
+/**
+ * 延迟追踪：报「距上一条标记」的毫秒数。
+ *
+ * 与主进程的 `popupMark` 同一套口径（相对上一步，而不是相对页面启动）——
+ * 弹窗路径上要看的是相邻两步之间的间隙。只在主进程随 payload 下发 `trace:true`
+ * 时被调用，默认零输出。见 electron/services/popupTrace.ts。
+ */
+let traceLastAt = 0
+function traceDelta(label: string): number {
+    const now = performance.now()
+    const delta = traceLastAt === 0 ? 0 : Math.round(now - traceLastAt)
+    traceLastAt = now
+    void label
+    return delta
+}
 
 /** 用户配置 → 原生面板参数（与渲染层同一个换算函数，两条路径观感一致）。 */
 function nativeGlassParams(glass: NotificationGlass) {
@@ -74,14 +90,21 @@ export default function NotificationWindow() {
     const [glass, setGlass] = useState<NotificationGlass>(NOTIFICATION_GLASS_DEFAULT)
     // 事件回调里需要读取"当前展示中"的通知作为过渡的旧通知，用 ref 避免重建监听
     const notificationRef = useRef<NotificationData | null>(null)
-    // 上次上报的窗口尺寸：重复上报会触发主进程 setSize，
-    // 可见状态下反复设置尺寸会让 DWM 短暂拉伸旧帧缓冲，闪出一圈幽灵轮廓
-    const lastSizeRef = useRef<{ width: number; height: number } | null>(null)
+    // 上次上报的窗口尺寸：**同一条通知内**的重复上报会被丢掉 —— 可见状态下反复
+    // 设置尺寸会让 DWM 短暂拉伸旧帧缓冲，闪出一圈幽灵轮廓。
+    //
+    // 必须带上通知 id：主进程现在要等这份上报才会显示窗口（见 notificationWindow.ts
+    // `revealPopup`），如果沿用"上次尺寸相同就不报"的去重，内容一样的连续两条通知
+    // （最常见的情况）会让主进程一直等到 120ms 兜底计时器才显示 —— 白等 120ms，
+    // 正好把这条优化变成反向优化（实测热路径 1ms → 138ms）。
+    const lastSizeRef = useRef<{ id: string; width: number; height: number } | null>(null)
     // 渲染层实测的卡片尺寸（含自适应加宽的宽度）。窗口必须跟着它走：卡片变宽而
     // 窗口不变 = 右侧被裁掉；卡片变窄而窗口不变 = 留下一片拦截桌面点击的空白。
     const [measured, setMeasured] = useState<{ width: number; height: number } | null>(null)
     // 采集源 ID：与窗口/流生命周期解耦，事件回调里读 ref
     const sourceIdRef = useRef<string | null>(null)
+    /** 已处理过的投递 id（幂等去重，见 handleShow 里的说明） */
+    const lastPayloadIdRef = useRef<string | null>(null)
 
     useEffect(() => {
         notificationRef.current = notification
@@ -89,6 +112,23 @@ export default function NotificationWindow() {
 
     useEffect(() => {
         const handleShow = (_event: any, data: any) => {
+            /**
+             * 同一次投递只处理一次。
+             *
+             * 主进程有两条路径会把同一条通知送进来：正常的 `notification:show`，
+             * 以及渲染层刚挂载时主动要缓存数据的 `notification:ready`。重复处理
+             * 一次 = 重新挂载卡片 + 入场动画从头再播 —— 用户看到的是"弹窗闪了一下"。
+             * 带 payloadId 之后这件事是幂等的（旧版主进程没有这个字段，跳过即可）。
+             */
+            const payloadId = String(data?.payloadId || '')
+            if (payloadId && payloadId === lastPayloadIdRef.current) return
+            if (payloadId) lastPayloadIdRef.current = payloadId
+
+            // 延迟追踪（主进程 WEPORT_POPUP_TRACE=1 时随 payload 下发）：
+            // 渲染层没有主进程的时间基准，这里只报自己的 performance.now()，
+            // 差值由探针读取。见 electron/services/popupTrace.ts。
+            const trace = Boolean(data?.trace)
+            if (trace) console.log(`[popup-rt] +${traceDelta('payload-received')}ms  payload-received`)
             const timestamp = Math.floor(Date.now() / 1000)
             const newNoti: NotificationData = {
                 id: `noti_${timestamp}_${Math.random().toString(36).substr(2, 9)}`,
@@ -180,6 +220,25 @@ export default function NotificationWindow() {
             return () => clearTimeout(timer)
         }
     }, [prevNotification])
+
+    /**
+     * 延迟追踪：卡片**布局落定**与**首个合成帧**。
+     *
+     * 「布局落定」用 useLayoutEffect（DOM 已更新、样式已算），「首个合成帧」用
+     * 双 rAF —— 单帧 rAF 只说明"下一帧要开始了"，双 rAF 才是"上一帧已经画出去"。
+     * 用户看到弹窗的那一刻就是后者。
+     */
+    useLayoutEffect(() => {
+        if (!notification) return
+        if (!(notification as { trace?: boolean }).trace) return
+        console.log(`[popup-rt] +${traceDelta('card-layout')}ms  card-layout`)
+        const raf1 = requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                console.log(`[popup-rt] +${traceDelta('card-painted')}ms  card-painted`)
+            })
+        })
+        return () => cancelAnimationFrame(raf1)
+    }, [notification])
 
     // 实时桌面折射（两条路，按可用性自动选）。
     //
@@ -342,24 +401,54 @@ export default function NotificationWindow() {
     useEffect(() => {
         if (!notification && !prevNotification) return
 
-        const timer = setTimeout(() => {
+        const trace = Boolean((notification as { trace?: boolean } | null)?.trace)
+
+        /**
+         * 上报窗口尺寸。
+         *
+         * **第一次必须同步跑**（不再等 50ms）：主进程现在等这份尺寸到了才显示窗口
+         * （见 notificationWindow.ts `revealPopup`）。放在定时器里等于每条通知都多等
+         * 50ms，而那 50ms 里窗口按"上一次的尺寸"显示 —— 卡片比它高就会被裁掉，
+         * 随后窗口长大并重算贴边，就是用户看到的"先出现、再抖一下"。
+         *
+         * 后面两次是复测：字体与 emoji 图片就位后度量会再收敛一次（首帧用的是
+         * 回退字体的宽度），以及尺寸变化后主进程要重新贴边。
+         */
+        const report = (why: 'immediate' | 'raf' | 'timer') => {
             // 窗口必须精确贴合内容：多余区域会拦截桌面点击。
             // 宽度 = 卡片 + 两侧留白（留白里画的是投影，见 notificationCardPadding）。
             const root = document.getElementById('notification-root')
             if (!root || !window.electronAPI?.notification?.resize) return
+            // 高度 0 = 这一帧里卡片还没铺开（异步数据/字体未就绪）。**绝不能上报**：
+            // 主进程会按它把窗口缩成 0 高再显示出来，用户看到的是"闪一下再长开"。
+            // 让后面的 rAF / 120ms 复测去报真实尺寸，主进程另有 120ms 兜底显示。
+            const rootHeight = Math.ceil(root.getBoundingClientRect().height)
+            if (rootHeight < 1 && !measured) return
             const minWidth = glass.width + notificationCardPadding(glass.shadow) * 2
             const width = Math.max(Math.round(measured?.width ?? minWidth), minWidth)
             const height = Math.min(
-                Math.max(Math.ceil(root.getBoundingClientRect().height), Math.round(measured?.height ?? 0)),
+                Math.max(rootHeight, Math.round(measured?.height ?? 0)),
                 NOTIFICATION_CARD_MAX_HEIGHT
             )
+            if (height < 1) return
             const last = lastSizeRef.current
-            if (last && last.width === width && last.height === height) return
-            lastSizeRef.current = { width, height }
+            // 同一条通知内尺寸没变 → 不重复 setSize（避免 DWM 幽灵轮廓）；
+            // 换了通知（id 不同）→ 必须报一次，主进程正等着它才显示窗口。
+            const notiId = notification?.id || prevNotification?.id || ''
+            if (last && last.id === notiId && last.width === width && last.height === height) return
+            lastSizeRef.current = { id: notiId, width, height }
+            if (trace) console.log(`[popup-rt] +${traceDelta(`resize-sent(${why})`)}ms  resize-sent(${why}) ${width}x${height}`)
             window.electronAPI.notification.resize(width, height)
-        }, 50)
+        }
 
-        return () => clearTimeout(timer)
+        report('immediate')
+        const raf = requestAnimationFrame(() => report('raf'))
+        const timer = setTimeout(() => report('timer'), 120)
+
+        return () => {
+            cancelAnimationFrame(raf)
+            clearTimeout(timer)
+        }
     }, [notification, prevNotification, position, measured, glass.width, glass.shadow])
 
     // 原生玻璃模式：卡片挂载后上报实测几何（窗口本地 CSS 像素 + 卡片本地亮度带），

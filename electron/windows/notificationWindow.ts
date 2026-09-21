@@ -9,6 +9,7 @@ import {
   sendLinuxNotification,
 } from "../services/linuxNotify";
 import { openWeChat } from "../services/wechatLinux";
+import { popupMark, popupTraceEnabled } from "../services/popupTrace";
 
 // 原生液态玻璃（Windows 专用）：DXGI 零拷贝采集 + D3D11 玻璃管线 + DComp 直接上屏，
 // 感知滞后中位 ~6ms（Chromium 流方案 ~77ms），渲染完全不经过 Electron 进程。
@@ -497,6 +498,7 @@ export function createNotificationWindow() {
   const isDev = !!process.env.VITE_DEV_SERVER_URL;
 
   console.log("[NotificationWindow] Creating window...");
+  popupMark("main:create-window");
   const width = 344;
   const height = 114;
 
@@ -562,6 +564,7 @@ export function createNotificationWindow() {
   // 任何来源的缩放残留都会让通知按错误的逻辑尺寸排版，这里强制钉回 1
   notificationWindow.webContents.on("did-finish-load", () => {
     notificationWindow?.webContents.setZoomFactor(1);
+    popupMark("main:load-finish");
   });
 
   notificationWindow.on("closed", () => {
@@ -689,14 +692,19 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
   cancelIdleDestroy();
   let win = notificationWindow;
   if (!win || win.isDestroyed()) {
+    popupMark("main:show-entry", { cold: true });
     win = createNotificationWindow();
+  } else {
+    popupMark("main:show-entry", { cold: false });
   }
 
   if (!win) return;
 
   // 确保加载完成
   if (win.webContents.isLoading()) {
+    popupMark("main:waiting-ready-to-show");
     win.once("ready-to-show", () => {
+      popupMark("main:ready-to-show");
       showAndSend(win!, data);
     });
   } else {
@@ -705,6 +713,41 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
 }
 
 let lastNotificationData: any = null;
+
+/**
+ * 「等渲染层报回第一帧尺寸再显示」的兜底计时器。
+ *
+ * 为什么显示要等到尺寸回来（v1.0.1 弹窗流畅度修复）：
+ * 旧顺序是 `send(payload) → 立刻 showInactive()`，而**正确的窗口尺寸只有渲染层
+ * 知道**（卡片宽度含昵称自适应增量、高度取决于正文行数）。于是窗口先按"上一次的
+ * 尺寸"出现：卡片更高就被窗口下沿裁掉，约 50~370ms 后 `notification:resize` 才到，
+ * 窗口长大 / 贴边重算 —— 用户看到的是"弹出来了，然后抖一下"。这条路径在冷启动
+ * （窗口刚创建、高度是初始的 114px）最明显。
+ *
+ * 现在的顺序是 `send(payload) → 渲染层同步量好 → notification:resize → 设置尺寸
+ * 与贴边 → 显示`。渲染层的量测在同一帧内完成（useLayoutEffect + 立即上报），
+ * 所以等它的代价是一帧左右；而窗口**第一次出现就是最终尺寸与最终位置**。
+ * 渲染层要是没能上报（异常、被销毁），250ms 后按现有尺寸兜底显示 —— 通知不能
+ * 因为一个尺寸没回来就不出现。
+ */
+const POPUP_REVEAL_FALLBACK_MS = 250;
+let revealTimer: NodeJS.Timeout | null = null;
+
+function cancelRevealTimer(): void {
+  if (revealTimer) {
+    clearTimeout(revealTimer);
+    revealTimer = null;
+  }
+}
+
+/** 显示弹窗（真正让用户看到它的那一步）。 */
+function revealPopup(win: BrowserWindow): void {
+  cancelRevealTimer();
+  if (!win || win.isDestroyed()) return;
+  win.showInactive(); // 显示但不聚焦
+  win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
+  popupMark("main:shown");
+}
 
 async function showAndSend(win: BrowserWindow, data: any) {
   const config = ConfigService.getInstance();
@@ -777,6 +820,18 @@ async function showAndSend(win: BrowserWindow, data: any) {
     position,
     notificationDuration,
     notificationAnimationEnabled,
+    /**
+     * 这一次投递的唯一标识。
+     *
+     * 渲染层用它丢掉**重复的 payload**：`notification:ready`（弹窗刚挂载时渲染层
+     * 主动要一次缓存数据）与正常的 `notification:show` 可能把同一条通知送达两次，
+     * 而每收到一次渲染层都会当成"新通知"重挂卡片 —— 入场动画从头再播一遍，
+     * 看起来就是"弹窗闪了一下"。带 id 之后重复投递是幂等的。
+     */
+    payloadId: `popup_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    // 渲染层的延迟追踪（`WEPORT_POPUP_TRACE=1` 时开启）：渲染进程看不到主进程的
+    // 环境变量，只能随 payload 捎过去。见 services/popupTrace.ts。
+    trace: popupTraceEnabled(),
     backdrop: process.platform === "linux"
       ? {
           // Linux 不提供采集源：sourceId 为 null 时渲染层不会发起 getUserMedia
@@ -802,12 +857,26 @@ async function showAndSend(win: BrowserWindow, data: any) {
   const [, currentHeight] = win.getSize();
   applyWindowSize(win, winWidth, currentHeight);
 
+  popupMark("main:send-payload", { winWidth });
   win.webContents.send("notification:show", payload);
 
-  // 设为可交互
+  // 设为可交互（点击穿透必须在显示之前关掉，否则第一帧点不动）
   win.setIgnoreMouseEvents(false);
-  win.showInactive(); // 显示但不聚焦
-  win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
+
+  // 已经在显示的窗口（连续来消息）不重新等尺寸：那条路径上窗口本来就贴在屏幕上，
+  // 隐藏再等一帧只会闪一下。新通知会走 resize 重新贴边，行为与旧版一致。
+  if (win.isVisible()) {
+    revealPopup(win);
+  } else {
+    // 等渲染层量好的尺寸回来再显示。
+    //
+    // 兜底 250ms 而不是更短：这条兜底一旦抢在尺寸上报之前触发，窗口就会按上一次的
+    // 尺寸出现 —— 那正是要修掉的"先出现、再抖一下"。实测渲染层量好尺寸通常在
+    // 10~90ms 之间（冷启动要加载页面时会到 ~100ms），250ms 足够让正常路径永远走
+    // 不到兜底；真正异常时（渲染层崩了）通知晚 0.25 秒出现，但它仍然会出现。
+    revealTimer = setTimeout(() => revealPopup(win), POPUP_REVEAL_FALLBACK_MS);
+    revealTimer.unref?.();
+  }
 
   // 显示之后才开始抓帧：此时内容保护已经能生效（排除弹窗自身），
   // 而且首帧正好赶在入场动画期间到达
@@ -828,6 +897,9 @@ export async function registerNotificationHandlers() {
     // 窗口即将隐藏，玻璃面板立即消失（渲染层通常已提前发过淡出信号）
     glassPanel?.hide(0);
     stopBackdropStream();
+    // 等待显示的那一帧来了通知又走了（超快关闭）：取消待显示的兜底计时器，
+    // 否则它会在窗口隐藏之后再把它显示出来
+    cancelRevealTimer();
     // 实时玻璃的内容保护随可见期结束一起撤掉：弹窗不在画面上时没有任何理由
     // 继续把窗口排除在截图之外。
     setLiveGlassProtection(false);
@@ -920,8 +992,8 @@ export async function registerNotificationHandlers() {
 
   // Handle resize request from renderer
   ipcMain.on("notification:resize", (event, { width, height }) => {
-    if (notificationWindow && !notificationWindow.isDestroyed()) {
-      const win = notificationWindow;
+    popupMark("main:resize-received", { width: Math.round(width), height: Math.round(height) });
+    if (notificationWindow && !notificationWindow.isDestroyed()) {      const win = notificationWindow;
       const prevSize = win.getSize();
       applyWindowSize(win, Math.round(width), Math.round(height));
 
@@ -959,7 +1031,12 @@ export async function registerNotificationHandlers() {
               win.setPosition(Math.floor(nextX), Math.floor(nextY));
             }
           } catch { /* noop */ }
-        })();
+          // 贴边算完再显示：这是"窗口第一次出现就是最终尺寸 + 最终位置"的最后一步。
+          // 放在 if 之外是必要的 —— 尺寸没变（复用同尺寸窗口）时也要走到显示。
+        })().finally(() => revealPopup(win));
+      } else {
+        // 尺寸与上次一致：不需要重新贴边，直接显示
+        revealPopup(win);
       }
     }
   });

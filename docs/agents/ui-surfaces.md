@@ -324,6 +324,31 @@ change must re-anchor the window**: right/bottom-anchored and centred positions 
 X/Y from the work area, otherwise an adaptively widened card grows off screen. Sizing rules:
 see "Glass Surfaces → Card size is adaptive".
 
+**The window is revealed *after* the renderer reports its first measured size**
+(v1.0.1 smoothness fix). The old order was `send(payload) → showInactive()` immediately,
+and since only the renderer knows the real size (adaptive width from long sender names,
+height from the body line count) the window appeared with the **previous** card's
+geometry, then grew/re-anchored 50–370 ms later — the visible "popup pops, then jumps".
+Now: `send → renderer measures in the same frame → notification:resize → setSize +
+re-anchor → revealPopup()`, so the first visible frame is already final. `revealPopup()`
+has a **250 ms fallback** so a wedged renderer delays a notification but never drops it,
+and `notification:close` cancels a pending reveal. Consequences for anyone touching this:
+
+- The renderer's first size report is **synchronous** (`report('immediate')` in
+  `NotificationWindow.tsx`), not a 50 ms timer. Re-adding a delay re-adds the jump.
+- The size dedupe is keyed by **notification id**: the first report of every new message
+  must go out even when the size equals the previous one, otherwise the reveal waits for
+  the fallback (measured: warm path 1 ms → 138 ms).
+- A 0-height report is dropped in the renderer (`rootHeight < 1 && !measured`), because a
+  0-height window would be revealed invisible and then "grow open".
+- Payloads carry a `payloadId`; the renderer ignores a repeat of the same id. Both
+  `notification:show` and the `notification:ready` catch-up can deliver the same
+  notification, and a double delivery restarts the entrance animation (a flicker).
+
+**Measure it, don't guess:** `node .ui-probe/probe-popup-latency.mjs` prints the whole
+path (window create → load → payload → renderer measure → reveal) with per-step deltas;
+`WEPORT_POPUP_TRACE=1` (see `electron/services/popupTrace.ts`) is what feeds it.
+
 **The card's default look is a 晴空 gradient (`#d8ecff → #6aa9ea`) at 60 %, text colour
 automatic, radius 25, no border/refraction/frost/shadow — v1.0.1-final, pinned item by item
 to the user's own config so 恢复默认 is a no-op. The "light glass fill" of v1.0.0, the

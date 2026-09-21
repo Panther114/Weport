@@ -95,7 +95,17 @@ export function NotificationToast({
     onMeasure,
 }: NotificationToastProps) {
     const [isVisible, setIsVisible] = useState(initialVisible)
-    const [currentData, setCurrentData] = useState<NotificationData | null>(null)
+    /**
+     * 首帧就用 props 里的 data 渲染，不经过"先空一帧、再由 effect 填上"。
+     *
+     * 这个组件每来一条通知都会因 `key` 变化而重新挂载，所以初始值就是这一条的
+     * 内容。旧写法（`useState(null)` + effect 里 set）会让第一次提交渲染出一个
+     * **空容器**（高度 0）：窗口尺寸上报读到的就是 0，而主进程现在正是按这份
+     * 上报来定尺寸再显示弹窗的 —— 空一帧的代价从"白画一帧"变成"窗口按 0 高度
+     * 弹一下再长开"。入场动画不受影响：`isVisible` 仍由 effect 翻到 true，
+     * 过渡照旧走。
+     */
+    const [currentData, setCurrentData] = useState<NotificationData | null>(data)
     /** 标题放不下时额外申请的宽度（0 = 基础宽度够用） */
     const [extraWidth, setExtraWidth] = useState(0)
     const onHideStartRef = useRef(onHideStart)
