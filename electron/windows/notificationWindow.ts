@@ -1,7 +1,14 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell } from "electron";
 import { join } from "path";
-import { writeFileSync } from "fs";
+import { existsSync, writeFileSync } from "fs";
 import { ConfigService } from "../services/config";
+import {
+  hasNotificationDaemon,
+  invalidateNotificationDaemonCache,
+  resolveLinuxNotificationMode,
+  sendLinuxNotification,
+} from "../services/linuxNotify";
+import { openWeChat } from "../services/wechatLinux";
 
 // 原生液态玻璃（Windows 专用）：DXGI 零拷贝采集 + D3D11 玻璃管线 + DComp 直接上屏，
 // 感知滞后中位 ~6ms（Chromium 流方案 ~77ms），渲染完全不经过 Electron 进程。
@@ -180,6 +187,9 @@ let cachedSourceId: string | null = null;
 let sourceIdInflight: Promise<string | null> | null = null;
 
 async function refreshDesktopSourceId(): Promise<string | null> {
+  // Linux 一律不解析采集源：Wayland 下任何 desktopCapturer 调用都会拉起
+  // xdg-desktop-portal 的屏幕共享授权。放在这里守卫，未来新增调用点也不会漏。
+  if (process.platform === "linux") return null;
   if (sourceIdInflight) return sourceIdInflight;
   sourceIdInflight = (async () => {
     try {
@@ -203,6 +213,8 @@ async function refreshDesktopSourceId(): Promise<string | null> {
 
 /** 启动时预热采集源，让首条通知不必等采集管线初始化 */
 export function prewarmDesktopSourceId(): void {
+  // Linux 默认走系统通知，应用内弹窗只是无采集的兜底，没有可预热的东西
+  if (process.platform === "linux") return;
   if (nativeGlass) return;
   void refreshDesktopSourceId();
 }
@@ -285,6 +297,9 @@ async function grabDesktopFrame(): Promise<string | null> {
  * 的退出条件是 stopBackdropStream()。
  */
 async function runBackdropStream() {
+  // Linux 不跑抓帧循环：这是 portal「共享屏幕」弹窗的来源。应用内弹窗在这条路上
+  // 只保留用户配置的整卡填充，没有实时桌面折射。
+  if (process.platform === "linux") return;
   if (backdropRunning || nativeGlass) return;
   if (!notificationWindow || notificationWindow.isDestroyed()) return;
   backdropRunning = true;
@@ -507,6 +522,62 @@ export function createNotificationWindow() {
   return notificationWindow;
 }
 
+/**
+ * 系统通知的图标。
+ *
+ * 打包后 `assets/icons/icon.png` 在 app.asar 里，**外部进程**（notify-send）读不到，
+ * 只能退回主题图标名；开发态直接用真实文件，图标能显示出来。
+ */
+function resolveSystemNotificationIcon(): string {
+  try {
+    const candidate = join(app.getAppPath(), "assets", "icons", "icon.png");
+    if (!candidate.includes(".asar") && existsSync(candidate)) return candidate;
+  } catch { /* app 尚未就绪时用图标名兜底 */ }
+  return "weport";
+}
+
+/**
+ * Linux：把通知投给桌面通知守护进程（mako/dunst/swaync…）。
+ *
+ * 返回 true 表示已经处理掉，调用方不要再创建应用内弹窗。
+ * 守护进程不可用或发送失败时返回 false —— 回退路径（应用内弹窗）同样不抓桌面。
+ */
+async function trySendSystemNotification(data: any): Promise<boolean> {
+  const config = ConfigService.getInstance();
+  const mode = resolveLinuxNotificationMode(
+    process.env.WEPORT_LINUX_NOTIFY,
+    await config.get("linuxNotificationMode"),
+  );
+  if (mode === "off") return false;
+
+  if (mode === "auto" && !(await hasNotificationDaemon())) {
+    console.log("[NotificationWindow] Linux 未检测到通知守护进程，回退应用内弹窗");
+    return false;
+  }
+
+  const isChatMessage = data?.channel === "message";
+  const ok = await sendLinuxNotification({
+    title: String(data?.title || data?.senderName || "微信消息"),
+    body: String(data?.content ?? data?.body ?? ""),
+    icon: resolveSystemNotificationIcon(),
+    timeoutMs: normalizeNotificationDuration(await config.get("notificationDuration")),
+    // 聊天消息用标准分类，mako/dunst 可以按它路由或过滤
+    category: isChatMessage ? "im.received" : undefined,
+    // 点击通知 → 打开微信（没运行就启动，在运行就聚焦窗口）。WeBot/AI 通知
+    // 没有"回微信"的语义，不挂动作。
+    actionLabel: isChatMessage ? "打开微信" : undefined,
+    onAction: isChatMessage ? () => { void openWeChat(); } : undefined,
+  });
+
+  if (!ok) {
+    // 发送失败（守护进程刚退出 / 未安装 notify-send）：清掉检测缓存让下一条
+    // 通知重新探测，然后回退到应用内弹窗 —— 消息不能因为系统通知故障而消失。
+    invalidateNotificationDaemonCache();
+    return false;
+  }
+  return true;
+}
+
 export async function showNotification(data: any, opts?: { force?: boolean }) {
   // 先检查配置
   const config = ConfigService.getInstance();
@@ -540,6 +611,20 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
       }
     }
     }
+  }
+
+  // Linux：优先把通知交给系统通知守护进程（mako/dunst/swaync…）。
+  //
+  // 为什么：应用内弹窗的实时玻璃要 desktopCapturer 抓整个桌面，Wayland 下这会
+  // 触发 xdg-desktop-portal 的「共享屏幕」授权框；而且弹窗的位置/超时/外观无法
+  // 复用用户对通知守护进程的配置，在 Linux 上等于重复造轮子。检测不到守护进程时
+  // 回退应用内弹窗 —— 回退路径已彻底关闭桌面采集（见 showAndSend 的 backdrop 与
+  // runBackdropStream 的平台守卫），所以任何情况下都不会再触发 portal。
+  //
+  // 截图 QA 模式是唯一例外：它必须捕获应用自己的弹窗，见 appMain 里对
+  // WEPORT_SCREENSHOT_POPUP 的设置。
+  if (process.platform === "linux" && process.env.WEPORT_SCREENSHOT_POPUP !== "1") {
+    if (await trySendSystemNotification(data)) return;
   }
 
   cancelIdleDestroy();
@@ -610,30 +695,42 @@ async function showAndSend(win: BrowserWindow, data: any) {
 
   // 弹窗弹出路径上**不做任何采集**：一次桌面抓取在本机实测 ~105ms，放在这里
   // 就是每条通知都晚出现一小截。首帧交给下面的折射循环，弹窗先出现。
+  const backdropGeometry = {
+    winX,
+    winY,
+    width: display.size.width,
+    height: display.size.height,
+    /**
+     * 窗口自身的尺寸（DIP）。
+     *
+     * 渲染层解主题时要按它把取样点挪到窗口**外面**：抓帧抓的是整屏，窗口自己就在
+     * 屏幕上，直接采样卡片那一片等于拿弹窗自己的像素去决定弹窗的主题 —— 自指闭环，
+     * 第一次采到亮色就永远选深色文字（实测换背景、甚至关掉重弹都不会变）。
+     */
+    winW: currentWinW,
+    winH: currentWinH,
+  };
   const payload = {
     ...data,
     position,
     notificationDuration,
     notificationAnimationEnabled,
-    backdrop: {
-      native: Boolean(nativeGlass),
-      // 渲染层优先用它开 WGC 视频流（30fps、GPU 合成、主进程零成本）；不可用时
-      // 自动落到主进程的定帧循环（runBackdropStream）
-      sourceId: nativeGlass ? null : cachedSourceId,
-      winX,
-      winY,
-      width: display.size.width,
-      height: display.size.height,
-      /**
-       * 窗口自身的尺寸（DIP）。
-       *
-       * 渲染层解主题时要按它把取样点挪到窗口**外面**：抓帧抓的是整屏，窗口自己就在
-       * 屏幕上，直接采样卡片那一片等于拿弹窗自己的像素去决定弹窗的主题 —— 自指闭环，
-       * 第一次采到亮色就永远选深色文字（实测换背景、甚至关掉重弹都不会变）。
-       */
-      winW: currentWinW,
-      winH: currentWinH,
-    },
+    backdrop: process.platform === "linux"
+      ? {
+          // Linux 不提供采集源：sourceId 为 null 时渲染层不会发起 getUserMedia
+          // （见 NotificationWindow.tsx），主进程的定帧循环也不会启动。玻璃只保留
+          // 用户配置的整卡填充，观感由主题引擎在"无快照"下照常解出。
+          native: false,
+          sourceId: null,
+          ...backdropGeometry,
+        }
+      : {
+          native: Boolean(nativeGlass),
+          // 渲染层优先用它开 WGC 视频流（30fps、GPU 合成、主进程零成本）；不可用时
+          // 自动落到主进程的定帧循环（runBackdropStream）
+          sourceId: nativeGlass ? null : cachedSourceId,
+          ...backdropGeometry,
+        },
   };
   lastNotificationData = payload;
 
