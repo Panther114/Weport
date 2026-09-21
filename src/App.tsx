@@ -371,6 +371,8 @@ export default function App() {
   const [notificationDuration, setNotificationDuration] = useState(3000)
   const [durationInput, setDurationInput] = useState('3')
   const [notificationAnimationEnabled, setNotificationAnimationEnabled] = useState(true)
+  /** Linux 通知投递方式（其他平台忽略）：auto/force-dbus/off，见 electron/services/linuxNotify.ts */
+  const [linuxNotificationMode, setLinuxNotificationMode] = useState<'auto' | 'force-dbus' | 'off'>('auto')
   const [respectWechatMute, setRespectWechatMute] = useState(true)
   const [launchAtStartup, setLaunchAtStartup] = useState(false)
   const [startupSupported, setStartupSupported] = useState(true)
@@ -918,6 +920,10 @@ export default function App() {
         }
         const notifAnimation = await api.config.get('notificationAnimationEnabled')
         if (typeof notifAnimation === 'boolean') setNotificationAnimationEnabled(notifAnimation)
+        const linuxNotifyMode = await api.config.get('linuxNotificationMode')
+        if (linuxNotifyMode === 'auto' || linuxNotifyMode === 'force-dbus' || linuxNotifyMode === 'off') {
+          setLinuxNotificationMode(linuxNotifyMode)
+        }
         const respectMute = await api.config.get('messagePushRespectWechatMute')
         if (typeof respectMute === 'boolean') setRespectWechatMute(respectMute)
         try {
@@ -1564,6 +1570,18 @@ export default function App() {
     } catch (error) {
       setNotificationAnimationEnabled(previous)
       pushToast('err', '弹窗动效设置失败', String(error))
+    }
+  }
+
+  async function updateLinuxNotificationMode(value: 'auto' | 'force-dbus' | 'off') {
+    const previous = linuxNotificationMode
+    setLinuxNotificationMode(value)
+    try {
+      const result = await api.config.set('linuxNotificationMode', value)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setLinuxNotificationMode(previous)
+      pushToast('err', '通知方式保存失败', String(error))
     }
   }
 
@@ -3029,12 +3047,16 @@ export default function App() {
                         ['微信账号', accountReady],
                         ['解密密钥', keyOk],
                       ].filter(([, ok]) => !ok).map(([label]) => label as string).join('、')}`
-                    : '弹窗出现在屏幕一角，右键卡片可立即关闭'}
+                    : api.process.platform === 'linux' && linuxNotificationMode === 'force-dbus'
+                      ? '始终尝试由桌面通知服务显示（mako / dunst / swaync 等）'
+                      : api.process.platform === 'linux' && linuxNotificationMode === 'auto'
+                        ? '优先由桌面通知服务显示，检测不到时回退应用内弹窗'
+                        : '弹窗出现在屏幕一角，右键卡片可立即关闭'}
                 </span>
               </div>
               <button className="ghost-btn" type="button" onClick={() => void api.notification.showTest()}>
                 <BellRing size={13} />
-                测试弹窗
+                {api.process.platform === 'linux' && linuxNotificationMode !== 'off' ? '测试通知' : '测试弹窗'}
               </button>
               <label className="switch" title="启用消息提醒">
                 <input
@@ -3045,6 +3067,43 @@ export default function App() {
                 <span className="track" />
               </label>
             </div>
+
+            {/* Linux 通知方式：应用内弹窗在 Wayland 下抓桌面做实时玻璃会
+                触发 xdg-desktop-portal 的「共享屏幕」授权框，而且位置/超时无法复用
+                通知守护进程的配置。默认把通知交给系统通知服务，检测不到再回退弹窗。 */}
+            {api.process.platform === 'linux' && (
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>
+                    <Bell size={15} />
+                    系统通知
+                  </h2>
+                  <span>由 mako / dunst / swaync 等通知服务显示</span>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Bell size={14} />
+                    <div>
+                      <strong>通知方式</strong>
+                      <span className="hint">
+                        自动：有通知服务时用系统通知，检测不到回退应用内弹窗（回退不抓桌面）
+                      </span>
+                    </div>
+                  </div>
+                  <select
+                    className="notification-select"
+                    value={linuxNotificationMode}
+                    onChange={(e) => void updateLinuxNotificationMode(e.target.value as 'auto' | 'force-dbus' | 'off')}
+                    aria-label="Linux 通知方式"
+                  >
+                    <option value="auto">自动（推荐）</option>
+                    <option value="force-dbus">强制系统通知</option>
+                    <option value="off">应用内弹窗</option>
+                  </select>
+                </div>
+              </section>
+            )}
 
             <section className="panel">
               <div className="panel-head">

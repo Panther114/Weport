@@ -26,6 +26,38 @@
 - safeStorage on headless Linux often has no backend: config falls back to
   plaintext secrets (existing graceful degradation, unchanged).
 
+## Linux Notifications (D-Bus first)
+
+- On Linux the app-internal popup's live glass needs `desktopCapturer`, which on
+  Wayland raises the xdg-desktop-portal "share screen" dialog for **every
+  message**. Linux therefore delivers through the desktop notification daemon
+  (`electron/services/linuxNotify.ts` → `notify-send`; mako/dunst/swaync) and
+  only falls back to the Electron popup when no daemon is present.
+- `linuxNotificationMode` (`auto` | `force-dbus` | `off`, default `auto`) is read
+  live; `WEPORT_LINUX_NOTIFY` overrides it. A send failure invalidates the daemon
+  detection cache and still falls back to the popup — a message must never be lost.
+- **The fallback popup must not capture the desktop on Linux**: guards live in
+  `runBackdropStream`, `prewarmDesktopSourceId`, `refreshDesktopSourceId`, and the
+  `notification:show` backdrop payload sends `sourceId: null` (the renderer only
+  calls `getUserMedia` when a source id exists). Do not remove them; that is what
+  resurrects the portal dialog.
+- `WEPORT_SCREENSHOT_POPUP=1` deliberately bypasses the D-Bus route (the QA harness
+  captures the app's own popup).
+- Chat notifications carry a `default` action (`notify-send --print-id
+  --action=default=打开微信`); clicking runs `wechatLinux.openWeChat()` — launches
+  WeChat when absent, focuses the window when present. WeBot/AI notifications have
+  no action (there is no "back to WeChat" meaning).
+- **Match the WeChat window by `app_id` (`wechat`), never by pid.** Flatpak/bwrap
+  sandboxes have their own PID namespace, so niri reports the sandbox-local pid
+  (under XWayland it even resolves to `xwayland-satellite`), which can never equal
+  the host pid from `pgrep`. Pid and exact title are only fallbacks.
+- Focus is best-effort: niri IPC (`NIRI_SOCKET`, else `niri.wayland-*.sock` in the
+  runtime dir) then `xdotool` on X11. If WeChat is running but no window is found,
+  do **not** relaunch — that risks a second instance.
+- The process detection/launch logic is shared with key capture
+  (`electron/services/wechatLinux.ts`, imported by `keyServiceLinux.ts`). Keep it
+  one implementation; the Linux key path must still attach to exactly one process.
+
 ## Weport TUI (`packages/weport-tui`) — v1.0
 
 `weport` in a terminal opens a full TUI; `weport <command>` runs one command.
