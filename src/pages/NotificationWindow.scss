@@ -1,5 +1,17 @@
 // 卡片动画可以安全使用 opacity：回退管线的玻璃像素源自含在卡片内（视频流画布），
 // 原生模式的折射面板在窗口之下、由主进程独立同步淡入淡出，均不受卡片透明度影响
+//
+// v1.0.1 两套动效：
+//   · `data-anim="slide"`（默认）—— 从离弹窗最近的那条屏幕边滑入，沿原路滑出。
+//     位移全部是 transform（合成器上跑，不触发布局），时长/曲线见
+//     utils/notificationAnimation.ts（JS 侧要按同一个数字决定何时关窗）。
+//   · `data-anim="classic"` —— 旧版的原地淡入 + 轻微缩放，用户要求保留。
+//
+// 入场为什么是"属性触发"而不是"挂载即播"：窗口要等渲染层量好尺寸才显示
+// （notificationWindow.ts `revealPopup`），挂载即播的话动画会跑掉一段，用户
+// 看到的是卡片从屏幕边闪一下。`data-run="false"` 时卡片钉在位移起点（窗口外，
+// 被 #notification-root 的 overflow:hidden 裁掉），主进程发来 `notification:shown`
+// 才切到 `data-run="true"` 起跑。
 @keyframes noti-enter {
     0% {
         opacity: 0;
@@ -37,6 +49,24 @@
     }
 }
 
+// 新卡片替换旧卡片时，旧卡片沿同一个方向滑出去（与"当前卡片"的入场方向一致：
+// 从右边进来的角，旧卡片也往右边走）。位移量与滑动风格一致 = 自身尺寸 + 20px，
+// 所以旧卡片会**完整滑出屏幕**（窗口在替换期间同样按 room 放大）。
+@keyframes noti-slide-out-right {
+    0% { opacity: 1; transform: translateX(0); }
+    100% { opacity: 0; transform: translateX(calc(100% + 20px)); }
+}
+
+@keyframes noti-slide-out-left {
+    0% { opacity: 1; transform: translateX(0); }
+    100% { opacity: 0; transform: translateX(calc(-100% - 20px)); }
+}
+
+@keyframes noti-slide-out-top {
+    0% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(calc(-100% - 20px)); }
+}
+
 body {
     // Ensure the body background is transparent to let the rounded corners show
     background: transparent;
@@ -56,6 +86,17 @@ body {
     &.motion-disabled {
         animation: none;
     }
+
+    // ---------------------------------------------------------------- slide
+    &[data-anim='slide'] {
+        /**
+         * 滑动风格的入场/退场**全部在卡片容器那一层**（NotificationToast.scss），
+         * 这里必须彻底不参与：两层同时位移会让位移量翻倍，而且这一层的
+         * `data-run` 门控与容器那层不同步（一个在父层、一个在子层）时会错帧。
+         */
+        animation: none;
+        will-change: transform;
+    }
 }
 
 #notification-prev {
@@ -69,4 +110,32 @@ body {
     &.motion-disabled {
         animation: none;
     }
+
+    // 旧卡片沿"入场方向的逆向"滑走：从右边进来的角，旧卡片也向右离开。
+    // 位移量与滑动风格一致 = 自身尺寸 + 20px，所以旧卡片会**完整滑出屏幕**
+    // （窗口在替换期间同样按 travel 放大）。
+    &[data-run='false'] {
+        animation: none;
+        transform: none;
+    }
+
+    &[data-anim='slide'][data-slide='right'] {
+        animation: noti-slide-out-right 0.62s cubic-bezier(0.4, 0, 0.9, 0.4) forwards;
+    }
+
+    &[data-anim='slide'][data-slide='left'] {
+        animation: noti-slide-out-left 0.62s cubic-bezier(0.4, 0, 0.9, 0.4) forwards;
+    }
+
+    &[data-anim='slide'][data-slide='top'] {
+        animation: noti-slide-out-top 0.62s cubic-bezier(0.4, 0, 0.9, 0.4) forwards;
+    }
+}
+
+// 关掉动效时两套风格都不动。放在最后，压过后面的动画声明。
+#notification-current.motion-disabled,
+#notification-prev.motion-disabled {
+    animation: none !important;
+    transform: none;
+    will-change: auto;
 }

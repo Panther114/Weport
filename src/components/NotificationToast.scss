@@ -31,6 +31,87 @@
         }
     }
 
+    /**
+     * 滑动风格（v1.0.1，默认）：卡片"从屏幕外面滑进来，再沿原路滑出去"。
+     *
+     * 入场与退场都作用在这一层：位移量 = 卡片自身尺寸 + 20px，正好等于主进程给
+     * 窗口多留的那段 `room`（见 utils/notificationAnimation.ts 顶部）—— 起点因此
+     * 恰好完全落在屏幕外，用户看到的是"从边外面慢慢进来"，而不是从屏幕内某个
+     * 位置凭空冒出来。
+     *
+     * `data-run=false` 是"等窗口真的显示"：窗口要等渲染层量好尺寸才显示，过渡若在
+     * 挂载那刻就起算，用户只能看到后半段。未起跑时卡片钉在起点（窗口外，被
+     * `#notification-root` 的 overflow:hidden 裁掉），不可见也不会误拦截点击。
+     *
+     * 滑动**不做淡出**：卡片是滑走的，变透明会先露出窗口底下那层桌面。
+     */
+    &.anim-slide {
+        opacity: 1;
+        transform: none;
+        transition: none;
+
+        // 起跑：入口曲线是"慢起 → 匀速 → 慢收"的对称 S 形。旧版的 exponential-out
+        // （快起慢收）会在最初 25% 里跑掉 80% 的距离 —— 那正是用户说的"太急了"。
+        &[data-run='true'][data-slide='right'] {
+            transform: none;
+            transition: transform 1.05s cubic-bezier(0.32, 0.06, 0.24, 1);
+        }
+
+        &[data-run='true'][data-slide='left'] {
+            transform: none;
+            transition: transform 1.05s cubic-bezier(0.32, 0.06, 0.24, 1);
+        }
+
+        &[data-run='true'][data-slide='top'] {
+            transform: none;
+            transition: transform 1.05s cubic-bezier(0.32, 0.06, 0.24, 1);
+        }
+
+        // 退场（`.visible` 被去掉 + 已起跑）：沿原路滑回起点。
+        // 曲线是 ease-in：慢慢离开再加速消失，干净利落。
+        &[data-run='true']:not(.visible)[data-slide='right'] {
+            transform: translateX(calc(100% + 20px));
+            transition: transform 0.62s cubic-bezier(0.4, 0, 0.9, 0.4);
+        }
+
+        &[data-run='true']:not(.visible)[data-slide='left'] {
+            transform: translateX(calc(-100% - 20px));
+            transition: transform 0.62s cubic-bezier(0.4, 0, 0.9, 0.4);
+        }
+
+        &[data-run='true']:not(.visible)[data-slide='top'] {
+            transform: translateY(calc(-100% - 20px));
+            transition: transform 0.62s cubic-bezier(0.4, 0, 0.9, 0.4);
+        }
+
+        // 未起跑（等主进程"窗口已显示"）：钉在起点，不播动画。窗口的 overflow:hidden
+        // 会把它整个裁掉 —— 这段等待时间里它既不可见，也不会误拦截桌面点击。
+        &[data-run='false'][data-slide='right'] {
+            transform: translateX(calc(100% + 20px));
+            transition: none;
+        }
+
+        &[data-run='false'][data-slide='left'] {
+            transform: translateX(calc(-100% - 20px));
+            transition: none;
+        }
+
+        &[data-run='false'][data-slide='top'] {
+            transform: translateY(calc(-100% - 20px));
+            transition: none;
+        }
+
+        &.visible {
+            opacity: 1;
+        }
+
+        // 关掉动效（用户把「弹窗动效」开关关了）时这一层完全不参与
+        &.motion-disabled {
+            transform: none;
+            transition: none;
+        }
+    }
+
     // 双极性光晕：亮核 + 暗边。玻璃是**完全透明**的，文字背后没有一张实色卡可以"垫"，
     // 于是可读性只能由文字自己承担 —— 只加暗影会在暗背景上糊掉、只加亮晕会在亮背景上糊掉，
     // 两层同时加就与背景极性无关。自适应引擎解出确定结论时仍会用它的单极性光晕覆盖这里。
@@ -53,7 +134,7 @@
     // （--noti-shadow）—— 卡片在亮桌面上仍然看得见。旧实现写的是
     // `var(--noti-shadow, …)`，**从来没有读过 --glass-shadow**，
     // 所以那个滑块怎么拖都没有任何变化。
-    --liquid-glass-shadow: var(--glass-shadow, var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.22)));
+    --liquid-glass-shadow: var(--glass-shadow, var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.18), 0 2px 5px rgba(0, 0, 0, 0.16)));
     --liquid-glass-tint: var(--glass-fill, var(--noti-tint, rgba(255, 255, 255, 0.06)));
 
     color: var(--glass-text-color, var(--noti-title-color, #ffffff));

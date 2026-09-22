@@ -103,6 +103,140 @@ function notificationWindowWidth(config: ConfigService): number {
   return card + pad * 2;
 }
 
+/** 弹窗离屏幕边的留白（DIP）。渲染层的滑动位移里也含这个数，见 notificationAnimation.ts。 */
+const POPUP_SCREEN_PADDING = 20;
+
+/**
+ * 弹窗窗口的最终矩形（v1.0.1）。
+ *
+ * 两条必须一起成立的性质：
+ *
+ *  1. **窗口就贴在卡片该在的位置上**。位置只有五种（四角 + 顶部居中），
+ *     每次都按 workArea 重算，而不是沿用上一次的坐标 —— 否则显示器切换、
+ *     任务栏移动之后弹窗会跑到别的屏上。
+ *  2. **滑动时窗口要往滑动方向多留 `room`**，那一段落在屏幕**之外**。
+ *     卡片是画在窗口里的，窗口只有卡片那么大时，卡片就只能从"屏幕内 20px 那条线"
+ *     钻出来 —— 用户看到的是凭空冒出，而不是从屏幕外滑进来。
+ *
+ * 卡片在窗口里的贴边方式（渲染层负责）与这里的方向严格对应：窗口多出来的那一段
+ * 永远在**远离卡片**的一侧，所以窗口的放大/收回都不会让卡片挪动一个像素。
+ * 收回的时机是入场动画结束（渲染层上报 `settled`）：这样弹窗存活期间屏幕上的
+ * 窗口面积恰好等于卡片，一个多余的像素都不拦截桌面点击（AGENTS.md 第 4 条）。
+ */
+function anchorPopupBounds(options: {
+  position: string;
+  workArea: { x: number; y: number; width: number; height: number };
+  cardWidth: number;
+  cardHeight: number;
+  slideFrom?: string;
+  room?: number;
+  settled?: boolean;
+}): { x: number; y: number; width: number; height: number } {
+  const { position, workArea, cardWidth, cardHeight } = options;
+  const horizontal = options.slideFrom === "left" || options.slideFrom === "right";
+  const vertical = options.slideFrom === "top";
+  /**
+   * 收回（settled）只在**右侧**滑动时会做。
+   *
+   * 收不回窗口就多留一段（那一段落在屏幕外），代价是屏幕上多出一条 20px 的窄带
+   * 会拦截桌面点击 —— 但比"卡片闪一下"好得多：左侧/顶部滑动时，收回意味着窗口
+   * 的左上角要移动一整段 travel，而渲染层的布局比窗口移动**晚一帧**，那一帧里
+   * 卡片会被画在窗口外面（实测：闪烁 + 探针量到 380px 的跳变）。
+   * 右侧滑动时收回只改宽度、窗口原点不动，贴左边的卡片一个像素都不会动。
+   */
+  const extensionSide = options.slideFrom === "left" || options.slideFrom === "top" ? options.slideFrom : "right";
+  const trimmable = extensionSide === "right";
+  const travel =
+    options.settled === false || !trimmable
+      ? cardAxis(cardWidth, cardHeight, horizontal) + Math.max(0, Math.round(Number(options.room) || 0))
+      : 0;
+  const width = cardWidth + (horizontal ? travel : 0);
+  const height = cardHeight + (vertical ? travel : 0);
+
+  let x = 0;
+  let y = 0;
+  switch (position) {
+    case "top-center":
+      x = workArea.x + (workArea.width - cardWidth) / 2;
+      y = workArea.y + POPUP_SCREEN_PADDING;
+      break;
+    case "top-right":
+      x = workArea.x + workArea.width - cardWidth - POPUP_SCREEN_PADDING;
+      y = workArea.y + POPUP_SCREEN_PADDING;
+      break;
+    case "bottom-right":
+      x = workArea.x + workArea.width - cardWidth - POPUP_SCREEN_PADDING;
+      y = workArea.y + workArea.height - cardHeight - POPUP_SCREEN_PADDING;
+      break;
+    case "top-left":
+      x = workArea.x + POPUP_SCREEN_PADDING;
+      y = workArea.y + POPUP_SCREEN_PADDING;
+      break;
+    case "bottom-left":
+      x = workArea.x + POPUP_SCREEN_PADDING;
+      y = workArea.y + workArea.height - cardHeight - POPUP_SCREEN_PADDING;
+      break;
+  }
+  // 多留的那一段永远在滑动来向那一侧（屏幕外）
+  if (horizontal && options.slideFrom === "left") x -= travel;
+  if (vertical) y -= travel;
+
+  return { x: Math.floor(x), y: Math.floor(y), width: Math.round(width), height: Math.round(height) };
+}
+/** 滑动轴上的卡片尺寸（水平滑动看宽度，垂直滑动看高度）。 */
+function cardAxis(cardWidth: number, cardHeight: number, horizontal: boolean): number {
+  return horizontal ? cardWidth : cardHeight;
+}
+
+/** 原子地改尺寸 + 位置：分两步会闪出一帧"尺寸对了但位置还没跟上"的画面。 */
+/** 把窗口几何发给渲染层（主题采样按它把取样点挪出窗口）。 */
+function sendPopupGeometry(win: BrowserWindow, bounds: { x: number; y: number; width: number; height: number }): void {
+  try {
+    win.webContents.send("notification:geometry", {
+      winX: bounds.x,
+      winY: bounds.y,
+      winW: bounds.width,
+      winH: bounds.height,
+    });
+  } catch { /* 渲染进程可能已销毁 */ }
+}
+
+/**
+ * 最后一次上报的卡片尺寸与滑动信息。
+ *
+ * 退场准备（`notification:prepare-exit`）要用它把窗口重新放开 —— 那时渲染层已经
+ * 没有新的上报了，而窗口必须按同一组数字算，否则放开的方向或距离会跟入场不一致。
+ */
+let lastCardMetrics: { width: number; height: number; slideFrom?: string; room: number } | null = null;
+
+/**
+ * 原子地改尺寸 + 位置：分两步会闪出一帧"尺寸对了但位置还没跟上"的画面。
+ *
+ * 为什么要先**放开** min/max 再 `setBounds`：窗口平时用 min=max=尺寸 锁死（防止
+ * 窗口管理器改它），而 Electron 应用更严格的 min/max 时会**立刻**把当前尺寸夹到
+ * 新约束上 —— 那是一次发生在**旧坐标**上的尺寸变化。滑动时窗口要一边变大一边挪
+ * 位置（左侧/顶部位置的窗口要往外多留一段），夹在旧坐标上就会让贴着另一条边的
+ * 卡片先跳到错误位置（实测是一次 380px 的抽动），随后 setBounds 才把它拉回来。
+ * 放开约束 → 一次 setBounds 定死 → 再锁上，中间不会出现第二个几何状态。
+ */
+function applyPopupBounds(win: BrowserWindow, bounds: { x: number; y: number; width: number; height: number }): boolean {
+  const current = win.getBounds();
+  if (
+    Math.round(current.width) === bounds.width &&
+    Math.round(current.height) === bounds.height &&
+    Math.round(current.x) === bounds.x &&
+    Math.round(current.y) === bounds.y
+  ) {
+    return false;
+  }
+  win.setMinimumSize(1, 1);
+  win.setMaximumSize(100_000, 100_000);
+  win.setBounds(bounds);
+  win.setMinimumSize(bounds.width, bounds.height);
+  win.setMaximumSize(bounds.width, bounds.height);
+  return true;
+}
+
 /**
  * 读通知玻璃配置。
  *
@@ -744,8 +878,28 @@ function cancelRevealTimer(): void {
 function revealPopup(win: BrowserWindow): void {
   cancelRevealTimer();
   if (!win || win.isDestroyed()) return;
+  const wasVisible = win.isVisible();
   win.showInactive(); // 显示但不聚焦
-  win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
+  /**
+   * 层级只在**这一次弹出**的第一个 reveal 上断言。
+   *
+   * v1.0.1 起 `revealPopup` 每条通知会被调用好几次（尺寸上报、贴边、收回…
+   * 每次都要顺带把"该显示了"这一步走完）。重复调用 `setAlwaysOnTop` 会让窗口
+   * 重新插一次 z 序，在 Windows 上表现是**闪一下** —— 而它本来就已经是最顶层了。
+   */
+  if (!wasVisible) win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
+  /**
+   * 告诉渲染层"窗口真的在屏幕上了"，**入场动画从这一刻才开始**（v1.0.1）。
+   *
+   * 为什么需要这一步：窗口是先挂载内容、等渲染层量好尺寸再显示的（见下面的
+   * 说明）。CSS 动画在挂载时就起跑，于是"显示"发生在动画中段 —— 滑入动效会
+   * 直接从半路开始（用户看到的是卡片突然从屏幕边缘闪出来）。把动画门控在这个
+   * 信号上，第一帧就是起始帧，整段位移都看得见。渲染层另有兜底：信号没到也会
+   * 在 400ms 后自己开跑。
+   */
+  try {
+    win.webContents.send("notification:shown", { payloadId: lastNotificationData?.payloadId ?? "" });
+  } catch { /* 渲染进程可能已经销毁 */ }
   popupMark("main:shown");
 }
 
@@ -754,6 +908,10 @@ async function showAndSend(win: BrowserWindow, data: any) {
   const position = (await config.get("notificationPosition")) || "top-right";
   const notificationDuration = normalizeNotificationDuration(await config.get("notificationDuration"));
   const notificationAnimationEnabled = (await config.get("notificationAnimationEnabled")) !== false;
+  // 动效风格（v1.0.1）：`slide` 从最近的屏幕边滑入/滑出（默认），`classic` 是
+  // 旧版的原地淡入缩放。渲染层据此选关键帧；不认识的值一律当 slide。
+  const notificationAnimationStyle =
+    (await config.get("notificationAnimationStyle")) === "classic" ? "classic" : "slide";
 
   // 更新位置：基于工作区完整矩形（含原点偏移）定位。
   // macOS 菜单栏、Windows 任务栏靠上/靠左时工作区原点不为 (0,0)，
@@ -763,38 +921,19 @@ async function showAndSend(win: BrowserWindow, data: any) {
   // 弹出前用**用户配置的基础宽度**定位；卡片实测宽度（可能因长昵称更大）会在
   // 渲染层上报后由 notification:resize 重算坐标，见下面的 resize 处理。
   // top-center 过去写死 280：那是"卡片比别的角窄"的历史遗留，现在统一走配置。
+  // 弹出前的这一份按"已经落定"（settled）算：滑动多留的那一段要等渲染层上报
+  // 方向与尺寸之后才由 resize 处理加上去。
   const winWidth = notificationWindowWidth(config);
   const winHeight = 114;
-  const padding = 20;
-
-  let x = 0;
-  let y = 0;
-
-  switch (position) {
-    case "top-center":
-      x = workArea.x + (workArea.width - winWidth) / 2;
-      y = workArea.y + padding;
-      break;
-    case "top-right":
-      x = workArea.x + workArea.width - winWidth - padding;
-      y = workArea.y + padding;
-      break;
-    case "bottom-right":
-      x = workArea.x + workArea.width - winWidth - padding;
-      y = workArea.y + workArea.height - winHeight - padding;
-      break;
-    case "top-left":
-      x = workArea.x + padding;
-      y = workArea.y + padding;
-      break;
-    case "bottom-left":
-      x = workArea.x + padding;
-      y = workArea.y + workArea.height - winHeight - padding;
-      break;
-  }
-
-  const winX = Math.floor(x);
-  const winY = Math.floor(y);
+  const initialBounds = anchorPopupBounds({
+    position,
+    workArea,
+    cardWidth: winWidth,
+    cardHeight: winHeight,
+    settled: true,
+  });
+  const winX = initialBounds.x;
+  const winY = initialBounds.y;
   // 窗口的**当前实际**尺寸（DIP）：主题采样要靠它把取样点挪出窗口，见下面的 winW/winH
   const [currentWinW, currentWinH] = win.getSize();
 
@@ -820,6 +959,7 @@ async function showAndSend(win: BrowserWindow, data: any) {
     position,
     notificationDuration,
     notificationAnimationEnabled,
+    notificationAnimationStyle,
     /**
      * 这一次投递的唯一标识。
      *
@@ -851,32 +991,42 @@ async function showAndSend(win: BrowserWindow, data: any) {
   };
   lastNotificationData = payload;
 
-  win.setPosition(winX, winY);
-  // 窗口高度始终沿用渲染层的实测校准值（notification:resize），
-  // 这里只同步宽度；反复重置高度会造成 114→实测高度的弹跳闪烁
-  const [, currentHeight] = win.getSize();
-  applyWindowSize(win, winWidth, currentHeight);
-
+  /**
+   * 窗口的尺寸与位置：**只在窗口还没显示的时候**在这里摆。
+   *
+   * 已经显示（连续来消息）时不能碰：`applyWindowSize` 会把窗口改回"配置的基础
+   * 宽度"，而那张正在展示的旧卡片可能是自适应加宽过的 —— 窗口一缩，旧卡片的
+   * 右边就被裁掉一截，用户看到的是"上一条通知突然缺了一块"。这种情况交给下面
+   * 渲染层上报的 resize：它按新卡片的实测尺寸一次性 setBounds，期间旧卡片不动
+   * （多留的那一段永远在卡片背后那一侧）。
+   */
+  if (!win.isVisible()) {
+    win.setPosition(winX, winY);
+    // 窗口高度始终沿用渲染层的实测校准值（notification:resize），
+    // 这里只同步宽度；反复重置高度会造成 114→实测高度的弹跳闪烁
+    const [, currentHeight] = win.getSize();
+    applyWindowSize(win, winWidth, currentHeight);
+  }
   popupMark("main:send-payload", { winWidth });
   win.webContents.send("notification:show", payload);
 
   // 设为可交互（点击穿透必须在显示之前关掉，否则第一帧点不动）
   win.setIgnoreMouseEvents(false);
 
-  // 已经在显示的窗口（连续来消息）不重新等尺寸：那条路径上窗口本来就贴在屏幕上，
-  // 隐藏再等一帧只会闪一下。新通知会走 resize 重新贴边，行为与旧版一致。
-  if (win.isVisible()) {
-    revealPopup(win);
-  } else {
-    // 等渲染层量好的尺寸回来再显示。
-    //
-    // 兜底 250ms 而不是更短：这条兜底一旦抢在尺寸上报之前触发，窗口就会按上一次的
-    // 尺寸出现 —— 那正是要修掉的"先出现、再抖一下"。实测渲染层量好尺寸通常在
-    // 10~90ms 之间（冷启动要加载页面时会到 ~100ms），250ms 足够让正常路径永远走
-    // 不到兜底；真正异常时（渲染层崩了）通知晚 0.25 秒出现，但它仍然会出现。
-    revealTimer = setTimeout(() => revealPopup(win), POPUP_REVEAL_FALLBACK_MS);
-    revealTimer.unref?.();
-  }
+  // 等渲染层量好的尺寸回来再显示。
+  //
+  // **连续来消息时也等**（v1.0.1 调整）：滑动风格下窗口要先按滑动方向多留一段
+  // `room`（那段在屏幕外），卡片才能从屏幕外面滑进来。若这一条立刻显示，它会先按
+  // 上一轮的小尺寸出现，卡片于是从"屏幕内 20px 那条线"钻出来 —— 正是要修的观感。
+  // 等尺寸的代价是一帧左右（渲染层在同一帧里量好并上报），而窗口本来就贴在屏幕上，
+  // 这一帧里旧卡片仍在按替换动画滑出去，看不出等待。
+  //
+  // 兜底 250ms 而不是更短：这条兜底一旦抢在尺寸上报之前触发，窗口就会按上一次的
+  // 尺寸出现 —— 那正是要修掉的"先出现、再抖一下"。实测渲染层量好尺寸通常在
+  // 10~90ms 之间（冷启动要加载页面时会到 ~100ms），250ms 足够让正常路径永远走
+  // 不到兜底；真正异常时（渲染层崩了）通知晚 0.25 秒出现，但它仍然会出现。
+  revealTimer = setTimeout(() => revealPopup(win), POPUP_REVEAL_FALLBACK_MS);
+  revealTimer.unref?.();
 
   // 显示之后才开始抓帧：此时内容保护已经能生效（排除弹窗自身），
   // 而且首帧正好赶在入场动画期间到达
@@ -970,6 +1120,41 @@ export async function registerNotificationHandlers() {
     }
   });
 
+  /**
+   * 退场前的准备：按滑动方向把窗口**重新放开**，落地之后才 resolve。
+   *
+   * 卡片退场是滑到屏幕外面去的，窗口只有卡片那么大时它会被窗口边界裁掉 ——
+   * 渲染层因此把退场动画推迟到这次调用返回之后（见 NotificationToast.dismiss）。
+   * 用的是最后一次上报的卡片尺寸：退场时卡片尺寸不会再变。
+   *
+   * **注册位置很关键**：`registerNotificationHandlers` 中间有一段按
+   * `messagePushEnabled` 提前 `return` 的预热逻辑 —— 把处理器放在它后面，
+   * 关掉消息推送的用户就会遇到 "No handler registered"（实测踩过：
+   * 那条路径下 prepare-exit 没注册，退场准备变成 150ms 超时后才开始）。
+   */
+  ipcMain.handle("notification:prepare-exit", async () => {
+    const win = notificationWindow;
+    if (!win || win.isDestroyed() || !lastCardMetrics) return { extended: false };
+    try {
+      const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
+      const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+      const bounds = anchorPopupBounds({
+        position,
+        workArea,
+        cardWidth: lastCardMetrics.width,
+        cardHeight: lastCardMetrics.height,
+        slideFrom: lastCardMetrics.slideFrom,
+        room: lastCardMetrics.room,
+        settled: false,
+      });
+      applyPopupBounds(win, bounds);
+      sendPopupGeometry(win, bounds);
+      return { extended: true };
+    } catch {
+      return { extended: false };
+    }
+  });
+
   // 启动空闲期预热（v1.0.3 收窄）：**不再预创建通知窗口**。
   //
   // 旧行为：启动 3s 后无条件 createNotificationWindow()，常驻一整个渲染进程
@@ -991,55 +1176,54 @@ export async function registerNotificationHandlers() {
   }, 3000);
 
   // Handle resize request from renderer
-  ipcMain.on("notification:resize", (event, { width, height }) => {
-    popupMark("main:resize-received", { width: Math.round(width), height: Math.round(height) });
-    if (notificationWindow && !notificationWindow.isDestroyed()) {      const win = notificationWindow;
-      const prevSize = win.getSize();
-      applyWindowSize(win, Math.round(width), Math.round(height));
+  ipcMain.on("notification:resize", (event, payload) => {    const cardWidth = Math.round(Number(payload?.width) || 0);
+    const cardHeight = Math.round(Number(payload?.height) || 0);
+    if (cardWidth < 1 || cardHeight < 1) return;
+    /**
+     * 渲染层的上报里现在还有三件事（v1.0.1 滑动动效）：
+     *   `slideFrom` 卡片从哪条边进来 —— 窗口要多留的那一段在它那一侧（屏幕外）
+     *   `room`      多留多少（= 卡片自身尺寸 + 屏幕留白，见 notificationAnimation.ts）
+     *   `settled`   入场动画是否已经结束 —— 结束了就把窗口**收回**到卡片大小，
+     *               让屏幕上不留任何拦截桌面点击的多余面积
+     */
+    const slideFrom = typeof payload?.slideFrom === "string" ? payload.slideFrom : undefined;
+    const room = Number(payload?.room) || 0;
+    const settled = payload?.settled !== false;
+    lastCardMetrics = { width: cardWidth, height: cardHeight, slideFrom, room: Math.max(0, Math.round(room)) };
+    popupMark("main:resize-received", {
+      width: cardWidth,
+      height: cardHeight,
+      settled,
+      slideFrom: slideFrom || "-",
+      room: Math.round(room),
+    });
 
-      /**
-       * 尺寸变化后必须**重新贴边**（v1.0.1 起宽度也会变，不再只有高度）。
-       *
-       * 旧版只处理"高度变大 → 底部定位的窗口重新贴底"。现在卡片会因为长昵称
-       * 自适应加宽，如果只 setSize 不重算 X，右上角的卡片会从右边长出屏幕 ——
-       * 而它本来就是贴边显示的。四个边角与居中都按新尺寸重算，宽度和高度任一变化
-       * 都会走到这里。
-       */
-      const [newW, newH] = win.getSize();
-      if (Math.round(newW) !== Math.round(prevSize[0]) || Math.round(newH) !== Math.round(prevSize[1])) {
-        void (async () => {
-          try {
-            const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
-            const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
-            const padding = 20;
-            const [winX, winY] = win.getPosition();
-            let nextX = winX;
-            let nextY = winY;
-            if (position === "top-right" || position === "bottom-right") {
-              nextX = workArea.x + workArea.width - newW - padding;
-            } else if (position === "top-center") {
-              nextX = workArea.x + (workArea.width - newW) / 2;
-            } else {
-              nextX = workArea.x + padding;
-            }
-            if (position === "bottom-left" || position === "bottom-right") {
-              nextY = workArea.y + workArea.height - newH - padding;
-            } else {
-              nextY = workArea.y + padding;
-            }
-            if (Math.round(nextX) !== winX || Math.round(nextY) !== winY) {
-              win.setPosition(Math.floor(nextX), Math.floor(nextY));
-            }
-          } catch { /* noop */ }
-          // 贴边算完再显示：这是"窗口第一次出现就是最终尺寸 + 最终位置"的最后一步。
-          // 放在 if 之外是必要的 —— 尺寸没变（复用同尺寸窗口）时也要走到显示。
-        })().finally(() => revealPopup(win));
-      } else {
-        // 尺寸与上次一致：不需要重新贴边，直接显示
+    if (notificationWindow && !notificationWindow.isDestroyed()) {
+      const win = notificationWindow;
+      void (async () => {
+        let bounds: { x: number; y: number; width: number; height: number } | null = null;
+        try {
+          const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
+          const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+          bounds = anchorPopupBounds({ position, workArea, cardWidth, cardHeight, slideFrom, room, settled });
+          applyPopupBounds(win, bounds);
+        } catch { /* noop */ }
+        // 贴边算完再显示：这是"窗口第一次出现就是最终尺寸 + 最终位置"的最后一步。
+        // 放在 try 之外是必要的 —— 尺寸没变（复用同尺寸窗口）时也要走到显示。
         revealPopup(win);
-      }
+        /**
+         * 收回之后要把**新的窗口几何**告诉渲染层。
+         *
+         * 主题采样用的是"窗口在屏幕上的位置"（它要把取样点挪到窗口**外面**，否则
+         * 读到的就是弹窗自己那张卡片 → 自指闭环）；那份几何是随 payload 下发的，
+         * 而窗口在"放开 → 收回"之间会移动一整段 travel —— 每次都通知，采样才不会
+         * 按旧坐标去读几百像素外的桌面（看起来就是"弹窗颜色和背景对不上"）。
+         */
+        if (bounds) sendPopupGeometry(win, bounds);
+      })();
     }
   });
+
 
   // 'notification-clicked' 在 main.ts 中处理 (导航)
 }

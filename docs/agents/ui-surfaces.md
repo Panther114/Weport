@@ -442,3 +442,60 @@ Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChan
   picking the first `window` webContents measures a 516×171 transparent toast and reports
   pure black) and asserts average luma moves the right way: dark 0.221 → 0.076, light
   0.460 → **0.944**. Both endpoints are asserted, not just the direction.
+
+---
+
+## 通知弹窗动效 — v1.0.1（滑动是默认）
+
+- **两套动效，一个开关**：`notificationAnimationStyle` = `slide`（默认）/ `classic`。
+  `classic` 是旧版的"原地淡入 + 轻微缩放"，用户明确要求保留 —— 不要删掉它只留滑动。
+- **方向由弹窗位置决定**，映射只有一份实现：`src/utils/notificationAnimation.ts`
+  `slideFromPosition()`（右上/右下 → 右，左上/左下 → 左，顶部居中 → 上）；退场沿原路返回。
+- **入场从屏幕外开始**。窗口只有卡片那么大时，卡片只能从"屏幕内 20px 那条线"钻出来 ——
+  用户看到的是凭空冒出。所以滑动时窗口按方向多留 `travel = 卡片尺寸 + 20px`（`room`），
+  那一段落在屏幕**外**；卡片位移恰好等于它（`translateX(calc(100% + 20px))`）。
+- **卡片在窗口里用固定偏移贴边，不用 `flex-end` / `bottom: 0`**。偏移是常量
+  （左/上滑动时 = 卡片尺寸 + 20px），因为渲染层的布局比窗口的实际变化晚一帧：
+  用对齐属性时，窗口一改几何，那一帧里卡片会被画到错误位置（实测：一次 104px 抽动
+  + 全程被裁）。
+- **只有右侧滑动会"收回"窗口**（`anchorPopupBounds` 里 `trimmable`）。收回是为了让屏幕上
+  恰好只剩卡片（AGENTS 第 4 条）；右侧收回只改宽度、窗口原点不动，所以卡片不会动。
+  左侧/顶部收回必须**移动窗口原点**，那就会撞上"布局晚一帧"。代价是屏幕上多出 20px 窄带，
+  比闪烁划算 —— 这是有意做的取舍，不要"顺手修掉"。
+- **入场动画门控在"窗口真的显示了"上**：`showInactive()` → `notification:shown{payloadId}`
+  → 渲染层 `data-run=true` 起跑；渲染层另有 400ms 兜底。未起跑时卡片钉在位移起点
+  （窗口外，被 `overflow:hidden` 裁掉，不可见也点不到）。**连续两条通知时旧卡片用同一个
+  门**，两张一起动。
+- **退场前先放开窗口**（`notification:prepare-exit`，渲染层 await 它再开始动画，150ms 兜底）
+  —— 否则卡片滑向屏幕外的那一半会被窗口边界切掉（用户原话："退场一顿、还有一段是切断的"）。
+  处理器必须注册在 `registerNotificationHandlers` 里**那段提前 return 之前**：关掉消息推送
+  的用户走的是提前返回路径，注册在它后面就等于没注册。
+- **时长只有一份数字**：入场 1050ms / 退场 620ms（classic 300ms）。`NotificationToast.dismiss()`
+  按它决定何时真的关窗，两份 scss 里的 `transition`/`animation` 时长必须一致。
+- **位移只用 transform**，退场不做透明度渐变（玻璃变透明会先露出窗口底下的桌面）。
+- **几何每一次变化都要通知渲染层**（`notification:geometry`）：主题采样按"窗口在屏幕上的
+  位置"把取样点挪到窗口外面，坐标过时就会读到几百像素外的桌面。
+- 验证：`.ui-probe/verify-popup-slide.mjs`（起点在屏幕外 / 位移单调且不跳 / 收回窗口时卡片
+  不许动 / 退场先放开再滑出 / 替换时两张一起动 / 文字色全程不变），
+  `npm run bench` 的 `[C/D] 通知弹窗`（窗口创建 / 首帧卡片 / 帧 p95 / CPU）。
+
+## 通知玻璃 — v1.0.1（按 Aave《Building Glass for the Web》补的三层）
+
+透镜位移贴图早就是那篇文章的做法（`lensDisplacementMap.ts`：圆角矩形 SDF → 球冠斜率 →
+斯涅尔弯曲，高光编码在蓝通道，左上象限四重对称）。缺的是**折射全关时**能不能读出玻璃：
+
+- **镜面高光层**（`data-glass-specular`）：由法线算出的高光单独导出成一张"白 + alpha"的图
+  （同一次象限循环里多写一个通道），用 `mix-blend-mode: screen` 贴在卡片上。它沿圆角走，
+  左上最亮、往下渐隐 —— 折射/模糊全是 0 时，这一层是"这是曲面玻璃"的唯一证据。
+  `generateLensDisplacementMap` 因此**在 WebGL 流管线里也要生成**（着色器不用位移贴图，
+  但高光层要用）。
+- **厚度层**（`data-glass-thickness`）：1.5px 环上叠一条纵向渐变 —— 上缘细亮、下缘细暗。
+  玻璃有看得见的厚度，均匀白描边只会读成"塑料贴纸的边"。
+- **两段式投影**（`notificationShadowLayers`）：1px/2px 的**接触阴影**（贴着下沿，圆角处
+  也是圆的）+ 滑块控制的**环境阴影**。只有一层大模糊时，眼睛读到的是"一块糊在下面的灰"，
+  不是"这块玻璃压在桌面上"。
+- **兜底投影必须装得进留白**：引擎的兜底曾是 `0 6px 18px`，而滑块 = 0 时窗口只留 8px ——
+  影子被窗口边界**切掉**，这就是用户说的"下面那块灰不像真的、不跟圆角走"。现在兜底是
+  1px/2px + 2px/5px（合计 7px，正好在留白里），要更大的影子就动「投影」滑块，留白会跟着长。
+- 验证：`scripts/capture-ui.ps1`（照 `%TEMP%\weport-electron-screenshots\popup.png` 直接看像素），
+  `npm run bench` 的满档玻璃 CPU / 帧 p95（加了这三层后仍是 3.25% / 17.4ms）。

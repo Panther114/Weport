@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Check, Loader2, MessageSquarePlus, Pencil, Send, Sparkles, Trash2, X } from 'lucide-react'
 import type { WeCloneListItem } from '../../types/weclone'
+import { splitReplyBubbles } from '../../utils/weCloneBubbles'
 
 /**
  * 和分身对话的抽屉。
@@ -310,16 +311,33 @@ export default function WeCloneChatDrawer({
                 <p>说点什么试试。它会用你聊天语料里学到的方式回答。</p>
               </div>
             )}
-            {turns.map((t, i) => (
-              <div key={i} className={`weclone-turn ${t.role}${t.error ? ' err' : ''}`}>
-                <div className="weclone-bubble">{t.content}</div>
-                {t.hint && (
-                  <p className="weclone-turn-hint">
-                    <AlertTriangle size={12} /> {t.hint}
-                  </p>
-                )}
-              </div>
-            ))}
+            {turns.map((t, i) => {
+              /**
+               * 一条回复 = **多条气泡**（v1.0.1）。
+               *
+               * 主进程的形态整形把回复按"连发短消息"切成几段、用空行连接；
+               * 旧版把整段塞进一个 `.weclone-bubble`（`white-space: pre-wrap`），
+               * 于是那些段落显示成一张卡片里的空行 —— 用户报的"多行长诗 + 莫名
+               * 两个换行"。切片规则是纯函数（utils/weCloneBubbles），有单测。
+               * 空内容（极少数失败轮次）退回原始文本，不能什么都不显示。
+               */
+              const parts = splitReplyBubbles(t.content)
+              const bubbles = parts.length > 0 ? parts : [t.content]
+              return (
+                <div key={i} className={`weclone-turn ${t.role}${t.error ? ' err' : ''}`}>
+                  {bubbles.map((part, index) => (
+                    <div className="weclone-bubble" key={index}>
+                      {part}
+                    </div>
+                  ))}
+                  {t.hint && (
+                    <p className="weclone-turn-hint">
+                      <AlertTriangle size={12} /> {t.hint}
+                    </p>
+                  )}
+                </div>
+              )
+            })}
             {sending && (
               <div className="weclone-turn assistant">
                 <div className="weclone-bubble pending">

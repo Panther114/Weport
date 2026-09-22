@@ -2085,24 +2085,34 @@ function ensureWeBotService(): WeBotService {
         mainWindow?.webContents.send('webot:runStarted', run)
       } catch { /* 窗口可能尚未创建 */ }
     },
-    notify: (note) => {
+    onRunFinished: (run) => {
+      // 开始与结束必须成对（v1.0.1）：失败的运行不再产生笔记，渲染层不能
+      // 再靠「来了新笔记」得知跑完了，否则那一行会永远停在「运行中」。
+      try {
+        mainWindow?.webContents.send('webot:runFinished', run)
+      } catch { /* 窗口可能尚未创建 */ }
+    },
+    notify: (notice) => {
       // 复用聊天通知的那套独立置顶窗口（notificationWindow.ts），不另起一套
       // 通知系统 —— 用户已经熟悉它出现的位置与交互。
       try {
         ensureWeChatRequestHeaderInterceptor()
         void showNotification({
-          sessionId: `webot:${note.taskId}`,
+          sessionId: `webot:${notice.taskId}`,
           channel: 'webot',
-          title: note.status === 'error' ? `WeBot 任务失败 · ${note.taskTitle}` : `WeBot 任务完成 · ${note.taskTitle}`,
-          content: note.summary.slice(0, 160),
-          timestamp: note.createdAt,
+          title: notice.status === 'error' ? `WeBot 任务失败 · ${notice.taskTitle}` : `WeBot 任务完成 · ${notice.taskTitle}`,
+          content: notice.summary.slice(0, 160),
+          timestamp: notice.createdAt,
         })
       } catch (e) {
         console.warn('[WeBot] 通知发送失败:', e)
       }
-      try {
-        mainWindow?.webContents.send('webot:note', note)
-      } catch { /* 窗口可能尚未创建 */ }
+      // 只有成功的那条会广播笔记事件（笔记板因此不需要对失败做任何过滤）。
+      if (notice.note) {
+        try {
+          mainWindow?.webContents.send('webot:note', notice.note)
+        } catch { /* 窗口可能尚未创建 */ }
+      }
     },
   })
   return weBotService
@@ -3158,7 +3168,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('webot:listNotes', (_e, options?: any) => ensureWeBotService().listNotes(options || {}))
   ipcMain.handle('webot:getNote', (_e, id: string) => ensureWeBotService().getNote(String(id || '')))
   ipcMain.handle('webot:updateNote', (_e, id: string, patch: any) => ensureWeBotService().updateNote(String(id || ''), patch || {}))
-  ipcMain.handle('webot:unreadCount', () => ensureWeBotService().unreadNoteCount())
+  ipcMain.handle('webot:deleteNote', (_e, id: string) => ensureWeBotService().deleteNote(String(id || '')))
   ipcMain.handle('webot:clearNotes', () => ensureWeBotService().clearNotes())
 
   // -------------------------------------------------------------------------
@@ -3369,6 +3379,12 @@ function demoConfigValue(key: string): unknown {
       return false
     case 'notificationDuration':
       return 3000
+    // 动效开关与风格也必须在演示数据里钉死：它们默认回落到真实配置，于是截图
+    // 会随"跑截图那台机器"的设置变化（同一份 README 出自不同人手就长得不一样）。
+    case 'notificationAnimationEnabled':
+      return true
+    case 'notificationAnimationStyle':
+      return 'slide'
     case 'antiRevokeAutoApplyNewGroups':
       return false
     default:
@@ -3657,12 +3673,26 @@ function installScreenshotDemoHandlers() {
     runId: 'run-demo-1',
     createdAt: Date.now() - 3_600_000,
     title: '化学群作业整理',
+    // 笔记正文是 **Markdown**（v1.0.1：模型本来就输出 md，界面以前按纯文本渲染，
+    // 于是 `- 第 3 题` 和 `**周三小测**` 原样露出来）。演示数据里刻意带上三种语法，
+    // 截图与视觉断言才不会在"有人把渲染改回纯文本"时全绿。
     summary:
-      '今天布置的是必修二第三章课后练习 3-5 题，另需预习有机化合物一节。\n老师提醒周三小测，范围是前两章。',
+      '今天布置的是必修二第三章课后练习：\n\n- 第 3 题（配平）\n- 第 4–5 题\n\n**老师提醒**：周三小测，范围是前两章。',
     status: 'ok' as const,
     references: [{ id: 'demo-room@chatroom', label: '化学 3 班', kind: 'group' as const }],
-    read: false,
     pinned: false,
+  }
+  const demoWebBotNote2 = {
+    ...demoWebBotNote,
+    id: 'note-demo-2',
+    taskId: 'task-demo-3',
+    taskTitle: '项目群进展跟踪',
+    runId: 'run-demo-3',
+    createdAt: Date.now() - 7_200_000,
+    title: '项目群进展跟踪',
+    summary: '1. 接口联调完成，等待测试环境部署。\n2. 下周一前需要确认埋点字段。',
+    references: [{ id: 'demo-work@chatroom', label: '项目协作', kind: 'group' as const }],
+    pinned: true,
   }
   // 三条任务而不是一条：任务列表是「卡片网格」，一条任务时看不出网格是否
   // 真的排开；第二条停用、第三条是每周任务，顺带覆盖停用态与每周排期文案。
@@ -3687,10 +3717,10 @@ function installScreenshotDemoHandlers() {
     nextRunAt: Date.now() + 540_000,
   }
   override('webot:listTasks', () => [demoWebBotTask, demoWebBotTask2, demoWebBotTask3])
-  override('webot:listNotes', () => [demoWebBotNote])
+  override('webot:listNotes', () => [demoWebBotNote, demoWebBotNote2])
   override('webot:getNote', () => demoWebBotNote)
   override('webot:updateNote', () => demoWebBotNote)
-  override('webot:unreadCount', () => 1)
+  override('webot:deleteNote', () => true)
   override('webot:clearNotes', () => 0)
   override('webot:listRuns', () => [
     {

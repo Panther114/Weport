@@ -50,6 +50,7 @@ import {
   Contrast,
   MapPin,
   Timer,
+  Move,
   CalendarClock,
   Pin,
   Fingerprint,
@@ -68,6 +69,7 @@ import BackgroundTasks from './components/BackgroundTasks'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
 import { summarizeNotifyScope } from './utils/notifyScope'
+import type { NotificationAnimationStyle } from './utils/notificationAnimation'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 
 /**
@@ -267,6 +269,21 @@ const NOTIFICATION_POSITION_OPTIONS: Array<{ value: NotificationPosition; label:
   { value: 'top-center', label: '顶部居中' },
 ]
 
+/**
+ * 弹窗动效风格（v1.0.1）。
+ *
+ * 文案里写清"从哪条边进来"：这条设置的效果只有在下一条真实通知到来时看得见，
+ * 而用户改完最想确认的恰恰是"它到底会怎么动"。
+ */
+const NOTIFICATION_ANIMATION_STYLES: Array<{ value: NotificationAnimationStyle; label: string; hint: string }> = [
+  {
+    value: 'slide',
+    label: '滑入滑出',
+    hint: '从离弹窗最近的那条屏幕边滑进来，退场沿原路滑出（右侧的角从右边进出，顶部居中从上往下）',
+  },
+  { value: 'classic', label: '淡入缩放', hint: '旧版动效：原地淡入并轻微放大，退场原地缩小' },
+]
+
 const isValidDecryptKey = (value: string): boolean => /^[0-9a-f]{64}$/i.test(value.trim())
 
 const EXPORT_DEFAULTS = {
@@ -371,6 +388,8 @@ export default function App() {
   const [notificationDuration, setNotificationDuration] = useState(3000)
   const [durationInput, setDurationInput] = useState('3')
   const [notificationAnimationEnabled, setNotificationAnimationEnabled] = useState(true)
+  /** 弹窗动效风格：slide（默认，从最近的屏幕边滑入）/ classic（旧版淡入缩放） */
+  const [notificationAnimationStyle, setNotificationAnimationStyle] = useState<NotificationAnimationStyle>('slide')
   /** Linux 通知投递方式（其他平台忽略）：auto/force-dbus/off，见 electron/services/linuxNotify.ts */
   const [linuxNotificationMode, setLinuxNotificationMode] = useState<'auto' | 'force-dbus' | 'off'>('auto')
   const [respectWechatMute, setRespectWechatMute] = useState(true)
@@ -920,6 +939,10 @@ export default function App() {
         }
         const notifAnimation = await api.config.get('notificationAnimationEnabled')
         if (typeof notifAnimation === 'boolean') setNotificationAnimationEnabled(notifAnimation)
+        const notifAnimationStyle = await api.config.get('notificationAnimationStyle')
+        if (notifAnimationStyle === 'classic' || notifAnimationStyle === 'slide') {
+          setNotificationAnimationStyle(notifAnimationStyle)
+        }
         const linuxNotifyMode = await api.config.get('linuxNotificationMode')
         if (linuxNotifyMode === 'auto' || linuxNotifyMode === 'force-dbus' || linuxNotifyMode === 'off') {
           setLinuxNotificationMode(linuxNotifyMode)
@@ -1570,6 +1593,18 @@ export default function App() {
     } catch (error) {
       setNotificationAnimationEnabled(previous)
       pushToast('err', '弹窗动效设置失败', String(error))
+    }
+  }
+
+  async function updateNotificationAnimationStyle(value: NotificationAnimationStyle) {
+    const previous = notificationAnimationStyle
+    setNotificationAnimationStyle(value)
+    try {
+      const result = await api.config.set('notificationAnimationStyle', value)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setNotificationAnimationStyle(previous)
+      pushToast('err', '弹窗动效风格保存失败', String(error))
     }
   }
 
@@ -3181,6 +3216,37 @@ export default function App() {
                   <span className="track" />
                 </label>
               </div>
+
+              {/* 动效风格（v1.0.1）：滑动是默认。关掉上面那个开关时这一行没有意义，
+                  所以只在开启动效时显示 —— 否则用户会对着一个不起作用的选择发呆。 */}
+              {notificationAnimationEnabled ? (
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Move size={14} />
+                    <div>
+                      <strong>动效风格</strong>
+                      <span className="hint">
+                        {NOTIFICATION_ANIMATION_STYLES.find((option) => option.value === notificationAnimationStyle)?.hint}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="segmented" role="radiogroup" aria-label="弹窗动效风格">
+                    {NOTIFICATION_ANIMATION_STYLES.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={notificationAnimationStyle === option.value}
+                        className="segmented-item"
+                        data-active={notificationAnimationStyle === option.value}
+                        onClick={() => void updateNotificationAnimationStyle(option.value)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </section>
 
             {/* 通知玻璃（v1.0.1 重做）：填充、渐变、文字色、描边、圆角、折射、模糊、

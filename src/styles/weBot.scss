@@ -568,37 +568,55 @@
   border-radius: var(--radius);
   background: var(--panel);
 
-  // 未读用左侧强调条 + 淡色底：既不是"整块高亮"（那样一堆未读会很吵），
-  // 也不只靠颜色（点在有边框的一侧，灰度下也能看出来）。
-  &[data-unread='true'] {
-    border-left: 2px solid var(--accent);
-    background: var(--elevated);
-  }
-
-  &[data-status='error'] {
-    border-left-color: var(--danger);
-  }
+  // v1.0.1：未读/已读整块删除，所以这里不再有 `[data-unread]` 的强调条，
+  // 也不再有失败态的左边框（失败已经不落笔记）。
 
   header {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
     gap: var(--space-2);
 
     h4 {
       font-size: 13.5px;
       font-weight: 600;
+      // 标题占满剩余宽度，把时间和 ✕ 顶到右边（✕ 必须是"这张卡片"的右上角，
+      // 而不是跟在标题后面）
+      flex: 1;
+      min-width: 0;
     }
   }
 
-  p {
+  // 笔记正文按 Markdown 渲染，因此是块级内容（不再是单个 <p>）。
+  .webot-note-body {
     font-size: 12.5px;
     line-height: 1.7;
     color: var(--text-dim);
-    white-space: pre-wrap;
-    word-break: break-word;
     max-height: 220px;
     overflow-y: auto;
+
+    // Markdown 的首尾外边距会把卡片撑出多余空隙；列表的缩进也收窄一点，
+    // 卡片只有 320px 上下。
+    > :first-child {
+      margin-top: 0;
+    }
+
+    > :last-child {
+      margin-bottom: 0;
+    }
+
+    ul,
+    ol {
+      padding-left: 1.2em;
+      margin: 0.4em 0;
+    }
+
+    p {
+      margin: 0.4em 0;
+    }
+
+    code {
+      font-size: 11.5px;
+    }
   }
 
   footer {
@@ -607,6 +625,28 @@
     gap: var(--space-2);
     flex-wrap: wrap;
     margin-top: auto;
+  }
+}
+
+// 逐条删除：右上角的 ✕。常驻可见（不做 hover 才出现）—— 隐藏起来的删除入口
+// 会让"想删一条"变成一次找按钮的猜谜。
+.webot-note-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    color: var(--danger);
   }
 }
 

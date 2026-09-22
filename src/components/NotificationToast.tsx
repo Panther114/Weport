@@ -8,9 +8,15 @@ import {
     notificationCardPadding,
     notificationCardWidth,
     notificationGlassRenderParams,
+    notificationGlassTextVars,
     notificationGlassVars,
     type NotificationGlass
 } from '../utils/notificationGlass'
+import {
+    notificationExitMs,
+    type NotificationAnimationStyle,
+    type NotificationSlideFrom
+} from '../utils/notificationAnimation'
 import './NotificationToast.scss'
 
 export interface NotificationData {
@@ -29,6 +35,10 @@ export interface NotificationData {
     notificationDuration?: number
     /** 是否播放弹窗入场/退场动效 */
     notificationAnimationEnabled?: boolean
+    /** 动效风格：slide（默认，从最近的屏幕边滑入）/ classic（旧版原地淡入缩放） */
+    notificationAnimationStyle?: NotificationAnimationStyle
+    /** 卡片从哪条边进来（由 position 在 NotificationWindow 里算好） */
+    slideFrom?: NotificationSlideFrom
 }
 
 interface NotificationToastProps {
@@ -44,8 +54,30 @@ interface NotificationToastProps {
     nativeBackdrop?: boolean
     /** 是否播放入场、退场和卡片过渡动效 */
     animationEnabled?: boolean
+    /** 动效风格（见 utils/notificationAnimation.ts） */
+    animationStyle?: NotificationAnimationStyle
+    /** 滑入方向（`slide` 风格才用得上） */
+    slideFrom?: NotificationSlideFrom
+    /**
+     * 窗口**已经显示**（主进程的 `notification:shown`）—— 入场动画的起跑信号。
+     *
+     * 为什么需要门控：窗口是"等渲染层量好尺寸再显示"的（见 notificationWindow.ts
+     * `revealPopup`）。CSS 过渡在挂载那一刻就起算，等窗口真的出现在屏幕上时动画
+     * 已经跑掉一段 —— 用户看到的是"卡片从屏幕边上闪一下"，而不是"滑进来"。
+     * 未 revealed 时卡片钉在位移起点（窗口外，被 `overflow: hidden` 裁掉），
+     * 所以这期间它既不可见也不会误拦截点击。
+     */
+    revealed?: boolean
     /** 退场动画开始的一刻触发（原生模式用来提前淡出原生面板） */
     onHideStart?: () => void
+    /**
+     * 退场**之前**的异步准备：让主进程先把窗口放开（滑动要滑到屏幕外面去，
+     * 窗口不够大就会被窗口边界裁掉，看起来是"滑到一半就没了"）。
+     *
+     * 返回 Promise 是有意的：动画要等它落地才开始，否则准备动作本身会和动画抢帧
+     * （实测就是"退场一顿"）。调用方另有 150ms 超时兜底，主进程不回也不会卡住。
+     */
+    onBeforeExit?: () => Promise<unknown>
     /**
      * 玻璃与卡片观感（设置 → 消息通知设置 → 通知玻璃）。是**变量**而不是写死的观感，
      * 因此同一份配置在弹窗与设置页预览里渲染出的结果完全一致。
@@ -90,7 +122,11 @@ export function NotificationToast({
     backdropStream,
     nativeBackdrop = false,
     animationEnabled = true,
+    animationStyle = 'slide',
+    slideFrom = 'right',
+    revealed = true,
     onHideStart,
+    onBeforeExit,
     glass = NOTIFICATION_GLASS_DEFAULT,
     onMeasure,
 }: NotificationToastProps) {
@@ -111,6 +147,7 @@ export function NotificationToast({
     const onHideStartRef = useRef(onHideStart)
     const onCloseRef = useRef(onClose)
     const onMeasureRef = useRef(onMeasure)
+    const onBeforeExitRef = useRef(onBeforeExit)
     const closeTimerRef = useRef<number | null>(null)
     const dismissedRef = useRef(false)
     const containerRef = useRef<HTMLDivElement>(null)
@@ -119,6 +156,7 @@ export function NotificationToast({
     onHideStartRef.current = onHideStart
     onCloseRef.current = onClose
     onMeasureRef.current = onMeasure
+    onBeforeExitRef.current = onBeforeExit
 
     const cardWidth = notificationCardWidth(glass.width, extraWidth)
     /**
@@ -143,11 +181,33 @@ export function NotificationToast({
     const dismiss = () => {
         if (dismissedRef.current) return
         dismissedRef.current = true
-        beginHide()
-        closeTimerRef.current = window.setTimeout(() => {
-            closeTimerRef.current = null
-            onCloseRef.current()
-        }, animationEnabled ? 300 : 0)
+        /**
+         * 退场 = 先"请主进程把窗口放开"，再开始动画。
+         *
+         * 顺序反了就会看到"滑到一半被切掉"：窗口在卡片滑出去之前只有卡片那么大，
+         * 卡片一开始位移就越过窗口边界被裁掉，等窗口放大回来才补全 —— 一帧的裁切
+         * 在肉眼上就是一次抖动。150ms 兜底：主进程没回应也不能让通知关不掉。
+         */
+        const exitMs = notificationExitMs(animationStyle, animationEnabled)
+        const run = () => {
+            beginHide()
+            // 等退场动画真的跑完再关窗。时长由 utils/notificationAnimation 给出
+            // （slide 480ms / classic 300ms / 关掉动效 0），与两份 scss 里的
+            // transition 时长是同一组数字：不一致的结果是最后一帧被切掉。
+            closeTimerRef.current = window.setTimeout(() => {
+                closeTimerRef.current = null
+                onCloseRef.current()
+            }, exitMs)
+        }
+        const prepare = onBeforeExitRef.current
+        if (exitMs > 0 && prepare) {
+            void Promise.race([
+                Promise.resolve(prepare()).catch(() => undefined),
+                new Promise((resolve) => window.setTimeout(resolve, 150)),
+            ]).then(run)
+        } else {
+            run()
+        }
     }
 
     useEffect(() => {
@@ -237,9 +297,27 @@ export function NotificationToast({
     // 变量挂在**卡片容器**上（不是 documentElement）：设置页的预览卡片用的是
     // 同一个组件、同一组变量，因此"预览 = 真弹窗"是结构上成立的，不靠人工同步。
     // null 值的变量直接不写（--glass-text-color 未指定时让 --noti-* 生效）。
-    const glassStyle = Object.fromEntries(
-        Object.entries(notificationGlassVars(glass)).filter(([, value]) => value !== null)
-    ) as CSSProperties
+    const glassStyle = {
+        ...(Object.fromEntries(
+            Object.entries(notificationGlassVars(glass)).filter(([, value]) => value !== null)
+        ) as CSSProperties),
+        /**
+         * 文字色**从第一帧起**就按填充色定极性（v1.0.1）。
+         *
+         * 用户报的："有些通知文字应该是黑的，但前几秒是白的，之后才变黑。"根因是
+         * 文字色的兜底链：用户没显式指定文字色时，颜色来自 `--noti-title-color`，
+         * 而那个变量只有**自适应引擎**会写 —— 引擎要等第一帧桌面采样（首次可达数秒）
+         * 才会落值，在那之前 `NotificationToast.scss` 的兜底 `#ffffff` 生效：
+         * 浅色玻璃配白字，等引擎跑完再翻成黑字。
+         *
+         * 极性本来就与背景无关（`glassTextPolarity`：填充是亮色 → 深字），所以它
+         * 不该等采样。这里把同一组变量（设置页预览用的就是它）直接写在卡片容器上：
+         * 容器的局部变量会遮蔽 `<html>` 上的引擎值，于是首帧就是对的，引擎之后写什么
+         * 都不会再改变文字色。用户显式指定文字色时 `--glass-text-color` 优先级更高，
+         * 这组变量不影响它。
+         */
+        ...notificationGlassTextVars(glass)
+    } as CSSProperties
 
     /**
      * 折射与磨砂只有在**有背景像素可加工**时才会改变观感。
@@ -254,7 +332,21 @@ export function NotificationToast({
     return (
         <div
             ref={containerRef}
-            className={`notification-toast-container ${isVisible ? 'visible' : ''} ${animationEnabled ? '' : 'motion-disabled'}`.trim()}
+            className={[
+                'notification-toast-container',
+                isVisible ? 'visible' : '',
+                animationEnabled ? `anim-${animationStyle}` : 'motion-disabled'
+            ].filter(Boolean).join(' ')}
+            /**
+             * 滑动风格的三件状态：
+             *   `data-slide`  往哪条边（见 utils/notificationAnimation.ts）
+             *   `data-run`    true 才起跑 —— 窗口是"等渲染层量好尺寸再显示"的，
+             *                 动画不能在被看见之前就跑掉一段
+             * 入场与退场都作用在这一层：位移量 100%+20px 正好等于主进程给窗口多留的
+             * `room`（见 notificationAnimation.ts 顶部），所以卡片起点恰好在屏幕外。
+             */
+            data-slide={animationEnabled && animationStyle === 'slide' ? slideFrom : undefined}
+            data-run={animationEnabled && animationStyle === 'slide' ? (revealed ? 'true' : 'false') : undefined}
             style={{ ...glassStyle, width: boxWidth, padding: pad }}
             onContextMenu={(event) => {
                 event.preventDefault()

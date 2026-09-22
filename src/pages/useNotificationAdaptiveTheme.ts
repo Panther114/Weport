@@ -109,8 +109,18 @@ const ANCHORS: Record<'title' | 'body' | 'tertiary', { dark: TextAnchor; light: 
  * 描边颜色按**文字极性**取，与填充方向一致 —— 白字配白边、黑字配黑边，方向反了
  * 会在玻璃里画出一圈脏线。
  */
-const CARD_ON_DARK_BACKDROP = 'inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 6px 18px rgba(0, 0, 0, 0.45)'
-const CARD_ON_LIGHT_BACKDROP = 'inset 0 0 0 1px rgba(0, 0, 0, 0.12), 0 6px 18px rgba(0, 0, 0, 0.22)'
+/**
+ * 兜底投影（用户把「投影」滑块放在 0 时用的就是它）。
+ *
+ * v1.0.1 改小：原来是 `0 6px 18px`（脚 24px），而弹窗窗口在滑块 = 0 时只给卡片
+ * 留 8px 的边距 —— 那圈投影**被窗口边界切掉**，看起来就是"下面糊了一块灰、不跟
+ * 圆角走"（用户报的）。现在两层：一层 1px/2px 的接触投影（贴着下沿、圆角处也是
+ * 圆的），一层 2px/5px 的环境投影，合计 7px，正好落在留白里。
+ * 想要更大的投影就动「投影」滑块 —— 那时留白会按滑块一起长（见 notificationGlass.ts
+ * 的 notificationShadowMargin），两边始终配套。
+ */
+const CARD_ON_DARK_BACKDROP = 'inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 5px rgba(0, 0, 0, 0.32)'
+const CARD_ON_LIGHT_BACKDROP = 'inset 0 0 0 1px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.18), 0 2px 5px rgba(0, 0, 0, 0.16)'
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
 const lerpRgb = (a: RGB, b: RGB, t: number): RGB => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]

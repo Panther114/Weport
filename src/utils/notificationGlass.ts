@@ -349,12 +349,20 @@ export const NOTIFICATION_CARD_BASE_PADDING = 8
  * 返回值同时被 `notificationShadowCss`（画）和 `notificationShadowMargin`（留地方）
  * 使用 —— 两处必须来自同一组数，否则又会出现"画得出来但被切掉"。
  */
-export function notificationShadowLayers(shadow: number): { offsetY: number; blur: number; alpha: number } {
+export function notificationShadowLayers(shadow: number): { offsetY: number; blur: number; alpha: number; contactAlpha: number } {
     const t = Math.min(100, Math.max(0, Number(shadow) || 0)) / 100
     return {
         offsetY: Math.round(3 + t * 6),
         blur: Math.round(8 + t * 12),
         alpha: Math.round((0.1 + t * 0.26) * 100) / 100,
+        /**
+         * 接触阴影的浓度（1px/2px 那一层）。
+         *
+         * 它不随滑块线性变淡：这层表达的是"玻璃压着桌面"这个**物理接触**，
+         * 滑块调的是"悬浮高度"，悬浮到很高时接触阴影才该消失。所以给一个下限，
+         * 让它在任何非零档位下都还在。
+         */
+        contactAlpha: Math.round((0.14 + t * 0.06) * 100) / 100,
     }
 }
 
@@ -395,8 +403,19 @@ export function notificationCardPadding(shadow: number): number {
  */
 export function notificationShadowCss(shadow: number): string | null {
     if (!(Number(shadow) > 0)) return null
-    const { offsetY, blur, alpha } = notificationShadowLayers(shadow)
-    return `var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04)), 0 ${offsetY}px ${blur}px rgba(0, 0, 0, ${alpha})`
+    const { offsetY, blur, alpha, contactAlpha } = notificationShadowLayers(shadow)
+    /**
+     * 两层，缺一不可（用户报的"下面那圈阴影不像真的、不跟着圆角走"）：
+     *
+     *  1. **接触阴影**：1px 偏移、2px 模糊 —— 它贴着卡片下沿走，圆角处的阴影
+     *     因此也是圆的。只有一层大模糊时，眼睛读到的是"一块糊在下面的灰"，
+     *     而不是"这块玻璃压在桌面上"。
+     *  2. **环境阴影**：滑块控制的偏移/模糊/浓度。它负责"浮起来"的感觉。
+     *
+     * 两层都用 `box-shadow`，因此都严格跟随卡片自己的 `border-radius` ——
+     * 阴影的形状由**投出它的那个圆角矩形**决定，而不是一个独立的方框。
+     */
+    return `var(--noti-shadow, 0 0 0 1px rgba(0, 0, 0, 0.04)), 0 1px 2px rgba(0, 0, 0, ${contactAlpha}), 0 ${offsetY}px ${blur}px rgba(0, 0, 0, ${alpha})`
 }
 
 /**

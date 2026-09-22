@@ -62,9 +62,9 @@ interface WeBotNote {
   createdAt: number
   title: string
   summary: string
+  /** 只可能是 `ok`：失败的运行从 v1.0.1 起不再产生笔记。 */
   status: 'ok' | 'error'
   references: WeBotReference[]
-  read: boolean
   pinned: boolean
 }
 
@@ -237,10 +237,12 @@ interface ElectronApi {
     close: () => Promise<void>
     click: (payload: any) => void
     ready: () => void
-    resize: (width: number, height: number) => void
+    resize: (width: number, height: number, options?: { slideFrom?: string; room?: number; settled?: boolean }) => void
     glassRect: (payload: any) => void
     glassHide: () => void
     showTest: () => Promise<{ success: boolean }>
+    /** 退场前把窗口按滑动方向放开一段（等它落地再开始退场动画）。 */
+    prepareExit: () => Promise<{ extended: boolean }>
     getMuteReport: () => Promise<{
       success: boolean
       sessionCount: number
@@ -261,6 +263,17 @@ interface ElectronApi {
     }>
     onLuma: (callback: (bands: any) => void) => () => void
     onShow: (callback: (event: any, data: any) => void) => () => void
+    /**
+     * 窗口**真正显示出来**了（主进程在 `showInactive` 之后立刻发）。
+     * 入场动画门控在它上面：CSS 动画在挂载时就会起跑，而窗口是等渲染层量好
+     * 尺寸才显示的 —— 不门控的话用户只能看到滑入动画的后半段。
+     */
+    onShown: (callback: (event: any, data: { payloadId?: string }) => void) => () => void
+    /**
+     * 窗口收回（入场动画结束）后主进程下发的**新窗口几何**。
+     * 主题采样按"窗口在屏幕上的位置"把取样点挪出窗口，坐标过时就会读到别处的桌面。
+     */
+    onGeometry: (callback: (event: any, data: { winX: number; winY: number; winW: number; winH: number }) => void) => () => void
     /** 主进程的定帧折射帧（弹窗可见期间约 3fps） */
     onBackdrop: (callback: (frame: { seq: number; dataUrl: string; winX: number; winY: number; width: number; height: number }) => void) => () => void
     /** 通知主进程：渲染层的实时视频流已接管折射，不必再抓帧 */
@@ -547,13 +560,15 @@ interface ElectronApi {
     deleteTask: (id: string) => Promise<boolean>
     runNow: (id: string) => Promise<{ success: boolean; error?: string }>
     listRuns: (taskId?: string) => Promise<WeBotRun[]>
-    listNotes: (options?: { taskId?: string; unreadOnly?: boolean; limit?: number }) => Promise<WeBotNote[]>
+    listNotes: (options?: { taskId?: string; limit?: number }) => Promise<WeBotNote[]>
     getNote: (id: string) => Promise<WeBotNote | null>
-    updateNote: (id: string, patch: { read?: boolean; pinned?: boolean }) => Promise<WeBotNote | null>
-    unreadCount: () => Promise<number>
+    updateNote: (id: string, patch: { pinned?: boolean }) => Promise<WeBotNote | null>
+    /** 逐条删除一条笔记（卡片右上角的 ✕）。 */
+    deleteNote: (id: string) => Promise<boolean>
     clearNotes: () => Promise<number>
     onNote: (callback: (note: WeBotNote) => void) => () => void
     onRunStarted: (callback: (run: WeBotRun) => void) => () => void
+    onRunFinished: (callback: (run: WeBotRun) => void) => () => void
   }
   /**
    * macOS 能力诊断（v1.0）。非 darwin 平台返回 supported:false，

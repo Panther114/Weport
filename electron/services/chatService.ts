@@ -851,6 +851,39 @@ class ChatService {
     } catch {}
   }
 
+  /**
+   * 丢弃**派生缓存**，让下一次读取真的回到数据库（v1.0.1）。
+   *
+   * 为什么需要它：服务里所有"读聊天记录"的路径最终都直连 WCDB，但中间有三层
+   * 缓存会让一份**旧快照**看起来像是当前事实：
+   *
+   *  1. `messageCursors` —— 分页游标。它在打开的那一刻定位到某条消息，之后
+   *     一直沿那个位置往下翻：新到的消息在游标**上方**，用同一个游标永远读不到。
+   *  2. `sessionStatsCacheService` —— 统计（总数 / 首末条时间）默认允许用旧值
+   *     （`allowStaleCache`），所以"今天有多少条"可能答的是几小时前的数。
+   *  3. `messageCacheService` —— 界面首屏用的消息快照。
+   *
+   * agent 侧的 `sync_chat_history` 工具就是调它：用户问"最新消息"时，先把这三层
+   * 清掉，再读出来的就是这一秒的事实。
+   */
+  async invalidateDerivedCaches(sessionId?: string): Promise<{ cursors: number; sessions: number }> {
+    let cursors = 0
+    if (sessionId) {
+      this.deleteSessionStatsCacheEntry(sessionId)
+      if (this.messageCursors.has(sessionId)) cursors += 1
+      await this.closeMessageCursorBySession(sessionId)
+      this.messageCacheService.delete(sessionId)
+      return { cursors, sessions: 1 }
+    }
+    cursors = this.messageCursors.size
+    for (const [id] of Array.from(this.messageCursors.entries())) {
+      await this.closeMessageCursorBySession(id)
+    }
+    this.clearSessionStatsCacheForScope()
+    this.messageCacheService.clear()
+    return { cursors, sessions: 0 }
+  }
+
   close(): void {
     try {
       for (const state of this.messageCursors.values()) {

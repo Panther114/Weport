@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Clock, History, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
+import AiMarkdown from '../components/weportAi/AiMarkdown'
 import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../components/reference/ReferencePicker'
 import { findActiveMention, referenceKindLabel, rewriteMentionQuery, stripMention, type ChatReference } from '../utils/mentionTrigger'
 import { loadReferenceCandidates } from '../utils/sessionCandidates'
@@ -64,8 +65,6 @@ export default function WeBotModule({ section }: Props) {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft)
-  const [unreadOnly, setUnreadOnly] = useState(false)
-  const [unread, setUnread] = useState(0)
   const [message, setMessage] = useState('')
   // 编辑器默认收起：任务列表才是这一页的内容，表单只在要建/改任务时出现。
   const [editorOpen, setEditorOpen] = useState(false)
@@ -86,20 +85,20 @@ export default function WeBotModule({ section }: Props) {
     try {
       const [nextTasks, nextNotes, nextRuns] = await Promise.all([
         api.weBot.listTasks(),
-        api.weBot.listNotes({ unreadOnly }),
+        // 笔记板只放**成功运行**的结论（失败的在运行记录里）。服务端已经过滤，
+        // 渲染层不再自己筛 —— 两处各筛一次迟早会分叉。
+        api.weBot.listNotes(),
         api.weBot.listRuns(),
       ])
       setTasks(nextTasks)
       setNotes(nextNotes)
       setRuns(nextRuns)
-      // 未读数是**全量**的，不受「只看未读」筛选影响，因此单独取。
-      setUnread(await api.weBot.unreadCount())
     } catch (error) {
       setMessage(`读取 WeBot 数据失败：${String((error as Error)?.message || error)}`)
     } finally {
       setLoading(false)
     }
-  }, [api, unreadOnly])
+  }, [api])
 
   useEffect(() => {
     void refresh()
@@ -132,9 +131,21 @@ export default function WeBotModule({ section }: Props) {
         setRuns((prev) => [run, ...prev.filter((item) => item.id !== run.id)])
         setOpenLogs((prev) => new Set(prev).add(run.taskId))
       })
+      /**
+       * 结束回调（成功与失败都有，v1.0.1）。
+       *
+       * 以前这条链路是「来了新笔记 → 整页重读」：失败也会写一条笔记，所以歪打正着
+       * 能用。失败不再落笔记之后，一条失败的运行会永远停在「运行中」—— 这里用
+       * 服务端回的终态记录原地替换那一行，顺手把日志留着展开（失败信息就在里面）。
+       */
+      const offFinished = api.weBot.onRunFinished((run) => {
+        setRuns((prev) => prev.map((item) => (item.id === run.id ? run : item)))
+        setOpenLogs((prev) => new Set(prev).add(run.taskId))
+      })
       return () => {
         offNote()
         offRun()
+        offFinished()
       }
     },
     [api, refresh]
@@ -355,7 +366,7 @@ export default function WeBotModule({ section }: Props) {
           <span className="webot-toolbar-sub">
             {section === 'tasks'
               ? `共 ${tasks.length} 个任务；任务到点自动执行，结果写入笔记`
-              : `共 ${notes.length} 条笔记${unread > 0 ? ` · ${unread} 条未读` : ''}`}
+              : `共 ${notes.length} 条笔记（只有成功的运行会留下笔记）`}
           </span>
         </div>
         <div className="webot-toolbar-actions">
@@ -365,10 +376,8 @@ export default function WeBotModule({ section }: Props) {
             </button>
           ) : (
             <>
-              <label className="webot-checkbox">
-                <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} />
-                <span>只看未读</span>
-              </label>
+              {/* 「只看未读」整块删除（v1.0.1）：未读/已读在 WeBot 里没有意义 ——
+                  笔记是任务的结论，不是待办收件箱。要丢掉一条就点它右上角的 ✕。 */}
               {notes.length > 0 ? (
                 <button
                   type="button"
@@ -716,10 +725,14 @@ export default function WeBotModule({ section }: Props) {
                               <span className="webot-run-duration">{formatDuration(run.durationMs)}</span>
                             </div>
                             {run.error ? <p className="webot-run-error">{run.error}</p> : null}
-                            {run.noteId ? (
+                            {run.status === 'error' ? (
+                              // 把「失败不写笔记」这条规则写在用户看得见的地方：
+                              // 否则失败之后去笔记板找不到东西，只会以为是坏了。
+                              <p className="webot-run-note">失败不会写入笔记板，原因就是上面这行。</p>
+                            ) : run.noteId ? (
                               <p className="webot-run-note">
                                 已写入笔记：
-                                {notes.find((note) => note.id === run.noteId)?.title || '（已保留在笔记板）'}
+                                {notes.find((note) => note.id === run.noteId)?.title || '（已删除）'}
                               </p>
                             ) : null}
                           </div>
@@ -775,12 +788,31 @@ export default function WeBotModule({ section }: Props) {
 
           <div className="webot-note-list">
             {notes.map((note) => (
-              <article className="webot-note" key={note.id} data-unread={!note.read} data-status={note.status}>
+              <article className="webot-note" key={note.id}>
                 <header>
                   <h4>{note.title}</h4>
                   <span className="webot-note-time">{describeRelativeTime(note.createdAt)}</span>
+                  {/* 逐条删除（v1.0.1）：右上角的 ✕。以前只有「清空全部」，
+                      想丢掉一条过期结论只能把整块板子清掉。 */}
+                  <button
+                    type="button"
+                    className="webot-note-close"
+                    aria-label={`删除笔记 ${note.title}`}
+                    title="删除这条笔记"
+                    onClick={async () => {
+                      await api.weBot.deleteNote(note.id)
+                      await refresh()
+                    }}
+                  >
+                    <X size={13} />
+                  </button>
                 </header>
-                <p>{note.summary}</p>
+                {/* 笔记正文按 **Markdown** 渲染（v1.0.1）。模型本来就输出 md
+                    （`- 第 3 题`、`**周三小测**`），旧版按纯文本渲染，用户看到的
+                    是裸露的星号和短横线。 */}
+                <div className="webot-note-body">
+                  <AiMarkdown text={note.summary} />
+                </div>
                 <footer>
                   <span className="webot-note-task">{note.taskTitle}</span>
                   {note.references.map((reference) => (
@@ -800,17 +832,6 @@ export default function WeBotModule({ section }: Props) {
                       }}
                     >
                       <Pin size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-btn"
-                      title={note.read ? '标为未读' : '标为已读'}
-                      onClick={async () => {
-                        await api.weBot.updateNote(note.id, { read: !note.read })
-                        await refresh()
-                      }}
-                    >
-                      <Check size={13} />
                     </button>
                   </div>
                 </footer>

@@ -89,6 +89,14 @@ interface ConfigSchema {
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
   notificationDuration: number
   notificationAnimationEnabled: boolean
+  /**
+   * 弹窗动效风格（v1.0.1）。
+   *
+   * - `slide`（默认）：从**离它最近的那条屏幕边**滑入，退场沿原路滑出。
+   *   边角位置是水平滑动（右侧的角 → 从右边滑入），顶部居中是从上往下滑。
+   * - `classic`：旧版的"原地淡入 + 轻微缩放"，用户明确要求保留。
+   */
+  notificationAnimationStyle: 'slide' | 'classic'
   notificationFilterMode: 'all' | 'whitelist' | 'blacklist' | 'mentions'
   notificationFilterList: string[]
   /**
@@ -310,6 +318,9 @@ export class ConfigService {
       notificationPosition: 'top-right',
       notificationDuration: 3000,
       notificationAnimationEnabled: true,
+      // 新的滑动动效是默认：用户要的是"从屏幕边滑进来、再滑出去"，旧版那种
+      // "原地出现"读起来像是卡了一下。classic 仍然可选。
+      notificationAnimationStyle: 'slide',
       notificationFilterMode: 'all',
       notificationFilterList: [],
       // Linux 上有通知守护进程时优先系统通知（Wayland 下应用内弹窗会触发

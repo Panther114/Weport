@@ -267,6 +267,9 @@ const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Wepo
 6. SCOPE & PRIVACY. Analyze only the local data of this account. Never ask the user to export anything; never instruct file operations outside write_note. Do not reveal raw wxids when a display name exists.
 7. LEARN FROM PRIOR RUNS WITHOUT COPYING THEIR CONCLUSIONS. review_prior_analyses can show earlier questions, investigation tool sequences, and final conclusions. Use these as leads and coverage hints only; independently verify anything reused. A prior AI answer and a memory file are secondary sources, not ground truth.
 8. CACHE-EFFICIENT INVESTIGATION. Prefer compact survey/stratified tools over repeatedly dumping large raw windows. Keep tool-planning reasoning concise. Fetch raw detail only for claims that will affect the answer, and use cursors/focused time windows rather than repeating overlapping reads. Call at most 2 evidence-heavy tools (read/session/sample/search/period) in one assistant step so each receives a useful result budget.
+9. ASSUME YOUR CHAT DATA IS STALE — AND MAKE IT FRESH. You read the local WeChat database directly, but the *account owner keeps chatting while you work*: messages arrive continuously, and both this conversation and any WeBot task (a scheduled run, a note, a summary you produced earlier) can be holding a snapshot that is minutes or hours old. Two consequences you must apply:
+   - Anything you read earlier in THIS conversation is a snapshot, not the current state. Before any claim that depends on "now / today / latest / 最近 / 刚刚 / 有没有新消息", call sync_chat_history first (it drops the cached cursors, statistics and message snapshots) and re-read the chat with read_session_messages. Never answer a "what's new" question from an earlier tool result.
+   - Your own memory files and the notes you (or a WeBot task) wrote earlier are even older. Date-stamp freshness when you rely on them ("截至 <时间>"), and re-verify before repeating them as current fact.
 
 ## Objectivity & source standards (professional, non-negotiable)
 This is the most important section. Group chats are LOUD, memetic, performative and frequently sarcastic; their content is NOT a reliable source about a person. You must apply a strict evidence hierarchy and never let the noisiest chat dominate your analysis.
@@ -346,6 +349,7 @@ TOOL-DISCIPLINE RULE (applies to all playbooks): read_day_events and read_period
 
 ## Tool selection guide (quick reference)
 - Which chats exist / top chats by volume → list_sessions, get_social_overview
+- Is my view of the chats still current / force a re-read of one chat or all chats → sync_chat_history (ALWAYS before "最新/今天/有没有新消息" claims)
 - What happened across ALL chats on a day or range → read_day_events / read_period_events (ALWAYS for "what happened" questions)
 - Deep dive one chat's messages → read_session_messages with startTime/endTime slices
 - What a PICTURE shows (homework photo, screenshot, receipt, timetable) → read_chat_images (the image itself is attached to the tool result; text tools cannot see inside a picture). Ask for 1-3 images only.
@@ -1511,6 +1515,67 @@ class WeportAiService {
           })
           const next = offset + rows.length < matching.length ? `，nextOffset=${offset + rows.length}` : '，已到末尾'
           return `会话页：符合=${matching.length}，offset=${offset}，返回=${rows.length}${next}：\n` + lines.join('\n')
+        },
+      },
+      {
+        name: 'sync_chat_history',
+        description:
+          'Force a FRESH read of WeChat history: drops the message cursors, cached statistics and cached session list, then re-reads from the local database and reports what is actually there right now (latest message per requested chat). Call this BEFORE any claim that depends on the newest data ("最新", "今天", "有没有新消息", "现在怎么样了") — a previous tool result in this very conversation is a snapshot from minutes ago, and the account owner keeps sending messages while you work. Cheap and safe: it only invalidates caches, it never writes to WeChat.',
+        parameters: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: 'Chat id to refresh. Omit to refresh every chat (session list + all cached message state).' },
+            recentLimit: { type: 'integer', minimum: 1, maximum: 20, description: 'When refreshing all chats, how many of the most recently active chats to list (default 8).' },
+          },
+        },
+        friendly: (args, ctx) => {
+          const id = String(args.sessionId || '').trim()
+          return id ? `同步了「${ctx.getSessionName(id)}」的最新聊天数据` : '同步了全部会话的最新数据'
+        },
+        handler: async (args) => {
+          const sessionId = String(args.sessionId || '').trim()
+          const recentLimit = clampInt(args.recentLimit, 1, 20, 8)
+          const invalidated = await chatService.invalidateDerivedCaches(sessionId || undefined)
+          // 会话列表缓存（15s）也要一起丢：否则「哪个会话最近活跃」还是旧视图。
+          this.sessionListCache = { at: 0, sessions: [] }
+          const sessions = await this.loadSessionsFresh()
+          if (sessions.length === 0) {
+            return '同步完成，但读不到会话列表 —— 微信可能没在运行，或数据库尚未连接。'
+          }
+
+          if (sessionId) {
+            const session = sessions.find((s) => s.username === sessionId)
+            // 真正"最新"的定义是数据库里的最后一条消息，而不是会话表里的 lastTimestamp：
+            // 游标重建后按时间倒序取 1 条，读到的就是这一秒的事实。
+            const latest = await chatService.getMessages(sessionId, 0, 1, 0, 0, false)
+            const newest = latest.success ? latest.messages?.[0] : undefined
+            const name = session?.displayName || sessionId
+            const lines = [
+              `已强制重读「${name}」（${sessionId}）：丢弃游标 ${invalidated.cursors} 个、统计与首屏快照各 1 份。`,
+              newest
+                ? `最后一条消息：${formatTime(Number(newest.createTime || 0))} 由 ${String((newest as { senderName?: string }).senderName || (newest.isSend ? '我' : '对方'))} 发出 —— 时间戳 ${Number(newest.createTime || 0)}。`
+                : `这个会话在当前窗口里读不到消息（可能是空会话，或该会话的消息被过滤）。`,
+              session
+                ? `会话表记录的最近活跃：${session.lastTimestamp ? formatTime(Number(session.lastTimestamp)) : '未知'}；消息数≈${session.messageCountHint ?? '未知'}。`
+                : '会话列表里没有这个 id —— 确认它来自 list_sessions 的返回。',
+            ]
+            return lines.join('\n')
+          }
+
+          const recentlyActive = sessions
+            .filter((s) => Number(s.lastTimestamp || 0) > 0)
+            .sort((a, b) => Number(b.lastTimestamp || 0) - Number(a.lastTimestamp || 0))
+            .slice(0, recentLimit)
+          const lines = recentlyActive.map((s) => {
+            const last = Number(s.lastTimestamp || 0)
+            return `- ${sessionTypeLabel(s.username)}「${s.displayName || s.username}」 id=${s.username} 最近活跃=${last ? formatTime(last) : '未知'}`
+          })
+          return (
+            `已强制重读全部会话：丢弃游标 ${invalidated.cursors} 个，并清掉全部统计与首屏快照缓存。\n` +
+            `当前共 ${sessions.length} 个会话，最近活跃的 ${recentlyActive.length} 个（实时读出）：\n` +
+            lines.join('\n') +
+            `\n要对某个会话读最新内容，直接用 read_session_messages（它的第一次读取现在必然是新开的游标）。`
+          )
         },
       },
       {

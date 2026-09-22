@@ -33,17 +33,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
     close: () => ipcRenderer.invoke('notification:close'),
     click: (payload: any) => ipcRenderer.send('notification-clicked', payload),
     ready: () => ipcRenderer.send('notification:ready'),
-    resize: (width: number, height: number) => ipcRenderer.send('notification:resize', { width, height }),
+    /**
+     * 上报卡片尺寸 + 滑动信息。
+     *
+     * `settled` = 入场动画是否已落定：false 时主进程会把窗口按 `room` 往滑动方向
+     * 多留一段（那段在屏幕外，卡片才有地方从屏幕外滑进来），true 时收回成卡片大小
+     * —— 屏幕上多出来的每个像素都会拦截桌面点击。
+     */
+    resize: (width: number, height: number, options?: { slideFrom?: string; room?: number; settled?: boolean }) =>
+      ipcRenderer.send('notification:resize', { width, height, ...(options || {}) }),
     glassRect: (payload: any) => ipcRenderer.send('notification:glassRect', payload),
     glassHide: () => ipcRenderer.send('notification:glassHide'),
     showTest: () => ipcRenderer.invoke('notification:showTest'),
+    /**
+     * 退场前的准备：请主进程按滑动方向把窗口重新放开一段。
+     *
+     * 必须等它落地再让卡片开始滑 —— 窗口不放开，卡片滑向屏幕外的那一半会被窗口
+     * 边界裁掉（看起来是"退场一顿"。见 NotificationToast.dismiss 的顺序）。
+     */
+    prepareExit: () => ipcRenderer.invoke('notification:prepare-exit'),
     getMuteReport: () => ipcRenderer.invoke('notification:getMuteReport'),
     onLuma: (callback: (bands: any) => void) => subscribe('notification:luma', callback),
     // 主进程的定帧折射：弹窗可见期间持续推新的桌面帧（约 3fps，按实测帧成本自适应）
     onBackdrop: (callback: (frame: any) => void) => subscribe('notification:backdrop', callback),
     // 渲染层的 WGC 视频流已接管折射，主进程可以停掉抓帧
     setGlassMode: (mode: string) => ipcRenderer.send('notification:glassMode', { mode }),
-    onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback)
+    onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback),
+    /** 窗口真正显示出来了（主进程在 showInactive 之后发）：入场动画的起跑信号。 */
+    onShown: (callback: (event: any, data: any) => void) => subscribe('notification:shown', callback),
+    /** 窗口收回后主进程下发的**新窗口几何**（主题采样按它把取样点挪出窗口）。 */
+    onGeometry: (callback: (event: any, data: any) => void) => subscribe('notification:geometry', callback)
   },
 
   // 对话框
@@ -282,16 +301,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     deleteTask: (id: string) => ipcRenderer.invoke('webot:deleteTask', id),
     runNow: (id: string) => ipcRenderer.invoke('webot:runNow', id),
     listRuns: (taskId?: string) => ipcRenderer.invoke('webot:listRuns', taskId),
-    listNotes: (options?: { taskId?: string; unreadOnly?: boolean; limit?: number }) =>
-      ipcRenderer.invoke('webot:listNotes', options),
+    listNotes: (options?: { taskId?: string; limit?: number }) => ipcRenderer.invoke('webot:listNotes', options),
     getNote: (id: string) => ipcRenderer.invoke('webot:getNote', id),
-    updateNote: (id: string, patch: { read?: boolean; pinned?: boolean }) =>
-      ipcRenderer.invoke('webot:updateNote', id, patch),
-    unreadCount: () => ipcRenderer.invoke('webot:unreadCount'),
+    /** 置顶是笔记唯一的状态：已读/未读整条功能在 v1.0.1 删除。 */
+    updateNote: (id: string, patch: { pinned?: boolean }) => ipcRenderer.invoke('webot:updateNote', id, patch),
+    /** 逐条删除（卡片右上角的 ✕）。 */
+    deleteNote: (id: string) => ipcRenderer.invoke('webot:deleteNote', id),
     clearNotes: () => ipcRenderer.invoke('webot:clearNotes'),
-    /** 任务完成/失败时的通知（主进程弹出右上角卡片后也会广播到这里）。 */
+    /** 任务成功时的通知（主进程弹卡片后也会广播到这里）。 */
     onNote: (callback: (note: any) => void) => subscribe('webot:note', callback),
-    onRunStarted: (callback: (run: any) => void) => subscribe('webot:runStarted', callback)
+    onRunStarted: (callback: (run: any) => void) => subscribe('webot:runStarted', callback),
+    /** 运行结束（成功/失败都有）：渲染层据此把「运行中」那一行换成终态。 */
+    onRunFinished: (callback: (run: any) => void) => subscribe('webot:runFinished', callback)
   },
 
   // macOS 能力诊断（v1.0）：仅在 darwin 上返回真实结果

@@ -444,6 +444,12 @@
   border-color: var(--line-strong, #2c2c33);
 }
 
+// 连发的多条消息：**只有最后一条带"尾巴"**（右下/左下的直角那只角）。
+// 每一条都带尾巴会读成"四张独立卡片"，而它们本来是同一个人的一口气连发。
+.weclone-turn.assistant .weclone-bubble:not(:last-of-type),
+.weclone-turn.user .weclone-bubble:not(:last-of-type) {
+  border-radius: 14px;
+}
 .weclone-turn.err .weclone-bubble {
   border-color: rgba(229, 72, 77, 0.45);
   color: var(--text-dim);

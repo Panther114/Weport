@@ -70,19 +70,18 @@ class McpService {
       'list_bot_notes',
       {
         title: '列出 WeBot 笔记',
-        description: 'WeBot 定时任务留下的笔记（只读）。每条笔记包含任务标题、结论正文、时间与引用过的会话。',
+        description: 'WeBot 定时任务留下的笔记（只读）。每条笔记包含任务标题、结论正文、时间与引用过的会话。只包含成功的运行。',
         inputSchema: {
           taskId: z.string().optional().describe('只返回某个任务的笔记'),
-          unreadOnly: z.boolean().optional().describe('只看未读'),
           limit: z.number().int().min(1).max(500).optional().describe('最多返回数量，默认 200'),
         },
       },
-      async ({ taskId, unreadOnly, limit }) => {
+      async ({ taskId, limit }) => {
         const service = getWeBotService()
         if (!service) return text({ success: false, error: 'WeBot 服务未启动' })
         return text({
           success: true,
-          notes: service.listNotes({ taskId, unreadOnly, limit: limit || 200 }),
+          notes: service.listNotes({ taskId, limit: limit || 200 }),
         })
       },
     )

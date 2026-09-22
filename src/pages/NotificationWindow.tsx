@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { NotificationToast, type NotificationData } from '../components/NotificationToast'
 import type { LiquidGlassBackdropImage } from '../components/LiquidGlass'
 import {
@@ -20,6 +20,15 @@ import {
     notificationGlassRenderParams,
     type NotificationGlass
 } from '../utils/notificationGlass'
+import {
+    NOTIFICATION_REVEAL_FALLBACK_MS,
+    NOTIFICATION_SLIDE_IN_MS,
+    NOTIFICATION_SLIDE_ROOM_PX,
+    normalizeNotificationAnimationStyle,
+    slideFromPosition,
+    type NotificationAnimationStyle,
+    type NotificationSlideFrom
+} from '../utils/notificationAnimation'
 
 /**
  * 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值）。
@@ -74,6 +83,35 @@ export default function NotificationWindow() {
     const [notification, setNotification] = useState<NotificationData | null>(null)
     const [prevNotification, setPrevNotification] = useState<NotificationData | null>(null)
     const [position, setPosition] = useState<string>('top-right')
+    /**
+     * 动效风格与滑入方向（v1.0.1）。
+     *
+     * `slide` 从**离弹窗最近的那条屏幕边**滑入、沿原路滑出；`classic` 是旧版的
+     * 原地淡入缩放（用户要求保留）。方向由 position 换算（utils/notificationAnimation），
+     * 主进程与这里用的是同一个函数，所以"哪个角从哪边进来"只有一份定义。
+     */
+    const [animationStyle, setAnimationStyle] = useState<NotificationAnimationStyle>('slide')
+    const [slideFrom, setSlideFrom] = useState<NotificationSlideFrom>('right')
+    /**
+     * 入场动画的起跑门。
+     *
+     * 主进程在 `showInactive()` 之后发 `notification:shown`（带 payloadId），这里
+     * 收到才让卡片开始滑 —— 否则动画在"窗口还没显示"的那几帧里就跑掉一段，
+     * 用户看到的不是滑入，而是从屏幕边上闪一下。没有信号时 400ms 兜底起跑。
+     */
+    const [revealedPayloadId, setRevealedPayloadId] = useState<string | null>(null)
+    const currentPayloadIdRef = useRef<string>('')
+    const revealFallbackRef = useRef<number | null>(null)
+    /**
+     * 入场动画是否已经落定（`arrived`）—— 决定主进程能不能把窗口**收回**到卡片大小。
+     *
+     * 滑动时窗口要往滑动方向多留一段 `room`（那段在屏幕外，卡片才有地方滑），
+     * 动画结束后必须收回来：屏幕上多出来的每一个像素都会拦截桌面点击
+     * （AGENTS.md 第 4 条）。收回是安全的 —— 多出来的那段永远在卡片**背后**那一侧，
+     * 卡片在窗口里的贴边方式与方向严格对应（见下面的 slideLayout），所以窗口收缩时
+     * 卡片一像素都不动。
+     */
+    const [arrived, setArrived] = useState(true)
     // 主进程随通知下发的屏幕几何信息（尺寸 + 窗口坐标）+ 首帧快照 + 采集源 ID。
     // 快照只是视频流出现前的底色；实时折射由下面的 backdropStream 提供
     const [backdrop, setBackdrop] = useState<LiquidGlassBackdropImage | undefined>(undefined)
@@ -97,7 +135,7 @@ export default function NotificationWindow() {
     // `revealPopup`），如果沿用"上次尺寸相同就不报"的去重，内容一样的连续两条通知
     // （最常见的情况）会让主进程一直等到 120ms 兜底计时器才显示 —— 白等 120ms，
     // 正好把这条优化变成反向优化（实测热路径 1ms → 138ms）。
-    const lastSizeRef = useRef<{ id: string; width: number; height: number } | null>(null)
+    const lastSizeRef = useRef<{ id: string; width: number; height: number; settled: boolean } | null>(null)
     // 渲染层实测的卡片尺寸（含自适应加宽的宽度）。窗口必须跟着它走：卡片变宽而
     // 窗口不变 = 右侧被裁掉；卡片变窄而窗口不变 = 留下一片拦截桌面点击的空白。
     const [measured, setMeasured] = useState<{ width: number; height: number } | null>(null)
@@ -105,6 +143,22 @@ export default function NotificationWindow() {
     const sourceIdRef = useRef<string | null>(null)
     /** 已处理过的投递 id（幂等去重，见 handleShow 里的说明） */
     const lastPayloadIdRef = useRef<string | null>(null)
+
+    /**
+     * 当前这条通知的入场动画是否已经起跑（见 `revealedPayloadId` 的说明）。
+     * 未起跑时卡片钉在位移起点（窗口外）：既不可见，也不会误拦截桌面点击。
+     *
+     * 在主进程「窗口已显示」信号到达前，任何位置都不该开始播动画 —— 所以这个
+     * 值要在原生面板上报等副作用之前算好。
+     */
+    const revealed = revealedPayloadId !== null && revealedPayloadId === currentPayloadIdRef.current
+    /**
+     * 当前这条通知是否播放动效。
+     *
+     * 必须在副作用之前算好：上报窗口尺寸 / 收回窗口 / 原生面板几何这几个 effect
+     * 的依赖数组里都要用它，放到组件末尾会让依赖数组在 TDZ 里求值。
+     */
+    const animationsOn = notification ? notification.notificationAnimationEnabled !== false : true
 
     useEffect(() => {
         notificationRef.current = notification
@@ -130,6 +184,9 @@ export default function NotificationWindow() {
             const trace = Boolean(data?.trace)
             if (trace) console.log(`[popup-rt] +${traceDelta('payload-received')}ms  payload-received`)
             const timestamp = Math.floor(Date.now() / 1000)
+            const style = normalizeNotificationAnimationStyle(data?.notificationAnimationStyle)
+            const direction = slideFromPosition(data?.position)
+            const animationsOn = data.notificationAnimationEnabled !== false
             const newNoti: NotificationData = {
                 id: `noti_${timestamp}_${Math.random().toString(36).substr(2, 9)}`,
                 sessionId: data.sessionId,
@@ -142,12 +199,43 @@ export default function NotificationWindow() {
                 avatarUrl: data.avatarUrl,
                 persistent: Boolean(data.persistent),
                 notificationDuration: normalizeNotificationDuration(data.notificationDuration),
-                notificationAnimationEnabled: data.notificationAnimationEnabled !== false
+                notificationAnimationEnabled: animationsOn,
+                notificationAnimationStyle: style,
+                slideFrom: direction
             }
 
             if (data.position) {
                 setPosition(data.position)
             }
+            setAnimationStyle(style)
+            setSlideFrom(direction)
+            /**
+             * 重新起跑入场动画：把门关上，等主进程的 `notification:shown`。
+             *
+             * 关掉动效时不需要门（没有动画可截断），直接算作已就位。
+             * payloadId 为空（旧版主进程 / `notification:ready` 的缓存数据）时
+             * 也用兜底计时器起跑 —— 卡片绝不能因为少一个信号就停在屏幕外。
+             */
+            currentPayloadIdRef.current = payloadId
+            if (revealFallbackRef.current !== null) {
+                window.clearTimeout(revealFallbackRef.current)
+                revealFallbackRef.current = null
+            }
+            if (!animationsOn) {
+                setRevealedPayloadId(payloadId)
+            } else {
+                setRevealedPayloadId(null)
+                revealFallbackRef.current = window.setTimeout(() => {
+                    revealFallbackRef.current = null
+                    setRevealedPayloadId(payloadId)
+                }, NOTIFICATION_REVEAL_FALLBACK_MS)
+            }
+            /**
+             * 新的一条通知 = 窗口要重新按 room 放大一遍（滑动时卡片才有地方出现），
+             * 所以先把"已落定"关掉；入场动画跑完再打开，主进程随即收回窗口。
+             * 关闭动效时没有滑动，直接算落定。
+             */
+            setArrived(!animationsOn || style !== 'slide')
             if (data.backdrop) {
                 setBackdrop({
                     width: data.backdrop.width,
@@ -174,8 +262,39 @@ export default function NotificationWindow() {
 
         if (window.electronAPI) {
             const remove = window.electronAPI.notification?.onShow?.(handleShow)
+            // 「窗口真的显示出来了」→ 入场动画从这一刻起跑（见上面的说明）。
+            const removeShown = window.electronAPI.notification?.onShown?.((_event, payload) => {
+                const id = String(payload?.payloadId ?? '')
+                // 只认当前这条投递的信号：连续两条通知时，迟到的信号不能让
+                // 新卡片提前起跑（那正是"动画被截断"的另一种形式）。
+                if (id && id !== currentPayloadIdRef.current) return
+                if (revealFallbackRef.current !== null) {
+                    window.clearTimeout(revealFallbackRef.current)
+                    revealFallbackRef.current = null
+                }
+                setRevealedPayloadId(id)
+            })
+            // 窗口收回后主进程会发来**新的窗口几何**：主题采样按"窗口在屏幕上的位置"
+            // 把取样点挪出窗口，坐标过时就会去读几百像素外的桌面。
+            const removeGeometry = window.electronAPI.notification?.onGeometry?.((_event, geometry) => {
+                setBackdrop((prev) => {
+                    if (!prev) return prev
+                    return {
+                        ...prev,
+                        screenX: geometry?.winX ?? prev.screenX,
+                        screenY: geometry?.winY ?? prev.screenY,
+                        winW: geometry?.winW ?? prev.winW,
+                        winH: geometry?.winH ?? prev.winH
+                    }
+                })
+            })
             window.electronAPI.notification?.ready?.()
-            return () => remove?.()
+            return () => {
+                remove?.()
+                removeShown?.()
+                removeGeometry?.()
+                if (revealFallbackRef.current !== null) window.clearTimeout(revealFallbackRef.current)
+            }
         }
     }, [])
 
@@ -387,6 +506,56 @@ export default function NotificationWindow() {
     }
 
     /**
+     * 退场前的准备：请主进程按滑动方向把窗口重新放开一段。
+     *
+     * 必须**等它落地**再让卡片开始滑（NotificationToast.dismiss 里 await 它）：
+     * 窗口不放开，卡片滑出屏幕的那一半会被窗口边界裁掉 —— 就是用户看到的"退场
+     * 一顿、还有一段是切断的"。
+     */
+    const prepareExit = useCallback(async () => {
+        try {
+            await window.electronAPI?.notification?.prepareExit?.()
+        } catch { /* 主进程没回应也不能挡住关窗（调用方另有超时兜底） */ }
+    }, [])
+
+    /**
+     * 入场落定 → 让主进程把窗口收回卡片大小（v1.0.1）。
+     *
+     * **不是**"等 820ms 就收"：过渡的实际进度取决于渲染层什么时候真正起跑（窗口显示
+     * 信号可能晚一两帧）。抢在过渡结束前收窗口，卡片会因为窗口变小而**提前被裁掉**,
+     * 看起来是"滑到一半就没了"。所以这里轮询计算样式，等 `transform` 真的回到
+     * `none` 再收 —— 上限 ~1.8s，异常时也一定会收（不收的话屏幕上会长期多出一块
+     * 拦截点击的面积）。
+     */
+    useEffect(() => {
+        if (!notification) return
+        if (animationStyle !== 'slide' || !animationsOn) {
+            setArrived(true)
+            return
+        }
+        if (!revealed) return
+        let cancelled = false
+        let timer = 0
+        let checks = 0
+        const check = () => {
+            if (cancelled) return
+            const el = document.querySelector('#notification-current .notification-toast-container')
+            const finished = !el || getComputedStyle(el).transform === 'none'
+            if (finished || checks >= 14) {
+                setArrived(true)
+                return
+            }
+            checks += 1
+            timer = window.setTimeout(check, 90)
+        }
+        timer = window.setTimeout(check, NOTIFICATION_SLIDE_IN_MS + 60)
+        return () => {
+            cancelled = true
+            window.clearTimeout(timer)
+        }
+    }, [notification, animationStyle, animationsOn, revealed])
+
+    /**
      * 窗口尺寸跟卡片走（v1.0.1）。
      *
      * 旧版把宽度写死成 344（top-center 写死 280），高度取 `#notification-root` 实测值；
@@ -421,24 +590,53 @@ export default function NotificationWindow() {
             if (!root || !window.electronAPI?.notification?.resize) return
             // 高度 0 = 这一帧里卡片还没铺开（异步数据/字体未就绪）。**绝不能上报**：
             // 主进程会按它把窗口缩成 0 高再显示出来，用户看到的是"闪一下再长开"。
-            // 让后面的 rAF / 120ms 复测去报真实尺寸，主进程另有 120ms 兜底显示。
+            // 让后面的 rAF / 120ms 复测去报真实尺寸，主进程另有兜底显示。
+            //
+            // 滑动风格下卡片是"贴着滑动来向那一侧"的（见下面的 slideLayout），根节点
+            // 的实测高度就是卡片高度；别的风格仍取两者的较大值。
             const rootHeight = Math.ceil(root.getBoundingClientRect().height)
             if (rootHeight < 1 && !measured) return
             const minWidth = glass.width + notificationCardPadding(glass.shadow) * 2
             const width = Math.max(Math.round(measured?.width ?? minWidth), minWidth)
+            /**
+             * 高度：**卡片自己量出来的值优先**。
+             *
+             * 顶部居中时根节点铺满窗口（`height: 100%`），根节点高度等于**窗口**高度
+             * 而不是卡片高度 —— 拿它上报会形成正反馈：窗口 = 上报值 + travel，下一帧
+             * 上报值又变成新的窗口高度。其余情况两者一致（根节点由卡片撑开），
+             * 取较大值是为了覆盖"卡片比根节点高一帧"的度量收敛过程。
+             */
             const height = Math.min(
-                Math.max(rootHeight, Math.round(measured?.height ?? 0)),
+                slideLayout === 'top'
+                    ? Math.round(measured?.height ?? 0)
+                    : Math.max(rootHeight, Math.round(measured?.height ?? 0)),
                 NOTIFICATION_CARD_MAX_HEIGHT
             )
             if (height < 1) return
+            const slide = animationStyle === 'slide' && animationsOn
             const last = lastSizeRef.current
             // 同一条通知内尺寸没变 → 不重复 setSize（避免 DWM 幽灵轮廓）；
             // 换了通知（id 不同）→ 必须报一次，主进程正等着它才显示窗口。
+            //
+            // `arrived` 也是键的一部分：窗口从"留了 room 的大窗口"收回成卡片大小是
+            // 一次**必须发出**的上报，尺寸本身没变、只有 settled 变了。
             const notiId = notification?.id || prevNotification?.id || ''
-            if (last && last.id === notiId && last.width === width && last.height === height) return
-            lastSizeRef.current = { id: notiId, width, height }
-            if (trace) console.log(`[popup-rt] +${traceDelta(`resize-sent(${why})`)}ms  resize-sent(${why}) ${width}x${height}`)
-            window.electronAPI.notification.resize(width, height)
+            if (
+                last &&
+                last.id === notiId &&
+                last.width === width &&
+                last.height === height &&
+                last.settled === arrived
+            ) {
+                return
+            }
+            lastSizeRef.current = { id: notiId, width, height, settled: arrived }
+            if (trace) console.log(`[popup-rt] +${traceDelta(`resize-sent(${why})`)}ms  resize-sent(${why}) ${width}x${height} settled=${arrived}`)
+            window.electronAPI.notification.resize(width, height, {
+                slideFrom: slide ? slideFrom : undefined,
+                room: slide ? NOTIFICATION_SLIDE_ROOM_PX : 0,
+                settled: arrived || !slide
+            })
         }
 
         report('immediate')
@@ -449,12 +647,26 @@ export default function NotificationWindow() {
             cancelAnimationFrame(raf)
             clearTimeout(timer)
         }
-    }, [notification, prevNotification, position, measured, glass.width, glass.shadow])
+    }, [notification, prevNotification, position, measured, glass.width, glass.shadow, arrived, animationStyle, animationsOn, slideFrom])
 
     // 原生玻璃模式：卡片挂载后上报实测几何（窗口本地 CSS 像素 + 卡片本地亮度带），
     // 主进程据此创建/复用窗口下方的原生面板；参数与 LiquidGlass 的视觉参数一致
     useEffect(() => {
         if (!nativeBackdrop || !notification) return
+        const slideStyle =
+            notification.notificationAnimationStyle === 'slide' && notification.notificationAnimationEnabled !== false
+        /**
+         * 滑动入场期间**不上报几何**。
+         *
+         * 原生面板是"挂在窗口底下、按卡片终态位置摆好"的独立窗口，而滑动是渲染层
+         * 内部的位移 —— 面板不跟着动。中途上报的话用户看到的是"玻璃板先落在终点，
+         * 卡片再滑进来盖住它"。等位移跑完再上报，面板的 `show(120)` 本身是渐显，
+         * 于是观感变成"卡片滑到位，玻璃显形"。
+         *
+         * 几何本身不受位移影响：`getLayoutRect` 读的是 offsetLeft/offsetTop
+         * （transform 不参与布局），所以这里量到的永远是终态坐标。
+         */
+        if (slideStyle && !revealed) return
         // 同一条通知内的重复上报去重（双 rAF 首测 + 120ms 复测几何通常一致）：
         // 跳过后主进程不会白做 setBounds/setLumaBands/anchor 原生调用，
         // 也避免 setLumaBands 触发的一次带 GPU 同步等待的亮度补采。
@@ -492,18 +704,71 @@ export default function NotificationWindow() {
             lastSent = key
             window.electronAPI?.notification?.glassRect?.(payload)
         }
-        // 双 rAF 等首次布局落定后测量；120ms 复测一次，覆盖表情图/字体就绪导致的高度变化
+        // 滑动风格：等位移跑完再量（+40ms 余量，见上面的说明）；其余情况立刻量。
+        // 双 rAF 等首次布局落定后测量；+120ms 复测一次，覆盖表情图/字体就绪导致的高度变化
+        const delay = slideStyle ? NOTIFICATION_SLIDE_IN_MS + 40 : 0
         let raf2 = 0
-        const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(report) })
-        const timer = setTimeout(report, 120)
+        let raf1 = 0
+        const kickoff = setTimeout(() => {
+            raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(report) })
+        }, delay)
+        const timer = setTimeout(report, delay + 120)
         return () => {
+            clearTimeout(kickoff)
             cancelAnimationFrame(raf1)
             cancelAnimationFrame(raf2)
             clearTimeout(timer)
         }
-    }, [nativeBackdrop, notification, position, glass])
+    }, [nativeBackdrop, notification, position, glass, revealed])
 
     if (!notification && !prevNotification) return null
+
+    /**
+     * 卡片在窗口里的贴边方式，必须与主进程"多留一段 room"的方向严格对应：
+     * 多出来的那一段永远在卡片**背后**那一侧，所以窗口放大 / 收回的时候卡片
+     * 一像素都不动（收回时若卡片跟着挪，就是一次肉眼可见的抽动）。
+     *
+     *   slide=right → 窗口往右多留 → 卡片贴**左**边（默认流向即左对齐）
+     *   slide=left  → 窗口往左多留 → 卡片贴右边（flex-end）
+     *   slide=top   → 窗口往上多留 → 卡片贴下边（padding-top 顶下去）
+     *
+     * 顶部居中不用 flex（那要求根节点有固定高度，而"首帧尺寸上报"依赖根节点高度
+     * 就是卡片高度），改用 padding-top：卡片被顶到根节点下沿 = 贴窗口下边。
+     */
+    /**
+     * 卡片在窗口里的**固定偏移**，必须与主进程"多留一段 travel"的方向严格对应。
+     *
+     * 偏移是常量（= 卡片在该轴上的尺寸 + 屏幕留白），**不是**靠 `flex-end` / `bottom: 0`
+     * 这类"贴另一条边"的对齐：那种对齐让卡片的位置依赖于**窗口尺寸**，而渲染层的
+     * 布局比窗口的实际变化晚一帧 —— 窗口一改尺寸，那一帧里卡片会被画到错误的位置
+     * （实测：一次 104px 的跳动 + 一帧被裁）。改成常量偏移后，卡片的位置只由
+     * "窗口原点 + 常量"决定，窗口怎么变都不影响它。
+     *
+     *   slide=right → 偏移 0（窗口左边缘就是卡片左边缘；多留的一段在右边）
+     *   slide=left  → 偏移 = 卡片宽 + 20（多留的一段在左边，窗口左边缘在屏幕外）
+     *   slide=top   → 偏移 = 卡片高 + 20（多留的一段在上边）
+     *
+     * 注意：只有右侧滑动会**收回**窗口（见 notificationWindow.ts anchorPopupBounds），
+     * 左侧/顶部保留那段偏移 —— 它们的窗口一收就要移动原点，而原点一动就会撞上上面
+     * 那个"布局晚一帧"的问题。代价是屏幕上多出 20px 窄带，比闪烁划算。
+     */
+    const slideLayout: NotificationSlideFrom | null = animationStyle === 'slide' && animationsOn ? slideFrom : null
+    const cardBoxWidth = Math.max(Math.round(measured?.width ?? glass.width), glass.width)
+    const cardBoxHeight = Math.round(measured?.height ?? 0)
+    const slideOffset = slideLayout
+        ? (slideLayout === 'top' ? cardBoxHeight : cardBoxWidth) + NOTIFICATION_SLIDE_ROOM_PX
+        : 0
+    const rootSlideStyle: CSSProperties =
+        slideLayout === 'left' ? { paddingLeft: slideOffset } : slideLayout === 'top' ? { paddingTop: slideOffset } : {}
+    /** 当前卡片的外层：宽度整宽（贴边由根节点的 padding 决定）。 */
+    const currentWrapperSlideStyle: CSSProperties = { width: '100%' }
+    /** 旧卡片的绝对定位锚点：必须与当前卡片同偏移，否则替换动画会错位。 */
+    const prevWrapperAnchor: CSSProperties =
+        slideLayout === 'left'
+            ? { left: slideOffset }
+            : slideLayout === 'top'
+                ? { top: slideOffset }
+                : { left: 0 }
 
     return (
         <>
@@ -514,7 +779,8 @@ export default function NotificationWindow() {
                     height: 'auto',
                     background: 'transparent',
                     position: 'relative', // Context for absolute children
-                    overflow: 'hidden' // Prevent scrollbars during transition
+                    overflow: 'hidden', // Prevent scrollbars during transition
+                    ...rootSlideStyle
                 }}>
 
                 {/* Previous Notification (Background / Fading Out) */}
@@ -523,13 +789,25 @@ export default function NotificationWindow() {
                         id="notification-prev"
                         key={prevNotification.id}
                         className={position === 'top-center' ? 'anim-center' : ''}
+                        data-anim={prevNotification.notificationAnimationStyle || animationStyle}
+                        data-slide={slideFrom}
+                        /**
+                         * 旧卡片的退场也门控在"窗口真的显示了"上。
+                         *
+                         * 它和当前卡片共用一条时间线：主进程先把窗口放开一段（滑动
+                         * 要滑到屏幕外），发来 `notification:shown`，**两张卡片这时
+                         * 才一起动** —— 旧卡片往外走、新卡片往里走。门控之前旧卡片
+                         * 一挂载就开跑，头几毫秒是在还没放开的窗口里，被裁掉一截。
+                         */
+                        data-run={slideLayout ? (revealed ? 'true' : 'false') : undefined}
                         style={{
                             position: 'absolute',
                             top: 0,
                             left: 0,
                             width: '100%',
                             zIndex: 1,
-                            pointerEvents: 'none' // Disable interaction on old one
+                            pointerEvents: 'none', // Disable interaction on old one
+                            ...prevWrapperAnchor
                         }}
                     >
                         <NotificationToast
@@ -546,6 +824,8 @@ export default function NotificationWindow() {
                             glass={glass}
                             duration={prevNotification.notificationDuration}
                             animationEnabled={prevNotification.notificationAnimationEnabled !== false}
+                            animationStyle={prevNotification.notificationAnimationStyle || animationStyle}
+                            slideFrom={prevNotification.slideFrom || slideFrom}
                         />
                     </div>
                 )}
@@ -559,10 +839,16 @@ export default function NotificationWindow() {
                             position === 'top-center' ? 'anim-center' : '',
                             notification.notificationAnimationEnabled === false ? 'motion-disabled' : ''
                         ].filter(Boolean).join(' ')}
+                        // 动效风格 / 方向 / 是否起跑：三者都挂在属性上，位移与过渡
+                        // 全在 NotificationWindow.scss 里（内联 transform 会把退场
+                        // 的 transition 盖掉）。
+                        data-anim={animationStyle}
+                        data-slide={slideFrom}
+                        data-run={animationsOn ? (revealed ? 'true' : 'false') : undefined}
                         style={{
                             position: 'relative', // Takes up space
                             zIndex: 2,
-                            width: '100%'
+                            ...currentWrapperSlideStyle
                         }}
                     >
                         <NotificationToast
@@ -576,11 +862,19 @@ export default function NotificationWindow() {
                             glass={glass}
                             duration={notification.notificationDuration}
                             animationEnabled={notification.notificationAnimationEnabled !== false}
+                            animationStyle={animationStyle}
+                            slideFrom={slideFrom}
+                            revealed={revealed}
                             // 只有"当前"这条上报尺寸：旧卡片是绝对定位的过渡层，
                             // 它的宽度不该决定窗口大小
                             onMeasure={setMeasured}
-                            // 退场动画开始的一刻同步淡出原生面板（与卡片 0.3s 渐隐节奏匹配）
-                            onHideStart={nativeBackdrop ? () => window.electronAPI?.notification?.glassHide?.() : undefined}
+                            // 退场动画开始的一刻：原生面板同步淡出（窗口的放开已经在
+                            // dismiss 之前用 prepareExit 做完了 —— 那是异步的，不能和
+                            // 动画抢同一帧）。
+                            onBeforeExit={slideLayout ? prepareExit : undefined}
+                            onHideStart={() => {
+                                if (nativeBackdrop) window.electronAPI?.notification?.glassHide?.()
+                            }}
                         />
                     </div>
                 )}

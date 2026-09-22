@@ -72,6 +72,19 @@ export class MessageCacheService {
     return this.cache[sessionId]
   }
 
+  /**
+   * 丢掉单个会话的快照。
+   *
+   * 逐条删除（而不是只留 `clear()`）是 agent 需要的粒度：`sync_chat_history`
+   * 只管一个会话时，没有理由把另外 23 个会话的首屏快照一起废掉。
+   */
+  delete(sessionId: string): void {
+    if (!sessionId || !(sessionId in this.cache)) return
+    delete this.cache[sessionId]
+    this.persistQueued = true
+    this.schedulePersist()
+  }
+
   set(sessionId: string, messages: any[]): void {
     if (!sessionId) return
     const trimmed = messages.length > this.sessionLimit

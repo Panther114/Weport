@@ -164,10 +164,14 @@ export default function LiquidGlass({
     const useGlPipeline = Boolean(backdropStream) && !glFailed && !nativeBackdrop
 
     // 透镜位移贴图按实际尺寸生成（中心零位移、边缘弯曲）；
-    // WebGL 流管线在着色器内解析求值同一几何，无需贴图；原生模式折射在原生面板完成
+    // WebGL 流管线在着色器内解析求值同一几何，无需贴图；原生模式折射在原生面板完成。
+    //
+    // **镜面高光那张仍然要生成**（v1.0.1）：折射关掉时它是唯一能读出"这是曲面玻璃"
+    // 的一层（Aave 文章里的 edge highlight）。代价只是同一个象限循环里多写一个
+    // alpha 通道，尺寸/圆角不变时不会重算。
     const lensMap = useMemo(
-        () => (useGlPipeline || nativeBackdrop ? null : generateLensDisplacementMap(glassSize.width, glassSize.height, cornerRadius)),
-        [useGlPipeline, nativeBackdrop, glassSize.width, glassSize.height, cornerRadius]
+        () => (nativeBackdrop ? null : generateLensDisplacementMap(glassSize.width, glassSize.height, cornerRadius)),
+        [nativeBackdrop, glassSize.width, glassSize.height, cornerRadius]
     )
     // 贴图生成失败时跳过位移滤镜（模糊和材质层仍然生效）
     const refractionFilter = lensMap?.url ? `url(#${filterId})` : undefined
@@ -470,9 +474,54 @@ export default function LiquidGlass({
             {/* 内容层保持清晰 */}
             <div style={{ position: 'relative', zIndex: 1, padding }}>{children}</div>
 
-            {/* 边缘高光双层（screen + overlay 混合），强度由兼容层变量整体缩放 */}
-            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'screen', opacity: 'calc(0.2 * var(--liquid-glass-ring, 1))', background: borderGradient(0.12, 0.4) }} />
-            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'overlay', opacity: 'var(--liquid-glass-ring, 1)', background: borderGradient(0.32, 0.6) }} />
+            {/**
+             * 镜面高光（v1.0.1）—— Aave 文章里那个"specular highlight"。
+             *
+             * 由法线算出的高光（贴图里那张白 + alpha 的图）**沿着圆角走**：左上那一
+             * 段最亮、往下侧逐渐消失。它和下面那两层白色渐变不一样：渐变只是"给边缘
+             * 刷一条亮线"，而这个是"曲面把光反到眼睛里"—— 折射/模糊全关时，玻璃能
+             * 不能读成曲面几乎全靠它。
+             *
+             * 屏幕混合（screen）只做提亮，不会把下面的填充压暗；强度跟着用户的
+             * 「边缘高光」（--liquid-glass-ring）走。
+             */}
+            {lensMap?.specularUrl && (
+                <span
+                    data-glass-specular="1"
+                    style={{
+                        ...overlayBase,
+                        zIndex: 2,
+                        backgroundImage: `url(${lensMap.specularUrl})`,
+                        backgroundSize: '100% 100%',
+                        mixBlendMode: 'screen',
+                        opacity: 'calc(0.85 * var(--liquid-glass-ring, 1))'
+                    }}
+                />
+            )}
+
+            {/**
+             * 厚度层（v1.0.1）：顶边内侧一道细亮、底边内侧一道细暗。
+             *
+             * 真玻璃有一条**看得见的厚度**：上缘把光汇进来（亮），下缘把光带出去并
+             * 微微压暗。只用一圈均匀的白色描边时，读起来是"塑料贴纸的边"。
+             * mask 与边缘高光同一套（1.5px 环），所以它贴着圆角走。
+             */}
+            <span
+                data-glass-thickness="1"
+                style={{
+                    ...borderLayerBase,
+                    zIndex: 2,
+                    boxShadow: 'none',
+                    background:
+                        'linear-gradient(180deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.10) 18%, rgba(255,255,255,0) 42%, rgba(0,0,0,0) 62%, rgba(0,0,0,0.16) 100%)',
+                    opacity: 'calc(0.9 * var(--liquid-glass-ring, 1))'
+                }}
+            />
+
+            {/* 边缘高光双层（screen + overlay 混合），强度由兼容层变量整体缩放。
+                镜面高光那一层（上面）已经把"曲面"表达了，这里只留一点点方向性补光。 */}
+            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'screen', opacity: 'calc(0.14 * var(--liquid-glass-ring, 1))', background: borderGradient(0.12, 0.4) }} />
+            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'overlay', opacity: 'calc(0.7 * var(--liquid-glass-ring, 1))', background: borderGradient(0.32, 0.6) }} />
 
             {/* 可点击时的悬停 / 按下辉光（通知弹窗通过 hoverEffect={false} 关闭） */}
             {clickable && hoverEffect && (
