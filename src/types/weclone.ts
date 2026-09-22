@@ -30,6 +30,11 @@ export interface WeCloneListItem extends WeCloneMetaInfo {
   source: 'local'
 }
 
+/**
+ * 档案预览的五份模型产物，外加两份**算出来的**材料（v1.0.1）：
+ * `fingerprint` 是本地统计的说话习惯，`corpus` 是语料处理摘要。
+ * 后两项不是模型写的，所以它们可以被用户用来核对"这次生成到底干了什么"。
+ */
 export type WeCloneMdsPreview = Partial<
-  Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>
+  Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language' | 'fingerprint' | 'corpus', string>
 >

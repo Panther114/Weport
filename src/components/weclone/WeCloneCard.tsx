@@ -7,6 +7,7 @@ import {
   FileText,
   Loader2,
   MessageSquareText,
+  Settings2,
   ShieldCheck,
   Trash2,
   Users2,
@@ -19,6 +20,15 @@ const MD_SECTIONS: Array<{ key: keyof WeCloneMdsPreview; label: string }> = [
   { key: 'knowledge', label: '知识与经历 · knowledge.md' },
   { key: 'timeline', label: '时间线 · timeline.md' },
   { key: 'language', label: '语料样例 · language.md' },
+  /**
+   * 这两项不是模型写的，是**算出来的**（v1.0.1）。
+   *
+   * 放在同一列表里但排在最后：用户读档案是为了看"它了解我多少"，而这两项回答
+   * 的是另一个问题 —— "这次生成到底把我的数据怎么处理了"。后者是能验证的事实，
+   * 也是用户抱怨"它根本不了解我"时唯一能自查的东西。
+   */
+  { key: 'fingerprint', label: '说话习惯 · 本地统计（非模型推断）' },
+  { key: 'corpus', label: '语料处理摘要' },
 ]
 
 function formatDateTime(iso: string): string {
@@ -29,14 +39,25 @@ function formatDateTime(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+/** 毫秒 → 「12 分 30 秒」/「45 秒」/「1 小时 4 分」 */
+function formatDuration(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+}
+
 interface WeCloneCardProps {
   clone: WeCloneListItem
   onDeleteRequest: (clone: WeCloneListItem) => void
   /** 打开对话抽屉（对话在本机完成，不需要任何服务器） */
   onChat: (clone: WeCloneListItem) => void
+  /** 打开这个克隆的行为设置（拒答方式等） */
+  onSettings: (clone: WeCloneListItem) => void
 }
 
-export default function WeCloneCard({ clone, onDeleteRequest, onChat }: WeCloneCardProps) {
+export default function WeCloneCard({ clone, onDeleteRequest, onChat, onSettings }: WeCloneCardProps) {
   const [mdOpen, setMdOpen] = useState(false)
   const [mdLoading, setMdLoading] = useState(false)
   const [mds, setMds] = useState<WeCloneMdsPreview | null>(null)
@@ -96,9 +117,42 @@ export default function WeCloneCard({ clone, onDeleteRequest, onChat }: WeCloneC
 
       <div className="weclone-card-foot">
         <span>生成于 {formatDateTime(clone.generatedAt)}</span>
-        {(clone.piiHits ?? 0) > 0 && <span>· 脱敏 {clone.piiHits} 处</span>}
-        {clone.truncated && <span>· 数据量过大已截断</span>}
+        {/* 「数据量过大已截断」这句话在 v1.0.1 之后基本不会再出现：阈值从
+            15 万条/会话提到 1200 万，正常使用碰不到。保留分支是为了万一真的
+            撞上硬护栏时说出来，而不是让界面继续假装一切正常。 */}
+        {clone.truncated && <span title="语料超过了硬性安全上限">· 语料超出安全上限，已截断</span>}
       </div>
+
+      {/*
+        生成质量小结。
+        用户看不到生成过程，只能看到结果 —— 这几行数字是他判断"这次生成到底
+        干了多少活"的唯一依据：读了多少条、切了多少段、花了多久、多少 token。
+        没有它们，"深度提炼"和"随便糊一份"在界面上长得一模一样。
+      */}
+      {(clone.shardCount ?? 0) > 0 && (
+        <div className="weclone-card-depth">
+          <span title="语料按时间切成的段数，每段单独提炼过">
+            {clone.shardCount} 段历史
+          </span>
+          {clone.corpusStart && <span title="语料覆盖的时间范围">{clone.corpusStart} 起</span>}
+          {(clone.elapsedMs ?? 0) > 0 && <span title="本次生成耗时">{formatDuration(clone.elapsedMs!)}</span>}
+          {(clone.tokensIn ?? 0) > 0 && (
+            <span title="本次生成输入/输出 token（模型返回的用量）">
+              {(clone.tokensIn! + (clone.tokensOut ?? 0)).toLocaleString()} tok
+            </span>
+          )}
+          {(clone.shardFailures ?? 0) > 0 && (
+            <span className="weclone-card-warn" title="这些段落未能用模型提炼，改用本地统计兜底">
+              {clone.shardFailures} 段兜底
+            </span>
+          )}
+          {clone.redacted === false ? (
+            <span className="weclone-card-warn" title="生成时没有做敏感信息脱敏">未脱敏</span>
+          ) : (
+            (clone.piiHits ?? 0) > 0 && <span title="生成过程中被遮蔽的敏感信息处数">脱敏 {clone.piiHits} 处</span>
+          )}
+        </div>
+      )}
 
       <div className="weclone-card-actions">
         <button
@@ -109,6 +163,15 @@ export default function WeCloneCard({ clone, onDeleteRequest, onChat }: WeCloneC
         >
           <MessageSquareText size={13} />
           开始对话
+        </button>
+        <button
+          className="ghost-btn compact"
+          type="button"
+          title="这个克隆的行为设置（敏感话题怎么处理）"
+          onClick={() => onSettings(clone)}
+        >
+          <Settings2 size={13} />
+          行为
         </button>
       </div>
 

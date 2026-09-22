@@ -50,6 +50,7 @@ import {
   Contrast,
   MapPin,
   Timer,
+  Move,
   CalendarClock,
   Pin,
   Fingerprint,
@@ -64,6 +65,11 @@ import type { SetupInfo } from './components/weportAi/aiPanelTypes'
 import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
+import BackgroundTasks from './components/BackgroundTasks'
+import { LIVE_TASK, liveTask } from './utils/liveTask'
+import { invalidateReferenceCandidates } from './utils/sessionCandidates'
+import { summarizeNotifyScope } from './utils/notifyScope'
+import type { NotificationAnimationStyle } from './utils/notificationAnimation'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
 
 /**
@@ -263,6 +269,21 @@ const NOTIFICATION_POSITION_OPTIONS: Array<{ value: NotificationPosition; label:
   { value: 'top-center', label: '顶部居中' },
 ]
 
+/**
+ * 弹窗动效风格（v1.0.1）。
+ *
+ * 文案里写清"从哪条边进来"：这条设置的效果只有在下一条真实通知到来时看得见，
+ * 而用户改完最想确认的恰恰是"它到底会怎么动"。
+ */
+const NOTIFICATION_ANIMATION_STYLES: Array<{ value: NotificationAnimationStyle; label: string; hint: string }> = [
+  {
+    value: 'slide',
+    label: '滑入滑出',
+    hint: '从离弹窗最近的那条屏幕边滑进来，退场沿原路滑出（右侧的角从右边进出，顶部居中从上往下）',
+  },
+  { value: 'classic', label: '淡入缩放', hint: '旧版动效：原地淡入并轻微放大，退场原地缩小' },
+]
+
 const isValidDecryptKey = (value: string): boolean => /^[0-9a-f]{64}$/i.test(value.trim())
 
 const EXPORT_DEFAULTS = {
@@ -303,7 +324,7 @@ const TABS: Array<{
   { id: 'sns', label: '朋友圈', icon: Images, group: 'wechat', hint: '浏览与导出朋友圈动态' },
   { id: 'analytics', label: '分析', icon: LineChart, group: 'wechat', hint: '全局与群聊统计图表' },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
-  { id: 'notifications', label: '消息通知', icon: Bell, group: 'wechat', hint: '新消息与撤回弹窗提醒' },
+  { id: 'notifications', label: '消息通知设置', icon: Bell, group: 'wechat', hint: '弹窗外观、玻璃样式与接收范围都在这里（系统「设置」页里没有）' },
   { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
@@ -367,6 +388,8 @@ export default function App() {
   const [notificationDuration, setNotificationDuration] = useState(3000)
   const [durationInput, setDurationInput] = useState('3')
   const [notificationAnimationEnabled, setNotificationAnimationEnabled] = useState(true)
+  /** 弹窗动效风格：slide（默认，从最近的屏幕边滑入）/ classic（旧版淡入缩放） */
+  const [notificationAnimationStyle, setNotificationAnimationStyle] = useState<NotificationAnimationStyle>('slide')
   /** Linux 通知投递方式（其他平台忽略）：auto/force-dbus/off，见 electron/services/linuxNotify.ts */
   const [linuxNotificationMode, setLinuxNotificationMode] = useState<'auto' | 'force-dbus' | 'off'>('auto')
   const [respectWechatMute, setRespectWechatMute] = useState(true)
@@ -395,6 +418,14 @@ export default function App() {
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
   const [muteReport, setMuteReport] = useState<Awaited<ReturnType<typeof window.electronAPI.notification.getMuteReport>> | null>(null)
   const [muteReportBusy, setMuteReportBusy] = useState(false)
+  /**
+   * 微信里标了「消息免打扰」的会话（`null` = 还不知道）。
+   *
+   * 「接收范围」那行文案要把它们算进屏蔽数 —— 打开「跟随微信消息免打扰」之后
+   * 它们确实不会弹窗，但以前的计数只算手选的会话，用户看到的是"这个开关没生效"。
+   */
+  const [mutedSessions, setMutedSessions] = useState<{ usernames: string[]; at: number } | null>(null)
+  const [mutedSessionsLoading, setMutedSessionsLoading] = useState(false)
   /** 三个功能面各自指向哪个 AI 服务（设置 → AI 服务）。 */
   const [aiAssignments, setAiAssignments] = useState<Awaited<ReturnType<typeof window.electronAPI.ai.getConsumerAssignments>> | null>(null)
   // 自定义强调色的输入框草稿：允许用户先打出半截十六进制。
@@ -524,8 +555,7 @@ export default function App() {
   const [notifyFilterBusy, setNotifyFilterBusy] = useState(false)
 
   const api = window.electronAPI
-  const imageKeyRequired = api.process.platform === 'win32'
-    || api.process.platform === 'darwin'
+  const imageKeyRequired = api.process.platform === 'win32'    || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
   // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
   // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
@@ -909,6 +939,10 @@ export default function App() {
         }
         const notifAnimation = await api.config.get('notificationAnimationEnabled')
         if (typeof notifAnimation === 'boolean') setNotificationAnimationEnabled(notifAnimation)
+        const notifAnimationStyle = await api.config.get('notificationAnimationStyle')
+        if (notifAnimationStyle === 'classic' || notifAnimationStyle === 'slide') {
+          setNotificationAnimationStyle(notifAnimationStyle)
+        }
         const linuxNotifyMode = await api.config.get('linuxNotificationMode')
         if (linuxNotifyMode === 'auto' || linuxNotifyMode === 'force-dbus' || linuxNotifyMode === 'off') {
           setLinuxNotificationMode(linuxNotifyMode)
@@ -1153,8 +1187,43 @@ export default function App() {
     }
   }
 
-  async function runExport() {
-    if (!dbPath.trim()) {
+  /**
+   * 账号一换，`@` 的会话候选缓存必须作废。
+   *
+   * 候选是**按账号**的（每个 wxid 一套会话表），而缓存是模块级的、TTL 60 秒。
+   * 不主动清的话，切账号后的第一个 `@` 会列出上一个账号的联系人 —— 这正是
+   * "引用了不存在的人"这类难查的问题的来源。密钥/数据目录变化同理。
+   */
+  useEffect(() => {
+    invalidateReferenceCandidates()
+  }, [selectedWxid, dbPath, decryptKey])
+
+  /**
+   * 全局长任务指示器要的两个回调。
+   *
+   * 「跳转」不是锦上添花：看到角落写着"导出 62%"想去看一眼，用户得自己回忆
+   * 它在哪个标签下 —— 这个按钮把那一步省掉。取消则直接复用各功能已有的取消
+   * 通道（导出按 taskId、克隆走 weclone.cancel）。
+   */
+  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'weclone' | 'settings') => {
+    setTab(target)
+  }, [])
+
+  const handleCancelTask = useCallback(
+    (key: string) => {
+      if (key === LIVE_TASK.export) {
+        const taskId = liveTask(LIVE_TASK.export).getState().detail?.taskId
+        if (typeof taskId === 'string' && taskId) void api.export.cancelTask(taskId)
+        return
+      }
+      if (key === LIVE_TASK.wecloneGenerate) {
+        void api.weclone.cancel()
+      }
+    },
+    [api]
+  )
+
+  async function runExport() {    if (!dbPath.trim()) {
       pushToast('err', '请选择微信数据目录')
       return
     }
@@ -1232,8 +1301,11 @@ export default function App() {
       // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
       const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
+      // issue #22：语音拿不到数据时以前是静默丢文件，用户只看到"导出的语音没有文件"。
+      const voiceFailed = Math.max(0, Math.floor(Number(result.voiceFailedFiles || 0)))
+      const voiceWarning = voiceFailed > 0 ? ` · ${voiceFailed} 条语音未能导出（微信里没有完整语音文件，先在微信里播放一次再导）` : ''
       if (result.success) {
-        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}`, imageKeyMissing > 0 ? 12000 : 7000)
+        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}${voiceWarning}`, (imageKeyMissing > 0 || voiceFailed > 0) ? 12000 : 7000)
         // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
         // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
         exportProgressRef.current?.complete()
@@ -1343,14 +1415,23 @@ export default function App() {
     try {
       const dir = await api.dialog.openDirectory()
       if (!dir) return
+      // 备份可能要几分钟（含附件时更久），期间用户一定会去干别的 ——
+      // 记进长任务 store，左下角角标就一直在，切页面也看得见。
+      liveTask(LIVE_TASK.backup).start('正在创建备份…')
       pushToast('info', '正在创建备份…', '数据库表快照打包中，请稍候')
       const r = await api.backup.create({
         outputPath: dir,
         options: { includeImages: backupIncludeMedia, includeVideos: backupIncludeMedia, includeFiles: backupIncludeMedia },
       })
-      if (r.success) pushToast('ok', '备份完成', r.filePath || '')
-      else pushToast('err', '备份失败', r.error || '未知错误', 10000)
+      if (r.success) {
+        liveTask(LIVE_TASK.backup).update({ status: 'done', progress: 100, message: '备份完成' })
+        pushToast('ok', '备份完成', r.filePath || '')
+      } else {
+        liveTask(LIVE_TASK.backup).update({ status: 'failed', message: r.error || '备份失败', error: r.error })
+        pushToast('err', '备份失败', r.error || '未知错误', 10000)
+      }
     } catch (e) {
+      liveTask(LIVE_TASK.backup).update({ status: 'failed', message: String(e), error: String(e) })
       pushToast('err', '备份失败', String(e), 10000)
     } finally {
       setBackupBusy(false)
@@ -1364,11 +1445,18 @@ export default function App() {
         filters: [{ name: 'Weport 备份', extensions: ['zip'] }],
       })
       if (!file) return
+      liveTask(LIVE_TASK.backup).start('正在恢复备份…')
       pushToast('info', '正在恢复备份…', '将覆盖当前数据库中的对应表')
       const r = await api.backup.restore(file)
-      if (r.success) pushToast('ok', '恢复完成', '请重启应用以重新加载数据')
-      else pushToast('err', '恢复失败', r.error || '未知错误', 10000)
+      if (r.success) {
+        liveTask(LIVE_TASK.backup).update({ status: 'done', progress: 100, message: '恢复完成' })
+        pushToast('ok', '恢复完成', '请重启应用以重新加载数据')
+      } else {
+        liveTask(LIVE_TASK.backup).update({ status: 'failed', message: r.error || '恢复失败', error: r.error })
+        pushToast('err', '恢复失败', r.error || '未知错误', 10000)
+      }
     } catch (e) {
+      liveTask(LIVE_TASK.backup).update({ status: 'failed', message: String(e), error: String(e) })
       pushToast('err', '恢复失败', String(e), 10000)
     } finally {
       setBackupBusy(false)
@@ -1511,6 +1599,18 @@ export default function App() {
     }
   }
 
+  async function updateNotificationAnimationStyle(value: NotificationAnimationStyle) {
+    const previous = notificationAnimationStyle
+    setNotificationAnimationStyle(value)
+    try {
+      const result = await api.config.set('notificationAnimationStyle', value)
+      if (result?.success === false) throw new Error('配置保存失败')
+    } catch (error) {
+      setNotificationAnimationStyle(previous)
+      pushToast('err', '弹窗动效风格保存失败', String(error))
+    }
+  }
+
   async function updateLinuxNotificationMode(value: 'auto' | 'force-dbus' | 'off') {
     const previous = linuxNotificationMode
     setLinuxNotificationMode(value)
@@ -1529,9 +1629,52 @@ export default function App() {
     try {
       const result = await api.config.set('messagePushRespectWechatMute', on)
       if (result?.success === false) throw new Error('配置保存失败')
+      // 打开这个开关就立刻把「哪些会话被它压住了」查出来：不查的话页面头上
+      // 只会显示手选的数字，看起来像这个开关什么也没做（用户报的 bug）。
+      void refreshMutedSessions(true)
     } catch (error) {
       setRespectWechatMute(previous)
       pushToast('err', '免打扰同步设置失败', String(error))
+    }
+  }
+
+  /**
+   * 拉取「微信里标了消息免打扰」的会话列表。
+   *
+   * 为什么要单独查一次：会话对象上的 `isMuted` 只在缓存命中时才带，推送侧是
+   * 在每次同步里补查的；设置页不能拿一个"未知"当"没有免打扰"。批量走
+   * `chat:getSessionStatuses`（主进程会写回同一个缓存，推送侧随后直接用）。
+   *
+   * 单个批次失败只影响那一批：整页数字因为一次超时变成 0 是最糟的结果。
+   */
+  async function refreshMutedSessions(force = false) {
+    if (!respectWechatMute && !force) {
+      setMutedSessions(null)
+      return
+    }
+    if (!force && mutedSessions && Date.now() - mutedSessions.at < 300_000) return
+    setMutedSessionsLoading(true)
+    try {
+      const result = await api.chat.getSessions()
+      const usernames = (result?.sessions || [])
+        .map((session) => String(session?.username || '').trim())
+        .filter(Boolean)
+      const muted: string[] = []
+      const batchSize = 200
+      for (let offset = 0; offset < usernames.length; offset += batchSize) {
+        const batch = usernames.slice(offset, offset + batchSize)
+        try {
+          const statuses = await api.chat.getSessionStatuses(batch)
+          for (const username of batch) if (statuses?.map?.[username]?.isMuted === true) muted.push(username)
+        } catch { /* 这一批读不到就当未知，不影响其它批次 */ }
+      }
+      setMutedSessions({ usernames: muted, at: Date.now() })
+    } catch (error) {
+      // 读失败要保持 null（未知），不能变成"没有免打扰会话"
+      setMutedSessions(null)
+      console.warn('[Notify] 读取免打扰会话失败:', error)
+    } finally {
+      setMutedSessionsLoading(false)
     }
   }
 
@@ -1726,6 +1869,46 @@ export default function App() {
       return true
     })
   }, [notifySessions, notifyFilterType, notifyFilterSearch])
+
+  /** 微信里标了免打扰、且**不在**手选列表里的会话 —— 它们让"屏蔽 n 个"变大。 */
+  const mutedSet = useMemo(() => new Set(mutedSessions?.usernames || []), [mutedSessions])
+  const mutedExtraCount = useMemo(() => {
+    if (!mutedSessions) return null
+    const selected = new Set(notifyFilterList)
+    let count = 0
+    for (const username of mutedSessions.usernames) if (!selected.has(username)) count += 1
+    return count
+  }, [mutedSessions, notifyFilterList])
+
+  /**
+   * 「接收范围」的文案。**免打扰跟随的会话必须算进屏蔽数** —— 这是用户报的
+   * bug：开关开着、通知确实不弹了，但头上那行数字一动不动，看起来像没生效。
+   */
+  const notifyScope = useMemo(
+    () =>
+      summarizeNotifyScope({
+        mode: notifyFilterMode,
+        selectedCount: notifyFilterList.length,
+        mutedExtraCount,
+        followMute: respectWechatMute,
+      }),
+    [notifyFilterMode, notifyFilterList.length, mutedExtraCount, respectWechatMute]
+  )
+
+  /**
+   * 打开「消息通知设置」时把免打扰会话查出来（60 秒内不重复查）。
+   *
+   * 只在这一页查：它是唯一会显示这个数字的地方，而读一次状态要走原生接口 +
+   * 最多几十个会话的批量调用，不该在启动路径上做。
+   */
+  useEffect(() => {
+    if (tab !== 'notifications') return
+    if (!respectWechatMute) return
+    void refreshMutedSessions()
+    // refreshMutedSessions 每次渲染都是新函数；这里只依赖"进入这一页"与开关状态，
+    // 5 分钟 TTL 已经在函数内部挡住了重复查询。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, respectWechatMute])
 
   async function openNotifyFilter() {
     setNotifyFilterDraft(new Set(notifyFilterList))
@@ -3036,17 +3219,49 @@ export default function App() {
                   <span className="track" />
                 </label>
               </div>
+
+              {/* 动效风格（v1.0.1）：滑动是默认。关掉上面那个开关时这一行没有意义，
+                  所以只在开启动效时显示 —— 否则用户会对着一个不起作用的选择发呆。 */}
+              {notificationAnimationEnabled ? (
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Move size={14} />
+                    <div>
+                      <strong>动效风格</strong>
+                      <span className="hint">
+                        {NOTIFICATION_ANIMATION_STYLES.find((option) => option.value === notificationAnimationStyle)?.hint}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="segmented" role="radiogroup" aria-label="弹窗动效风格">
+                    {NOTIFICATION_ANIMATION_STYLES.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={notificationAnimationStyle === option.value}
+                        className="segmented-item"
+                        data-active={notificationAnimationStyle === option.value}
+                        onClick={() => void updateNotificationAnimationStyle(option.value)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </section>
 
-            {/* 通知玻璃（v1.0.3）：填充、文字色、描边、圆角、折射、投影全部可调。
-                预览用的是真弹窗组件，见 NotificationGlassPanel 顶部说明。 */}
+            {/* 通知玻璃（v1.0.1 重做）：填充、渐变、文字色、描边、圆角、折射、模糊、
+                投影、卡片宽度与正文行数全部可调，预览用的是真弹窗组件，
+                见 NotificationGlassPanel 顶部说明。 */}
             <section className="panel">
               <div className="panel-head">
                 <h2>
                   <Sparkles size={15} />
                   通知玻璃
                 </h2>
-                <span>卡片填充、文字色、描边与折射强度</span>
+                <span>整张卡片的填充、文字、形状、材质与尺寸，改一下预览立刻变</span>
               </div>
               <Suspense fallback={<div className="wp-loading">正在加载玻璃设置…</div>}>
                 <NotificationGlassPanel />
@@ -3059,14 +3274,11 @@ export default function App() {
                   <Filter size={15} />
                   接收范围
                 </h2>
-                <span>
-                  {notifyFilterMode === 'all'
-                    ? '接收所有会话的通知'
-                    : notifyFilterMode === 'whitelist'
-                      ? `仅通知已选 ${notifyFilterList.length} 个会话`
-                      : notifyFilterMode === 'blacklist'
-                        ? `屏蔽 ${notifyFilterList.length} 个会话的通知`
-                        : '仅提醒群聊中明确 @你的消息（@所有人不触发）'}
+                <span className="notify-scope">
+                  <span className="notify-scope-primary" data-loading={mutedSessionsLoading || undefined}>
+                    {notifyScope.primary}
+                  </span>
+                  {notifyScope.detail ? <em className="notify-scope-detail">{notifyScope.detail}</em> : null}
                 </span>
               </div>
 
@@ -4221,6 +4433,11 @@ export default function App() {
                       />
                       <Avatar src={s.avatarUrl} name={s.displayName || s.username} size={22} shape={sessionTypeOf(s.username) === 'group' ? 'rounded' : 'circle'} className="notify-avatar" />
                       <span className="notify-name">{s.displayName || s.username}</span>
+                      {/* 免打扰跟随命中的会话在这里也要标出来：用户在微信里标过免打扰，
+                          但过滤对话框里看不出它已经被自动屏蔽了。 */}
+                      {respectWechatMute && mutedSet.has(s.username) ? (
+                        <span className="notify-muted-chip" title="微信里标了「消息免打扰」，跟随设置不会弹窗">免打扰</span>
+                      ) : null}
                       <span className="notify-id">{s.username}</span>
                     </label>
                   )
@@ -4308,6 +4525,14 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/*
+        全局长任务指示器（v1.0.1）。
+
+        挂在 App 上而不是某个页面里：它要回答的问题正是"我切到别的页面之后，
+        刚才点的那件事还在跑吗"。任何标签页下都显示，任务结束就自己消失。
+      */}
+      <BackgroundTasks onOpen={handleOpenTaskTab} onCancel={handleCancelTask} />
     </div>
   )
 }

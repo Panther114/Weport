@@ -25,8 +25,7 @@ export type ProviderModelMetadata = {
   contextWindow?: number
   maxOutputTokens?: number
   protocol?: string
-  /** USD per million tokens. Absent means "unknown" and MUST render as `N/A`. */
-  cost?: { input?: number; output?: number; reasoning?: number; cacheRead?: number; cacheWrite?: number }
+  // 定价（cost）不再下发到渲染层：定价估算功能已在 v1.0.1 移除。
   capabilities?: {
     attachment: boolean
     reasoning: boolean
@@ -62,6 +61,8 @@ export type SetupInfo = {
   baseUrlError?: string
   model: string
   reasoningEffort: string
+  /** 图片输入开关（默认开）：关掉后 read_chat_images 不再把图片本体发给模型 */
+  imageInputs?: boolean
   customPrompt: string
   workspaceRoot: string
   exportPath: string
@@ -70,20 +71,9 @@ export type SetupInfo = {
   activeProfileId: string
   profiles: ProviderProfileSummary[]
   catalog: ProviderCatalogEntry[]
-  /**
-   * 模型 id → 定价（USD / 百万 token）。主进程从 models.dev registry 解析后下发，
-   * 因为 registry 是主进程里一个数 MB 的 JSON，渲染侧拿不到。
-   *
-   * 缺失表示「未定价」，必须渲染成「未定价」而不是 0 —— 未定价和免费是两件事。
-   */
-  modelCosts?: Record<string, {
-    input?: number
-    output?: number
-    reasoning?: number
-    cacheRead?: number
-    cacheWrite?: number
-    source?: string
-  }>
+  // 定价（modelCosts）在 v1.0.1 移除：渲染层的每次「花费估算」都建立在
+  // models.dev 那张覆盖不全的定价表上，显示的多数是「未定价」，偶尔有值也只能
+  // 当估算用。真正的账单在服务商后台。
 }
 
 export type AiAction = { id: string; name: string; prompt: string }

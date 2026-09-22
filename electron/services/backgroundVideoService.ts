@@ -20,7 +20,8 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import { join } from 'node:path'
+import { findFfmpeg } from './ffmpegLocator'
 
 /**
  * 背景视频的画质档位。
@@ -158,31 +159,7 @@ interface CacheState {
   reason?: string
 }
 
-/**
- * 找 ffmpeg。刻意**不打包**它：一个完整构建 40-100 MB，而背景视频只是
- * 锦上添花。找不到就用原文件 —— 功能不降级，只是没那么省。
- */
-function findFfmpeg(): string | null {
-  const override = String(process.env.WEPORT_FFMPEG || '').trim()
-  if (override && existsSync(override)) return override
-  const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-  const fromPath = String(process.env.PATH || '')
-    .split(delimiter)
-    .filter(Boolean)
-    .map((dir) => join(dir, exe))
-    .find((candidate) => existsSync(candidate))
-  if (fromPath) return fromPath
-  // 常见安装位置：PATH 里没有但确实装了的情况（WinGet / scoop / brew）
-  const fallbacks =
-    process.platform === 'win32'
-      ? [
-          join(process.env.LOCALAPPDATA || '', 'Programs', 'FFmpeg', 'bin', 'ffmpeg.exe'),
-          join(process.env.ProgramData || '', 'chocolatey', 'bin', 'ffmpeg.exe'),
-          join(process.env.USERPROFILE || '', 'scoop', 'shims', 'ffmpeg.exe'),
-        ]
-      : ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']
-  return fallbacks.find((candidate) => candidate && existsSync(candidate)) || null
-}
+// ffmpeg 探测与 wxgf(HEVC) 图片路径共用一份实现：electron/services/ffmpegLocator.ts
 
 /**
  * 目标长边：跟着"这层背景实际会被显示多大"走。

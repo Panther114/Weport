@@ -152,6 +152,8 @@ export interface ExportProgress {
   mediaBytesWritten?: number
   // issue #15/#5b：因缺图片解密密钥而显示为 [图片] 占位符的消息数（同一次运行内同一图片去重）。
   mediaImageKeyMissingFiles?: number
+  /** issue #22：语音数据拿不到（微信里没有完整语音文件）而没能导出成文件的条数。 */
+  mediaVoiceFailedFiles?: number
 }
 
 export interface MediaExportTelemetry {
@@ -162,6 +164,8 @@ export interface MediaExportTelemetry {
   dedupReuseFiles: number
   bytesWritten: number
   imageKeyMissingFiles: number
+  /** issue #22：语音拿不到可解码数据（未在微信里播放过 / 定位失败）而跳过的条数。 */
+  voiceFailedFiles: number
 }
 
 export interface MediaSourceResolution {

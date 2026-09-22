@@ -435,7 +435,8 @@ export class ExportContext {
           cacheFillFiles: 0,
           dedupReuseFiles: 0,
           bytesWritten: 0,
-          imageKeyMissingFiles: 0
+          imageKeyMissingFiles: 0,
+          voiceFailedFiles: 0
         }
     }
 
@@ -504,7 +505,8 @@ export class ExportContext {
           mediaCacheFillFiles: stats.cacheFillFiles,
           mediaDedupReuseFiles: stats.dedupReuseFiles,
           mediaBytesWritten: stats.bytesWritten,
-          mediaImageKeyMissingFiles: stats.imageKeyMissingFiles
+          mediaImageKeyMissingFiles: stats.imageKeyMissingFiles,
+          mediaVoiceFailedFiles: stats.voiceFailedFiles
         }
     }
 
@@ -532,6 +534,10 @@ export class ExportContext {
 
         if (Number.isFinite(delta.imageKeyMissingFiles)) {
           this.mediaExportTelemetry.imageKeyMissingFiles += Math.max(0, Math.floor(Number(delta.imageKeyMissingFiles || 0)))
+        }
+
+        if (Number.isFinite(delta.voiceFailedFiles)) {
+          this.mediaExportTelemetry.voiceFailedFiles += Math.max(0, Math.floor(Number(delta.voiceFailedFiles || 0)))
         }
 
         if (Number.isFinite(delta.bytesWritten)) {
@@ -3097,7 +3103,9 @@ export class ExportContext {
                   hardlinkOnly: true,
                   disableUpdateCheck: true,
                   allowCacheIndex: true,
-                  suppressEvents: true
+                  suppressEvents: true,
+                  // 导出要画质：缓存里是缩略图、而磁盘上已有显示版 / 原图时必须换掉
+                  excludeThumbnail: true
                 })
                 return pickResolvedImagePath(cachedResult)
               }
@@ -3115,7 +3123,8 @@ export class ExportContext {
                 force: false,
                 preferFilePath: true,
                 hardlinkOnly: true,
-                allowCacheIndex: true
+                allowCacheIndex: true,
+                excludeThumbnail: true
               })
               if (decryptResult.failureKind === 'missing_key') sawMissingImageKey = true
               const decryptedPath = pickResolvedImagePath(decryptResult)
@@ -3123,7 +3132,7 @@ export class ExportContext {
 
               const localId = Number(msg?.localId || 0)
               if (Number.isFinite(localId) && localId > 0) {
-                const fallback = await chatService.getImageData(sessionId, String(localId))
+                const fallback = await chatService.getImageData(sessionId, String(localId), { excludeThumbnail: true })
                 if (fallback.success && fallback.data) {
                   const buffer = Buffer.from(fallback.data, 'base64')
                   const mime = this.detectMimeType(buffer) || 'image/jpeg'
@@ -3385,6 +3394,9 @@ export class ExportContext {
             msg?.senderUsername || undefined
           )
           if (!voiceResult.success || !voiceResult.data) {
+            // issue #22：以前这里静默返回 null —— 用户只看到"导出的语音没有文件"。
+            // 记进统计，导出结束时按条数提示（原因多半是微信里没有完整语音文件）。
+            this.noteMediaTelemetry({ voiceFailedFiles: 1 })
             return null
           }
 
@@ -3402,6 +3414,7 @@ export class ExportContext {
             kind: 'voice'
           }
         } catch (e) {
+          this.noteMediaTelemetry({ voiceFailedFiles: 1 })
           return null
         }
     }

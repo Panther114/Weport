@@ -62,9 +62,9 @@ interface WeBotNote {
   createdAt: number
   title: string
   summary: string
+  /** 只可能是 `ok`：失败的运行从 v1.0.1 起不再产生笔记。 */
   status: 'ok' | 'error'
   references: WeBotReference[]
-  read: boolean
   pinned: boolean
 }
 
@@ -80,6 +80,47 @@ interface WeCloneMetaInfo {
   generatedAt: string
   piiHits?: number
   truncated?: boolean
+  /** 语料最早一条消息的日期（ISO），v1.0.1 */
+  corpusStart?: string
+  /** 生成时是否做了敏感信息脱敏 */
+  redacted?: boolean
+  /** 生成时实际用了几段时间切片（分片提炼） */
+  shardCount?: number
+  /** 分片提炼里失败的片数（失败片用本地统计兜底） */
+  shardFailures?: number
+  tokensIn?: number
+  tokensOut?: number
+  elapsedMs?: number
+}
+
+/**
+ * 单个克隆自己的设置（v1.0.1）。
+ *
+ * `refusal` 决定 system prompt 里有没有"有些事你不说"这一节：
+ * `character` = 以本人的方式带过去（默认）；`off` = 完全不设限。
+ */
+type WeCloneRefusalMode = 'character' | 'off'
+interface WeCloneSettings {
+  refusal: WeCloneRefusalMode
+}
+
+/**
+ * 长任务状态快照（v1.0.1，`api.task.status()`）。
+ *
+ * 渲染进程可能被整个销毁重建（托盘隐藏销毁窗口 / 最小化 unload），
+ * 而任务跑在主进程里 —— 这是它把进度、日志、开始时间还回来的通道。
+ */
+type LiveTaskStatusValue = 'idle' | 'running' | 'done' | 'failed' | 'aborted'
+interface LiveTaskSnapshot {
+  status: LiveTaskStatusValue
+  stage?: string
+  progress: number
+  message: string
+  logs: string[]
+  startedAt?: number
+  finishedAt?: number
+  error?: string
+  detail?: Record<string, unknown>
 }
 /** 一条克隆对话里的单轮消息（v1.0.1，本机持久化） */
 interface WeCloneChatTurn {
@@ -196,10 +237,12 @@ interface ElectronApi {
     close: () => Promise<void>
     click: (payload: any) => void
     ready: () => void
-    resize: (width: number, height: number) => void
+    resize: (width: number, height: number, options?: { slideFrom?: string; room?: number; settled?: boolean }) => void
     glassRect: (payload: any) => void
     glassHide: () => void
     showTest: () => Promise<{ success: boolean }>
+    /** 退场前把窗口按滑动方向放开一段（等它落地再开始退场动画）。 */
+    prepareExit: () => Promise<{ extended: boolean }>
     getMuteReport: () => Promise<{
       success: boolean
       sessionCount: number
@@ -220,10 +263,29 @@ interface ElectronApi {
     }>
     onLuma: (callback: (bands: any) => void) => () => void
     onShow: (callback: (event: any, data: any) => void) => () => void
-    /** 主进程的定帧折射帧（弹窗可见期间约 3fps） */
-    onBackdrop: (callback: (frame: { seq: number; dataUrl: string; winX: number; winY: number; width: number; height: number }) => void) => () => void
+    /**
+     * 窗口**真正显示出来**了（主进程在 `showInactive` 之后立刻发）。
+     * 入场动画门控在它上面：CSS 动画在挂载时就会起跑，而窗口是等渲染层量好
+     * 尺寸才显示的 —— 不门控的话用户只能看到滑入动画的后半段。
+     */
+    onShown: (callback: (event: any, data: { payloadId?: string }) => void) => () => void
+    /**
+     * 窗口收回（入场动画结束）后主进程下发的**新窗口几何**。
+     * 主题采样按"窗口在屏幕上的位置"把取样点挪出窗口，坐标过时就会读到别处的桌面。
+     */
+    onGeometry: (callback: (event: any, data: { winX: number; winY: number; winW: number; winH: number }) => void) => () => void
+    /**
+     * 主进程的定帧折射帧。
+     *
+     * 两种形态（v1.1）：
+     *  - 快速路径（koffi BitBlt，只抓卡片附近 ≈5~22ms）：`pixelsBase64` + `frameX/Y/Width/Height`；
+     *  - 兜底路径（desktopCapturer 整屏 JPEG ≈150~208ms）：`dataUrl` + `winX/winY/width/height`。
+     */
+    onBackdrop: (callback: (frame: any) => void) => () => void
     /** 通知主进程：渲染层的实时视频流已接管折射，不必再抓帧 */
     setGlassMode: (mode: 'stream' | 'frames' | 'native') => void
+    /** 上报 WGC 采集尝试结果：`ok:false` = 这台机器上采集流起不来，后续通知跳过尝试 */
+    reportDesktopStream: (ok: boolean) => void
   }
   dialog: {
     openDirectory: (options?: any) => Promise<string | null>
@@ -506,13 +568,15 @@ interface ElectronApi {
     deleteTask: (id: string) => Promise<boolean>
     runNow: (id: string) => Promise<{ success: boolean; error?: string }>
     listRuns: (taskId?: string) => Promise<WeBotRun[]>
-    listNotes: (options?: { taskId?: string; unreadOnly?: boolean; limit?: number }) => Promise<WeBotNote[]>
+    listNotes: (options?: { taskId?: string; limit?: number }) => Promise<WeBotNote[]>
     getNote: (id: string) => Promise<WeBotNote | null>
-    updateNote: (id: string, patch: { read?: boolean; pinned?: boolean }) => Promise<WeBotNote | null>
-    unreadCount: () => Promise<number>
+    updateNote: (id: string, patch: { pinned?: boolean }) => Promise<WeBotNote | null>
+    /** 逐条删除一条笔记（卡片右上角的 ✕）。 */
+    deleteNote: (id: string) => Promise<boolean>
     clearNotes: () => Promise<number>
     onNote: (callback: (note: WeBotNote) => void) => () => void
     onRunStarted: (callback: (run: WeBotRun) => void) => () => void
+    onRunFinished: (callback: (run: WeBotRun) => void) => () => void
   }
   /**
    * macOS 能力诊断（v1.0）。非 darwin 平台返回 supported:false，
@@ -565,9 +629,19 @@ interface ElectronApi {
         providerId: string
         /** 本轮判定出来的对方语言：回复应当跟着它走 */
         replyLanguage?: 'zh' | 'en' | 'mixed'
+        /** 本轮检索到的本人原话条数（语气样本） */
+        voiceSamples?: number
+        /** 本轮生效的拒答行为 —— 让"它怎么什么都答"能被解释 */
+        refusal?: WeCloneRefusalMode
       }
     }>
-    generate: () => Promise<{
+    /** 导出（生成）时的脱敏开关，持久化在配置里 */
+    getRedact: () => Promise<{ success: boolean; redact: boolean }>
+    setRedact: (enabled: boolean) => Promise<{ success: boolean; redact: boolean }>
+    /** 单个克隆自己的设置（拒答行为等） */
+    getSettings: (cloneId: string) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
+    setSettings: (cloneId: string, patch: { refusal?: WeCloneRefusalMode }) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
+    generate: (opts?: { redact?: boolean }) => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo
       aborted?: boolean
@@ -581,7 +655,13 @@ interface ElectronApi {
     get: (id: string) => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo
-      mds?: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language', string>>
+      /**
+       * 五份模型产物，外加两份**算出来的**材料（v1.0.1）：
+       * `fingerprint` 是本地统计的说话习惯，`corpus` 是语料处理摘要。
+       */
+      mds?: Partial<
+        Record<'profile' | 'relationships' | 'knowledge' | 'timeline' | 'language' | 'fingerprint' | 'corpus', string>
+      >
       error?: string
     }>
     delete: (id: string) => Promise<{ success: boolean; error?: string }>
@@ -601,6 +681,16 @@ interface ElectronApi {
     }) => Promise<{ success: boolean; chatId?: string; title?: string; error?: string }>
     renameChat: (cloneId: string, chatId: string, title: string) => Promise<{ success: boolean; title?: string; error?: string }>
     deleteChat: (cloneId: string, chatId: string) => Promise<{ success: boolean; error?: string }>
+  }
+  /**
+   * 长任务状态快照（v1.0.1）。
+   *
+   * 渲染进程可能被整个销毁重建（托盘隐藏销毁窗口 / 最小化 unload），而克隆
+   * 生成、导出、连接都跑在主进程里。新文档启动时调一次 `status()` 就能把进度、
+   * 日志、开始时间原样拿回来 —— 否则重建后的界面看起来像什么都没发生过。
+   */
+  task: {
+    status: () => Promise<Record<string, LiveTaskSnapshot>>
   }
   process: {
     platform: string

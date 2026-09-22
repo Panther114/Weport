@@ -40,7 +40,9 @@ function makeService(
   options: {
     clock?: ReturnType<typeof makeClock>
     dispatch?: (signal: AbortSignal) => Promise<WeBotDispatchResult>
-    notify?: (note: unknown) => void
+    notify?: (notice: unknown) => void
+    onRunStarted?: (run: unknown) => void
+    onRunFinished?: (run: unknown) => void
   } = {}
 ) {
   const dir = makeDir()
@@ -63,6 +65,8 @@ function makeService(
       }
     },
     notify: options.notify as never,
+    onRunStarted: options.onRunStarted as never,
+    onRunFinished: options.onRunFinished as never,
   })
 
   return { service, clock, dir, stats: () => ({ maxConcurrent, started }) }
@@ -125,6 +129,79 @@ describe('WeBotService — 任务 CRUD 与持久化', () => {
     expect(service.deleteTask(task.id)).toBe(true)
     expect(service.listNotes()).toHaveLength(1)
     expect(service.listNotes()[0].taskTitle).toBe('A')
+  })
+})
+
+/**
+ * 运行记录（v1.0.1）：用户要能看到任务**跑过什么**，而不只是最后一次的成败。
+ *
+ * 起因是那句「上次失败：fetch failed」——界面上只有一行截断过的错误，既没有
+ * 时间、也没有历史，用户无从判断是一次网络抖动还是配置坏了。
+ */
+describe('WeBotService — 运行记录', () => {
+  it('开始时回调一次 running 记录，结束时同一条变成 ok', async () => {
+    const clock = makeClock()
+    const seen: Array<{ id: string; status: string; taskId: string }> = []
+    const { service } = makeService({ clock, onRunStarted: (run) => seen.push(run as never) })
+    const task = service.createTask({ title: '作业整理', schedule: daily(8, 30) })
+
+    await service.runNow(task.id)
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0].status).toBe('running')
+    expect(seen[0].taskId).toBe(task.id)
+    // 同一条记录在历史里变成 ok（不是新增一条），否则日志会把一次运行算成两次
+    const runs = service.listRuns(task.id)
+    expect(runs).toHaveLength(1)
+    expect(runs[0].id).toBe(seen[0].id)
+    expect(runs[0].status).toBe('ok')
+    expect(runs[0].noteId).toBeTruthy()
+  })
+
+  it('失败时错误文本完整留档（不再只有一句话的截断），并且**不落笔记**', async () => {
+    const clock = makeClock()
+    const notices: Array<{ status: string; summary: string }> = []
+    const finished: Array<{ id: string; status: string }> = []
+    const { service } = makeService({
+      clock,
+      notify: (notice) => notices.push(notice as never),
+      onRunFinished: (run) => finished.push(run as never),
+      dispatch: async () => {
+        throw new Error('网络请求失败：api.example.com 域名解析失败（ENOTFOUND）')
+      },
+    })
+    const task = service.createTask({ title: 'A', schedule: daily(8, 30) })
+    await service.runNow(task.id)
+
+    const [run] = service.listRuns(task.id)
+    expect(run.status).toBe('error')
+    expect(run.error).toContain('ENOTFOUND')
+    expect(run.durationMs).toBeGreaterThanOrEqual(0)
+    // 失败不进结论板：错误属于运行记录（上面这几条断言），不属于笔记
+    expect(run.noteId).toBeUndefined()
+    expect(service.listNotes()).toHaveLength(0)
+    // 但用户仍要收到失败弹窗 —— 那是他唯一会立刻注意到的通道
+    expect(notices).toHaveLength(1)
+    expect(notices[0].status).toBe('error')
+    expect(notices[0].summary).toContain('ENOTFOUND')
+    // 运行结束回调必须成对出现，否则渲染层的「运行中」永远收不掉
+    expect(finished).toHaveLength(1)
+    expect(finished[0].id).toBe(run.id)
+    expect(finished[0].status).toBe('error')
+  })
+
+  it('历史按任务分组时保留多次运行（listRuns 不折叠）', async () => {
+    const clock = makeClock()
+    const { service } = makeService({ clock })
+    const task = service.createTask({ title: 'A', schedule: daily(8, 30) })
+    await service.runNow(task.id)
+    clock.advance(60_000)
+    await service.runNow(task.id)
+
+    const runs = service.listRuns(task.id)
+    expect(runs).toHaveLength(2)
+    // 最新在前，界面直接按顺序渲染
+    expect(runs[0].startedAt).toBeGreaterThan(runs[1].startedAt)
   })
 })
 
@@ -207,7 +284,7 @@ describe('WeBotService — 调度行为', () => {
 })
 
 describe('WeBotService — 笔记', () => {
-  it('成功与失败都留下笔记，并把状态带上', async () => {
+  it('只有成功的运行留下笔记，失败的只进运行记录', async () => {
     const clock = makeClock()
     let fail = false
     const { service } = makeService({
@@ -224,26 +301,60 @@ describe('WeBotService — 笔记', () => {
     await service.runNow(task.id)
 
     const notes = service.listNotes()
-    expect(notes).toHaveLength(2)
-    expect(notes[0].status).toBe('error')
-    expect(notes[0].summary).toContain('429')
-    expect(notes[1].status).toBe('ok')
-    expect(notes[1].summary).toContain('第 3-5 题')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].status).toBe('ok')
+    expect(notes[0].summary).toContain('第 3-5 题')
     // 引用随笔记一起保存：外部集成需要知道这份笔记是关于哪些会话的
-    expect(notes[1].references).toEqual([{ id: 'g1', label: '化学', kind: 'group' }])
+    expect(notes[0].references).toEqual([{ id: 'g1', label: '化学', kind: 'group' }])
+    // 失败那次仍在运行记录里，带完整原因
+    expect(service.listRuns(task.id)[0].status).toBe('error')
+    expect(service.listRuns(task.id)[0].error).toContain('429')
   })
 
-  it('笔记默认未读，可标记已读与置顶', async () => {
+  it('笔记只有置顶一个状态；旧状态文件里的未读已读被丢掉', async () => {
+    const clock = makeClock()
+    const dir = makeDir()
+    // 手写一份旧格式状态文件：一条 ok 笔记带 read:true，一条 error 笔记
+    writeFileSync(
+      join(dir, 'webot.json'),
+      JSON.stringify({
+        version: 1,
+        tasks: [],
+        runs: [],
+        notes: [
+          { version: 1, id: 'note-old', taskId: 't', taskTitle: 'A', runId: 'r', createdAt: 1, title: '旧笔记', summary: 'x', status: 'ok', references: [], read: true, pinned: false },
+          { version: 1, id: 'note-err', taskId: 't', taskTitle: 'A', runId: 'r2', createdAt: 2, title: 'A（失败）', summary: 'fetch failed', status: 'error', references: [], read: false, pinned: false },
+        ],
+      }),
+      'utf8'
+    )
+    const service = new WeBotService({ dataDir: dir, now: clock.now, dispatch: async () => ({ summary: '完成' }) })
+
+    const notes = service.listNotes()
+    expect(notes).toHaveLength(1)
+    expect(notes[0].id).toBe('note-old')
+    expect((notes[0] as unknown as { read?: unknown }).read).toBeUndefined()
+    // 清理是一次性的：磁盘上也不该再留着失败笔记
+    const onDisk = JSON.parse(readFileSync(join(dir, 'webot.json'), 'utf8'))
+    expect(onDisk.notes).toHaveLength(1)
+    expect(onDisk.notes[0].read).toBeUndefined()
+  })
+
+  it('可以逐条删除笔记（清空是另一回事）', async () => {
     const clock = makeClock()
     const { service } = makeService({ clock })
     const task = service.createTask({ title: 'A', schedule: daily(8, 0) })
     await service.runNow(task.id)
+    clock.advance(1000)
+    await service.runNow(task.id)
 
-    expect(service.unreadNoteCount()).toBe(1)
-    const note = service.listNotes()[0]
-    service.updateNote(note.id, { read: true, pinned: true })
-    expect(service.unreadNoteCount()).toBe(0)
-    expect(service.getNote(note.id)?.pinned).toBe(true)
+    const notes = service.listNotes()
+    expect(notes).toHaveLength(2)
+    expect(service.deleteNote(notes[0].id)).toBe(true)
+    expect(service.listNotes().map((note) => note.id)).toEqual([notes[1].id])
+    expect(service.deleteNote(notes[0].id)).toBe(false)
+    expect(service.clearNotes()).toBe(1)
+    expect(service.listNotes()).toHaveLength(0)
   })
 
   it('置顶的笔记不会被淘汰', async () => {
@@ -274,7 +385,7 @@ describe('WeBotService — 笔记', () => {
   it('notify 回调在每次运行后触发（用于右上角弹窗）', async () => {
     const clock = makeClock()
     const seen: string[] = []
-    const { service } = makeService({ clock, notify: (note) => seen.push((note as { status: string }).status) })
+    const { service } = makeService({ clock, notify: (notice) => seen.push((notice as { status: string }).status) })
     const task = service.createTask({ title: 'A', schedule: daily(8, 0) })
     await service.runNow(task.id)
     expect(seen).toEqual(['ok'])

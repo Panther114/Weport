@@ -1,5 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell } from "electron";
 import { join } from "path";
+import { captureScreenRegion, dipRectToPhysical, fastCaptureAvailable } from "../services/glassCapture";
 import { existsSync, writeFileSync } from "fs";
 import { ConfigService } from "../services/config";
 import {
@@ -9,6 +10,7 @@ import {
   sendLinuxNotification,
 } from "../services/linuxNotify";
 import { openWeChat } from "../services/wechatLinux";
+import { popupMark, popupTraceEnabled } from "../services/popupTrace";
 
 // 原生液态玻璃（Windows 专用）：DXGI 零拷贝采集 + D3D11 玻璃管线 + DComp 直接上屏，
 // 感知滞后中位 ~6ms（Chromium 流方案 ~77ms），渲染完全不经过 Electron 进程。
@@ -57,6 +59,199 @@ let closeTimer: NodeJS.Timeout | null = null;
 const DEFAULT_NOTIFICATION_DURATION_MS = 3000;
 const MIN_NOTIFICATION_DURATION_MS = 1000;
 const MAX_NOTIFICATION_DURATION_MS = 60_000;
+
+/**
+ * 卡片宽度的缺省与边界（与渲染层 `src/utils/notificationGlass.ts` 的常量保持一致）。
+ *
+ * v1.0.1 起宽度是**用户可配置**的（设置 → 消息通知设置 → 通知玻璃 → 基础宽度），
+ * 而且卡片会按昵称长度自适应再加宽（渲染层算出最终宽度后通过 notification:resize
+ * 回报）。主进程只在"弹出前"需要一个初值来定位窗口 —— 它不该猜，读配置；
+ * 读不到就退回 344（v1.0.0 之前的固定宽度）。
+ */
+const DEFAULT_CARD_WIDTH = 344;
+const MIN_CARD_WIDTH = 300;
+const MAX_CARD_WIDTH = 640;
+
+function normalizeCardWidth(value: unknown): number {
+  const width = Number(value);
+  if (!Number.isFinite(width)) return DEFAULT_CARD_WIDTH;
+  return Math.round(Math.min(MAX_CARD_WIDTH, Math.max(MIN_CARD_WIDTH, width)));
+}
+
+/** 卡片四周的基础留白（与渲染层 notificationGlass.ts 的常量保持一致）。 */
+const CARD_BASE_PADDING = 8;
+
+/**
+ * 投影占用的额外留白 —— **必须与渲染层 `notificationShadowMargin` 逐值一致**。
+ *
+ * 窗口尺寸 = 卡片宽度 + 2×留白，所以弹出前定位用的宽度必须把留白算进去，
+ * 否则"投影"拉大之后首次定位会偏，要等渲染层报回尺寸才纠正（看得见的跳动）。
+ * 参数与 `notificationShadowLayers` 是同一组数：偏移 3..9、模糊 8..20，
+ * 留白 min(36, ceil(偏移 + 模糊) + 2)。
+ */
+function shadowMargin(shadow: unknown): number {
+  const t = Math.min(100, Math.max(0, Number(shadow) || 0)) / 100;
+  if (t <= 0) return 0;
+  const offsetY = Math.round(3 + t * 6);
+  const blur = Math.round(8 + t * 12);
+  return Math.min(36, Math.ceil(offsetY + blur) + 2);
+}
+
+/** 窗口的完整宽度（卡片 + 两侧留白） */
+function notificationWindowWidth(config: ConfigService): number {
+  const card = normalizeCardWidth(notifGlassGet(config, "notificationGlassWidth"));
+  const pad = CARD_BASE_PADDING + shadowMargin(notifGlassGet(config, "notificationGlassShadow"));
+  return card + pad * 2;
+}
+
+/** 弹窗离屏幕边的留白（DIP）。渲染层的滑动位移里也含这个数，见 notificationAnimation.ts。 */
+const POPUP_SCREEN_PADDING = 20;
+
+/**
+ * 弹窗窗口的最终矩形（v1.0.1）。
+ *
+ * 两条必须一起成立的性质：
+ *
+ *  1. **窗口就贴在卡片该在的位置上**。位置只有五种（四角 + 顶部居中），
+ *     每次都按 workArea 重算，而不是沿用上一次的坐标 —— 否则显示器切换、
+ *     任务栏移动之后弹窗会跑到别的屏上。
+ *  2. **滑动时窗口要往滑动方向多留 `room`**，那一段落在屏幕**之外**。
+ *     卡片是画在窗口里的，窗口只有卡片那么大时，卡片就只能从"屏幕内 20px 那条线"
+ *     钻出来 —— 用户看到的是凭空冒出，而不是从屏幕外滑进来。
+ *
+ * 卡片在窗口里的贴边方式（渲染层负责）与这里的方向严格对应：窗口多出来的那一段
+ * 永远在**远离卡片**的一侧，所以窗口的放大/收回都不会让卡片挪动一个像素。
+ * 收回的时机是入场动画结束（渲染层上报 `settled`）：这样弹窗存活期间屏幕上的
+ * 窗口面积恰好等于卡片，一个多余的像素都不拦截桌面点击（AGENTS.md 第 4 条）。
+ */
+function anchorPopupBounds(options: {
+  position: string;
+  workArea: { x: number; y: number; width: number; height: number };
+  cardWidth: number;
+  cardHeight: number;
+  slideFrom?: string;
+  room?: number;
+  settled?: boolean;
+}): { x: number; y: number; width: number; height: number } {
+  const { position, workArea, cardWidth, cardHeight } = options;
+  const horizontal = options.slideFrom === "left" || options.slideFrom === "right";
+  const vertical = options.slideFrom === "top";
+  /**
+   * 收回（settled）只在**右侧**滑动时会做。
+   *
+   * 收不回窗口就多留一段（那一段落在屏幕外），代价是屏幕上多出一条 20px 的窄带
+   * 会拦截桌面点击 —— 但比"卡片闪一下"好得多：左侧/顶部滑动时，收回意味着窗口
+   * 的左上角要移动一整段 travel，而渲染层的布局比窗口移动**晚一帧**，那一帧里
+   * 卡片会被画在窗口外面（实测：闪烁 + 探针量到 380px 的跳变）。
+   * 右侧滑动时收回只改宽度、窗口原点不动，贴左边的卡片一个像素都不会动。
+   */
+  const extensionSide = options.slideFrom === "left" || options.slideFrom === "top" ? options.slideFrom : "right";
+  const trimmable = extensionSide === "right";
+  const travel =
+    options.settled === false || !trimmable
+      ? cardAxis(cardWidth, cardHeight, horizontal) + Math.max(0, Math.round(Number(options.room) || 0))
+      : 0;
+  const width = cardWidth + (horizontal ? travel : 0);
+  const height = cardHeight + (vertical ? travel : 0);
+
+  let x = 0;
+  let y = 0;
+  switch (position) {
+    case "top-center":
+      x = workArea.x + (workArea.width - cardWidth) / 2;
+      y = workArea.y + POPUP_SCREEN_PADDING;
+      break;
+    case "top-right":
+      x = workArea.x + workArea.width - cardWidth - POPUP_SCREEN_PADDING;
+      y = workArea.y + POPUP_SCREEN_PADDING;
+      break;
+    case "bottom-right":
+      x = workArea.x + workArea.width - cardWidth - POPUP_SCREEN_PADDING;
+      y = workArea.y + workArea.height - cardHeight - POPUP_SCREEN_PADDING;
+      break;
+    case "top-left":
+      x = workArea.x + POPUP_SCREEN_PADDING;
+      y = workArea.y + POPUP_SCREEN_PADDING;
+      break;
+    case "bottom-left":
+      x = workArea.x + POPUP_SCREEN_PADDING;
+      y = workArea.y + workArea.height - cardHeight - POPUP_SCREEN_PADDING;
+      break;
+  }
+  // 多留的那一段永远在滑动来向那一侧（屏幕外）
+  if (horizontal && options.slideFrom === "left") x -= travel;
+  if (vertical) y -= travel;
+
+  return { x: Math.floor(x), y: Math.floor(y), width: Math.round(width), height: Math.round(height) };
+}
+/** 滑动轴上的卡片尺寸（水平滑动看宽度，垂直滑动看高度）。 */
+function cardAxis(cardWidth: number, cardHeight: number, horizontal: boolean): number {
+  return horizontal ? cardWidth : cardHeight;
+}
+
+/** 原子地改尺寸 + 位置：分两步会闪出一帧"尺寸对了但位置还没跟上"的画面。 */
+/** 把窗口几何发给渲染层（主题采样按它把取样点挪出窗口）。 */
+function sendPopupGeometry(win: BrowserWindow, bounds: { x: number; y: number; width: number; height: number }): void {
+  try {
+    win.webContents.send("notification:geometry", {
+      winX: bounds.x,
+      winY: bounds.y,
+      winW: bounds.width,
+      winH: bounds.height,
+    });
+  } catch { /* 渲染进程可能已销毁 */ }
+}
+
+/**
+ * 最后一次上报的卡片尺寸与滑动信息。
+ *
+ * 退场准备（`notification:prepare-exit`）要用它把窗口重新放开 —— 那时渲染层已经
+ * 没有新的上报了，而窗口必须按同一组数字算，否则放开的方向或距离会跟入场不一致。
+ */
+let lastCardMetrics: { width: number; height: number; slideFrom?: string; room: number } | null = null;
+
+/**
+ * 原子地改尺寸 + 位置：分两步会闪出一帧"尺寸对了但位置还没跟上"的画面。
+ *
+ * 为什么要先**放开** min/max 再 `setBounds`：窗口平时用 min=max=尺寸 锁死（防止
+ * 窗口管理器改它），而 Electron 应用更严格的 min/max 时会**立刻**把当前尺寸夹到
+ * 新约束上 —— 那是一次发生在**旧坐标**上的尺寸变化。滑动时窗口要一边变大一边挪
+ * 位置（左侧/顶部位置的窗口要往外多留一段），夹在旧坐标上就会让贴着另一条边的
+ * 卡片先跳到错误位置（实测是一次 380px 的抽动），随后 setBounds 才把它拉回来。
+ * 放开约束 → 一次 setBounds 定死 → 再锁上，中间不会出现第二个几何状态。
+ */
+function applyPopupBounds(win: BrowserWindow, bounds: { x: number; y: number; width: number; height: number }): boolean {
+  const current = win.getBounds();
+  if (
+    Math.round(current.width) === bounds.width &&
+    Math.round(current.height) === bounds.height &&
+    Math.round(current.x) === bounds.x &&
+    Math.round(current.y) === bounds.y
+  ) {
+    return false;
+  }
+  win.setMinimumSize(1, 1);
+  win.setMaximumSize(100_000, 100_000);
+  win.setBounds(bounds);
+  win.setMinimumSize(bounds.width, bounds.height);
+  win.setMaximumSize(bounds.width, bounds.height);
+  return true;
+}
+
+/**
+ * 读通知玻璃配置。
+ *
+ * `notificationGlass*` 不在 `ConfigSchema` 里（渲染层通过非类型化的 config IPC
+ * 读写，与外观/主题那些键同一套做法），所以这里走 `(config as any).get` —— 与
+ * appMain.ts 的 `config:get` 处理器保持一致，不为了一个键去改全局 schema。
+ */
+function notifGlassGet(config: ConfigService, key: string): unknown {
+  try {
+    return (config as unknown as { get: (k: string) => unknown }).get(key);
+  } catch {
+    return undefined;
+  }
+}
 
 function normalizeNotificationDuration(value: unknown): number {
   const duration = Number(value);
@@ -227,6 +422,16 @@ let backdropLastSeq = 0;
 let backdropFramesSent = 0;
 /** 最近一次单帧实测耗时，用于自适应间隔（慢机器上主动降帧） */
 let lastFrameCostMs = 0;
+/**
+ * 渲染层 WGC 视频流是否已被证明**起不来**（`getUserMedia` 返回 NotReadableError）。
+ *
+ * 本机实测（Iris Xe + 当前驱动）：Chromium 的 `wgc_capture_source.cc
+ * CreateForMonitor` 恒 failure（E_ACCESSDENIED），`getUserMedia` 与
+ * `getDisplayMedia` 两条路都 `NotReadableError`。渲染层每次弹窗都要先试一遍才回落，
+ * 那一次尝试实测 ~150ms —— 全都白等。这里把"试过、失败"记下来，随下一次 payload
+ * 下发，渲染层就不再试（换显示器/驱动后重启进程即恢复尝试）。
+ */
+let desktopStreamUnavailable = false;
 /** 渲染层报上来的折射模式：stream = WGC 视频流已接管，主进程不需要再抓帧 */
 let backdropMode: "frames" | "stream" | "native" = "frames";
 
@@ -258,6 +463,42 @@ function stopBackdropStream() {
 const BACKDROP_CAPTURE_SCALE = 0.25
 /** JPEG 质量：玻璃会再模糊一次，压缩噪点看不见，但编码成本差很多 */
 const BACKDROP_JPEG_QUALITY = 55
+/** 快速路径向外多抓的边距（CSS px）：LiquidGlass 的 BLUR_MARGIN 是 40 */
+const FAST_CAPTURE_MARGIN = 40
+/**
+ * 快速路径是否可用（本机 Win32 + koffi 能加载 GDI）。
+ *
+ * 环境变量 `WEPORT_GLASS_NOCAPTURE=1` 可强制关掉，回到 desktopCapturer 整屏 JPEG
+ * 那条老路（排查采集相关问题时用）。
+ */
+function fastBackdropEnabled(): boolean {
+  if (process.env.WEPORT_GLASS_NOCAPTURE === "1") return false;
+  return fastCaptureAvailable();
+}
+
+/**
+ * 抓一帧「玻璃所在的那一小块屏幕」——koffi BitBlt 快速路径。
+ *
+ * 返回 BGRA 像素（base64）+ 它在屏幕逻辑坐标里的矩形；渲染层把它画成 ImageData 后
+ * 交给玻璃。实测 5~22ms/帧，而 desktopCapturer 整屏 JPEG 是 150~208ms/帧。
+ */
+function grabFastBackdropFrame(): { data: string; pixels: number; rect: { x: number; y: number; width: number; height: number } } | null {
+  if (!notificationWindow || notificationWindow.isDestroyed()) return null;
+  const [winX, winY] = notificationWindow.getPosition();
+  const [winW, winH] = notificationWindow.getSize();
+  const display = screen.getPrimaryDisplay();
+  const work = display.bounds;
+  // 卡片附近 + 模糊边距，并 clamp 到显示器内（越界 BitBlt 回来的是黑块）
+  const x = Math.max(work.x, winX - FAST_CAPTURE_MARGIN);
+  const y = Math.max(work.y, winY - FAST_CAPTURE_MARGIN);
+  const right = Math.min(work.x + work.width, winX + winW + FAST_CAPTURE_MARGIN);
+  const bottom = Math.min(work.y + work.height, winY + winH + FAST_CAPTURE_MARGIN);
+  const rect = { x, y, width: right - x, height: bottom - y };
+  if (rect.width < 8 || rect.height < 8) return null;
+  const captured = captureScreenRegion(dipRectToPhysical(rect.x, rect.y, rect.width, rect.height));
+  if (!captured) return null;
+  return { data: captured.pixels.toString("base64"), pixels: captured.pixels.length, rect };
+}
 
 async function grabDesktopFrame(): Promise<string | null> {
   const startedAt = Date.now();
@@ -324,9 +565,42 @@ async function runBackdropStream() {
       }
     } else {
       invisibleStreak = 0;
-      const dataUrl = await grabDesktopFrame();
+      /**
+       * 两条采集路（v1.1）：
+       *
+       * - **快速路径**（koffi BitBlt，只抓卡片附近 ~420×144）：一次 5~22ms，帧是原始
+       *   BGRA 像素，渲染层直接画成 ImageData。实测老路 0.7fps → 这条路至少 10fps。
+       * - **兜底路径**（`desktopCapturer` 整屏 JPEG）：一次 150~208ms，与输出分辨率
+       *   无关（Chromium 采集管线的固定开销），只能跑到 ~0.7fps —— 用户看到的
+       *   "玻璃跟不上桌面"就是它。koffi 不可用时才走这里。
+       *
+       * 两条路都只在弹窗可见期间跑，隐藏即停。
+       */
+      const fastEnabled = fastBackdropEnabled();
+      const frameStartedAt = Date.now();
+      const fastFrame = fastEnabled ? grabFastBackdropFrame() : null;
+      if (fastFrame) lastFrameCostMs = Math.max(1, Date.now() - frameStartedAt);
+      const dataUrl = fastFrame ? null : await grabDesktopFrame();
       if (!backdropRunning) break;
-      if (dataUrl && notificationWindow && !notificationWindow.isDestroyed()) {
+      if (fastFrame && notificationWindow && !notificationWindow.isDestroyed()) {
+        backdropLastSeq += 1;
+        notificationWindow.webContents.send("notification:backdrop", {
+          seq: backdropLastSeq,
+          pixelsBase64: fastFrame.data,
+          frameX: fastFrame.rect.x,
+          frameY: fastFrame.rect.y,
+          frameWidth: fastFrame.rect.width,
+          frameHeight: fastFrame.rect.height,
+          winX: fastFrame.rect.x,
+          winY: fastFrame.rect.y,
+          costMs: lastFrameCostMs,
+        });
+        frameIndex += 1;
+        backdropFramesSent += 1;
+        if (frameIndex === 1 || frameIndex % 30 === 0) {
+          console.log(`[NotificationWindow] backdrop fast frame #${frameIndex} (${lastFrameCostMs}ms)`);
+        }
+      } else if (dataUrl && notificationWindow && !notificationWindow.isDestroyed()) {
         const [winX, winY] = notificationWindow.getPosition();
         const display = screen.getPrimaryDisplay();
         backdropLastSeq += 1;
@@ -350,7 +624,11 @@ async function runBackdropStream() {
         }
       }
     }
-    const interval = Math.max(200, Math.min(1000, Math.round(lastFrameCostMs * 3) || 300));
+    // 帧间隔：快速路径 5~22ms/帧，间隔按 3× 成本取 33~66ms（约 15~30fps）；
+    // 兜底路径仍是 3× 成本、200~1000ms（约 0.7~5fps）
+    const interval = fastBackdropEnabled()
+      ? Math.max(33, Math.min(100, Math.round(lastFrameCostMs * 3) || 50))
+      : Math.max(200, Math.min(1000, Math.round(lastFrameCostMs * 3) || 300));
     await new Promise<void>((resolve) => {
       backdropTimer = setTimeout(resolve, interval);
       backdropTimer.unref?.();
@@ -438,6 +716,7 @@ export function createNotificationWindow() {
   const isDev = !!process.env.VITE_DEV_SERVER_URL;
 
   console.log("[NotificationWindow] Creating window...");
+  popupMark("main:create-window");
   const width = 344;
   const height = 114;
 
@@ -503,6 +782,7 @@ export function createNotificationWindow() {
   // 任何来源的缩放残留都会让通知按错误的逻辑尺寸排版，这里强制钉回 1
   notificationWindow.webContents.on("did-finish-load", () => {
     notificationWindow?.webContents.setZoomFactor(1);
+    popupMark("main:load-finish");
   });
 
   notificationWindow.on("closed", () => {
@@ -630,14 +910,19 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
   cancelIdleDestroy();
   let win = notificationWindow;
   if (!win || win.isDestroyed()) {
+    popupMark("main:show-entry", { cold: true });
     win = createNotificationWindow();
+  } else {
+    popupMark("main:show-entry", { cold: false });
   }
 
   if (!win) return;
 
   // 确保加载完成
   if (win.webContents.isLoading()) {
+    popupMark("main:waiting-ready-to-show");
     win.once("ready-to-show", () => {
+      popupMark("main:ready-to-show");
       showAndSend(win!, data);
     });
   } else {
@@ -647,49 +932,92 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
 
 let lastNotificationData: any = null;
 
+/**
+ * 「等渲染层报回第一帧尺寸再显示」的兜底计时器。
+ *
+ * 为什么显示要等到尺寸回来（v1.0.1 弹窗流畅度修复）：
+ * 旧顺序是 `send(payload) → 立刻 showInactive()`，而**正确的窗口尺寸只有渲染层
+ * 知道**（卡片宽度含昵称自适应增量、高度取决于正文行数）。于是窗口先按"上一次的
+ * 尺寸"出现：卡片更高就被窗口下沿裁掉，约 50~370ms 后 `notification:resize` 才到，
+ * 窗口长大 / 贴边重算 —— 用户看到的是"弹出来了，然后抖一下"。这条路径在冷启动
+ * （窗口刚创建、高度是初始的 114px）最明显。
+ *
+ * 现在的顺序是 `send(payload) → 渲染层同步量好 → notification:resize → 设置尺寸
+ * 与贴边 → 显示`。渲染层的量测在同一帧内完成（useLayoutEffect + 立即上报），
+ * 所以等它的代价是一帧左右；而窗口**第一次出现就是最终尺寸与最终位置**。
+ * 渲染层要是没能上报（异常、被销毁），250ms 后按现有尺寸兜底显示 —— 通知不能
+ * 因为一个尺寸没回来就不出现。
+ */
+const POPUP_REVEAL_FALLBACK_MS = 250;
+let revealTimer: NodeJS.Timeout | null = null;
+
+function cancelRevealTimer(): void {
+  if (revealTimer) {
+    clearTimeout(revealTimer);
+    revealTimer = null;
+  }
+}
+
+/** 显示弹窗（真正让用户看到它的那一步）。 */
+function revealPopup(win: BrowserWindow): void {
+  cancelRevealTimer();
+  if (!win || win.isDestroyed()) return;
+  const wasVisible = win.isVisible();
+  win.showInactive(); // 显示但不聚焦
+  /**
+   * 层级只在**这一次弹出**的第一个 reveal 上断言。
+   *
+   * v1.0.1 起 `revealPopup` 每条通知会被调用好几次（尺寸上报、贴边、收回…
+   * 每次都要顺带把"该显示了"这一步走完）。重复调用 `setAlwaysOnTop` 会让窗口
+   * 重新插一次 z 序，在 Windows 上表现是**闪一下** —— 而它本来就已经是最顶层了。
+   */
+  if (!wasVisible) win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
+  /**
+   * 告诉渲染层"窗口真的在屏幕上了"，**入场动画从这一刻才开始**（v1.0.1）。
+   *
+   * 为什么需要这一步：窗口是先挂载内容、等渲染层量好尺寸再显示的（见下面的
+   * 说明）。CSS 动画在挂载时就起跑，于是"显示"发生在动画中段 —— 滑入动效会
+   * 直接从半路开始（用户看到的是卡片突然从屏幕边缘闪出来）。把动画门控在这个
+   * 信号上，第一帧就是起始帧，整段位移都看得见。渲染层另有兜底：信号没到也会
+   * 在 400ms 后自己开跑。
+   */
+  try {
+    win.webContents.send("notification:shown", { payloadId: lastNotificationData?.payloadId ?? "" });
+  } catch { /* 渲染进程可能已经销毁 */ }
+  popupMark("main:shown");
+}
+
 async function showAndSend(win: BrowserWindow, data: any) {
   const config = ConfigService.getInstance();
   const position = (await config.get("notificationPosition")) || "top-right";
   const notificationDuration = normalizeNotificationDuration(await config.get("notificationDuration"));
   const notificationAnimationEnabled = (await config.get("notificationAnimationEnabled")) !== false;
+  // 动效风格（v1.0.1）：`slide` 从最近的屏幕边滑入/滑出（默认），`classic` 是
+  // 旧版的原地淡入缩放。渲染层据此选关键帧；不认识的值一律当 slide。
+  const notificationAnimationStyle =
+    (await config.get("notificationAnimationStyle")) === "classic" ? "classic" : "slide";
 
   // 更新位置：基于工作区完整矩形（含原点偏移）定位。
   // macOS 菜单栏、Windows 任务栏靠上/靠左时工作区原点不为 (0,0)，
   // 只用 workAreaSize 会把通知压进系统栏下面
   const display = screen.getPrimaryDisplay();
   const workArea = display.workArea;
-  const winWidth = position === "top-center" ? 280 : 344;
+  // 弹出前用**用户配置的基础宽度**定位；卡片实测宽度（可能因长昵称更大）会在
+  // 渲染层上报后由 notification:resize 重算坐标，见下面的 resize 处理。
+  // top-center 过去写死 280：那是"卡片比别的角窄"的历史遗留，现在统一走配置。
+  // 弹出前的这一份按"已经落定"（settled）算：滑动多留的那一段要等渲染层上报
+  // 方向与尺寸之后才由 resize 处理加上去。
+  const winWidth = notificationWindowWidth(config);
   const winHeight = 114;
-  const padding = 20;
-
-  let x = 0;
-  let y = 0;
-
-  switch (position) {
-    case "top-center":
-      x = workArea.x + (workArea.width - winWidth) / 2;
-      y = workArea.y + padding;
-      break;
-    case "top-right":
-      x = workArea.x + workArea.width - winWidth - padding;
-      y = workArea.y + padding;
-      break;
-    case "bottom-right":
-      x = workArea.x + workArea.width - winWidth - padding;
-      y = workArea.y + workArea.height - winHeight - padding;
-      break;
-    case "top-left":
-      x = workArea.x + padding;
-      y = workArea.y + padding;
-      break;
-    case "bottom-left":
-      x = workArea.x + padding;
-      y = workArea.y + workArea.height - winHeight - padding;
-      break;
-  }
-
-  const winX = Math.floor(x);
-  const winY = Math.floor(y);
+  const initialBounds = anchorPopupBounds({
+    position,
+    workArea,
+    cardWidth: winWidth,
+    cardHeight: winHeight,
+    settled: true,
+  });
+  const winX = initialBounds.x;
+  const winY = initialBounds.y;
   // 窗口的**当前实际**尺寸（DIP）：主题采样要靠它把取样点挪出窗口，见下面的 winW/winH
   const [currentWinW, currentWinH] = win.getSize();
 
@@ -715,6 +1043,19 @@ async function showAndSend(win: BrowserWindow, data: any) {
     position,
     notificationDuration,
     notificationAnimationEnabled,
+    notificationAnimationStyle,
+    /**
+     * 这一次投递的唯一标识。
+     *
+     * 渲染层用它丢掉**重复的 payload**：`notification:ready`（弹窗刚挂载时渲染层
+     * 主动要一次缓存数据）与正常的 `notification:show` 可能把同一条通知送达两次，
+     * 而每收到一次渲染层都会当成"新通知"重挂卡片 —— 入场动画从头再播一遍，
+     * 看起来就是"弹窗闪了一下"。带 id 之后重复投递是幂等的。
+     */
+    payloadId: `popup_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    // 渲染层的延迟追踪（`WEPORT_POPUP_TRACE=1` 时开启）：渲染进程看不到主进程的
+    // 环境变量，只能随 payload 捎过去。见 services/popupTrace.ts。
+    trace: popupTraceEnabled(),
     backdrop: process.platform === "linux"
       ? {
           // Linux 不提供采集源：sourceId 为 null 时渲染层不会发起 getUserMedia
@@ -727,25 +1068,52 @@ async function showAndSend(win: BrowserWindow, data: any) {
       : {
           native: Boolean(nativeGlass),
           // 渲染层优先用它开 WGC 视频流（30fps、GPU 合成、主进程零成本）；不可用时
-          // 自动落到主进程的定帧循环（runBackdropStream）
+          // 自动落到主进程的定帧循环（runBackdropStream）。
+          // `streamUnavailable`：这台机器上 WGC 已经被证明起不来（见上面的说明），
+          // 渲染层据此**跳过**那次注定失败的 getUserMedia（省掉每条约 150ms）。
           sourceId: nativeGlass ? null : cachedSourceId,
+          streamUnavailable: desktopStreamUnavailable,
           ...backdropGeometry,
         },
   };
   lastNotificationData = payload;
 
-  win.setPosition(winX, winY);
-  // 窗口高度始终沿用渲染层的实测校准值（notification:resize），
-  // 这里只同步宽度；反复重置高度会造成 114→实测高度的弹跳闪烁
-  const [, currentHeight] = win.getSize();
-  applyWindowSize(win, winWidth, currentHeight);
-
+  /**
+   * 窗口的尺寸与位置：**只在窗口还没显示的时候**在这里摆。
+   *
+   * 已经显示（连续来消息）时不能碰：`applyWindowSize` 会把窗口改回"配置的基础
+   * 宽度"，而那张正在展示的旧卡片可能是自适应加宽过的 —— 窗口一缩，旧卡片的
+   * 右边就被裁掉一截，用户看到的是"上一条通知突然缺了一块"。这种情况交给下面
+   * 渲染层上报的 resize：它按新卡片的实测尺寸一次性 setBounds，期间旧卡片不动
+   * （多留的那一段永远在卡片背后那一侧）。
+   */
+  if (!win.isVisible()) {
+    win.setPosition(winX, winY);
+    // 窗口高度始终沿用渲染层的实测校准值（notification:resize），
+    // 这里只同步宽度；反复重置高度会造成 114→实测高度的弹跳闪烁
+    const [, currentHeight] = win.getSize();
+    applyWindowSize(win, winWidth, currentHeight);
+  }
+  popupMark("main:send-payload", { winWidth });
   win.webContents.send("notification:show", payload);
 
-  // 设为可交互
+  // 设为可交互（点击穿透必须在显示之前关掉，否则第一帧点不动）
   win.setIgnoreMouseEvents(false);
-  win.showInactive(); // 显示但不聚焦
-  win.setAlwaysOnTop(true, "screen-saver"); // 最高层级
+
+  // 等渲染层量好的尺寸回来再显示。
+  //
+  // **连续来消息时也等**（v1.0.1 调整）：滑动风格下窗口要先按滑动方向多留一段
+  // `room`（那段在屏幕外），卡片才能从屏幕外面滑进来。若这一条立刻显示，它会先按
+  // 上一轮的小尺寸出现，卡片于是从"屏幕内 20px 那条线"钻出来 —— 正是要修的观感。
+  // 等尺寸的代价是一帧左右（渲染层在同一帧里量好并上报），而窗口本来就贴在屏幕上，
+  // 这一帧里旧卡片仍在按替换动画滑出去，看不出等待。
+  //
+  // 兜底 250ms 而不是更短：这条兜底一旦抢在尺寸上报之前触发，窗口就会按上一次的
+  // 尺寸出现 —— 那正是要修掉的"先出现、再抖一下"。实测渲染层量好尺寸通常在
+  // 10~90ms 之间（冷启动要加载页面时会到 ~100ms），250ms 足够让正常路径永远走
+  // 不到兜底；真正异常时（渲染层崩了）通知晚 0.25 秒出现，但它仍然会出现。
+  revealTimer = setTimeout(() => revealPopup(win), POPUP_REVEAL_FALLBACK_MS);
+  revealTimer.unref?.();
 
   // 显示之后才开始抓帧：此时内容保护已经能生效（排除弹窗自身），
   // 而且首帧正好赶在入场动画期间到达
@@ -766,6 +1134,9 @@ export async function registerNotificationHandlers() {
     // 窗口即将隐藏，玻璃面板立即消失（渲染层通常已提前发过淡出信号）
     glassPanel?.hide(0);
     stopBackdropStream();
+    // 等待显示的那一帧来了通知又走了（超快关闭）：取消待显示的兜底计时器，
+    // 否则它会在窗口隐藏之后再把它显示出来
+    cancelRevealTimer();
     // 实时玻璃的内容保护随可见期结束一起撤掉：弹窗不在画面上时没有任何理由
     // 继续把窗口排除在截图之外。
     setLiveGlassProtection(false);
@@ -780,6 +1151,16 @@ export async function registerNotificationHandlers() {
   // 反向切回（流中断）不需要处理：流一旦建立就由渲染层持有到弹窗隐藏。
   ipcMain.on("notification:glassMode", (_event, payload: { mode?: string }) => {
     if (payload?.mode === "stream") backdropMode = "stream";
+  });
+
+  /**
+   * 渲染层报告 WGC 采集尝试的结果。
+   *
+   * `ok:false` 时记下来：这台机器上采集流起不来，后续通知直接跳过那次尝试
+   * （本机实测一次尝试 ~150ms，全部白等）。
+   */
+  ipcMain.on("notification:desktopStream", (_event, payload: { ok?: boolean }) => {
+    desktopStreamUnavailable = payload?.ok === false;
   });
 
   // —— 原生玻璃面板生命周期（仅 nativeGlass 可用时渲染层才会发这些消息）——
@@ -836,6 +1217,41 @@ export async function registerNotificationHandlers() {
     }
   });
 
+  /**
+   * 退场前的准备：按滑动方向把窗口**重新放开**，落地之后才 resolve。
+   *
+   * 卡片退场是滑到屏幕外面去的，窗口只有卡片那么大时它会被窗口边界裁掉 ——
+   * 渲染层因此把退场动画推迟到这次调用返回之后（见 NotificationToast.dismiss）。
+   * 用的是最后一次上报的卡片尺寸：退场时卡片尺寸不会再变。
+   *
+   * **注册位置很关键**：`registerNotificationHandlers` 中间有一段按
+   * `messagePushEnabled` 提前 `return` 的预热逻辑 —— 把处理器放在它后面，
+   * 关掉消息推送的用户就会遇到 "No handler registered"（实测踩过：
+   * 那条路径下 prepare-exit 没注册，退场准备变成 150ms 超时后才开始）。
+   */
+  ipcMain.handle("notification:prepare-exit", async () => {
+    const win = notificationWindow;
+    if (!win || win.isDestroyed() || !lastCardMetrics) return { extended: false };
+    try {
+      const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
+      const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+      const bounds = anchorPopupBounds({
+        position,
+        workArea,
+        cardWidth: lastCardMetrics.width,
+        cardHeight: lastCardMetrics.height,
+        slideFrom: lastCardMetrics.slideFrom,
+        room: lastCardMetrics.room,
+        settled: false,
+      });
+      applyPopupBounds(win, bounds);
+      sendPopupGeometry(win, bounds);
+      return { extended: true };
+    } catch {
+      return { extended: false };
+    }
+  });
+
   // 启动空闲期预热（v1.0.3 收窄）：**不再预创建通知窗口**。
   //
   // 旧行为：启动 3s 后无条件 createNotificationWindow()，常驻一整个渲染进程
@@ -857,31 +1273,54 @@ export async function registerNotificationHandlers() {
   }, 3000);
 
   // Handle resize request from renderer
-  ipcMain.on("notification:resize", (event, { width, height }) => {
+  ipcMain.on("notification:resize", (event, payload) => {    const cardWidth = Math.round(Number(payload?.width) || 0);
+    const cardHeight = Math.round(Number(payload?.height) || 0);
+    if (cardWidth < 1 || cardHeight < 1) return;
+    /**
+     * 渲染层的上报里现在还有三件事（v1.0.1 滑动动效）：
+     *   `slideFrom` 卡片从哪条边进来 —— 窗口要多留的那一段在它那一侧（屏幕外）
+     *   `room`      多留多少（= 卡片自身尺寸 + 屏幕留白，见 notificationAnimation.ts）
+     *   `settled`   入场动画是否已经结束 —— 结束了就把窗口**收回**到卡片大小，
+     *               让屏幕上不留任何拦截桌面点击的多余面积
+     */
+    const slideFrom = typeof payload?.slideFrom === "string" ? payload.slideFrom : undefined;
+    const room = Number(payload?.room) || 0;
+    const settled = payload?.settled !== false;
+    lastCardMetrics = { width: cardWidth, height: cardHeight, slideFrom, room: Math.max(0, Math.round(room)) };
+    popupMark("main:resize-received", {
+      width: cardWidth,
+      height: cardHeight,
+      settled,
+      slideFrom: slideFrom || "-",
+      room: Math.round(room),
+    });
+
     if (notificationWindow && !notificationWindow.isDestroyed()) {
       const win = notificationWindow;
-      const prevSize = win.getSize();
-      applyWindowSize(win, Math.round(width), Math.round(height));
-
-      // 底部定位（bottom-left / bottom-right）：窗口按渲染层实测高度增高后，
-      // 必须重新贴底，否则会向下长出屏幕（此前只 setSize，Y 不再重算）。
-      const [, newH] = win.getSize();
-      if (Math.round(newH) !== Math.round(prevSize[1])) {
-        void (async () => {
-          try {
-            const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
-            if (position === "bottom-left" || position === "bottom-right") {
-              const workArea = screen.getPrimaryDisplay().workArea;
-              const padding = 20;
-              const [winX] = win.getPosition();
-              const newY = workArea.y + workArea.height - newH - padding;
-              win.setPosition(winX, newY);
-            }
-          } catch { /* noop */ }
-        })();
-      }
+      void (async () => {
+        let bounds: { x: number; y: number; width: number; height: number } | null = null;
+        try {
+          const position = (await ConfigService.getInstance().get("notificationPosition")) || "top-right";
+          const workArea = screen.getDisplayMatching(win.getBounds()).workArea;
+          bounds = anchorPopupBounds({ position, workArea, cardWidth, cardHeight, slideFrom, room, settled });
+          applyPopupBounds(win, bounds);
+        } catch { /* noop */ }
+        // 贴边算完再显示：这是"窗口第一次出现就是最终尺寸 + 最终位置"的最后一步。
+        // 放在 try 之外是必要的 —— 尺寸没变（复用同尺寸窗口）时也要走到显示。
+        revealPopup(win);
+        /**
+         * 收回之后要把**新的窗口几何**告诉渲染层。
+         *
+         * 主题采样用的是"窗口在屏幕上的位置"（它要把取样点挪到窗口**外面**，否则
+         * 读到的就是弹窗自己那张卡片 → 自指闭环）；那份几何是随 payload 下发的，
+         * 而窗口在"放开 → 收回"之间会移动一整段 travel —— 每次都通知，采样才不会
+         * 按旧坐标去读几百像素外的桌面（看起来就是"弹窗颜色和背景对不上"）。
+         */
+        if (bounds) sendPopupGeometry(win, bounds);
+      })();
     }
   });
+
 
   // 'notification-clicked' 在 main.ts 中处理 (导航)
 }

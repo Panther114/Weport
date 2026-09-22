@@ -851,6 +851,39 @@ class ChatService {
     } catch {}
   }
 
+  /**
+   * 丢弃**派生缓存**，让下一次读取真的回到数据库（v1.0.1）。
+   *
+   * 为什么需要它：服务里所有"读聊天记录"的路径最终都直连 WCDB，但中间有三层
+   * 缓存会让一份**旧快照**看起来像是当前事实：
+   *
+   *  1. `messageCursors` —— 分页游标。它在打开的那一刻定位到某条消息，之后
+   *     一直沿那个位置往下翻：新到的消息在游标**上方**，用同一个游标永远读不到。
+   *  2. `sessionStatsCacheService` —— 统计（总数 / 首末条时间）默认允许用旧值
+   *     （`allowStaleCache`），所以"今天有多少条"可能答的是几小时前的数。
+   *  3. `messageCacheService` —— 界面首屏用的消息快照。
+   *
+   * agent 侧的 `sync_chat_history` 工具就是调它：用户问"最新消息"时，先把这三层
+   * 清掉，再读出来的就是这一秒的事实。
+   */
+  async invalidateDerivedCaches(sessionId?: string): Promise<{ cursors: number; sessions: number }> {
+    let cursors = 0
+    if (sessionId) {
+      this.deleteSessionStatsCacheEntry(sessionId)
+      if (this.messageCursors.has(sessionId)) cursors += 1
+      await this.closeMessageCursorBySession(sessionId)
+      this.messageCacheService.delete(sessionId)
+      return { cursors, sessions: 1 }
+    }
+    cursors = this.messageCursors.size
+    for (const [id] of Array.from(this.messageCursors.entries())) {
+      await this.closeMessageCursorBySession(id)
+    }
+    this.clearSessionStatsCacheForScope()
+    this.messageCacheService.clear()
+    return { cursors, sessions: 0 }
+  }
+
   close(): void {
     try {
       for (const state of this.messageCursors.values()) {
@@ -9109,8 +9142,14 @@ class ChatService {
   }
   /**
    * 获取图片数据（解密后的）
+   *
+   * `options.excludeThumbnail`：磁盘上还有显示版 / 原图时不要交回缩略图（导出用）。
    */
-  async getImageData(sessionId: string, msgId: string): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getImageData(
+    sessionId: string,
+    msgId: string,
+    options?: { excludeThumbnail?: boolean }
+  ): Promise<{ success: boolean; data?: string; error?: string }> {
     try {
       const localId = parseInt(msgId, 10)
       if (!this.connected) await this.connect()
@@ -9137,7 +9176,8 @@ class ChatService {
         createTime: msg.createTime,
         force: false,
         preferFilePath: true,
-        hardlinkOnly: true
+        hardlinkOnly: true,
+        excludeThumbnail: options?.excludeThumbnail === true
       })
 
       if (!result.success || !result.localPath) {
@@ -9935,27 +9975,54 @@ class ChatService {
 
 
   /**
+   * 定位 `silk-wasm/lib/silk.wasm`。
+   *
+   * 打包后有**两个完全不同的 resources 目录**，这里最容易踩：
+   * - `process.resourcesPath`（`<app>/resources`）—— `node_modules` 在这里；
+   * - app 自己的资源目录（`<app>/resources/resources`，只有 key/wcdb/wedecrypt），
+   *   也就是 `resolveResourcesPath()` 的返回值，它会经 `setRuntimeConfig` 传进来。
+   *
+   * 旧代码把后者当成了前者，拼出 `resources/resources/node_modules/...` —— 打包版
+   * 永远拿不到 wasm，语音解码全灭（issue #22：导出的语音一条文件都没有）。
+   */
+  private resolveSilkWasmPath(): string | null {
+    const candidates: string[] = []
+    const appPath = this.runtimeConfig?.appPath ?? app.getAppPath()
+
+    // 1) 让模块自己解析（asarUnpack 之后这条路径就是真实文件）
+    try {
+      const requireFromApp = createRequire(join(appPath, 'package.json'))
+      candidates.push(requireFromApp.resolve('silk-wasm/lib/silk.wasm'))
+    } catch {
+      // 模块解析失败时继续用下面的候选
+    }
+
+    // 2) 打包：node_modules 在 process.resourcesPath 下，不在 app 的资源目录下
+    const realResourcesPath = process.resourcesPath
+    if (realResourcesPath) {
+      candidates.push(join(realResourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm'))
+      candidates.push(join(realResourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm'))
+    }
+
+    // 3) 开发环境 / 兜底
+    for (const base of [appPath, process.cwd()]) {
+      if (base) candidates.push(join(base, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm'))
+    }
+
+    return candidates.find((candidate) => candidate && existsSync(candidate)) || null
+  }
+
+  /**
    * 解码 Silk 数据为 PCM (silk-wasm)
    */
   private async decodeSilkToPcm(silkData: Buffer, sampleRate: number): Promise<Buffer | null> {
     try {
-      let wasmPath: string
-      const isPackaged = this.runtimeConfig?.isPackaged ?? app.isPackaged
-      const resourcesPath = this.runtimeConfig?.resourcesPath ?? process.resourcesPath
       const appPath = this.runtimeConfig?.appPath ?? app.getAppPath()
-
-      if (isPackaged) {
-        wasmPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
-        if (!existsSync(wasmPath)) {
-          wasmPath = join(resourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
-        }
-      } else {
-        wasmPath = join(appPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
-      }
-
-      if (!existsSync(wasmPath)) {
-        console.error('[ChatService][Voice] silk.wasm not found at:', wasmPath)
-        return null
+      const wasmPath = this.resolveSilkWasmPath()
+      if (!wasmPath) {
+        // **不再直接失败**：silk-wasm 自己按 `lib/silk.wasm` 实例化，这里只是路径推断。
+        // 推断不出来只记一条日志，解码照常尝试（旧版在这里 return null 是 issue #22 的根因）。
+        console.warn('[ChatService][Voice] 未定位到 silk.wasm，仍尝试直接解码')
       }
 
       // 在 worker 环境中使用 createRequire 来正确加载模块

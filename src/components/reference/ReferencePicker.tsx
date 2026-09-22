@@ -1,11 +1,14 @@
-import { useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Hash, Megaphone, User } from 'lucide-react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type RefObject } from 'react'
+import { Hash, Megaphone, Search, User, X } from 'lucide-react'
+import FloatingLayer from '../ui/FloatingLayer'
 import {
   filterReferenceCandidates,
   referenceKindLabel,
+  resolveReferenceIndex,
   type ChatReference,
   type ReferenceKind,
 } from '../../utils/mentionTrigger'
+import { emptyReferenceHint } from '../../utils/sessionCandidates'
 
 export interface ReferenceCandidate {
   id: string
@@ -24,13 +27,36 @@ export interface ReferencePickerHandle {
 }
 
 interface Props {
-  /** 当前 `@` 之后的查询串（由输入框光标位置推导，见 utils/mentionTrigger.ts）。 */
+  /** 触发这次引用的输入框：浮层跟着它的位置走（见 components/ui/FloatingLayer） */
+  anchor: RefObject<HTMLElement | null>
+  /** 当前 `@` 之后的查询串（由输入框光标位置推导，见 utils/mentionTrigger.ts） */
   query: string
   candidates: ReferenceCandidate[]
   loading?: boolean
+  /**
+   * 候选是**成功读到**的吗（默认 true）。
+   *
+   * 「读失败」与「真的没有会话」是两回事：前者要说原因，后者才该提示去连接微信。
+   * 两者都渲染成「先连接微信」正是用户报的那个 bug。
+   */
+  ok?: boolean
+  error?: string
+  /**
+   * 查询串变化。**弹层里的搜索框是真的能打字的**：它把新查询交回父级，
+   * 父级改写自己输入框里的那段 `@查询`（唯一来源），再回灌进来。
+   */
   onQueryChange: (query: string) => void
   onPick: (reference: ChatReference) => void
   onClose: () => void
+  /**
+   * 已经引用过的会话 id。
+   *
+   * 它们**继续留在列表里但灰掉**：直接删掉的话，用户在 `@` 里搜一个刚引用过的
+   * 群会得到「没有匹配的会话」，看起来像搜索坏了；灰掉则明确说「这个已经有了」。
+   */
+  pickedIds?: string[]
+  /** 关闭后把焦点交还输入框（父级实现） */
+  onReturnFocus?: () => void
   ref?: React.Ref<ReferencePickerHandle>
 }
 
@@ -41,131 +67,186 @@ interface Props {
  * 动作 —— 它必须像引用文件一样顺手：输入即筛选、全键盘可操作、不打断打字。
  *
  * 几个刻意的设计：
- * - 候选列表由调用方提供（已按会话时间排好序）；这里只做筛选与排序，不自己
- *   读 WCDB，避免每敲一个字符就查一次数据库。
+ * - **渲染到 body 下的浮层**（FloatingLayer）。旧版挂在文档流里，在 WeBot 的
+ *   滚动容器（`.webot { overflow-y: auto }`）内向上展开时会被整块裁掉 ——
+ *   用户看到的是"弹窗在顶部被切掉"。浮层化之后，任何祖先的 overflow 都管不到它。
+ * - 候选列表由调用方提供（**按最近聊天排序，私聊与群聊混排**）；这里只做筛选与
+ *   排序，不自己读 WCDB，避免每敲一个字符就查一次数据库。旧版在 `sessionCandidates`
+ *   里把群聊整块排到前面，60 条上限一截断就只剩群聊 —— 用户报的就是这个。
+ * - 已经引用过的条目**灰掉但留在列表里**（见 `pickedIds`），键盘导航跳过它们。
  * - 上限 60 条：5000 个会话的账号也不会因为渲染整列而卡顿。
- * - **自己不抢焦点**：键盘事件由父级输入框转发进来（见 ReferencePickerHandle），
- *   所以打字不会被中断，选择完成后光标也还在原处。
+ * - **搜索框是真输入框**（v1.0.1）。旧版是 `readOnly` 的"展示型"输入框：
+ *   点它会把焦点从输入框抢走，之后打字一个字符也进不去，用户看到的就是
+ *   "搜索不能用"。现在它自己收键盘，并把查询串同步回输入框；
+ *   同时 **不自动聚焦** —— 打出一个 `@` 就被抢走焦点会让正常打字断掉。
  */
 export default function ReferencePicker({
+  anchor,
   query,
   candidates,
   loading,
+  ok = true,
+  error,
   onQueryChange,
   onPick,
   onClose,
+  pickedIds,
+  onReturnFocus,
   ref,
 }: Props) {
   const [activeIndex, setActiveIndex] = useState(0)
   const listRef = useRef<HTMLDivElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
 
   const filtered = useMemo(() => filterReferenceCandidates(candidates, query, 60), [candidates, query])
+  const picked = useMemo(() => new Set((pickedIds || []).map((id) => String(id || '').trim()).filter(Boolean)), [pickedIds])
+  const isPicked = useCallback((index: number) => picked.has(String(filtered[index]?.id || '')), [picked, filtered])
 
   // 筛选结果变化时把选中项夹回合法范围，否则会停在一个不存在的下标上，
-  // 表现为「按回车没反应」。
+  // 表现为「按回车没反应」；已经引用过的条目同样要跳过（灰掉了就选不中）。
   useEffect(() => {
-    setActiveIndex((current) => (current >= filtered.length ? 0 : current))
-  }, [filtered])
+    setActiveIndex((current) => resolveReferenceIndex(filtered.length, current, (index) => picked.has(String(filtered[index]?.id || ''))))
+  }, [filtered, picked])
 
   useEffect(() => {
     const node = listRef.current?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
     node?.scrollIntoView({ block: 'nearest' })
   }, [activeIndex])
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      handleKeyDown(event) {
-        if (event.key === 'ArrowDown') {
-          event.preventDefault()
-          setActiveIndex((current) => (filtered.length === 0 ? 0 : (current + 1) % filtered.length))
-          return true
-        }
-        if (event.key === 'ArrowUp') {
-          event.preventDefault()
-          setActiveIndex((current) => (filtered.length === 0 ? 0 : (current - 1 + filtered.length) % filtered.length))
-          return true
-        }
-        if (event.key === 'Enter' || event.key === 'Tab') {
-          const picked = filtered[activeIndex]
-          if (!picked) return false
-          event.preventDefault()
-          onPick({ id: picked.id, label: picked.label, kind: picked.kind })
-          return true
-        }
-        if (event.key === 'Escape') {
-          event.preventDefault()
-          onClose()
-          return true
-        }
-        return false
-      },
-    }),
-    [filtered, activeIndex, onPick, onClose]
-  )
+  /** 键盘导航：父级输入框与弹层搜索框共用同一份逻辑 */
+  const navigate = (event: { key: string; preventDefault: () => void; shiftKey?: boolean }): boolean => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const delta = event.key === 'ArrowDown' ? 1 : -1
+      setActiveIndex((current) => resolveReferenceIndex(filtered.length, current, isPicked, delta))
+      return true
+    }
+    if (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) {
+      const picked_item = filtered[activeIndex]
+      if (!picked_item) return false
+      event.preventDefault()
+      // 已引用的条目是灰的：消费按键但不重复添加，也不会把换行/制表符打进输入框。
+      if (isPicked(activeIndex)) return true
+      onPick({ id: picked_item.id, label: picked_item.label, kind: picked_item.kind })
+      onReturnFocus?.()
+      return true
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      onClose()
+      onReturnFocus?.()
+      return true
+    }
+    return false
+  }
 
+  useImperativeHandle(ref, () => ({ handleKeyDown: navigate }), [filtered, activeIndex, picked, onPick, onClose, onReturnFocus])
+
+  /**
+   * 点击浮层内部不应关闭它。
+   *
+   * 父级输入框的 `onBlur` 会延迟关闭选择器（点击条目时先触发 blur）。搜索框
+   * 在浮层里，用户点它是想"在这里打字"，而不是想关掉选择器 —— 所以父级用
+   * `relatedTarget` 判断焦点是否落进 `.ref-picker`，这里负责提供那个锚点。
+   */
   return (
-    <div className="ref-picker" role="dialog" aria-label="引用会话">
-      <div className="ref-picker-search">
-        <span className="ref-picker-at" aria-hidden>
-          @
-        </span>
-        {/* 展示型搜索框：真正的输入发生在父级输入框里，这里只回显查询串。
-            readOnly + tabIndex=-1 保证 Tab 与鼠标都不会把焦点从打字位置抢走。 */}
-        <input
-          value={query}
-          onChange={(e) => onQueryChange(e.target.value)}
-          placeholder="搜索联系人、群聊或微信号…"
-          aria-label="搜索会话"
-          readOnly
-          tabIndex={-1}
-        />
-        <span className="ref-picker-count">{filtered.length}</span>
-      </div>
-
-      <div className="ref-picker-list" role="listbox" ref={listRef} aria-label="会话列表">
-        {loading && filtered.length === 0 ? <div className="ref-picker-empty">正在读取会话…</div> : null}
-        {!loading && filtered.length === 0 ? (
-          <div className="ref-picker-empty">
-            {candidates.length === 0 ? '还没有可引用的会话（先连接微信）' : '没有匹配的会话'}
-          </div>
-        ) : null}
-
-        {filtered.map((candidate, index) => (
-          <button
-            key={candidate.id}
-            type="button"
-            role="option"
-            aria-selected={index === activeIndex}
-            data-index={index}
-            data-active={index === activeIndex}
-            className="ref-picker-item"
-            // onMouseDown 而不是 onClick：失焦处理会先于 click 触发，
-            // 用 mousedown 抢在失焦之前完成选择。
-            onMouseDown={(e) => {
-              e.preventDefault()
-              onPick({ id: candidate.id, label: candidate.label, kind: candidate.kind })
+    <FloatingLayer
+      anchor={anchor}
+      open
+      placement="top-start"
+      gap={6}
+      width={380}
+      minHeight={180}
+      className="ref-picker-layer"
+      role="dialog"
+      aria-label="引用会话"
+    >
+      <div className="ref-picker" data-ref-picker="true">
+        <div className="ref-picker-search">
+          <Search size={13} className="ref-picker-search-icon" aria-hidden />
+          {/* 真输入框：查询串的唯一来源仍是父级输入框的文本，这里只是它的另一个
+              视图 —— 打字 → onQueryChange → 父级改写 `@查询` → 回灌 value。 */}
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            onKeyDown={(e) => {
+              const consumed = navigate(e)
+              if (!consumed && e.key === ' ') e.preventDefault()
             }}
-            onMouseEnter={() => setActiveIndex(index)}
-          >
-            <span className="ref-picker-avatar" aria-hidden>
-              {candidate.avatarUrl ? (
-                <img src={candidate.avatarUrl} alt="" draggable={false} />
-              ) : (
-                <KindIcon kind={candidate.kind} />
-              )}
-            </span>
-            <span className="ref-picker-main">
-              <span className="ref-picker-label">{candidate.label}</span>
-              {candidate.subtitle ? <span className="ref-picker-sub">{candidate.subtitle}</span> : null}
-            </span>
-            <span className="ref-picker-kind" data-kind={candidate.kind}>
-              {referenceKindLabel(candidate.kind)}
-            </span>
-          </button>
-        ))}
+            placeholder="搜索联系人、群聊或微信号…"
+            aria-label="搜索会话"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          {query ? (
+            <button
+              type="button"
+              className="ref-picker-clear"
+              aria-label="清空搜索"
+              onClick={() => {
+                onQueryChange('')
+                searchRef.current?.focus()
+              }}
+            >
+              <X size={11} />
+            </button>
+          ) : null}
+          <span className="ref-picker-count">{filtered.length}</span>
+        </div>
+
+        <div className="ref-picker-list" role="listbox" ref={listRef} aria-label="会话列表">
+          {filtered.length === 0 ? (
+            <div className="ref-picker-empty" data-state={ok ? 'empty' : 'error'}>
+              {emptyReferenceHint({ loading, ok, error, hasCandidates: candidates.length > 0 })}
+            </div>
+          ) : null}
+
+          {filtered.map((candidate, index) => {
+            const alreadyPicked = picked.has(String(candidate.id))
+            return (
+            <button
+              key={candidate.id}
+              type="button"
+              role="option"
+              aria-selected={index === activeIndex}
+              aria-disabled={alreadyPicked || undefined}
+              data-index={index}
+              data-active={index === activeIndex}
+              data-picked={alreadyPicked || undefined}
+              className="ref-picker-item"
+              title={alreadyPicked ? '已经引用过这个会话了' : undefined}
+              // onMouseDown 而不是 onClick：失焦处理会先于 click 触发，
+              // 用 mousedown 抢在失焦之前完成选择。
+              onMouseDown={(e) => {
+                e.preventDefault()
+                if (alreadyPicked) return
+                onPick({ id: candidate.id, label: candidate.label, kind: candidate.kind })
+                onReturnFocus?.()
+              }}
+              onMouseEnter={() => setActiveIndex(index)}
+            >
+              <span className="ref-picker-avatar" aria-hidden>
+                {candidate.avatarUrl ? (
+                  <img src={candidate.avatarUrl} alt="" draggable={false} />
+                ) : (
+                  <KindIcon kind={candidate.kind} />
+                )}
+              </span>
+              <span className="ref-picker-main">
+                <span className="ref-picker-label">{candidate.label}</span>
+                {candidate.subtitle ? <span className="ref-picker-sub">{candidate.subtitle}</span> : null}
+              </span>
+              {alreadyPicked ? <span className="ref-picker-picked">已引用</span> : null}
+              <span className="ref-picker-kind" data-kind={candidate.kind}>
+                {referenceKindLabel(candidate.kind)}
+              </span>
+            </button>
+            )
+          })}
+        </div>
       </div>
-    </div>
+    </FloatingLayer>
   )
 }
 

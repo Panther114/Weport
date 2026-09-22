@@ -1,9 +1,72 @@
 import { randomUUID } from 'crypto'
 import { getProviderCatalogEntry } from './providerCatalog'
 import { extractModelIds } from './modelRegistry'
+import { enrichNetworkError, fetchWithRetry } from './netError'
 import type { ProviderAdapter, ProviderProfile, ProviderProtocol, ProviderStreamInput, ProviderStreamResult } from './providerTypes'
 
 const DEFAULT_HEADERS = { 'Content-Type': 'application/json' }
+
+/**
+ * 图片附件的形状（与 `weportAiService.AiMessage.images` 一致）。
+ *
+ * 这里做一次**运行时**校验而不是直接相信上游：这些对象来自工具执行结果，
+ * 形状错了会让整个请求 400，而错误信息只会说"content 无效"。
+ */
+function imageParts(value: unknown): Array<{ mimeType: string; data: string }> {
+  if (!Array.isArray(value)) return []
+  const out: Array<{ mimeType: string; data: string }> = []
+  for (const item of value) {
+    const record = item as { mimeType?: unknown; data?: unknown } | null
+    const mimeType = String(record?.mimeType || '').trim()
+    const data = String(record?.data || '').trim()
+    if (!mimeType || !data) continue
+    out.push({ mimeType, data })
+  }
+  return out
+}
+
+function imageDataUrl(image: { mimeType: string; data: string }): string {
+  return `data:${image.mimeType};base64,${image.data}`
+}
+
+/**
+ * 工具消息带图片时的 OpenAI 兼容转换。
+ *
+ * **图片放在紧跟其后的 user 消息里，不放进 tool 消息的 content 数组**（v1.1）。
+ *
+ * 旧实现是把 `content` 换成 `[{type:'text'},{type:'image_url'}]`：结构上完全合规，
+ * 但实测网关（opencode-go → deepseek-v4.1-flash）会直接 422
+ * `invalid_request_error: Input should be a valid string` —— 它对 tool 角色的
+ * content 只接受字符串。图片是**这一轮唯一的新信息**，整段前缀重发都指望着它，
+ * 所以不能赌某个网关的宽容度：tool 消息保持纯文本（原样透传），图片作为一条
+ * 独立的 user 消息追加在后面 —— 这是各家中转/原生 DeepSeek 都接受的多模态形状。
+ *
+ * 形状坏掉（缺 mimeType/data）的图片被丢掉，不把整轮请求搞成 400。
+ */
+export function openAIChatMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  for (const message of messages) {
+    if (message.role !== 'tool') {
+      out.push(message)
+      continue
+    }
+    const images = imageParts(message.images)
+    if (images.length === 0) {
+      out.push(message)
+      continue
+    }
+    // 纯文本的 tool 结果原样透传（多一次改写就多一次前缀缓存失效），图片另起一条
+    out.push({ role: 'tool', tool_call_id: message.tool_call_id, content: String(message.content || '') })
+    out.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: '（工具返回的图片，见下）' },
+        ...images.map((image) => ({ type: 'image_url', image_url: { url: imageDataUrl(image) } })),
+      ],
+    })
+  }
+  return out
+}
 
 /**
  * Default `User-Agent` for gateway requests.
@@ -53,8 +116,20 @@ async function readError(response: Response): Promise<never> {
   throw error
 }
 
+/**
+ * Every provider request goes through this.
+ *
+ * `fetchWithRetry` only retries connect-phase failures (DNS / connection setup)
+ * and rethrows a readable message — without it a transient DNS hiccup surfaced
+ * in a WeBot note as `fetch failed`, which tells the user nothing. See
+ * `netError.ts`.
+ */
+function providerFetch(url: string, init: RequestInit): Promise<Response> {
+  return fetchWithRetry(url, init)
+}
+
 async function requestJson(url: string, init: RequestInit): Promise<any> {
-  const response = await fetch(url, init)
+  const response = await providerFetch(url, init)
   if (!response.ok) return readError(response)
   return response.json()
 }
@@ -96,7 +171,15 @@ async function* sseEvents(response: Response): AsyncGenerator<{ event: string; d
     try { yield { event, data: JSON.parse(raw) } } catch { /* ignore malformed provider fragments */ }
   }
   while (true) {
-    const { value, done } = await reader.read()
+    // 流中途断开（ND_ERR_SOCKET / ECONNRESET）同样只抛 `terminated` 这类裸错误。
+    // 这里补一次翻译，让"回答写到一半网络断了"也能读出来是什么原因。
+    let chunk: { value?: Uint8Array; done: boolean }
+    try {
+      chunk = await reader.read()
+    } catch (error) {
+      throw enrichNetworkError(error)
+    }
+    const { value, done } = chunk
     buffer += decoder.decode(value, { stream: !done })
     const lines = buffer.split(/\r?\n/)
     buffer = lines.pop() || ''
@@ -119,14 +202,28 @@ function emptyResult(): ProviderStreamResult {
   return { content: '', reasoning: '', toolCalls: [], usage: undefined }
 }
 
-function usageFromOpenAI(usage: any) {
+/**
+ * OpenAI-shaped usage → harness usage.
+ *
+ * Exported for tests: cache accounting IS the product's cost model, and the
+ * field chain below is exactly the kind of silent-zero regression that showed
+ * up as "hit rate mysteriously low" — DeepSeek gateways report
+ * `prompt_cache_hit_tokens`, OpenAI reports `prompt_tokens_details.cached_tokens`,
+ * Anthropic-shaped relays report `cache_read_input_tokens`. Read them all.
+ */
+export function usageFromOpenAI(usage: any) {
   if (!usage) return undefined
+  const cacheHit =
+    usage.prompt_tokens_details?.cached_tokens ??
+    usage.input_tokens_details?.cached_tokens ??
+    usage.prompt_cache_hit_tokens ??
+    usage.cache_read_input_tokens
   return {
     promptTokens: Number(usage.prompt_tokens ?? usage.input_tokens) || 0,
     completionTokens: Number(usage.completion_tokens ?? usage.output_tokens) || 0,
     reasoningTokens: Number(usage.completion_tokens_details?.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens) || 0,
     totalTokens: Number(usage.total_tokens) || 0,
-    promptCacheHitTokens: Number(usage.prompt_tokens_details?.cached_tokens ?? usage.input_tokens_details?.cached_tokens) || 0,
+    promptCacheHitTokens: Number(cacheHit) || 0,
   }
 }
 
@@ -148,7 +245,15 @@ function openAIInput(messages: Array<Record<string, unknown>>): { instructions: 
     const role = String(message.role || '')
     if (role === 'system') continue
     if (role === 'tool') {
-      input.push({ type: 'function_call_output', call_id: String(message.tool_call_id || ''), output: String(message.content || '') })
+      const images = imageParts(message.images)
+      // Responses 的函数输出接受内容块数组：`input_text` + `input_image`。
+      const output = images.length > 0
+        ? [
+            { type: 'input_text', text: String(message.content || '') },
+            ...images.map((image) => ({ type: 'input_image', image_url: imageDataUrl(image) })),
+          ]
+        : String(message.content || '')
+      input.push({ type: 'function_call_output', call_id: String(message.tool_call_id || ''), output })
       continue
     }
     if (role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -179,7 +284,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
     }
     if (input.maxOutputTokens !== undefined) body.max_output_tokens = input.maxOutputTokens
     if (instructions) body.instructions = instructions
-    const response = await fetch(endpoint(input.profile.baseUrl, '/responses'), {
+    const response = await providerFetch(endpoint(input.profile.baseUrl, '/responses'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -201,7 +306,9 @@ const openAIResponsesAdapter: ProviderAdapter = {
       } else if (item.event === 'response.function_call_arguments.delta' || data.type === 'response.function_call_arguments.delta') {
         const id = String(data.call_id || data.item_id || '')
         const call = calls.get(id)
-        if (call) call.args += String(data.delta || '')
+        const piece = String(data.delta || '')
+        if (call) call.args += piece
+        input.onToolArgs?.(piece)
       } else if (item.event === 'response.completed' || data.type === 'response.completed') {
         result.usage = usageFromOpenAI(data.response?.usage || data.usage)
         result.finishReason = String(data.response?.status || 'completed')
@@ -222,7 +329,7 @@ function parseArgs(value: string): Record<string, unknown> {
 export function openAIChatBody(input: ProviderStreamInput): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: input.profile.model,
-    messages: input.messages,
+    messages: openAIChatMessages(input.messages),
     stream: true,
   }
   if (input.maxOutputTokens !== undefined) body.max_tokens = input.maxOutputTokens
@@ -230,8 +337,12 @@ export function openAIChatBody(input: ProviderStreamInput): Record<string, unkno
     body.tools = toolDefinitions(input)
     body.tool_choice = 'auto'
   }
+  // Unconditional: on the chat-completions wire, OpenAI (and any gateway that
+  // follows it strictly) returns NO usage at all without `include_usage` — no
+  // usage means no TPS badge and no cache-hit reading, silently. DeepSeek
+  // needs it too; everyone else treats it as a harmless no-op.
+  body.stream_options = { include_usage: true }
   if (input.profile.providerId === 'deepseek' || /deepseek/i.test(input.profile.model)) {
-    body.stream_options = { include_usage: true }
     body.reasoning_effort = input.reasoningEffort
   }
   return body
@@ -240,7 +351,7 @@ export function openAIChatBody(input: ProviderStreamInput): Record<string, unkno
 const openAICompatibleAdapter: ProviderAdapter = {
   async stream(input) {
     const body = openAIChatBody(input)
-    const response = await fetch(endpoint(input.profile.baseUrl, '/chat/completions'), {
+    const response = await providerFetch(endpoint(input.profile.baseUrl, '/chat/completions'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -264,6 +375,8 @@ const openAICompatibleAdapter: ProviderAdapter = {
         if (toolCall.function?.name) current.name += String(toolCall.function.name)
         if (typeof toolCall.function?.arguments === 'string') current.args += toolCall.function.arguments
         calls.set(index, current)
+        // tool-only 步骤的「首 token」就在这里 —— 计时用，不外发任何东西。
+        if (toolCall.function?.name || toolCall.function?.arguments) input.onToolArgs?.(String(toolCall.function?.arguments || toolCall.function?.name || ''))
       }
     }
     result.toolCalls = Array.from(calls.values()).filter((call) => call.name).map((call) => ({ id: call.id, name: call.name, args: parseArgs(call.args) }))
@@ -290,14 +403,26 @@ function listModelsFromEnvelope(envelope: unknown): string[] {
   return extractModelIds(envelope)
 }
 
-function anthropicMessages(messages: Array<Record<string, unknown>>) {
+/** Exported for the image-path test: Anthropic carries images inside `tool_result`. */
+export function anthropicMessages(messages: Array<Record<string, unknown>>) {
   let system = ''
   const result: Array<Record<string, unknown>> = []
   for (const message of messages) {
     const role = String(message.role || '')
     if (role === 'system') { system += `${system ? '\n\n' : ''}${String(message.content || '')}`; continue }
     if (role === 'tool') {
-      result.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: String(message.tool_call_id || ''), content: String(message.content || '') }] })
+      const images = imageParts(message.images)
+      // Anthropic 的 tool_result 内容块直接接受 image block（内联 base64）。
+      const content: unknown = images.length > 0
+        ? [
+            { type: 'text', text: String(message.content || '') },
+            ...images.map((image) => ({
+              type: 'image',
+              source: { type: 'base64', media_type: image.mimeType, data: image.data },
+            })),
+          ]
+        : String(message.content || '')
+      result.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: String(message.tool_call_id || ''), content }] })
       continue
     }
     if (role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -327,7 +452,7 @@ const anthropicAdapter: ProviderAdapter = {
     body.max_tokens = input.maxOutputTokens ?? 32768
     if (converted.system) body.system = converted.system
     if (input.tools.length > 0) body.tools = input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }))
-    const response = await fetch(endpoint(input.profile.baseUrl, '/messages'), {
+    const response = await providerFetch(endpoint(input.profile.baseUrl, '/messages'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -342,11 +467,25 @@ const anthropicAdapter: ProviderAdapter = {
       if (data.type === 'content_block_delta') {
         if (data.delta?.type === 'text_delta') { const text = String(data.delta.text || ''); result.content += text; input.onText(text) }
         if (data.delta?.type === 'thinking_delta') { const text = String(data.delta.thinking || ''); result.reasoning += text; input.onReasoning(text) }
-        if (data.delta?.type === 'input_json_delta') { const call = calls.get(Number(data.index)); if (call) call.args += String(data.delta.partial_json || '') }
+        if (data.delta?.type === 'input_json_delta') { const call = calls.get(Number(data.index)); const piece = String(data.delta.partial_json || ''); if (call) call.args += piece; input.onToolArgs?.(piece) }
       }
       if (data.type === 'message_delta') {
         result.finishReason = String(data.delta?.stop_reason || '')
-        if (data.usage) result.usage = { ...(result.usage || emptyUsage()), ...usageFromAnthropic(data.usage) }
+        if (data.usage) {
+          const incremental = usageFromAnthropic(data.usage)
+          if (incremental) {
+            // `message_delta.usage` may omit input-side fields; never let an
+            // absent bucket overwrite a real promptTokens with 0 (that used to
+            // zero the denominator and collapse the hit-rate reading).
+            const base = result.usage || emptyUsage()
+            result.usage = {
+              ...base,
+              ...incremental,
+              promptTokens: incremental.promptTokens || base.promptTokens,
+              promptCacheHitTokens: incremental.promptCacheHitTokens || base.promptCacheHitTokens,
+            }
+          }
+        }
       }
     }
     result.toolCalls = Array.from(calls.values()).filter((call) => call.name).map((call) => ({ id: call.id, name: call.name, args: parseArgs(call.args) }))
@@ -364,14 +503,41 @@ const anthropicAdapter: ProviderAdapter = {
 
 function emptyUsage() { return { promptTokens: 0, completionTokens: 0, reasoningTokens: 0, totalTokens: 0, promptCacheHitTokens: 0 } }
 
-function usageFromAnthropic(usage: any) {
+/**
+ * Anthropic usage → the harness's **inclusive** prompt convention.
+ *
+ * Anthropic reports `input_tokens` DISJOINT from the cache buckets
+ * (`input_tokens` excludes both cache reads and cache writes), while DeepSeek's
+ * `prompt_tokens` INCLUDES cache hits. The UI computes one hit rate
+ * (`hit / promptTokens`), so the adapter must normalize to one convention —
+ * otherwise the same formula means "hit share" on one provider and
+ * "hit-over-uncached" (often >100 %) on another. `cache_creation_input_tokens`
+ * is a miss (fresh write) and belongs in the denominator.
+ *
+ * Exported for tests.
+ */
+export function usageFromAnthropic(usage: any) {
   if (!usage) return undefined
-  const prompt = Number(usage.input_tokens) || 0
+  const cacheRead = Number(usage.cache_read_input_tokens) || 0
+  const cacheWrite = Number(usage.cache_creation_input_tokens) || 0
+  const prompt = (Number(usage.input_tokens) || 0) + cacheRead + cacheWrite
   const completion = Number(usage.output_tokens) || 0
-  return { promptTokens: prompt, completionTokens: completion, reasoningTokens: 0, totalTokens: prompt + completion, promptCacheHitTokens: Number(usage.cache_read_input_tokens) || 0 }
+  return {
+    promptTokens: prompt,
+    completionTokens: completion,
+    reasoningTokens: 0,
+    totalTokens: prompt + completion,
+    promptCacheHitTokens: cacheRead,
+  }
 }
 
-function googleContents(messages: Array<Record<string, unknown>>) {
+/**
+ * Exported for the image-path test.
+ *
+ * Gemini's `functionResponse` cannot carry images, so this pushes an extra
+ * `user` content with `inlineData` right after the tool result.
+ */
+export function googleContents(messages: Array<Record<string, unknown>>) {
   let system = ''
   const contents: Array<Record<string, unknown>> = []
   for (const message of messages) {
@@ -381,6 +547,12 @@ function googleContents(messages: Array<Record<string, unknown>>) {
     if (role === 'tool') {
       parts.push({ functionResponse: { name: String(message.toolName || message.tool_call_id || 'tool'), response: { result: String(message.content || '') } } })
       contents.push({ role: 'user', parts })
+      // Gemini 的 functionResponse 只能放文本，图片要作为**紧随其后的一个 user
+      // content**递进去（`inlineData`）。这是它的协议差异，不是我们的形状问题。
+      const images = imageParts(message.images)
+      if (images.length > 0) {
+        contents.push({ role: 'user', parts: images.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } })) })
+      }
       continue
     }
     if (role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -403,7 +575,7 @@ const googleAdapter: ProviderAdapter = {
     if (input.maxOutputTokens !== undefined) body.generationConfig = { maxOutputTokens: input.maxOutputTokens }
     if (input.tools.length > 0) body.tools = [{ functionDeclarations: input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }]
     const url = endpoint(input.profile.baseUrl, `/models/${encodeURIComponent(input.profile.model)}:streamGenerateContent?alt=sse`)
-    const response = await fetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
+    const response = await providerFetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
     if (!response.ok) return readError(response)
     const result = emptyResult()
     for await (const item of sseEvents(response)) {
@@ -412,7 +584,7 @@ const googleAdapter: ProviderAdapter = {
       for (const part of parts) {
         if (part.thought === true && typeof part.text === 'string') { result.reasoning += part.text; input.onReasoning(part.text) }
         else if (typeof part.text === 'string') { result.content += part.text; input.onText(part.text) }
-        if (part.functionCall) result.toolCalls.push({ id: `call_${randomUUID()}`, name: String(part.functionCall.name || ''), args: (part.functionCall.args || {}) as Record<string, unknown> })
+        if (part.functionCall) { result.toolCalls.push({ id: `call_${randomUUID()}`, name: String(part.functionCall.name || ''), args: (part.functionCall.args || {}) as Record<string, unknown> }); input.onToolArgs?.(String(part.functionCall.name || '')) }
       }
       const usage = payload?.usageMetadata
       if (usage) result.usage = { promptTokens: Number(usage.promptTokenCount) || 0, completionTokens: Number(usage.candidatesTokenCount) || 0, reasoningTokens: Number(usage.thoughtsTokenCount) || 0, totalTokens: Number(usage.totalTokenCount) || 0, promptCacheHitTokens: Number(usage.cachedContentTokenCount) || 0 }

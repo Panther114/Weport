@@ -174,9 +174,19 @@
 }
 
 .webot-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
   font-size: 12px;
   color: var(--danger);
   word-break: break-word;
+
+  // 「查看运行记录」跟着错误走：一行截断的错误后面必须有一步能看全上下文。
+  button {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 11.5px;
+  }
 }
 
 .webot-card-actions {
@@ -332,12 +342,9 @@
   }
 }
 
-.webot-picker-anchor {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 40;
-}
+// 引用选择器不再需要锚点容器：它渲染在 body 下的浮层里（components/ui/FloatingLayer）。
+// 旧版这里是 `position: absolute; bottom: calc(100% + 6px)`，在 `.webot` 的
+// 滚动容器内向上展开时会被整块裁掉 —— 用户看到的"弹窗在顶部被切掉"。
 
 .webot-schedule-row {
   display: flex;
@@ -382,6 +389,107 @@
 }
 
 .webot-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+// 12 小时制的时间输入：小时下拉 + 分钟 + 上午/下午。
+// 小时是 select（1–12，不会出现 0 点或 23 点这种读法），分钟保持可输入任意值。
+.webot-clock {
+  select {
+    min-width: 62px;
+  }
+}
+
+.webot-meridiem {
+  margin-left: 2px;
+}
+
+// 运行记录：与卡片同一张脸，只是纵向排几行「什么时候 / 什么结果 / 跑了多久」。
+// 失败原因整段换行显示 —— 「上次失败：fetch failed」就是因为只留了一句
+// 没有上下文的短文本，用户无从判断。
+.webot-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.webot-runs-empty {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.webot-run {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border-left: 2px solid var(--line);
+
+  &[data-status='error'] {
+    border-left-color: var(--danger);
+  }
+
+  &[data-status='running'] {
+    border-left-color: var(--accent-2);
+  }
+
+  &[data-status='skipped'] {
+    border-left-color: var(--text-faint);
+  }
+}
+
+.webot-run-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.webot-run-time {
+  font-family: var(--font-mono);
+}
+
+.webot-run-status {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+
+  &[data-status='ok'] {
+    border-color: color-mix(in srgb, var(--accent-2) 45%, transparent);
+    color: var(--accent-2);
+  }
+
+  &[data-status='error'] {
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    color: var(--danger);
+  }
+}
+
+.webot-run-duration {
+  margin-left: auto;
+}
+
+.webot-run-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.webot-run-note {
+  margin: 0;
   font-size: 11.5px;
   color: var(--text-faint);
 }
@@ -460,37 +568,55 @@
   border-radius: var(--radius);
   background: var(--panel);
 
-  // 未读用左侧强调条 + 淡色底：既不是"整块高亮"（那样一堆未读会很吵），
-  // 也不只靠颜色（点在有边框的一侧，灰度下也能看出来）。
-  &[data-unread='true'] {
-    border-left: 2px solid var(--accent);
-    background: var(--elevated);
-  }
-
-  &[data-status='error'] {
-    border-left-color: var(--danger);
-  }
+  // v1.0.1：未读/已读整块删除，所以这里不再有 `[data-unread]` 的强调条，
+  // 也不再有失败态的左边框（失败已经不落笔记）。
 
   header {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
     gap: var(--space-2);
 
     h4 {
       font-size: 13.5px;
       font-weight: 600;
+      // 标题占满剩余宽度，把时间和 ✕ 顶到右边（✕ 必须是"这张卡片"的右上角，
+      // 而不是跟在标题后面）
+      flex: 1;
+      min-width: 0;
     }
   }
 
-  p {
+  // 笔记正文按 Markdown 渲染，因此是块级内容（不再是单个 <p>）。
+  .webot-note-body {
     font-size: 12.5px;
     line-height: 1.7;
     color: var(--text-dim);
-    white-space: pre-wrap;
-    word-break: break-word;
     max-height: 220px;
     overflow-y: auto;
+
+    // Markdown 的首尾外边距会把卡片撑出多余空隙；列表的缩进也收窄一点，
+    // 卡片只有 320px 上下。
+    > :first-child {
+      margin-top: 0;
+    }
+
+    > :last-child {
+      margin-bottom: 0;
+    }
+
+    ul,
+    ol {
+      padding-left: 1.2em;
+      margin: 0.4em 0;
+    }
+
+    p {
+      margin: 0.4em 0;
+    }
+
+    code {
+      font-size: 11.5px;
+    }
   }
 
   footer {
@@ -499,6 +625,28 @@
     gap: var(--space-2);
     flex-wrap: wrap;
     margin-top: auto;
+  }
+}
+
+// 逐条删除：右上角的 ✕。常驻可见（不做 hover 才出现）—— 隐藏起来的删除入口
+// 会让"想删一条"变成一次找按钮的猜谜。
+.webot-note-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+    color: var(--danger);
   }
 }
 

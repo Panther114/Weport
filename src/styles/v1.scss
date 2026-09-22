@@ -852,10 +852,14 @@ textarea,
 // -----------------------------------------------------------------------------
 // 11. `@` 会话选择器
 // -----------------------------------------------------------------------------
+//
+// v1.0.1：整个选择器渲染在 `<body>` 下的浮层里（components/ui/FloatingLayer），
+// 位置由视口坐标算出来。因此这里**不再有任何定位属性**，也不再需要调用方给它
+// 准备一个 position: relative 的锚点容器 —— 那两个东西正是"被祖先的 overflow
+// 切掉"的来源。高度由浮层下发的 max-height 约束，列表自己滚。
 
 .ref-picker {
-  width: 380px;
-  max-width: 100%;
+  width: 100%;
   padding: var(--space-2);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -864,6 +868,8 @@ textarea,
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .ref-picker-search {
@@ -871,7 +877,8 @@ textarea,
   align-items: center;
   gap: var(--space-2);
   padding: 0 var(--space-2);
-  height: 30px;
+  height: 32px;
+  flex: none;
   border-bottom: 1px solid var(--line);
 
   input {
@@ -893,6 +900,31 @@ textarea,
   }
 }
 
+.ref-picker-search-icon {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.ref-picker-clear {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--accent-softer);
+    color: var(--text);
+  }
+}
+
 .ref-picker-at {
   color: var(--accent-2);
   font-weight: 700;
@@ -905,6 +937,8 @@ textarea,
 }
 
 .ref-picker-list {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: 280px;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -933,6 +967,29 @@ textarea,
     background: var(--accent-soft);
     color: var(--text);
   }
+
+  // 已经引用过的会话：灰掉、不再有选中态、光标也说明它点不动。
+  // 留在列表里而不是删掉 —— 删掉会让「搜一个刚引用过的群」变成「没有匹配的会话」，
+  // 用户只会以为搜索坏了。
+  &[data-picked='true'] {
+    opacity: 0.45;
+    cursor: default;
+
+    &[data-active='true'] {
+      background: transparent;
+      color: var(--text-dim);
+    }
+  }
+}
+
+.ref-picker-picked {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--text-faint);
 }
 
 .ref-picker-avatar {
@@ -1008,17 +1065,8 @@ textarea,
   color: var(--text-faint);
 }
 
-.ai-ref-picker {
-  position: relative;
-  padding: 0 var(--space-3) var(--space-2);
-
-  .ref-picker {
-    position: absolute;
-    bottom: 0;
-    left: var(--space-3);
-    z-index: 60;
-  }
-}
+// 引用选择器不再需要调用方提供定位容器：它自己渲染到 body 下的浮层里
+// （旧版这里是 `position: absolute; bottom: 0`，会在滚动容器里被裁掉）。
 
 // -----------------------------------------------------------------------------
 // 12. 弹窗层与右下角内容的碰撞
@@ -2905,4 +2953,178 @@ textarea,
 // 窄窗口下自动折行，不会横向溢出。
 .setting-block .theme-picker {
   grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+}
+/* ==========================================================================
+   v1.0.1 全局长任务指示器（BackgroundTasks）
+   --------------------------------------------------------------------------
+   贴左下角、只在真有任务在跑时出现。容器本身 pointer-events: none，
+   否则这块透明区域会吃掉下层的点击（它悬在页面内容上面）。
+   ========================================================================== */
+
+.bg-tasks {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 340px;
+  pointer-events: none;
+}
+
+.bg-task {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong, #2a2a33);
+  background: var(--panel, #14141a);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.32);
+}
+
+/* 玻璃模式下也读得清：面板底色由主题给，这里只加一层极淡的强调色描边 */
+:root[data-has-bg='true'] .bg-task {
+  background: color-mix(in srgb, var(--panel, #14141a) 88%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.bg-task-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: 6px;
+  color: var(--accent, #7accff);
+  background: color-mix(in srgb, var(--accent, #7accff) 14%, transparent);
+}
+
+.bg-task-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bg-task-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+
+  strong {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+}
+
+.bg-task-elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* 消息一行就够：详细日志在各自的页面里，这里只回答"还在动吗" */
+.bg-task-msg {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 0;
+
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  b {
+    margin-left: auto;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-faint);
+    flex: none;
+  }
+
+  svg {
+    flex: none;
+  }
+}
+
+.bg-task-track {
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-faint) 20%, transparent);
+}
+
+.bg-task-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent, #7accff);
+  transition: width 0.3s ease;
+}
+
+.bg-task-open,
+.bg-task-cancel {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    background: color-mix(in srgb, var(--text-faint) 16%, transparent);
+    color: var(--text);
+  }
+}
+
+.bg-task-cancel:hover {
+  color: var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-task-fill {
+    transition: none;
+  }
+}
+
+/* 无百分比可报的任务（备份 / 恢复）：用一条来回跑的条，而不是停在 0% 的实心条 */
+.bg-task-fill.indeterminate {
+  width: 40%;
+  animation: bg-task-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes bg-task-slide {
+  0% { margin-left: 0%; }
+  50% { margin-left: 60%; }
+  100% { margin-left: 0%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-task-fill.indeterminate {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }

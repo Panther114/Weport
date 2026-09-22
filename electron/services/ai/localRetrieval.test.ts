@@ -4,6 +4,7 @@ import {
   createCorpusBuilder,
   rankDocs,
   tokenize,
+  topUpVoiceSamples,
 } from './localRetrieval'
 
 describe('tokenize', () => {
@@ -178,5 +179,47 @@ describe('createCorpusBuilder', () => {
     const stats = createCorpusBuilder().finish()
     expect(stats.n).toBe(0)
     expect(stats.avgdl).toBe(0)
+  })
+})
+
+/**
+ * 语气样本补齐（v1.0.1）。
+ *
+ * 语气样本是**按当前话题检索**本人的原话。对方说"在忙什么"时能检索到一堆相关
+ * 句子；但对方只发"在吗""hi"或一个表情时，查询词在语料里几乎不存在，检索结果
+ * 可能是零 —— 这一轮模型没有任何语气参照，回复就滑回通用助手腔。
+ * 短消息恰恰是最常见的那种，所以这个兜底不是锦上添花。
+ */
+describe('topUpVoiceSamples：话题检索没命中时用最近说过的话兜底', () => {
+  it('话题样本已经够了就不动它（保持检索结果的顺序）', () => {
+    const primary = ['a1', 'a2', 'a3', 'a4', 'a5', 'a6']
+    expect(topUpVoiceSamples(primary, ['recent1', 'recent2'], 6, 14)).toEqual(primary)
+  })
+
+  it('话题样本为空时完全用最近的发言补上', () => {
+    const out = topUpVoiceSamples([], ['r1', 'r2', 'r3'], 6, 14)
+    expect(out).toEqual(['r1', 'r2', 'r3'])
+  })
+
+  it('不足 minCount 时补齐到 limit，且话题样本排在前面（优先级明确）', () => {
+    const out = topUpVoiceSamples(['topic1'], ['r1', 'r2', 'r3', 'r4'], 3, 5)
+    expect(out[0]).toBe('topic1')
+    expect(out).toHaveLength(5)
+  })
+
+  it('去重：同一句在两组里都出现时只留一次', () => {
+    const out = topUpVoiceSamples(['在吗'], ['在吗', '干嘛呢'], 6, 14)
+    expect(out.filter((t) => t === '在吗')).toHaveLength(1)
+    expect(out).toContain('干嘛呢')
+  })
+
+  it('空白与首尾空格被规范化，不会塞进一个空字符串样本', () => {
+    const out = topUpVoiceSamples(['  有效  '], ['', '   ', '\n'], 6, 14)
+    expect(out).toEqual(['有效'])
+  })
+
+  it('不会超过 limit（样本太多会挤掉检索到的历史片段）', () => {
+    const many = Array.from({ length: 50 }, (_, i) => `r${i}`)
+    expect(topUpVoiceSamples([], many, 6, 14)).toHaveLength(14)
   })
 })

@@ -61,6 +61,13 @@ export interface LiquidGlassBackdropImage {
      */
     winW?: number
     winH?: number
+    /**
+     * 快速采集路径的原始帧（主进程 koffi BitBlt，只抓卡片附近 ≈5~22ms）。
+     *
+     * 有它时玻璃把像素画进一张内部 canvas（见组件内 `frameSourceHostRef` 的说明），
+     * `dataUrl` 那条整屏 JPEG 路只在 koffi 不可用时才走。
+     */
+    pixels?: ImageData
 }
 
 export interface LiquidGlassProps {
@@ -69,6 +76,15 @@ export interface LiquidGlassProps {
     displacementScale?: number
     /** 磨砂程度（0~1，映射为额外的 backdrop blur 像素） */
     blurAmount?: number
+    /**
+     * 模糊像素的**最终值**（v1.0.1）。
+     *
+     * 通知卡片把"折射厚度"和"磨砂模糊"拆成了两个用户可调的档（设置 → 消息通知 →
+     * 通知玻璃），因此模糊不能再由 blurAmount 反推：这里直接收最终像素值。
+     * 两个管线的换算保持一致 —— WebGL 管线把它当 sigma、回退管线当 CSS blur()，
+     * 与改动前 `(4 + blurAmount * 32) / 2` 的取值逐值相同。不传则退回旧公式。
+     */
+    blurPx?: number
     /** 背景饱和度百分比 */
     saturation?: number
     /** 边缘色散强度 */
@@ -117,6 +133,7 @@ export default function LiquidGlass({
     children,
     displacementScale = 70,
     blurAmount = 0.0625,
+    blurPx,
     saturation = 140,
     aberrationIntensity = 2,
     elasticity = 0,
@@ -134,6 +151,11 @@ export default function LiquidGlass({
     const rawId = useId()
     // useId 可能包含 ':' 等 CSS url() 不接受的字符，需要清洗后才能用作滤镜 id
     const filterId = `liquid-glass-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`
+    // 模糊像素：显式传入优先，否则按旧的 blurAmount 公式换算（默认调用方行为不变）。
+    // 两条回退管线的比例关系保持原样：快照/视频是"对像素源直接下滤镜"，模糊半径减半
+    // 才与 backdrop 采样同观感，所以 backdrop-filter 那条路用两倍值。
+    const effectiveBlurPx = Math.max(0, blurPx ?? (4 + blurAmount * 32) / 2)
+    const backdropBlurPx = blurPx === undefined ? 4 + blurAmount * 32 : blurPx * 2
 
     const [isHovered, setIsHovered] = useState(false)
     const [isActive, setIsActive] = useState(false)
@@ -142,6 +164,9 @@ export default function LiquidGlass({
     const [mouse, setMouse] = useState<MouseState>(IDLE_MOUSE)
     const videoRef = useRef<HTMLVideoElement>(null)
     const canvasRef = useRef<HTMLCanvasElement>(null)
+    const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
+    /** 帧 canvas 的宿主（canvas 由 effect 创建并挂进去，见下面的说明） */
+    const frameSourceHostRef = useRef<HTMLSpanElement | null>(null)
     // 视频流出帧后才切换显示，避免黑帧闪烁
     const [streamLive, setStreamLive] = useState(false)
     // WebGL 渲染器初始化失败时回退 <video> + SVG 滤镜管线
@@ -149,10 +174,14 @@ export default function LiquidGlass({
     const useGlPipeline = Boolean(backdropStream) && !glFailed && !nativeBackdrop
 
     // 透镜位移贴图按实际尺寸生成（中心零位移、边缘弯曲）；
-    // WebGL 流管线在着色器内解析求值同一几何，无需贴图；原生模式折射在原生面板完成
+    // WebGL 流管线在着色器内解析求值同一几何，无需贴图；原生模式折射在原生面板完成。
+    //
+    // **镜面高光那张仍然要生成**（v1.0.1）：折射关掉时它是唯一能读出"这是曲面玻璃"
+    // 的一层（Aave 文章里的 edge highlight）。代价只是同一个象限循环里多写一个
+    // alpha 通道，尺寸/圆角不变时不会重算。
     const lensMap = useMemo(
-        () => (useGlPipeline || nativeBackdrop ? null : generateLensDisplacementMap(glassSize.width, glassSize.height, cornerRadius)),
-        [useGlPipeline, nativeBackdrop, glassSize.width, glassSize.height, cornerRadius]
+        () => (nativeBackdrop ? null : generateLensDisplacementMap(glassSize.width, glassSize.height, cornerRadius)),
+        [nativeBackdrop, glassSize.width, glassSize.height, cornerRadius]
     )
     // 贴图生成失败时跳过位移滤镜（模糊和材质层仍然生效）
     const refractionFilter = lensMap?.url ? `url(#${filterId})` : undefined
@@ -179,8 +208,8 @@ export default function LiquidGlass({
             displacementScale,
             aberrationIntensity,
             saturation,
-            // 与回退管线的 blur(${(4 + blurAmount * 32) / 2}px) 一致
-            blurSigma: (4 + blurAmount * 32) / 2,
+            // 与回退管线的 blur(${effectiveBlurPx}px) 一致
+            blurSigma: effectiveBlurPx,
             onFirstFrame: () => setStreamLive(true)
         })
         if (!renderer) {
@@ -195,7 +224,7 @@ export default function LiquidGlass({
     }, [
         useGlPipeline, backdropStream, glassSize.width, glassSize.height, cornerRadius,
         backdropImage?.screenX, backdropImage?.screenY, backdropImage?.width, backdropImage?.height,
-        anchor.x, anchor.y, displacementScale, aberrationIntensity, saturation, blurAmount
+        anchor.x, anchor.y, displacementScale, aberrationIntensity, saturation, effectiveBlurPx
     ])
 
     // 回退管线：<video> 承载流，CSS/SVG 滤镜加工
@@ -233,6 +262,35 @@ export default function LiquidGlass({
         observer.observe(el)
         return () => observer.disconnect()
     }, [])
+
+    /**
+     * 快速采集帧 → 一张由 effect 直接挂进 DOM 的 canvas。
+     *
+     * 为什么不是 React 渲染出来的 `<img src={canvas.toDataURL()}>`：那样每帧都要一次
+     * JPEG 编码（15fps 下是这条路上最贵的一步）。canvas 挂在 DOM 里之后内容自己更新，
+     * 浏览器下一帧直接重绘，每帧只剩一次 `putImageData`。
+     */
+    const framePixels = backdropImage?.pixels
+    useEffect(() => {
+        const host = frameSourceHostRef.current
+        if (!host) return
+        let canvas = frameCanvasRef.current
+        if (!canvas || canvas.parentNode !== host) {
+            canvas = document.createElement('canvas')
+            canvas.setAttribute('data-glass-frame', '1')
+            canvas.style.cssText = 'position:absolute;left:0;top:0;display:block;pointer-events:none'
+            frameCanvasRef.current = canvas
+            host.replaceChildren(canvas)
+        }
+        canvas.style.width = `${backdropImage?.width ?? 0}px`
+        canvas.style.height = `${backdropImage?.height ?? 0}px`
+        if (!framePixels) return
+        if (canvas.width !== framePixels.width || canvas.height !== framePixels.height) {
+            canvas.width = framePixels.width
+            canvas.height = framePixels.height
+        }
+        canvas.getContext('2d')?.putImageData(framePixels, 0, 0)
+    }, [framePixels, backdropImage?.width, backdropImage?.height])
 
     // 鼠标接近时的弹性形变（rAF 节流；远离激活区时不重复 setState）
     useEffect(() => {
@@ -347,6 +405,16 @@ export default function LiquidGlass({
         <div
             ref={rootRef}
             className={`liquid-glass ${className}`.trim()}
+            /**
+             * 折射/模糊的**实际生效值**挂成数据属性。
+             *
+             * 和 `<html data-glass>` 同一个用途：让探针能断言"滑块真的把参数送到了玻璃"，
+             * 而不是只看控件自己的 value（控件值一直是对的，坏的是它到渲染的链路）。
+             * 设置页的预览没有桌面帧可用，`backdrop-filter` 那条路上的观感没法用像素
+             * 断言，只能靠这两个值把链路钉死。
+             */
+            data-glass-blur={effectiveBlurPx}
+            data-glass-disp={displacementScale}
             style={{
                 position: 'relative',
                 borderRadius: cornerRadius,
@@ -402,10 +470,13 @@ export default function LiquidGlass({
                                 inset: -PIXEL_SOURCE_BLEED,
                                 overflow: 'hidden',
                                 // 快照模式模糊直接作用于像素源，同参数观感重于 backdrop 采样，减半以保留折射细节
-                                filter: `blur(${(4 + blurAmount * 32) / 2}px) saturate(${saturation}%)`
+                                filter: `blur(${effectiveBlurPx}px) saturate(${saturation}%)`
                             }}
                         >
-                            {backdropImage.dataUrl && !streamLive && (
+                            {backdropImage.pixels ? (
+                                <span ref={frameSourceHostRef} style={backdropPixelSourceStyle} />
+                            ) : null}
+                            {backdropImage.dataUrl && !streamLive && !backdropImage.pixels && (
                                 <img src={backdropImage.dataUrl} alt="" style={backdropPixelSourceStyle} />
                             )}
                             {backdropStream && (
@@ -431,7 +502,7 @@ export default function LiquidGlass({
                         ...overlayBase,
                         overflow: 'hidden',
                         // 与原库一致的轻模糊基线，保证玻璃通透而非磨砂
-                        backdropFilter: `blur(${4 + blurAmount * 32}px) saturate(${saturation}%)`,
+                        backdropFilter: `blur(${backdropBlurPx}px) saturate(${saturation}%)`,
                         filter: refractionFilter
                     }}
                 />
@@ -445,9 +516,61 @@ export default function LiquidGlass({
             {/* 内容层保持清晰 */}
             <div style={{ position: 'relative', zIndex: 1, padding }}>{children}</div>
 
-            {/* 边缘高光双层（screen + overlay 混合），强度由兼容层变量整体缩放 */}
-            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'screen', opacity: 'calc(0.2 * var(--liquid-glass-ring, 1))', background: borderGradient(0.12, 0.4) }} />
-            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'overlay', opacity: 'var(--liquid-glass-ring, 1)', background: borderGradient(0.32, 0.6) }} />
+            {/**
+             * 镜面高光（v1.0.1）—— Aave 文章里那个"specular highlight"。
+             *
+             * 由法线算出的高光（贴图里那张白 + alpha 的图）**沿着圆角走**：左上那一
+             * 段最亮、往下侧逐渐消失。它和下面那两层白色渐变不一样：渐变只是"给边缘
+             * 刷一条亮线"，而这个是"曲面把光反到眼睛里"—— 折射/模糊全关时，玻璃能
+             * 不能读成曲面几乎全靠它。
+             *
+             * 屏幕混合（screen）只做提亮，不会把下面的填充压暗；强度跟着用户的
+             * 「边缘高光」（--liquid-glass-ring）走。
+             */}
+            {lensMap?.specularUrl && (
+                <span
+                    data-glass-specular="1"
+                    style={{
+                        ...overlayBase,
+                        zIndex: 2,
+                        backgroundImage: `url(${lensMap.specularUrl})`,
+                        backgroundSize: '100% 100%',
+                        mixBlendMode: 'screen',
+                        /**
+                         * 下限 0.35：镜面高光是"这是玻璃"最直接的证据，不能因为用户把
+                         * 「边缘高光」拉到 0 就整层消失 —— 那正好把玻璃读成一块纯色板
+                         * （实测：`--glass-ring` 来自描边不透明度，默认 0，于是这一层
+                         * 在默认配置下完全不显示，白做）。滑块只负责往上加。
+                         */
+                        opacity: 'max(0.35, calc(0.85 * var(--liquid-glass-ring, 1)))'
+                    }}
+                />
+            )}
+
+            {/**
+             * 厚度层（v1.0.1）：顶边内侧一道细亮、底边内侧一道细暗。
+             *
+             * 真玻璃有一条**看得见的厚度**：上缘把光汇进来（亮），下缘把光带出去并
+             * 微微压暗。只用一圈均匀的白色描边时，读起来是"塑料贴纸的边"。
+             * mask 与边缘高光同一套（1.5px 环），所以它贴着圆角走。
+             */}
+            <span
+                data-glass-thickness="1"
+                style={{
+                    ...borderLayerBase,
+                    zIndex: 2,
+                    boxShadow: 'none',
+                    background:
+                        'linear-gradient(180deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.10) 18%, rgba(255,255,255,0) 42%, rgba(0,0,0,0) 62%, rgba(0,0,0,0.16) 100%)',
+                    // 同上：厚度是材质线索，给一个下限，滑块只负责往上加。
+                    opacity: 'max(0.3, calc(0.9 * var(--liquid-glass-ring, 1)))'
+                }}
+            />
+
+            {/* 边缘高光双层（screen + overlay 混合），强度由兼容层变量整体缩放。
+                镜面高光那一层（上面）已经把"曲面"表达了，这里只留一点点方向性补光。 */}
+            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'screen', opacity: 'calc(0.14 * var(--liquid-glass-ring, 1))', background: borderGradient(0.12, 0.4) }} />
+            <span style={{ ...borderLayerBase, zIndex: 2, mixBlendMode: 'overlay', opacity: 'calc(0.7 * var(--liquid-glass-ring, 1))', background: borderGradient(0.32, 0.6) }} />
 
             {/* 可点击时的悬停 / 按下辉光（通知弹窗通过 hoverEffect={false} 关闭） */}
             {clickable && hoverEffect && (

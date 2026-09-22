@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { resolveNotificationTheme, type BandSample } from './useNotificationAdaptiveTheme'
 import {
   GRADIENT_PRESETS,
+  GRADIENT_PRESET_MIN_LUMA_DELTA,
   NOTIFICATION_GLASS_DEFAULT,
   glassTextPolarity,
   normalizeNotificationGlass,
@@ -108,22 +109,22 @@ describe('弹窗文字颜色：不随背景自动调整', () => {
   })
 })
 
-describe('glassTextPolarity：极性只由用户填的玻璃颜色决定', () => {
+describe('glassTextPolarity：极性由「填充 × 不透明度」合成后的实际观感决定', () => {
   const withGlass = (patch: Partial<NotificationGlass>): NotificationGlass => ({ ...NOTIFICATION_GLASS_DEFAULT, ...patch })
 
-  it('默认（白色填充 16%）→ 深色文字', () => {
+  it('默认（浅色渐变 60%）→ 深色文字', () => {
     expect(glassTextPolarity(NOTIFICATION_GLASS_DEFAULT)).toBe('dark')
   })
 
-  it('任意亮色填充 → 深色文字', () => {
+  it('不透明的亮色填充 → 深色文字', () => {
     for (const fillColor of ['#ffffff', '#f5f5f5', '#e0e0e0', '#c8c8c8', '#80c0ff']) {
-      expect(glassTextPolarity(withGlass({ fillColor })), fillColor).toBe('dark')
+      expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor, fillOpacity: 100 }), 0.5), fillColor).toBe('dark')
     }
   })
 
-  it('暗色填充 → 浅色文字', () => {
+  it('不透明的暗色填充 → 浅色文字', () => {
     for (const fillColor of ['#000000', '#161412', '#333333', '#2b2b3a']) {
-      expect(glassTextPolarity(withGlass({ fillColor })), fillColor).toBe('light')
+      expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor, fillOpacity: 100 }), 0.5), fillColor).toBe('light')
     }
   })
 
@@ -132,18 +133,60 @@ describe('glassTextPolarity：极性只由用户填的玻璃颜色决定', () =>
   })
 
   it('填充色非法时退回默认白 → 深色文字，不抛错', () => {
-    expect(glassTextPolarity(withGlass({ fillColor: 'not-a-color' }))).toBe('dark')
-    expect(glassTextPolarity(withGlass({ fillColor: '' }))).toBe('dark')
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: 'not-a-color' }))).toBe('dark')
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '' }))).toBe('dark')
   })
 
-  it('渐变填充取两端中点判极性：两套渐变预设都该配深字，石墨配浅字', () => {
-    // 预设里除石墨外最亮端都 ≥0.7，中点因此必然落在深字一侧
+  /**
+   * 用户报的第二个问题：
+   *
+   *  「文字色的自适应只看了渐变/填充色，没考虑这些颜色乘上**不透明度**之后的实际效果。」
+   *
+   * 旧实现只看填充色本身，于是"20% 的黑"（实际上几乎是透明的）被当成"暗色填充"配白字，
+   * 落在亮桌面上就是浅底白字。这里的四组断言把两件事分别钉住：
+   *  · 低不透明度时结论**跟着背景走**（因为背景才是画面里的大头）；
+   *  · 同一个填充色在满不透明度下结论**相反** —— 证明确实是"合成"在起作用，
+   *    而不是又退回"看填充色"。
+   */
+  it('低不透明度时按合成结果判：浅底配深字、暗底配浅字', () => {
+    const translucentBlack = withGlass({ fillMode: 'solid', fillColor: '#000000', fillOpacity: 20 })
+    // 20% 黑落在亮桌面（0.82）→ 合成 ≈ 0.66 → 深字
+    expect(glassTextPolarity(translucentBlack, 0.82)).toBe('dark')
+    // 10% 白落在近黑桌面（0.02）→ 合成 ≈ 0.12 → 浅字
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '#ffffff', fillOpacity: 10 }), 0.02)).toBe('light')
+
+    // 同样两个颜色，满不透明度下结论翻转（证明确实是"合成"在起作用）
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '#000000', fillOpacity: 100 }), 0.82)).toBe('light')
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '#ffffff', fillOpacity: 100 }), 0.06)).toBe('dark')
+  })
+
+  it('渐变按代表色合成：整张卡只有一个极性，不让一端翻车', () => {
+    // #ffffff → #000000（代表色≈中灰 0.216），60% 不透明度
+    const glass = withGlass({ fillMode: 'gradient', fillGradientFrom: '#ffffff', fillGradientTo: '#000000', fillOpacity: 60 })
+    // 中灰背景（0.5）：合成 ≈ 0.33 → 深字
+    expect(glassTextPolarity(glass, 0.5)).toBe('dark')
+    // 近黑背景（0.0）：合成 ≈ 0.13 → 浅字
+    expect(glassTextPolarity(glass, 0.0)).toBe('light')
+  })
+
+  it('没有背景采样时按中灰（0.5）估：不确定的假设不把任一端判死', () => {
+    const glass = withGlass({ fillMode: 'solid', fillColor: '#808080', fillOpacity: 60 })
+    // 合成 = 0.6*0.216 + 0.4*0.5 = 0.33 → 深字（对比度 6.4 vs 2.9）
+    expect(glassTextPolarity(glass, 0.5)).toBe('dark')
+  })
+
+  it('渐变填充取两端中点判极性：每一对预设都与它声明的极性一致', () => {
+    // 预设自带 `expect`（这一对**应该**配什么颜色的文字）。这里拿函数对它账，
+    // 而不是反过来写死"除了石墨都是深字" —— 那样新增一个暗色预设就会静默判错。
+    // 用 100% 不透明度：预设的 expect 描述的是"这套配色本身"，与背景无关。
     for (const preset of GRADIENT_PRESETS) {
-      const expected = preset.id === 'graphite' ? 'light' : 'dark'
       expect(
-        glassTextPolarity(withGlass({ fillMode: 'gradient', fillGradientFrom: preset.from, fillGradientTo: preset.to })),
+        glassTextPolarity(
+          withGlass({ fillMode: 'gradient', fillGradientFrom: preset.from, fillGradientTo: preset.to, fillOpacity: 100 }),
+          0.5
+        ),
         preset.id
-      ).toBe(expected)
+      ).toBe(preset.expect)
     }
   })
 
@@ -175,11 +218,20 @@ describe('glassTextPolarity：极性只由用户填的玻璃颜色决定', () =>
       expect(vars['--noti-title-color']).not.toBe('#ffffff')
     })
 
-    it('暗色填充 → 预览文字变浅色（说明控件真的动了）', () => {
+    it('暗色填充（不透明）→ 预览文字变浅色（说明控件真的动了）', () => {
       const vars = notificationGlassTextVars(
-        withGlass({ fillMode: 'gradient', fillGradientFrom: '#3a3d45', fillGradientTo: '#1c1e23' })
+        withGlass({ fillMode: 'gradient', fillGradientFrom: '#3a3d45', fillGradientTo: '#1c1e23', fillOpacity: 100 })
       )
       expect(luma(vars['--noti-title-color'])).toBeGreaterThan(0.6)
+    })
+
+    it('预览也按"填充 × 不透明度"合成：极淡的暗色填充落在亮底上仍配深字', () => {
+      // 10% 的黑几乎透明 —— 预览（中灰底）里它依然是浅色板，配深字
+      const vars = notificationGlassTextVars(
+        withGlass({ fillMode: 'solid', fillColor: '#000000', fillOpacity: 10 }),
+        0.5
+      )
+      expect(luma(vars['--noti-title-color'])).toBeLessThan(0.12)
     })
 
     it('关掉填充 → 仍是深色，且四个变量都给全（缺一个就会退回兜底白）', () => {
@@ -205,9 +257,72 @@ describe('填充渐变：只允许从左到右', () => {
   const withGlass = (patch: Partial<NotificationGlass>): NotificationGlass => ({ ...NOTIFICATION_GLASS_DEFAULT, ...patch })
 
   it('纯色模式仍然是 rgba 单色，与旧行为逐字节一致', () => {
-    const value = notificationGlassFillValue(NOTIFICATION_GLASS_DEFAULT)
+    const value = notificationGlassFillValue(
+      withGlass({ fillMode: 'solid', fillColor: '#ffffff', fillOpacity: 16 })
+    )
     expect(value).toBe('rgba(255, 255, 255, 0.16)')
-    expect(notificationGlassVars(NOTIFICATION_GLASS_DEFAULT)['--glass-fill']).toBe(value)
+    expect(notificationGlassVars(withGlass({ fillMode: 'solid', fillColor: '#ffffff', fillOpacity: 16 }))['--glass-fill']).toBe(value)
+  })
+
+  /**
+   * 默认值 = 用户那套配置，**v1.0.1 逐项对齐了他本机的 Weport-config.json**。
+   *
+   * 用户的要求是"我的当前设置就是默认值，一按恢复默认不该有任何变化"。所以这条
+   * 断言钉的不是审美，而是**他的那串值**：60% 晴空渐变、文字色自动（空串，
+   * 不是手动黑）、圆角 **25**、无描边/投影/折射/磨砂、宽度 344、4 行。
+   * 以后要改默认值，必须在这里留痕 —— 那等于替用户改观感。
+   */
+  it('默认值 = 晴空渐变 60% + 自动文字色 + 圆角 25 + 宽度 344', () => {
+    const d = NOTIFICATION_GLASS_DEFAULT
+    expect(d.fill).toBe(true)
+    expect(d.fillMode).toBe('gradient')
+    expect(d.fillGradientFrom).toBe('#d8ecff')
+    expect(d.fillGradientTo).toBe('#6aa9ea')
+    expect(d.fillOpacity).toBe(60)
+    // 空串 = 按填充色极性自动（用户配置里 notificationGlassTextColor 就是空串）
+    expect(d.textColor).toBe('')
+    expect(d.radius).toBe(25)
+    expect(d.borderWidth).toBe(0)
+    expect(d.borderOpacity).toBe(0)
+    expect(d.blur).toBe(0)
+    expect(d.frost).toBe(0)
+    expect(d.shadow).toBe(0)
+    expect(d.width).toBe(344)
+    expect(d.maxLines).toBe(4)
+    expect(notificationGlassFillValue(d)).toBe('linear-gradient(90deg, rgba(216, 236, 255, 0.6), rgba(106, 169, 234, 0.6))')
+  })
+
+  const presetLuma = (hex: string) => {
+    const n = parseInt(hex.slice(1), 16)
+    const lin = (v: number) => {
+      const s = v / 255
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
+    }
+    return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255)
+  }
+
+  /**
+   * 用户原话（v1.0.1）：**"变化太细微了"**。
+   *
+   * 旧列表里最平的一条两端相对亮度只差 0.044 —— 60% 铺上去读起来就是一块纯色，
+   * 用户会以为预设没生效。这条断言把"每一对都要看得出变化"变成硬约束：以后
+   * 不可能再把一条几乎同色的浅灰混进预设列表。
+   */
+  it('每一条预设两端都真的看得出变化（相对亮度差 ≥ 0.20）', () => {
+    for (const preset of GRADIENT_PRESETS) {
+      const delta = Math.abs(presetLuma(preset.from) - presetLuma(preset.to))
+      expect(delta, `${preset.id}（${preset.label}）ΔL=${delta.toFixed(3)}`).toBeGreaterThanOrEqual(
+        GRADIENT_PRESET_MIN_LUMA_DELTA
+      )
+    }
+  })
+
+  /** 默认那一条自己也要够狠 —— 它就是用户每天看到的那张卡片。 */
+  it('默认渐变两端差别够大（相对亮度差 ≥ 0.20）', () => {
+    const d = NOTIFICATION_GLASS_DEFAULT
+    expect(Math.abs(presetLuma(d.fillGradientFrom) - presetLuma(d.fillGradientTo))).toBeGreaterThanOrEqual(
+      GRADIENT_PRESET_MIN_LUMA_DELTA
+    )
   })
 
   it('渐变模式输出 90deg 的 linear-gradient，两端都带同一个 alpha', () => {
@@ -244,19 +359,28 @@ describe('填充渐变：只允许从左到右', () => {
       fillGradientTo: '',
       fillOpacity: 9999,
     })
-    expect(g.fillMode).toBe('solid')
+    expect(g.fillMode).toBe(NOTIFICATION_GLASS_DEFAULT.fillMode)
     expect(g.fillGradientFrom).toBe(NOTIFICATION_GLASS_DEFAULT.fillGradientFrom)
     expect(g.fillGradientTo).toBe(NOTIFICATION_GLASS_DEFAULT.fillGradientTo)
     expect(g.fillOpacity).toBe(100)
   })
 
-  it('预设色板本身合法：8 个预设、色值都是 #rrggbb、两端不相同', () => {
-    expect(GRADIENT_PRESETS.length).toBeGreaterThanOrEqual(6)
+  it('预设色板本身合法：色值都是 #rrggbb、两端不相同、极性声明齐全', () => {
+    // v1.0.1 起预设大幅扩容（旧列表 9 条且大半几乎同色）。下限抬到 20 条，
+    // 让"多给一些预设"这件事也有个可对账的数。
+    expect(GRADIENT_PRESETS.length).toBeGreaterThanOrEqual(20)
     for (const preset of GRADIENT_PRESETS) {
       expect(preset.from, preset.id).toMatch(/^#[0-9a-f]{6}$/)
       expect(preset.to, preset.id).toMatch(/^#[0-9a-f]{6}$/)
       // 两端相同就不是渐变了，会让用户以为没生效
       expect(preset.from, preset.id).not.toBe(preset.to)
+      expect(['dark', 'light'], preset.id).toContain(preset.expect)
     }
+    // 预设 id 唯一：设置页用 id 当 React key，重名会让点击选错色
+    expect(new Set(GRADIENT_PRESETS.map((p) => p.id)).size).toBe(GRADIENT_PRESETS.length)
+    // 第一项就是默认值：预设列表的第一个必须能"一键回到默认的观感"
+    expect(GRADIENT_PRESETS[0].from).toBe(NOTIFICATION_GLASS_DEFAULT.fillGradientFrom)
+    expect(GRADIENT_PRESETS[0].to).toBe(NOTIFICATION_GLASS_DEFAULT.fillGradientTo)
+    expect(GRADIENT_PRESETS[0].label).toBe('晴空')
   })
 })

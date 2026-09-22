@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -21,6 +21,9 @@
     "qa:tui": "npm run build:tui && node scripts/qa-tui.mjs",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
+    "bench": "node .ui-probe/bench-perf.mjs",
+    "bench:installed": "node .ui-probe/bench-perf.mjs --installed",
+    "bench:update": "node .ui-probe/bench-perf.mjs --update",
     "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vitest run && vite build && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
     "build": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
     "build:dir": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --dir --publish never",

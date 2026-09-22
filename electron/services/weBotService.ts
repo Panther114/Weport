@@ -53,6 +53,12 @@ export interface WeBotRun {
  * 这是 WeBot 真正的输出面：任务跑完不是把整段对话倒给用户，而是在笔记板上
  * 留下一张短的、结构化的卡片。字段刻意保持稳定（见 `version`），因为
  * 它同时通过 HTTP API 与 MCP 对外暴露给第三方集成。
+ *
+ * v1.0.1 两处收窄（都是用户报的）：
+ * - **失败的运行不再落笔记**。失败原因属于「运行记录」，不属于结论板；旧版把
+ *   `上次失败：fetch failed` 当成一条笔记铺在结论旁边，用户看到的是一堆噪声。
+ * - **没有已读/未读**。`read` 字段已删除；历史数据里的 `read` 在载入时被丢掉。
+ *   `status` 保留是因为旧的状态文件里可能有 `error` 笔记，载入时会据此清理。
  */
 export interface WeBotNote {
   version: 1
@@ -63,10 +69,28 @@ export interface WeBotNote {
   createdAt: number
   title: string
   summary: string
+  /** 只可能是 `ok`（保留 `error` 仅为读取旧状态文件）。 */
   status: 'ok' | 'error'
   references: WeBotReference[]
-  read: boolean
   pinned: boolean
+}
+
+/**
+ * 一次运行结束时给**通知**用的载荷（不是笔记）。
+ *
+ * 成功时带上刚落盘的笔记；失败时带错误原因 —— 两者都要弹窗，但只有成功的那条
+ * 会在笔记板上留下卡片。把「通知」与「笔记」分成两个类型，是因为它们从 v1.0.1
+ * 起就不再一一对应了。
+ */
+export interface WeBotRunNotice {
+  status: 'ok' | 'error'
+  taskId: string
+  taskTitle: string
+  createdAt: number
+  /** 弹窗正文（成功 = 笔记摘要，失败 = 错误原因）。 */
+  summary: string
+  /** 成功时存在。 */
+  note?: WeBotNote
 }
 
 export interface WeBotDispatchRequest {
@@ -87,8 +111,24 @@ export interface WeBotServiceOptions {
   dataDir: string
   /** 派发一次运行。由 appMain 注入，避免本模块直接依赖 agent harness。 */
   dispatch: (request: WeBotDispatchRequest, signal: AbortSignal) => Promise<WeBotDispatchResult>
-  /** 通知回调（任务完成/失败时弹窗）。 */
-  notify?: (note: WeBotNote) => void
+  /** 运行结束时的通知回调（成功与失败都会调；只有成功会带笔记）。 */
+  notify?: (notice: WeBotRunNotice) => void
+  /**
+   * 一次运行**开始**时的回调。
+   *
+   * 为什么需要它：定时任务可能跑几分钟，而这期间界面上什么都不会变 ——
+   * 用户看到的是「这个任务到点了但没动静」。渲染层收到它就把这条 `running`
+   * 记录插进运行日志里（同样的形状，同样的渲染路径）。
+   */
+  onRunStarted?: (run: WeBotRun) => void
+  /**
+   * 一次运行**结束**时的回调（成功与失败都会调）。
+   *
+   * 开始与结束必须成对：失败的运行从 v1.0.1 起不再产生笔记，而渲染层的运行日志
+   * 过去是靠「来了新笔记 → 整页重读」才知道跑完了。少了它，一条失败的运行会
+   * 永远停在「运行中」。
+   */
+  onRunFinished?: (run: WeBotRun) => void
   /** 调度 tick 间隔，测试可调小。 */
   tickMs?: number
   /** 运行历史保留条数（默认 400）。 */
@@ -110,6 +150,44 @@ const MAX_RUNS = 400
 const MAX_NOTES = 500
 
 /**
+ * 把磁盘上的一条笔记收敛成当前口径，或丢掉它。
+ *
+ * 两件事在这里发生（v1.0.1）：
+ *  1. **失败笔记不再存在**。旧版本给每次失败也写一条 `status: 'error'` 的笔记，
+ *     用户报的是「结论板里混着一堆 fetch failed」。载入时直接丢掉，并在
+ *     `load()` 里回写一次。
+ *  2. **`read` 字段被丢掉**。未读/已读整条功能删掉了，留着这个字段只会让
+ *     "笔记是否已读"这种概念在类型里阴魂不散。
+ */
+function normalizeNote(raw: unknown): WeBotNote | null {
+  if (!raw || typeof raw !== 'object') return null
+  const note = raw as WeBotNote & { read?: unknown }
+  if (note.status === 'error') return null
+  if (!note.id || typeof note.id !== 'string') return null
+  return {
+    version: 1,
+    id: note.id,
+    taskId: String(note.taskId || ''),
+    taskTitle: String(note.taskTitle || ''),
+    runId: String(note.runId || ''),
+    createdAt: Number(note.createdAt) || 0,
+    title: String(note.title || ''),
+    summary: String(note.summary || ''),
+    status: 'ok',
+    references: Array.isArray(note.references)
+      ? note.references
+          .filter((reference) => reference && typeof reference === 'object')
+          .map((reference) => ({
+            id: String(reference.id || ''),
+            label: String(reference.label || ''),
+            kind: reference.kind === 'group' || reference.kind === 'official' ? reference.kind : 'private',
+          }))
+      : [],
+    pinned: note.pinned === true,
+  }
+}
+
+/**
  * WeBot：应用内定时任务调度器。
  *
  * 三条设计约束（都来自产品约束，不是实现偏好）：
@@ -125,7 +203,9 @@ const MAX_NOTES = 500
 export class WeBotService {
   private readonly dataDir: string
   private readonly dispatchFn: WeBotServiceOptions['dispatch']
-  private readonly notifyFn?: (note: WeBotNote) => void
+  private readonly notifyFn?: (notice: WeBotRunNotice) => void
+  private readonly onRunStartedFn?: (run: WeBotRun) => void
+  private readonly onRunFinishedFn?: (run: WeBotRun) => void
   private readonly tickMs: number
   private readonly maxRuns: number
   private readonly maxNotes: number
@@ -141,6 +221,8 @@ export class WeBotService {
     this.dataDir = options.dataDir
     this.dispatchFn = options.dispatch
     this.notifyFn = options.notify
+    this.onRunStartedFn = options.onRunStarted
+    this.onRunFinishedFn = options.onRunFinished
     this.tickMs = Math.max(5_000, options.tickMs ?? 30_000)
     this.maxRuns = Math.max(1, options.maxRuns ?? MAX_RUNS)
     this.maxNotes = Math.max(1, options.maxNotes ?? MAX_NOTES)
@@ -166,8 +248,12 @@ export class WeBotService {
         version: 1,
         tasks: Array.isArray(parsed.tasks) ? (parsed.tasks as WeBotTask[]) : [],
         runs: Array.isArray(parsed.runs) ? (parsed.runs as WeBotRun[]) : [],
-        notes: Array.isArray(parsed.notes) ? (parsed.notes as WeBotNote[]) : [],
+        notes: Array.isArray(parsed.notes)
+          ? parsed.notes.map((note) => normalizeNote(note)).filter((note): note is WeBotNote => note !== null)
+          : [],
       }
+      // 清理是一次性的：只在真的丢了东西时回写，避免每次启动都无谓地写盘。
+      if (this.state.notes.length !== (Array.isArray(parsed.notes) ? parsed.notes.length : 0)) this.persist()
     } catch (error) {
       // 损坏的状态文件不能让整个功能崩掉：留空并继续，旧文件保留在磁盘上。
       console.warn('[WeBot] 状态文件无法解析，已从空状态启动:', error)
@@ -275,6 +361,11 @@ export class WeBotService {
     task.lastRunAt = startedAt
     this.trim()
     this.persist()
+    try {
+      this.onRunStartedFn?.({ ...run })
+    } catch (error) {
+      console.warn('[WeBot] 运行开始回调失败:', error)
+    }
 
     const controller = new AbortController()
     this.running.set(run.id, controller)
@@ -287,34 +378,47 @@ export class WeBotService {
       const note = this.appendNote(task, run, {
         title: result.title || task.title,
         summary: String(result.summary || '').trim() || '（本次运行没有产出内容）',
-        status: 'ok',
       })
       run.noteId = note.id
-      this.notifyFn?.(note)
+      this.notifyFn?.({ status: 'ok', taskId: task.id, taskTitle: task.title, createdAt: note.createdAt, summary: note.summary, note })
     } catch (error) {
       run.status = controller.signal.aborted ? 'skipped' : 'error'
       run.finishedAt = this.nowFn()
       run.durationMs = run.finishedAt - startedAt
       run.error = String((error as Error)?.message || error).slice(0, 500)
-      // 失败也要留笔记：否则用户只在弹窗里瞥一眼错误，之后无从复盘。
-      const note = this.appendNote(task, run, {
-        title: `${task.title}（失败）`,
-        summary: run.error || '运行失败',
+      /**
+       * 失败**不写笔记**（v1.0.1）。
+       *
+       * 旧实现在这里也 appendNote 一条 `status: 'error'`：结论板上于是混进
+       * 「上次失败：fetch failed」这类卡片，和真正的结论并列。用户要的是两件事
+       * 分开 —— 失败看在运行记录里（有完整错误、时刻与耗时），笔记板只放结论。
+       * 失败仍然弹窗：那是用户唯一会立刻注意到的通道。
+       */
+      this.notifyFn?.({
         status: 'error',
+        taskId: task.id,
+        taskTitle: task.title,
+        createdAt: run.finishedAt,
+        summary: run.error || '运行失败',
       })
-      run.noteId = note.id
-      this.notifyFn?.(note)
     } finally {
       this.running.delete(run.id)
       this.trim()
       this.persist()
+      // 结束回调放在最后：此时这条 run 已经是终态，渲染层拿到就能直接替换掉
+      // 那一行「运行中」。
+      try {
+        this.onRunFinishedFn?.({ ...run })
+      } catch (error) {
+        console.warn('[WeBot] 运行结束回调失败:', error)
+      }
     }
   }
 
   private appendNote(
     task: WeBotTask,
     run: WeBotRun,
-    content: { title: string; summary: string; status: 'ok' | 'error' }
+    content: { title: string; summary: string }
   ): WeBotNote {
     const note: WeBotNote = {
       version: 1,
@@ -325,9 +429,8 @@ export class WeBotService {
       createdAt: this.nowFn(),
       title: content.title.slice(0, 120),
       summary: content.summary.slice(0, 4000),
-      status: content.status,
+      status: 'ok',
       references: task.references.map((reference) => ({ ...reference })),
-      read: false,
       pinned: false,
     }
     this.state.notes.unshift(note)
@@ -414,33 +517,45 @@ export class WeBotService {
     return runs.slice(0, Math.max(1, Math.min(500, limit))).map((run) => ({ ...run }))
   }
 
-  listNotes(options: { taskId?: string; unreadOnly?: boolean; limit?: number } = {}): WeBotNote[] {
+  listNotes(options: { taskId?: string; limit?: number } = {}): WeBotNote[] {
     this.load()
-    let notes = this.state.notes
+    // 失败笔记在载入时就被清掉了，这里再过滤一次是防御：任何路径写进来的
+    // `error` 都不该出现在结论板上（这是用户的明确要求）。
+    let notes = this.state.notes.filter((note) => note.status !== 'error')
     if (options.taskId) notes = notes.filter((note) => note.taskId === options.taskId)
-    if (options.unreadOnly) notes = notes.filter((note) => !note.read)
     return notes.slice(0, Math.max(1, Math.min(500, options.limit ?? 200))).map((note) => ({ ...note }))
   }
 
   getNote(id: string): WeBotNote | null {
     this.load()
     const note = this.state.notes.find((item) => item.id === id)
-    return note ? { ...note } : null
+    if (!note || note.status === 'error') return null
+    return { ...note }
   }
 
-  updateNote(id: string, patch: { read?: boolean; pinned?: boolean }): WeBotNote | null {
+  /** 置顶是笔记**唯一**的状态（v1.0.1 起已读/未读整条功能删除）。 */
+  updateNote(id: string, patch: { pinned?: boolean }): WeBotNote | null {
     this.load()
     const note = this.state.notes.find((item) => item.id === id)
-    if (!note) return null
-    if (patch.read !== undefined) note.read = patch.read === true
+    if (!note || note.status === 'error') return null
     if (patch.pinned !== undefined) note.pinned = patch.pinned === true
     this.persist()
     return { ...note }
   }
 
-  unreadNoteCount(): number {
+  /**
+   * 逐条删除（笔记卡片右上角的 ✕）。
+   *
+   * 为什么要有它：旧版只有「清空全部」，用户想丢掉一条过期结论只能把整个板子
+   * 清掉 —— 这是把"删除"这个动作的粒度做错了。
+   */
+  deleteNote(id: string): boolean {
     this.load()
-    return this.state.notes.filter((note) => !note.read).length
+    const before = this.state.notes.length
+    this.state.notes = this.state.notes.filter((note) => note.id !== id)
+    if (this.state.notes.length === before) return false
+    this.persist()
+    return true
   }
 
   clearNotes(): number {

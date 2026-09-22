@@ -54,6 +54,7 @@ import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
 import { setWeBotService } from './services/weBotRegistry'
 import { weCloneService } from './services/weCloneService'
+import { TASK_KEY, taskStatusService } from './services/taskStatusService'
 import { connectorsService } from './services/connectors/connectorsService'
 import { registerCliCommands } from './services/cliCommands'
 import { runCommand } from './services/weportCommands'
@@ -2055,7 +2056,9 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
 
   sections.push(
     `这是 WeBot 定时任务的自动执行（${new Date().toLocaleString('zh-CN')}）。` +
-      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。'
+      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。' +
+      '如果结论取决于聊天里的**图片**（作业照片、截图、通知单），必须用 read_chat_images 真正看图后再下结论 —— ' +
+      '不要凭文件名、文字描述或猜测代替看图；图看不了就如实说明原因。'
   )
 
   // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
@@ -2075,24 +2078,41 @@ function ensureWeBotService(): WeBotService {
   weBotService = new WeBotService({
     dataDir: join(app.getPath('userData'), 'webot'),
     dispatch: dispatchWeBotTask,
-    notify: (note) => {
+    onRunStarted: (run) => {
+      // 「到点了正在跑」这一刻也要可见：任务可能跑几分钟，界面在此之前
+      // 完全没有变化。渲染层把这条 running 记录直接插进运行日志。
+      try {
+        mainWindow?.webContents.send('webot:runStarted', run)
+      } catch { /* 窗口可能尚未创建 */ }
+    },
+    onRunFinished: (run) => {
+      // 开始与结束必须成对（v1.0.1）：失败的运行不再产生笔记，渲染层不能
+      // 再靠「来了新笔记」得知跑完了，否则那一行会永远停在「运行中」。
+      try {
+        mainWindow?.webContents.send('webot:runFinished', run)
+      } catch { /* 窗口可能尚未创建 */ }
+    },
+    notify: (notice) => {
       // 复用聊天通知的那套独立置顶窗口（notificationWindow.ts），不另起一套
       // 通知系统 —— 用户已经熟悉它出现的位置与交互。
       try {
         ensureWeChatRequestHeaderInterceptor()
         void showNotification({
-          sessionId: `webot:${note.taskId}`,
+          sessionId: `webot:${notice.taskId}`,
           channel: 'webot',
-          title: note.status === 'error' ? `WeBot 任务失败 · ${note.taskTitle}` : `WeBot 任务完成 · ${note.taskTitle}`,
-          content: note.summary.slice(0, 160),
-          timestamp: note.createdAt,
+          title: notice.status === 'error' ? `WeBot 任务失败 · ${notice.taskTitle}` : `WeBot 任务完成 · ${notice.taskTitle}`,
+          content: notice.summary.slice(0, 160),
+          timestamp: notice.createdAt,
         })
       } catch (e) {
         console.warn('[WeBot] 通知发送失败:', e)
       }
-      try {
-        mainWindow?.webContents.send('webot:note', note)
-      } catch { /* 窗口可能尚未创建 */ }
+      // 只有成功的那条会广播笔记事件（笔记板因此不需要对失败做任何过滤）。
+      if (notice.note) {
+        try {
+          mainWindow?.webContents.send('webot:note', notice.note)
+        } catch { /* 窗口可能尚未创建 */ }
+      }
     },
   })
   return weBotService
@@ -2385,7 +2405,23 @@ function registerIpcHandlers() {
   })
 
   // 聊天
-  ipcMain.handle('chat:connect', () => chatService.connect())
+  //
+  // 连接是一条**可能很久**的操作（读密钥要走原生 helper、可能要 sudo、要等
+  // WCDB 宿主起来）。状态写进 taskStatusService，这样渲染进程被销毁重建
+  // （托盘隐藏 / 最小化）之后仍然能看到"正在连接"而不是一个空白的按钮。
+  ipcMain.handle('chat:connect', async () => {
+    taskStatusService.begin(TASK_KEY.connect, '正在连接微信数据库…')
+    try {
+      const result = await chatService.connect()
+      if (result?.success) taskStatusService.end(TASK_KEY.connect, 'done', { message: '已连接' })
+      else taskStatusService.end(TASK_KEY.connect, 'failed', { error: String(result?.error || '连接失败'), message: '连接失败' })
+      return result
+    } catch (e) {
+      const message = String((e as Error)?.message || e)
+      taskStatusService.end(TASK_KEY.connect, 'failed', { error: message, message: '连接失败' })
+      throw e
+    }
+  })
   ipcMain.handle('chat:close', () => {
     chatService.close()
     return { success: true }
@@ -2484,6 +2520,7 @@ function registerIpcHandlers() {
 
     const taskId = `export-${Date.now()}`
     const control = exportTaskControlService.createControl(taskId, outDir)
+    taskStatusService.begin(TASK_KEY.export, '准备中…', 'prepare')
     const progressEmitter = (progress: any) => {
       // 进度事件携带 taskId：渲染层靠它执行 export:cancelTask
       //
@@ -2491,6 +2528,22 @@ function registerIpcHandlers() {
       // 每 400ms 一条，而群聊名可以很长。把无界字符串塞进高频事件里，渲染层每帧都
       // 要把一行超长文本交给文本整形 + 省略号计算，观感就是"名字在抖"。三个消费方
       // （进度条 / CLI 日志 / TUI）都从这里取数，所以在最上游收敛一次即可。
+      taskStatusService.progress(TASK_KEY.export, {
+        stage: String(progress?.phase || ''),
+        progress: Number(progress?.total) > 0 ? (Number(progress?.current) / Number(progress.total)) * 100 : undefined,
+        message: String(progress?.phaseLabel || progress?.currentSession || '导出中…'),
+        // 导出每 400ms 一条事件，全部记进日志会把 200 行的环形缓冲冲干净，
+        // 也读不出东西 —— 只记进度、不记日志，日志面板本来也只显示阶段行。
+        log: false,
+        detail: {
+          taskId,
+          current: Number(progress?.current) || 0,
+          total: Number(progress?.total) || 0,
+          phase: String(progress?.phase || ''),
+          phaseLabel: String(progress?.phaseLabel || ''),
+          currentSession: boundProgressSessionLabel(progress?.currentSession),
+        },
+      })
       mainWindow?.webContents.send('export:progress', {
         ...progress,
         currentSession: boundProgressSessionLabel(progress?.currentSession),
@@ -2539,6 +2592,18 @@ function registerIpcHandlers() {
       if (fmt === 'txt' || fmt === 'json') {
         writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
       }
+      // 终态显式落下：取消 / 失败 / 完成三种收尾在界面上完全不一样，
+      // 靠"进度到 100"推断会把一次取消显示成成功。
+      const cancelled = exportTaskControlService.getState(taskId) === 'cancel_requested'
+      taskStatusService.end(
+        TASK_KEY.export,
+        cancelled ? 'aborted' : result.success && result.failCount === 0 ? 'done' : 'failed',
+        {
+          message: cancelled ? '已取消导出' : `导出完成（成功 ${result.successCount || 0}，失败 ${result.failCount || 0}）`,
+          error: result.failCount ? `${result.failCount} 个会话导出失败` : undefined,
+          detail: { taskId, successCount: result.successCount || 0, failCount: result.failCount || 0 },
+        }
+      )
       return {
         ...result,
         success: result.success && result.failCount === 0,
@@ -2547,6 +2612,7 @@ function registerIpcHandlers() {
         taskId,
       }
     } catch (e) {
+      taskStatusService.end(TASK_KEY.export, 'failed', { error: String((e as Error)?.message || e), message: '导出失败' })
       return { success: false, successCount: 0, failCount: sessionIds.length, error: String((e as Error)?.message || e) }
     } finally {
       exportTaskControlService.releaseTask(taskId)
@@ -3102,7 +3168,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('webot:listNotes', (_e, options?: any) => ensureWeBotService().listNotes(options || {}))
   ipcMain.handle('webot:getNote', (_e, id: string) => ensureWeBotService().getNote(String(id || '')))
   ipcMain.handle('webot:updateNote', (_e, id: string, patch: any) => ensureWeBotService().updateNote(String(id || ''), patch || {}))
-  ipcMain.handle('webot:unreadCount', () => ensureWeBotService().unreadNoteCount())
+  ipcMain.handle('webot:deleteNote', (_e, id: string) => ensureWeBotService().deleteNote(String(id || '')))
   ipcMain.handle('webot:clearNotes', () => ensureWeBotService().clearNotes())
 
   // -------------------------------------------------------------------------
@@ -3133,20 +3199,60 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // 这几个我保留并扩展过的接口。此处只补齐 IPC。
   // -------------------------------------------------------------------------
   const wecloneControllers = new Map<string, AbortController>()
-  ipcMain.handle('weclone:generate', async (_e, opts?: { localOnly?: boolean }) => {
+  ipcMain.handle('weclone:generate', async (_e, opts?: { redact?: boolean }) => {
     const taskId = 'generate'
     if (wecloneControllers.has(taskId)) return { success: false, error: '克隆生成已在进行中' }
     const ctrl = new AbortController()
     wecloneControllers.set(taskId, ctrl)
+    // 主进程侧的状态快照（见 taskStatusService）：渲染进程可能在中途被销毁重建，
+    // 只有主进程知道这次生成跑到哪一步了。
+    taskStatusService.begin(TASK_KEY.wecloneGenerate, '正在检查配置…', 'scan')
     try {
-      return await weCloneService.generateClone(
-        (progress) => mainWindow?.webContents.send('weclone:progress', progress),
-        ctrl.signal
+      const result = await weCloneService.generateClone(
+        (progress) => {
+          taskStatusService.progress(TASK_KEY.wecloneGenerate, {
+            stage: progress.stage,
+            progress: progress.progress,
+            message: progress.message,
+            detail: progress.detail,
+          })
+          mainWindow?.webContents.send('weclone:progress', progress)
+        },
+        ctrl.signal,
+        // 脱敏开关由渲染层传下来（导出页的勾选）；不传则用配置里的值。
+        // 两者都缺就是默认「开」。
+        { redact: opts?.redact !== undefined ? opts.redact !== false : weCloneService.getRedactEnabled() }
       )
+      if (result.success) {
+        taskStatusService.end(TASK_KEY.wecloneGenerate, 'done', {
+          message: '克隆已在本地生成',
+          detail: { cloneId: result.clone?.id },
+        })
+      } else if (result.aborted) {
+        taskStatusService.end(TASK_KEY.wecloneGenerate, 'aborted', { message: '已取消' })
+      } else {
+        taskStatusService.end(TASK_KEY.wecloneGenerate, 'failed', {
+          error: String(result.error || '生成失败'),
+          message: String(result.error || '生成失败'),
+        })
+      }
+      return result
+    } catch (error) {
+      const message = String((error as Error)?.message || error)
+      taskStatusService.end(TASK_KEY.wecloneGenerate, 'failed', { error: message, message })
+      throw error
     } finally {
       wecloneControllers.delete(taskId)
     }
   })
+  /**
+   * 导出（生成）时的脱敏开关。
+   *
+   * 存在配置里而不是只放在页面 state：用户勾了「不脱敏」然后切了个页面再回来，
+   * 勾选状态不该自己变回默认。
+   */
+  ipcMain.handle('weclone:getRedact', () => ({ success: true, redact: weCloneService.getRedactEnabled() }))
+  ipcMain.handle('weclone:setRedact', (_e, enabled: boolean) => weCloneService.setRedactEnabled(enabled !== false))
   ipcMain.handle('weclone:list', () => weCloneService.getClones())
   ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
   ipcMain.handle('weclone:delete', (_e, id: string) => weCloneService.deleteClone(String(id || '')))
@@ -3163,6 +3269,14 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     weCloneService.cancel()
     return { success: true }
   })
+  /**
+   * 长任务状态快照。
+   *
+   * 渲染进程侧 `utils/liveTaskWiring.ts` 在应用启动时调用一次；窗口被销毁重建
+   * （托盘隐藏 / 最小化 unload）后**新文档**会再调一次，于是进度、日志、开始
+   * 时间都能原样恢复 —— 任务本身一直活在主进程里，从来没停过。
+   */
+  ipcMain.handle('task:status', () => taskStatusService.all())
   // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
   // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
   ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))
@@ -3187,6 +3301,12 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   )
   ipcMain.handle('weclone:deleteChat', (_e, cloneId: string, chatId: string) =>
     weCloneService.deleteChat(String(cloneId || ''), String(chatId || ''))
+  )
+  // 每个克隆自己的设置（v1.0.1）：目前只有拒答行为。存在克隆目录里，
+  // 跟着它的档案与语料一起生灭。
+  ipcMain.handle('weclone:getSettings', (_e, cloneId: string) => weCloneService.getSettings(String(cloneId || '')))
+  ipcMain.handle('weclone:setSettings', (_e, cloneId: string, patch: { refusal?: string }) =>
+    weCloneService.setSettings(String(cloneId || ''), patch || {})
   )
   // v1.0：`weclone:getForcedProviderStatus` / `weclone:ensureProvider` /
   // `weclone:setForcedApiKey` 三个通道已删除 —— 人格克隆不再有自己的服务，
@@ -3246,17 +3366,25 @@ function demoConfigValue(key: string): unknown {
     case 'messagePushRespectWechatMute':
       return true
     case 'messagePushFilterMode':
-      return 'all'
+      // 演示用黑名单模式：截图要能看出「屏蔽 n 个会话」把跟随免打扰的会话算了进去
+      // （用户报的 bug），全部接收的话那行数字根本不显示。
+      return 'blacklist'
     case 'messagePushFilterList':
-      return []
+      return ['trip@chatroom']
     case 'notificationFilterMode':
-      return 'all'
+      return 'blacklist'
     case 'notificationFilterList':
-      return []
+      return ['trip@chatroom']
     case 'notificationEnabled':
       return false
     case 'notificationDuration':
       return 3000
+    // 动效开关与风格也必须在演示数据里钉死：它们默认回落到真实配置，于是截图
+    // 会随"跑截图那台机器"的设置变化（同一份 README 出自不同人手就长得不一样）。
+    case 'notificationAnimationEnabled':
+      return true
+    case 'notificationAnimationStyle':
+      return 'slide'
     case 'antiRevokeAutoApplyNewGroups':
       return false
     default:
@@ -3395,6 +3523,29 @@ function demoAntiRevokeSessions() {
   ]
 }
 
+/**
+ * 演示会话列表。
+ *
+ * 为什么截图模式必须覆盖 `chat:getSessions`：v1.0.1 起「消息通知设置」在打开时
+ * 会读一次会话与免打扰状态（那行「屏蔽 n 个会话」要把跟随免打扰的算进去），
+ * 不覆盖就会打到**真实的微信数据库**，把真实会话 id / 名字画进 README 截图。
+ *
+ * 顺序与真实返回一致：按最近活跃降序（`@` 选择器直接吃这个顺序）。
+ */
+function demoSessions() {
+  const now = Math.floor(Date.now() / 1000)
+  return [
+    { username: 'family@chatroom', displayName: '一家人', summary: '周末去郊野公园野餐', sortTimestamp: now - 120, lastTimestamp: now - 120, messageCountHint: 9163, isMuted: false, isFolded: false },
+    { username: 'wxid_zhangwei', displayName: '张伟', summary: '明天记得带实验报告', sortTimestamp: now - 900, lastTimestamp: now - 900, messageCountHint: 1284, isMuted: false, isFolded: false },
+    { username: 'proj@chatroom', displayName: '项目群 · 产品迭代', summary: '这版先上通知设置', sortTimestamp: now - 3_600, lastTimestamp: now - 3_600, messageCountHint: 4021, isMuted: true, isFolded: true },
+    { username: 'wxid_lina', displayName: '李娜', summary: '照片洗好了', sortTimestamp: now - 5_400, lastTimestamp: now - 5_400, messageCountHint: 642, isMuted: false, isFolded: false },
+    { username: 'daily@chatroom', displayName: '工作日报群', summary: '今日日报汇总', sortTimestamp: now - 7_200, lastTimestamp: now - 7_200, messageCountHint: 2140, isMuted: true, isFolded: false },
+    { username: 'alumni@chatroom', displayName: '老同学', summary: '聚一次吧', sortTimestamp: now - 86_400, lastTimestamp: now - 86_400, messageCountHint: 3312, isMuted: true, isFolded: false },
+    { username: 'trip@chatroom', displayName: '周末郊游小分队', summary: '订了三辆车', sortTimestamp: now - 90_000, lastTimestamp: now - 90_000, messageCountHint: 420, isMuted: false, isFolded: false },
+    { username: 'parents@chatroom', displayName: '爸妈', summary: '到家说一声', sortTimestamp: now - 172_800, lastTimestamp: now - 172_800, messageCountHint: 806, isMuted: false, isFolded: false },
+  ]
+}
+
 function installScreenshotDemoHandlers() {
   // WEPORT_TRACE_AI=1 时把渲染进程实际发出的 ai:* 调用打到 stdout：截图模式里
   // "AI 页面只渲染出空态"这类问题，只有看清调用了哪些通道、拿到了什么才能定位。
@@ -3426,6 +3577,15 @@ function installScreenshotDemoHandlers() {
   override('chat:uninstallAntiRevokeTriggers', (e, sessionIds: string[]) => ({
     rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
   }))
+  // 会话列表 + 免打扰状态：通知设置的「屏蔽 n 个会话」与 `@` 选择器都读它们，
+  // 不覆盖就会读到真实微信数据（见 demoSessions 的说明）。
+  override('chat:getSessions', () => ({ success: true, sessions: demoSessions() }))
+  override('chat:getSessionStatuses', (_e, usernames: string[]) => {
+    const muted = new Set(demoSessions().filter((session) => session.isMuted).map((session) => session.username))
+    const map: Record<string, { isMuted: boolean; isFolded: boolean }> = {}
+    for (const username of usernames || []) map[String(username)] = { isMuted: muted.has(String(username)), isFolded: false }
+    return { success: true, map }
+  })
   override('ai:getSetup', () => demoAiSetup())
   override('ai:setSetup', () => ({ success: true }))
   override('ai:listProviders', () => ({ providers: demoAiSetup().catalog }))
@@ -3513,12 +3673,26 @@ function installScreenshotDemoHandlers() {
     runId: 'run-demo-1',
     createdAt: Date.now() - 3_600_000,
     title: '化学群作业整理',
+    // 笔记正文是 **Markdown**（v1.0.1：模型本来就输出 md，界面以前按纯文本渲染，
+    // 于是 `- 第 3 题` 和 `**周三小测**` 原样露出来）。演示数据里刻意带上三种语法，
+    // 截图与视觉断言才不会在"有人把渲染改回纯文本"时全绿。
     summary:
-      '今天布置的是必修二第三章课后练习 3-5 题，另需预习有机化合物一节。\n老师提醒周三小测，范围是前两章。',
+      '今天布置的是必修二第三章课后练习：\n\n- 第 3 题（配平）\n- 第 4–5 题\n\n**老师提醒**：周三小测，范围是前两章。',
     status: 'ok' as const,
     references: [{ id: 'demo-room@chatroom', label: '化学 3 班', kind: 'group' as const }],
-    read: false,
     pinned: false,
+  }
+  const demoWebBotNote2 = {
+    ...demoWebBotNote,
+    id: 'note-demo-2',
+    taskId: 'task-demo-3',
+    taskTitle: '项目群进展跟踪',
+    runId: 'run-demo-3',
+    createdAt: Date.now() - 7_200_000,
+    title: '项目群进展跟踪',
+    summary: '1. 接口联调完成，等待测试环境部署。\n2. 下周一前需要确认埋点字段。',
+    references: [{ id: 'demo-work@chatroom', label: '项目协作', kind: 'group' as const }],
+    pinned: true,
   }
   // 三条任务而不是一条：任务列表是「卡片网格」，一条任务时看不出网格是否
   // 真的排开；第二条停用、第三条是每周任务，顺带覆盖停用态与每周排期文案。
@@ -3543,10 +3717,10 @@ function installScreenshotDemoHandlers() {
     nextRunAt: Date.now() + 540_000,
   }
   override('webot:listTasks', () => [demoWebBotTask, demoWebBotTask2, demoWebBotTask3])
-  override('webot:listNotes', () => [demoWebBotNote])
+  override('webot:listNotes', () => [demoWebBotNote, demoWebBotNote2])
   override('webot:getNote', () => demoWebBotNote)
   override('webot:updateNote', () => demoWebBotNote)
-  override('webot:unreadCount', () => 1)
+  override('webot:deleteNote', () => true)
   override('webot:clearNotes', () => 0)
   override('webot:listRuns', () => [
     {
@@ -3556,6 +3730,20 @@ function installScreenshotDemoHandlers() {
       scheduledAt: Date.now() - 3_630_000,
       startedAt: Date.now() - 3_600_000,
       finishedAt: Date.now() - 3_570_000,
+      // 最近一次失败：卡片上会显示「上次失败：<原因>」，运行记录里也能看到完整文本。
+      // v1.0.1 之前这里是一句 `fetch failed` —— 那正是用户报的 bug。
+      status: 'error' as const,
+      error: '网络请求失败：api.deepseek.com 域名解析失败（ENOTFOUND）',
+      noteId: 'note-demo-1',
+      durationMs: 900,
+    },
+    {
+      id: 'run-demo-2',
+      taskId: 'task-demo-1',
+      taskTitle: '化学群作业整理',
+      scheduledAt: Date.now() - 7_260_000,
+      startedAt: Date.now() - 7_200_000,
+      finishedAt: Date.now() - 7_170_000,
       status: 'ok' as const,
       noteId: 'note-demo-1',
       durationMs: 30_000,
@@ -4306,7 +4494,12 @@ async function runV09DumpMode() {
     const r = await wc.executeJavaScript(`
       (() => {
         const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
-        const b = buttons.find((x) => x.textContent.includes(${JSON.stringify(label)}));
+        // 先精确匹配，再退回包含匹配：左侧导航里「消息通知设置」包含「设置」，
+        // 只按 includes 找会把「设置」点到「消息通知设置」上去（实测：整段设置页
+        // 巡检拿到的全是通知页的截图，而断言只报"某个类名没渲染"，很难看出原因）。
+        const exact = ${JSON.stringify(label)};
+        const b = buttons.find((x) => (x.textContent || '').trim() === exact)
+          || buttons.find((x) => (x.textContent || '').includes(exact));
         if (!b) return { ok: false, tabs: buttons.map((x) => x.textContent.trim()) };
         b.click();
         return { ok: true };
@@ -5065,7 +5258,8 @@ async function runScreenshotMode() {
   const clickTab = (label: string) =>
     (mainWindow?.webContents
       .executeJavaScript(
-        `(() => { const b = Array.from(document.querySelectorAll('.tab, .rail-item')).find((el) => el.textContent.includes(${JSON.stringify(label)})); if (b) { b.click(); return true } return false })()`,
+        // 精确优先（同 runScreenshotMode 的说明）：「设置」不能被「消息通知设置」抢走
+        `(() => { const items = Array.from(document.querySelectorAll('.tab, .rail-item')); const want = ${JSON.stringify(label)}; const b = items.find((el) => (el.textContent || '').trim() === want) || items.find((el) => (el.textContent || '').includes(want)); if (b) { b.click(); return true } return false })()`,
         true,
       )
       .catch(() => false) ?? Promise.resolve(false))
@@ -5639,9 +5833,41 @@ async function runScreenshotMode() {
              let bg = { r: 0, g: 0, b: 0, a: 0 }
              let node = el
              const layers = []
+             // 通知卡片的填充（--glass-fill）画在**卡片内部**的一层覆盖元素上，
+             // 不是任何文字的祖先 backgroundColor，所以只走 backgroundColor 的
+             // 祖先链会把"浅色玻璃上的黑字"判成"压在深色面板上的黑字"（实测 1.1，
+             // 假失败）。这里把它当成文字背后的一层正常参与合成：值可能是渐变
+             // （取各 stop 的平均，与 notificationGlassRepresentativeRgba 同口径），
+             // 也可能是单色 rgba。
+             const parseFill = (raw) => {
+               if (!raw) return null
+               const stops = []
+               const re = /rgba?\\(([^)]+)\\)/g
+               let m
+               while ((m = re.exec(raw))) {
+                 const parts = m[1].split(',').map((v) => Number.parseFloat(v.trim()))
+                 if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) continue
+                 stops.push({ r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 && Number.isFinite(parts[3]) ? parts[3] : 1 })
+               }
+               if (!stops.length) return null
+               const sum = stops.reduce((acc, s) => ({ r: acc.r + s.r, g: acc.g + s.g, b: acc.b + s.b, a: acc.a + s.a }), { r: 0, g: 0, b: 0, a: 0 })
+               return { r: sum.r / stops.length, g: sum.g / stops.length, b: sum.b / stops.length, a: sum.a / stops.length }
+             }
+             // 自定义属性会**继承**：--glass-fill 定义在卡片容器上，卡内每个后代都读得到
+             // 同一个值。按元素逐个入栈会把同一层填充叠 N 次，合成结果完全失真；
+             // 只在"本元素的填充与它**父级**的不同"（也就是它自己定义了这一层）时入栈。
              while (node && node.nodeType === 1) {
-               const c = parse(getComputedStyle(node).backgroundColor)
+               const style = getComputedStyle(node)
+               const c = parse(style.backgroundColor)
                if (c && c.a > 0) layers.push(c)
+               const rawFill = style.getPropertyValue('--glass-fill').trim()
+               const parentFill = node.parentElement
+                 ? getComputedStyle(node.parentElement).getPropertyValue('--glass-fill').trim()
+                 : ''
+               if (rawFill && rawFill !== parentFill) {
+                 const fill = parseFill(rawFill)
+                 if (fill && fill.a > 0) layers.push(fill)
+               }
                if (c && c.a >= 0.99) break
                node = node.parentElement
              }
@@ -6015,6 +6241,58 @@ async function runScreenshotMode() {
       true,
     ).catch(() => false)
     await sleep(500)
+  })
+
+  // WeBot 运行记录（v1.0.1）：卡片上的历史按钮展开出每次运行的时刻 / 结果 / 耗时。
+  // 断言的是具体的运行行，而不是"卡片还在" —— 后者在按钮坏了的时候照样通过。
+  // 先把上一张图留下的编辑器关掉、并把卡片滚进视口，否则截图里看不到记录行。
+  await captureV09('webot-runs', 'webot-runs.png', ['.webot-run'], async () => {
+    await clickTab('WeBot')
+    await sleep(300)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => {
+         const close = Array.from(document.querySelectorAll('.webot-editor-head button')).find((x) => x.textContent.includes('关闭'));
+         close?.click();
+         return !!close;
+       })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const b = document.querySelector('.webot-card-log'); b?.click(); return !!b; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(500)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const el = document.querySelector('.webot-runs'); el?.scrollIntoView({ block: 'center' }); return !!el; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+  })
+
+  // `@` 选择器（v1.0.1）：私聊与群聊按最近聊天混排，已引用的会话灰掉。
+  // 先引用一个，再打开一次 —— 第二张图里第一项必须是灰的（已引用），否则
+  // 「已引用还留在列表里、但不该再被选中」这条规则就没有被验证过。
+  await captureV09('mention-picker', 'mention-picker.png', ['.ref-picker-item'], async () => {
+    await clickTab('WeportAI')
+    await sleep(800)
+    const setInput = (value: string) => `(() => {
+      const el = document.querySelector('.ai-input');
+      if (!el) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`
+    await mainWindow!.webContents.executeJavaScript(setInput('@'), true).catch(() => false)
+    await sleep(700)
+    await mainWindow!.webContents.executeJavaScript(
+      `(() => { const first = document.querySelector('.ref-picker-item'); first?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return !!first; })()`,
+      true,
+    ).catch(() => false)
+    await sleep(400)
+    await mainWindow!.webContents.executeJavaScript(setInput('@'), true).catch(() => false)
+    await sleep(700)
   })
 
   await captureV09('webot-notes', 'webot-notes.png', ['.webot-note', '.webot-note-list'], async () => {

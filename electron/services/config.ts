@@ -89,6 +89,14 @@ interface ConfigSchema {
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
   notificationDuration: number
   notificationAnimationEnabled: boolean
+  /**
+   * 弹窗动效风格（v1.0.1）。
+   *
+   * - `slide`（默认）：从**离它最近的那条屏幕边**滑入，退场沿原路滑出。
+   *   边角位置是水平滑动（右侧的角 → 从右边滑入），顶部居中是从上往下滑。
+   * - `classic`：旧版的"原地淡入 + 轻微缩放"，用户明确要求保留。
+   */
+  notificationAnimationStyle: 'slide' | 'classic'
   notificationFilterMode: 'all' | 'whitelist' | 'blacklist' | 'mentions'
   notificationFilterList: string[]
   /**
@@ -177,6 +185,15 @@ interface ConfigSchema {
   weportAiModel: string
   weportAiMaxTokens: number
   weportAiReasoningEffort: 'low' | 'high' | 'max'
+  /**
+   * 图片输入开关（v1.1，默认开）。
+   *
+   * 关掉后 `read_chat_images` 只回报"这个窗口里有几张图、谁发的、什么时候"，不再把
+   * 图片本体交给模型 —— 给**不支持视觉**的模型/网关用（有些 OpenAI 兼容网关收到
+   * `image_url` 内容块会直接 400）。默认开，因为默认模型（deepseek-v4.1-flash 一类）
+   * 都是视觉模型，作业照片这类任务必须真的看图。
+   */
+  weportAiImageInputs: boolean
   weportAiMaxSteps: number
   weportAiCustomPrompt: string
   weportAiWorkspaceRoot: string
@@ -185,6 +202,8 @@ interface ConfigSchema {
   weportAiDisabledTools: string[]
   weportAiActions: Array<{ id: string; name: string; prompt: string }>
   weportAiMaxToolChars: number
+  /** 一批工具调用里的并行安全并发上限（DSH maxParallelToolCalls 的对应项） */
+  weportAiMaxParallelToolCalls: number
   weportAiContextWindow: number
 
   // WeClone（人格克隆）—— v1.0 起**纯本地**
@@ -195,6 +214,14 @@ interface ConfigSchema {
   // 老配置文件里残留的这三个键会在下次写入时被丢弃 —— 它们不再被读取。
   /** 最近一次生成的知识截止日（ISO 日期），仅展示用 */
   weCloneLastCutoff: string
+  /**
+   * 生成克隆时是否做敏感信息脱敏（v1.0.1）。**默认 true**。
+   *
+   * 关掉之后：扫描时不把敏感值替换成占位符、生成 prompt 里的敏感信息条款整段
+   * 消失、第二阶段的 LLM 审查也跳过。语料仍然只存本机 —— 这个开关控制的是
+   * "要不要多做一层遮蔽"，而不是"要不要把数据发出去"。
+   */
+  wecloneRedact: boolean
 
   // 连接器（第三方工具，v1.0）
   /** 连接器配置 + 凭据信封，整体 safeStorage 加密（同 weportAiProfilesBlob）。 */
@@ -302,6 +329,9 @@ export class ConfigService {
       notificationPosition: 'top-right',
       notificationDuration: 3000,
       notificationAnimationEnabled: true,
+      // 新的滑动动效是默认：用户要的是"从屏幕边滑进来、再滑出去"，旧版那种
+      // "原地出现"读起来像是卡了一下。classic 仍然可选。
+      notificationAnimationStyle: 'slide',
       notificationFilterMode: 'all',
       notificationFilterList: [],
       // Linux 上有通知守护进程时优先系统通知（Wayland 下应用内弹窗会触发
@@ -372,6 +402,8 @@ export class ConfigService {
       weportAiModel: 'deepseek-v4-flash',
       weportAiMaxTokens: 32768,
       weportAiReasoningEffort: 'high',
+      // 图片输入默认开：默认模型都是视觉模型，作业照片/截图这类任务必须真的看图
+      weportAiImageInputs: true,
       weportAiMaxSteps: 48,
       weportAiCustomPrompt: '',
       weportAiWorkspaceRoot: '',
@@ -396,9 +428,13 @@ export class ConfigService {
         },
       ],
       weportAiMaxToolChars: 12000,
+      // 并行工具并发：4 而不是 DSH 默认 10 —— 这里的工具打的是同一个 WCDB FFI
+      // 宿主，消息游标是有限资源（工具内部本身也按 4 分批翻页）。
+      weportAiMaxParallelToolCalls: 4,
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
       weCloneLastCutoff: '',
+      wecloneRedact: true,
       weportConnectorsBlob: '',
       connectorsAllowAgent: true,
     }

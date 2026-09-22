@@ -33,6 +33,15 @@ import {
 export interface LensDisplacementMap {
     /** 贴图 dataURL，生成失败时为空串（此时滤镜退化为无位移） */
     url: string
+    /**
+     * **只含镜面高光**的贴图（白色 + alpha = 高光强度），生成失败时为空串。
+     *
+     * 为什么要单独一张：位移贴图把高光编码在蓝通道里，直接当背景图画出来会是
+     * 一片灰蓝（R/G 通道的 128 中性值），只有 `feDisplacementMap` 能挑出蓝通道。
+     * 而"镜面高光"恰恰是玻璃在**没有折射**时最需要的一层（Aave 文章里的
+     * "edge highlight / specular angle"）：它沿着圆角走，一眼就能读出曲面。
+     */
+    specularUrl: string
     /** 贴图编码的最大位移像素数；SVG 滤镜 scale 取 2×maxScale 时还原几何精确的折射 */
     maxScale: number
     /** 贴图（=元素）尺寸，feImage 的像素几何 */
@@ -59,12 +68,18 @@ export function generateLensDisplacementMap(
     const started = performance.now()
     const w = Math.max(1, Math.round(width))
     const h = Math.max(1, Math.round(height))
-    const empty: LensDisplacementMap = { url: '', maxScale: 0, width: w, height: h, computedPixels: 0, totalPixels: w * h, generateMs: 0 }
+    const empty: LensDisplacementMap = { url: '', specularUrl: '', maxScale: 0, width: w, height: h, computedPixels: 0, totalPixels: w * h, generateMs: 0 }
     const canvas = document.createElement('canvas')
     canvas.width = w
     canvas.height = h
     const context = canvas.getContext('2d')
     if (!context) return empty
+    // 高光单独一张：白 + alpha
+    const specCanvas = document.createElement('canvas')
+    specCanvas.width = w
+    specCanvas.height = h
+    const specContext = specCanvas.getContext('2d')
+    if (!specContext) return empty
 
     const halfW = w / 2
     const halfH = h / 2
@@ -74,12 +89,17 @@ export function generateLensDisplacementMap(
 
     const imageData = context.createImageData(w, h)
     const data = imageData.data
+    const specData = specContext.createImageData(w, h).data
     // 全图先填中性：位移 128、高光 0。镜片外的像素因此原样通过。
     for (let i = 0; i < data.length; i += 4) {
         data[i] = 128
         data[i + 1] = 128
         data[i + 2] = 0
         data[i + 3] = 255
+        specData[i] = 255
+        specData[i + 1] = 255
+        specData[i + 2] = 255
+        specData[i + 3] = 0
     }
 
     // ---- 第一步：只算左上象限的几何量（最贵的一步） ----
@@ -114,7 +134,10 @@ export function generateLensDisplacementMap(
         data[p] = Math.max(0, Math.min(255, Math.round(((s.dx * sx) / normalize + 0.5) * 255)))
         data[p + 1] = Math.max(0, Math.min(255, Math.round(((s.dy * sy) / normalize + 0.5) * 255)))
         // 高光由**镜像后的法线**重算：光有方向，镜像会改变它朝向光源的那一侧
-        data[p + 2] = Math.round(specularAt(s.nx * sx, s.ny * sy, s.edge, optics) * 255)
+        const spec = specularAt(s.nx * sx, s.ny * sy, s.edge, optics)
+        data[p + 2] = Math.round(spec * 255)
+        // 单独那张：白色 + alpha = 高光强度（屏幕混合层直接用）
+        specData[p + 3] = Math.round(Math.max(0, Math.min(1, spec)) * 255)
     }
     for (const s of samples) {
         const xr = w - 1 - s.x
@@ -126,8 +149,10 @@ export function generateLensDisplacementMap(
     }
 
     context.putImageData(imageData, 0, 0)
+    specContext.putImageData(new ImageData(specData, w, h), 0, 0)
     return {
         url: canvas.toDataURL(),
+        specularUrl: specCanvas.toDataURL(),
         maxScale,
         width: w,
         height: h,

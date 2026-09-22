@@ -27,6 +27,20 @@
   --font-mono: Consolas, "Cascadia Mono", "JetBrains Mono", monospace;
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+  /* 层级阶梯（v1.0.1）。全应用只用这一组值，不再各处写魔数：
+       --z-sticky     吸顶/吸底条
+       --z-popover    文档流内的局部浮层（内联下拉、日历）
+       --z-float      **渲染到 body 下**的浮层（components/ui/FloatingLayer）
+       --z-modal      模态遮罩
+       --z-toast      全局提示
+     浮层必须高于模态：模态里也会打开取色器/选择器，而它渲染在模态的 DOM 之外。
+     弹窗（通知）是**另一个 BrowserWindow**，不参与这套阶梯。 */
+  --z-sticky: 20;
+  --z-popover: 40;
+  --z-float: 1200;
+  --z-modal: 1000;
+  --z-toast: 1400;
 }
 
 /* 强调色家族与明暗两档 moved to styles/theme.scss（在本文件之后加载）：
@@ -1932,6 +1946,37 @@ button:disabled {
   max-width: 45%;
 }
 
+/* 「跟随微信消息免打扰」命中的会话：标出来，否则用户看不出它已经被自动屏蔽。
+   有它的时候 username 不再需要 margin-left:auto 顶到右边（见 .notify-muted-chip）。 */
+.notify-muted-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent-2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* 「接收范围」那行数字 + 它的来源说明。禁用状态（还在查）会轻微变淡，
+   让用户知道数字还会变 —— 免打扰数量是异步查出来的。 */
+.notify-scope {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.notify-scope-primary[data-loading='true'] {
+  opacity: 0.7;
+}
+
+.notify-scope-detail {
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-faint);
+}
+
 /* ---------- 导出信息 / 进度 ---------- */
 .export-meta {
   background: var(--bg);
@@ -2362,7 +2407,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 1000;
+  z-index: var(--z-toast, 1400);
   max-width: 340px;
   pointer-events: none;
 }
@@ -3010,65 +3055,80 @@ button:disabled {
   overflow-y: auto;
 }
 
-/* 工具执行卡片（可折叠） */
+/* 工具调用 —— 超紧凑单行（v1.1）。
+   调用是**过程**不是结果：去掉卡片盒子、边框、底色、图标配对，一行就是
+   「▸ 一句话摘要 …… 状态字形」，点击才展开参数/结果。密集任务里几十条调用
+   不再占掉半屏。 */
 .ai-tool-stack {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 1px;
 }
 
 .ai-tool-card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
-  font-size: 12.5px;
-  overflow: hidden;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font-size: 11.5px;
+  overflow: visible;
 }
 
-.ai-tool-card.live {
-  border-color: var(--line-strong);
+.ai-tool-card.ok .ai-tool-status {
+  color: var(--ok);
 }
 
-.ai-tool-card.ok {
-  border-color: rgba(159, 232, 168, 0.3);
+.ai-tool-card.err .ai-tool-status {
+  color: var(--danger);
 }
 
-.ai-tool-card.memory-write {
-  border-color: rgba(99, 179, 237, 0.55);
-  background: color-mix(in srgb, var(--bg-raised) 88%, #63b3ed 12%);
+.ai-tool-card.live .ai-tool-status {
+  color: var(--accent);
 }
 
+/* 记忆写入：行内淡色小字，不是胶囊徽章 */
 .ai-memory-write-badge {
   flex: none;
-  padding: 2px 7px;
-  border: 1px solid rgba(99, 179, 237, 0.45);
-  border-radius: 999px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
   color: #8bc8f3;
-  font-size: 10px;
-  font-weight: 650;
+  font-size: 9.5px;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
-.ai-tool-card.err {
-  border-color: rgba(229, 72, 77, 0.45);
+/* 「已把 N 张图片附给模型看」—— 证据标记，保留但降为行内小字 */
+.ai-tool-image-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  color: var(--accent-2);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.ai-tool-image-badge svg {
+  flex: none;
 }
 
 .ai-tool-row {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
-  /* 工具调用行收紧到单行 24px。原来 8px 上下内边距 + 12.5px 字号让每次调用占
-     一屏里的三十多像素，一轮十几个调用就要滚好几屏；信息密度比"每行舒服"
-     更重要，因为调用是**过程**而不是结果。 */
-  padding: 2px 8px;
-  min-height: 24px;
+  gap: 5px;
+  /* 工具调用行收紧到单行 19px：一轮十几个调用不再滚好几屏。 */
+  padding: 1px 4px;
+  min-height: 19px;
   background: none;
   border: none;
   color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.35;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
   text-align: left;
   cursor: pointer;
   transition: background 0.15s ease;
@@ -3077,8 +3137,8 @@ button:disabled {
 /* 不可展开时（既无参数也无结果）占位符保持左侧对齐一致 */
 .ai-tool-chev-placeholder {
   flex: none;
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
 }
 
 .ai-tool-row:hover {
@@ -3091,13 +3151,10 @@ button:disabled {
 
 .ai-tool-chev {
   flex: none;
+  width: 10px;
   color: var(--text-faint);
-  transform: rotate(-90deg);
-  transition: transform 0.15s ease;
-}
-
-.ai-tool-chev.open {
-  transform: none;
+  font-size: 9px;
+  transition: none;
 }
 
 .ai-tool-icon {
@@ -3119,13 +3176,16 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .ai-tool-status {
   flex: none;
   display: flex;
   align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
   color: var(--text-faint);
 }
 
@@ -3138,15 +3198,18 @@ button:disabled {
 }
 
 .ai-tool-detail {
-  border-top: 1px solid var(--line);
-  background: var(--panel);
+  border-top: none;
+  border-left: 2px solid var(--line);
+  margin-left: 10px;
+  padding-left: 8px;
+  background: none;
   animation: ai-detail-in 0.15s ease;
 }
 
 /* 展开区里的「参数 / 结果」小标题：两组 pre 直接摞在一起时看不出哪段是哪段 */
 .ai-tool-detail-label {
-  padding: 6px 12px 0;
-  font-size: 10px;
+  padding: 4px 0 0;
+  font-size: 9.5px;
   font-weight: 650;
   letter-spacing: 0.06em;
   color: var(--text-faint);
@@ -3562,13 +3625,13 @@ button:disabled {
 .ai-step-stack {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .ai-step {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .ai-reasoning.inline {
@@ -3992,18 +4055,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* 定位交给 components/ui/FloatingLayer（渲染在 body 下，视口坐标 + 自动翻转），
+   这里只管观感。 */
 .ai-actions-menu {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  width: 320px;
+  width: 100%;
   background: var(--elevated);
   border: 1px solid var(--line-strong);
   border-radius: 12px;
   box-shadow: var(--shadow-pop);
   padding: 8px;
-  z-index: 50;
-  animation: modal-in 0.15s ease;
 }
 
 .ai-actions-head {

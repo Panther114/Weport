@@ -8,6 +8,7 @@ import crypto from 'crypto'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { decryptDatViaNativeAsync, nativeAddonLocation } from './nativeImageDecrypt'
+import { findFfmpeg } from './ffmpegLocator'
 
 // 获取 ffmpeg-static 的路径
 function getStaticFfmpegPath(): string | null {
@@ -59,6 +60,12 @@ type DecryptResult = {
 
 type DecryptProgressStage = 'queued' | 'locating' | 'decrypting' | 'writing' | 'done' | 'failed'
 
+/** 缩略图缓存的提升结论。档位：原图 `_h`(3) > 显示版 `<md5>.dat`(2) > 缩略图 `_t`(1)。 */
+type ThumbnailPromotion =
+  | { kind: 'upgraded'; path: string }
+  | { kind: 'stale' }
+  | { kind: 'none' }
+
 type CachedImagePayload = {
   sessionId?: string
   imageMd5?: string
@@ -71,6 +78,12 @@ type CachedImagePayload = {
   allowCachePromotion?: boolean
   allowFilesystemScan?: boolean
   suppressEvents?: boolean
+  /**
+   * 不甘于缩略图：命中 `_t` 档时，磁盘上还有显示版 / 原图就改用它。
+   * 与 `allowThumbnail: false`（只要原图）不同，本开关仍接受显示版；全程找不到更高档时
+   * 退回 `_t`，不会因此丢图。
+   */
+  excludeThumbnail?: boolean
 }
 
 type DecryptImagePayload = CachedImagePayload & {
@@ -233,7 +246,23 @@ export class ImageDecryptService {
     for (const key of cacheKeys) {
       const cached = this.getResolvedMediaCache(payload, key)
       if (cached && existsSync(cached) && this.isUsableImageCacheFile(cached)) {
-        const upgraded = !this.isHdPath(cached) && payload.allowCachePromotion !== false
+        let skipPromotion = false
+        if (payload.excludeThumbnail === true) {
+          const promotion = await this.resolveThumbnailUpgrade(payload, key, cached)
+          if (promotion.kind === 'upgraded') {
+            this.clearUpdateFlag(payload, key)
+            const localPath = this.resolveLocalPathForPayload(promotion.path, payload.preferFilePath)
+            this.emitCacheResolved(payload, key, this.resolveEmitPath(promotion.path, payload.preferFilePath))
+            return { success: true, localPath, hasUpdate: false }
+          }
+          if (promotion.kind === 'stale') {
+            // 磁盘上已有更高档：丢掉这条过期映射，继续走普通解析流程去解密它
+            continue
+          }
+          // none：刚确认过没有更高档，不必再让只认 _hd 的提升重扫一遍
+          skipPromotion = this.getCachedPathTier(cached) === 1
+        }
+        const upgraded = !skipPromotion && !this.isHdPath(cached) && payload.allowCachePromotion !== false
           ? await this.tryPromoteThumbnailCache(payload, key, cached)
           : null
         const finalPath = upgraded || cached
@@ -265,6 +294,7 @@ export class ImageDecryptService {
         payload.createTime,
         {
           allowThumbnail: true,
+          excludeThumbnail: payload.excludeThumbnail === true,
           skipResolvedCache: false,
           hardlinkOnly: true,
           allowDatNameScanFallback: payload.allowCacheIndex !== false,
@@ -272,7 +302,8 @@ export class ImageDecryptService {
         }
       )
       if (datPath) {
-        const existing = this.findCachedOutputByDatPath(datPath, payload.sessionId, false)
+        const existingRaw = this.findCachedOutputByDatPath(datPath, payload.sessionId, false)
+        const existing = this.shouldRejectThumbnailOutput(payload, datPath, existingRaw) ? null : existingRaw
         if (existing) {
           const upgraded = !this.isHdPath(existing) && payload.allowCachePromotion !== false
             ? await this.tryPromoteThumbnailCache(payload, cacheKey, existing)
@@ -327,14 +358,30 @@ export class ImageDecryptService {
     if (!payload.force) {
       const cached = this.getResolvedMediaCache(payload, cacheKey)
       if (cached && existsSync(cached) && this.isUsableImageCacheFile(cached)) {
-        const upgraded = !this.isHdPath(cached)
-          ? await this.tryPromoteThumbnailCache(payload, cacheKey, cached)
-          : null
-        const finalPath = upgraded || cached
-        const localPath = this.resolveLocalPathForPayload(finalPath, payload.preferFilePath)
-        this.emitCacheResolved(payload, cacheKey, this.resolveEmitPath(finalPath, payload.preferFilePath))
-        this.emitDecryptProgress(payload, cacheKey, 'done', 100, 'done')
-        return { success: true, localPath }
+        let useCached = true
+        let skipPromotion = false
+        if (payload.excludeThumbnail === true) {
+          const promotion = await this.resolveThumbnailUpgrade(payload, cacheKey, cached)
+          if (promotion.kind === 'upgraded') {
+            const localPath = this.resolveLocalPathForPayload(promotion.path, payload.preferFilePath)
+            this.emitCacheResolved(payload, cacheKey, this.resolveEmitPath(promotion.path, payload.preferFilePath))
+            this.emitDecryptProgress(payload, cacheKey, 'done', 100, 'done')
+            return { success: true, localPath }
+          }
+          // stale：磁盘上已有更高档，别把缩略图交出去，继续往下解密
+          useCached = promotion.kind !== 'stale'
+          skipPromotion = this.getCachedPathTier(cached) === 1
+        }
+        if (useCached) {
+          const upgraded = !skipPromotion && !this.isHdPath(cached)
+            ? await this.tryPromoteThumbnailCache(payload, cacheKey, cached)
+            : null
+          const finalPath = upgraded || cached
+          const localPath = this.resolveLocalPathForPayload(finalPath, payload.preferFilePath)
+          this.emitCacheResolved(payload, cacheKey, this.resolveEmitPath(finalPath, payload.preferFilePath))
+          this.emitDecryptProgress(payload, cacheKey, 'done', 100, 'done')
+          return { success: true, localPath }
+        }
       }
       if (cached && !this.isUsableImageCacheFile(cached)) {
         this.deleteResolvedMediaCache(payload, cacheKey)
@@ -523,6 +570,8 @@ export class ImageDecryptService {
           payload.createTime,
           {
             allowThumbnail: true,
+            // 导出这类"要画质"的调用：缩略图只当最后的兜底，显示版 / 原图优先
+            excludeThumbnail: payload.excludeThumbnail === true,
             skipResolvedCache: false,
             hardlinkOnly: payload.hardlinkOnly === true,
             allowDatNameScanFallback: payload.allowCacheIndex !== false,
@@ -553,7 +602,8 @@ export class ImageDecryptService {
       }
 
       const preferHdCache = Boolean(payload.force && !fallbackToThumbnail)
-      const existingFast = this.findCachedOutputByDatPath(datPath, payload.sessionId, preferHdCache)
+      const existingFastRaw = this.findCachedOutputByDatPath(datPath, payload.sessionId, preferHdCache)
+      const existingFast = this.shouldRejectThumbnailOutput(payload, datPath, existingFastRaw) ? null : existingFastRaw
       if (existingFast) {
         this.logInfo('找到已解密文件(按DAT快速命中)', { existing: existingFast, isHd: this.isHdPath(existingFast) })
         const isHd = this.isHdPath(existingFast)
@@ -763,9 +813,11 @@ export class ImageDecryptService {
     imageDatName?: string,
     sessionId?: string,
     createTime?: number,
-    options?: { allowThumbnail?: boolean; skipResolvedCache?: boolean; hardlinkOnly?: boolean; allowDatNameScanFallback?: boolean; allowFilesystemScan?: boolean }
+    options?: { allowThumbnail?: boolean; excludeThumbnail?: boolean; skipResolvedCache?: boolean; hardlinkOnly?: boolean; allowDatNameScanFallback?: boolean; allowFilesystemScan?: boolean }
   ): Promise<string | null> {
     const allowThumbnail = options?.allowThumbnail ?? true
+    // 注意与 allowThumbnail=false（只要原图）区分：本档仍接受显示版 `<md5>.dat`
+    const excludeThumbnail = options?.excludeThumbnail === true
     const skipResolvedCache = options?.skipResolvedCache ?? false
     const hardlinkOnly = options?.hardlinkOnly ?? false
     const allowDatNameScanFallback = options?.allowDatNameScanFallback ?? true
@@ -775,6 +827,7 @@ export class ImageDecryptService {
       imageDatName,
       createTime,
       allowThumbnail,
+      excludeThumbnail,
       skipResolvedCache,
       hardlinkOnly,
       allowDatNameScanFallback,
@@ -795,6 +848,7 @@ export class ImageDecryptService {
       sessionId,
       createTime,
       allowThumbnail,
+      excludeThumbnail,
       allowDatNameScanFallback,
       skipResolvedCache,
       allowFilesystemScan
@@ -803,6 +857,9 @@ export class ImageDecryptService {
     if (lastMiss && (Date.now() - lastMiss) < this.datNameScanMissTtlMs) {
       return null
     }
+
+    // 只是"先别急着用缩略图"，不是"宁可不给图"：命中先记下，全程找不到更高档再交出去
+    let thumbnailFallbackPath: string | null = null
 
     if (!skipResolvedCache) {
       const cacheCandidates = Array.from(new Set([
@@ -815,6 +872,10 @@ export class ImageDecryptService {
         const cached = this.getResolvedCache(scopedKey)
         if (!cached || !existsSync(cached)) continue
         if (!allowThumbnail && !this.isHdDatPath(cached)) continue
+        if (excludeThumbnail && this.isTVariantDat(cached)) {
+          if (!thumbnailFallbackPath) thumbnailFallbackPath = cached
+          continue
+        }
         return cached
       }
     }
@@ -825,6 +886,12 @@ export class ImageDecryptService {
         const hardlinkPath = await this.resolveHardlinkPath(accountDir, baseMd5, sessionId)
         if (!hardlinkPath) continue
         if (!allowThumbnail && !this.isHdDatPath(hardlinkPath)) continue
+        // hardlink 索引只认 md5、不认档位：命中缩略图不能就此收工，
+        // 用户点开过图片的话显示版就在同一目录里
+        if (excludeThumbnail && this.isTVariantDat(hardlinkPath)) {
+          if (!thumbnailFallbackPath) thumbnailFallbackPath = hardlinkPath
+          continue
+        }
         this.cacheDatPath(accountDir, baseMd5, hardlinkPath)
         if (imageMd5) this.cacheDatPath(accountDir, imageMd5, hardlinkPath)
         if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
@@ -836,6 +903,7 @@ export class ImageDecryptService {
     }
 
     if (!allowFilesystemScan) {
+      if (thumbnailFallbackPath) return thumbnailFallbackPath
       this.setDatNameScanMissAt(missKey, Date.now())
       return null
     }
@@ -858,12 +926,22 @@ export class ImageDecryptService {
       return selectedPath
     }
 
+    if (thumbnailFallbackPath) {
+      this.logInfo('[ImageDecrypt] 磁盘上没有更高档，回退缩略图', {
+        imageMd5,
+        imageDatName,
+        thumbnailFallbackPath
+      })
+      return thumbnailFallbackPath
+    }
+
     this.setDatNameScanMissAt(missKey, Date.now())
     this.logInfo('[ImageDecrypt] resolveDatPath miss (dat scan)', {
       imageMd5,
       imageDatName,
       lookupBases,
-      allowThumbnail
+      allowThumbnail,
+      excludeThumbnail
     })
     return null
   }
@@ -914,6 +992,67 @@ export class ImageDecryptService {
     if (!bestDatPath || bestDatTier <= 0) return false
     if (currentTier < 0) currentTier = 1
     return bestDatTier > currentTier
+  }
+
+  /**
+   * 判断缩略图缓存能否换成更高档，并在更高档已经有现成结果时直接换掉。
+   * 按 3(原图) > 2(显示版) > 1(缩略图) 严格比较，返回 upgraded（更高档已解密好，可直接用）
+   * / stale（更高档在磁盘上但未解密，交给调用方走正常解密流程）/ none（确实没有更高档）。
+   */
+  private async resolveThumbnailUpgrade(
+    payload: CachedImagePayload,
+    cacheKey: string,
+    cachedPath: string
+  ): Promise<ThumbnailPromotion> {
+    if (!cachedPath || !existsSync(cachedPath)) return { kind: 'none' }
+    const currentTier = this.getCachedPathTier(cachedPath)
+    if (currentTier !== 1) return { kind: 'none' }
+
+    const accountDir = this.resolveCurrentAccountDir()
+    if (!accountDir) return { kind: 'none' }
+    const lookupBases = this.collectLookupBasesForScan(payload.imageMd5, payload.imageDatName, true)
+    if (lookupBases.length === 0) return { kind: 'none' }
+
+    let bestDatPath: string | null = null
+    let bestTier = currentTier
+    for (const baseMd5 of lookupBases) {
+      if (!this.looksLikeMd5(baseMd5)) continue
+      // selectBestDatPathByBase 本身就是按档位挑的（原图 → 显示版 → 缩略图）
+      const candidate = this.selectBestDatPathByBase(accountDir, baseMd5, payload.sessionId, payload.createTime, true)
+      if (!candidate) continue
+      const candidateTier = this.getDatTier(candidate, baseMd5)
+      if (candidateTier <= bestTier) continue
+      if (bestDatPath && this.fileSizeSafe(candidate) <= this.fileSizeSafe(bestDatPath)) continue
+      bestDatPath = candidate
+      bestTier = candidateTier
+    }
+    if (!bestDatPath) return { kind: 'none' }
+
+    const existing = this.findCachedOutputByDatPath(bestDatPath, payload.sessionId, false)
+    if (
+      existing &&
+      existsSync(existing) &&
+      this.isUsableImageCacheFile(existing) &&
+      this.getCachedPathTier(existing) > currentTier
+    ) {
+      this.cacheResolvedPaths(payload, cacheKey, existing)
+      this.removeThumbnailCacheFile(cachedPath, existing)
+      this.logInfo('[ImageDecrypt] 缩略图缓存已换成更高档', {
+        from: cachedPath,
+        to: existing,
+        datPath: bestDatPath,
+        tier: bestTier
+      })
+      return { kind: 'upgraded', path: existing }
+    }
+
+    this.deleteResolvedMediaCache(payload, cacheKey)
+    this.logInfo('[ImageDecrypt] 磁盘上有更高档 dat，丢弃过期的缩略图映射', {
+      cachedPath,
+      bestDatPath,
+      tier: bestTier
+    })
+    return { kind: 'stale' }
   }
 
   private async tryPromoteThumbnailCache(
@@ -1255,6 +1394,7 @@ export class ImageDecryptService {
     sessionId?: string,
     createTime?: number,
     allowThumbnail = true,
+    excludeThumbnail = false,
     allowDatNameScanFallback = true,
     skipResolvedCache = false,
     allowFilesystemScan = true
@@ -1272,6 +1412,8 @@ export class ImageDecryptService {
       safeSessionId,
       monthKey,
       allowThumbnail ? 'all' : 'hd',
+      // 进 key 隔离：否则"跳过缩略图"那次记下的 miss 会挡住随后允许缩略图的查询
+      excludeThumbnail ? 'nothumb1' : 'nothumb0',
       allowDatNameScanFallback ? 'fallback1' : 'fallback0',
       skipResolvedCache ? 'skip-cache1' : 'skip-cache0',
       allowFilesystemScan ? 'fs-scan1' : 'fs-scan0',
@@ -1678,6 +1820,22 @@ export class ImageDecryptService {
       if (this.isUsableImageCacheFile(candidate)) return candidate
     }
     return null
+  }
+
+  /**
+   * `findCachedOutputByDatPath` 的同名候选里含 `_t`：dat 已是显示版时，会把上次遗留的
+   * 缩略图产物当成它的解密结果交出去。只在 dat 本身不是缩略图时启用（否则同一张缩略图
+   * 每次导出都要重新解密一遍）。
+   */
+  private shouldRejectThumbnailOutput(
+    payload: { excludeThumbnail?: boolean },
+    datPath: string,
+    outputPath: string | null
+  ): boolean {
+    if (payload.excludeThumbnail !== true) return false
+    if (!outputPath) return false
+    if (this.isTVariantDat(datPath)) return false
+    return this.getCachedPathTier(outputPath) === 1
   }
 
   private cacheResolvedPaths(
@@ -2484,7 +2642,13 @@ export class ImageDecryptService {
       return staticPath
     }
 
-    // 回退到系统 ffmpeg
+    // 回退到系统 ffmpeg：PATH、WinGet/scoop/brew 常见位置，以及 WEPORT_FFMPEG 覆盖。
+    // 与背景视频共用同一份探测（ffmpegLocator），少了它 wxgf(HEVC) 只能给缩略图。
+    const systemPath = findFfmpeg()
+    if (systemPath) {
+      this.logInfo('ffmpeg 回退到系统安装', { systemPath })
+      return systemPath
+    }
     return 'ffmpeg'
   }
 

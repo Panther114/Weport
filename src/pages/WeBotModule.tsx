@@ -1,51 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Clock, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Clock, History, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
+import AiMarkdown from '../components/weportAi/AiMarkdown'
 import ReferencePicker, { type ReferenceCandidate, type ReferencePickerHandle } from '../components/reference/ReferencePicker'
-import { applyMention, findActiveMention, referenceKindLabel, type ChatReference } from '../utils/mentionTrigger'
-import { CATCH_UP_OPTIONS, WEEKDAY_OPTIONS, describeNextRun, describeRelativeTime, describeSchedule } from '../utils/weBotFormat'
+import { findActiveMention, referenceKindLabel, rewriteMentionQuery, stripMention, type ChatReference } from '../utils/mentionTrigger'
+import { loadReferenceCandidates } from '../utils/sessionCandidates'
+import {
+  CATCH_UP_OPTIONS,
+  WEEKDAY_OPTIONS,
+  describeNextRun,
+  describeRelativeTime,
+  describeSchedule,
+  formatDuration,
+  formatStamp,
+  runStatusLabel,
+  toTwelveHour,
+  toTwentyFourHour,
+  type Meridiem,
+} from '../utils/weBotFormat'
 import '../styles/weBot.scss'
 
 export type WeBotSection = 'tasks' | 'notes'
 
+/** 12 小时制的下拉项（12 在前，与「12 点」的读法一致）。 */
+const HOUR12_OPTIONS = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
 interface Props {
   section: WeBotSection
-}
-
-interface SessionLike {
-  username?: string
-  displayName?: string
-  nickName?: string
-  remark?: string
-  avatarUrl?: string
-  type?: string
-}
-
-/**
- * 把会话映射成引用候选。
- *
- * 类型判定只看 username：`@chatroom` 是群、`gh_` 是公众号，其余为私聊 ——
- * 这与 Weport 其余部分（导出、通知过滤）用的是同一套判据。
- */
-function toCandidates(sessions: SessionLike[]): ReferenceCandidate[] {
-  const mapped: ReferenceCandidate[] = []
-  for (const session of sessions) {
-    const id = String(session.username || '').trim()
-    if (!id) continue
-    const kind: ReferenceCandidate['kind'] = id.endsWith('@chatroom')
-      ? 'group'
-      : id.startsWith('gh_')
-        ? 'official'
-        : 'private'
-    const label = String(session.displayName || session.remark || session.nickName || id)
-    // 备注与显示名相同时不再重复一遍（否则每条都会写「备注：<同名>」）。
-    const subtitle = session.remark && session.remark !== label ? `备注：${session.remark}` : undefined
-    mapped.push({ id, label, kind, subtitle, avatarUrl: session.avatarUrl })
-  }
-  return mapped.sort((a, b) => {
-    // 群聊排在前面：WeBot 的典型用法是「扫描某个群」，私聊引用相对少见。
-    if (a.kind !== b.kind) return a.kind === 'group' ? -1 : b.kind === 'group' ? 1 : 0
-    return a.label.localeCompare(b.label)
-  })
 }
 
 const emptyDraft = () => ({
@@ -77,12 +57,14 @@ export default function WeBotModule({ section }: Props) {
   const [notes, setNotes] = useState<WeBotNote[]>([])
   const [runs, setRuns] = useState<WeBotRun[]>([])
   const [candidates, setCandidates] = useState<ReferenceCandidate[]>([])
+  const [candidatesState, setCandidatesState] = useState<{ loading: boolean; ok: boolean; error?: string }>({
+    loading: true,
+    ok: true,
+  })
   const [loading, setLoading] = useState(true)
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft)
-  const [unreadOnly, setUnreadOnly] = useState(false)
-  const [unread, setUnread] = useState(0)
   const [message, setMessage] = useState('')
   // 编辑器默认收起：任务列表才是这一页的内容，表单只在要建/改任务时出现。
   const [editorOpen, setEditorOpen] = useState(false)
@@ -93,41 +75,46 @@ export default function WeBotModule({ section }: Props) {
   const descriptionRef = useRef<HTMLTextAreaElement | null>(null)
   const titleRef = useRef<HTMLInputElement | null>(null)
 
+  /** 编辑器里的时间按 12 小时制显示（内部 hour 仍是 0–23）。 */
+  const twelveHour = useMemo(() => toTwelveHour(draft.hour), [draft.hour])
+
+  /** 展开了运行记录的任务 id。 */
+  const [openLogs, setOpenLogs] = useState<Set<string>>(() => new Set())
+
   const refresh = useCallback(async () => {
     try {
       const [nextTasks, nextNotes, nextRuns] = await Promise.all([
         api.weBot.listTasks(),
-        api.weBot.listNotes({ unreadOnly }),
+        // 笔记板只放**成功运行**的结论（失败的在运行记录里）。服务端已经过滤，
+        // 渲染层不再自己筛 —— 两处各筛一次迟早会分叉。
+        api.weBot.listNotes(),
         api.weBot.listRuns(),
       ])
       setTasks(nextTasks)
       setNotes(nextNotes)
       setRuns(nextRuns)
-      // 未读数是**全量**的，不受「只看未读」筛选影响，因此单独取。
-      setUnread(await api.weBot.unreadCount())
     } catch (error) {
       setMessage(`读取 WeBot 数据失败：${String((error as Error)?.message || error)}`)
     } finally {
       setLoading(false)
     }
-  }, [api, unreadOnly])
+  }, [api])
 
   useEffect(() => {
     void refresh()
   }, [refresh])
 
   useEffect(() => {
-    // 会话列表只取一次：引用候选不需要实时刷新，而每次打开页面都去读 WCDB
-    // 会明显拖慢页面切换。
+    // 会话列表只取一次（共享缓存 60s，两个 `@` 入口共用）：引用候选不需要实时刷新，
+    // 而每次打开页面都去读 WCDB 会明显拖慢页面切换。
+    // 解包与映射统一走 utils/sessionCandidates —— 以前这里按 `data` 解包
+    // `chat:getSessions` 的 `{ sessions }` 返回，于是永远显示「先连接微信」。
     let cancelled = false
     void (async () => {
-      try {
-        const sessions = (await api.chat.getSessions()) as { data?: SessionLike[]; success?: boolean } | SessionLike[]
-        const list = Array.isArray(sessions) ? sessions : Array.isArray(sessions?.data) ? sessions.data : []
-        if (!cancelled) setCandidates(toCandidates(list))
-      } catch {
-        if (!cancelled) setCandidates([])
-      }
+      const result = await loadReferenceCandidates(() => api.chat.getSessions())
+      if (cancelled) return
+      setCandidatesState({ loading: false, ok: result.ok, error: result.error })
+      setCandidates(result.candidates)
     })()
     return () => {
       cancelled = true
@@ -135,10 +122,44 @@ export default function WeBotModule({ section }: Props) {
   }, [api])
 
   const unsubscribe = useCallback(
-    () => api.weBot.onNote(() => void refresh()),
+    () => {
+      const offNote = api.weBot.onNote(() => void refresh())
+      // 任务开始的那一刻就把「运行中」写进记录并展开这一段的日志：
+      // 定时任务可能跑几分钟，用户在这一页上要能看见它正在跑，而不是等最后
+      // 弹一个弹窗。失败时的错误文本也随之落在同一处。
+      const offRun = api.weBot.onRunStarted((run) => {
+        setRuns((prev) => [run, ...prev.filter((item) => item.id !== run.id)])
+        setOpenLogs((prev) => new Set(prev).add(run.taskId))
+      })
+      /**
+       * 结束回调（成功与失败都有，v1.0.1）。
+       *
+       * 以前这条链路是「来了新笔记 → 整页重读」：失败也会写一条笔记，所以歪打正着
+       * 能用。失败不再落笔记之后，一条失败的运行会永远停在「运行中」—— 这里用
+       * 服务端回的终态记录原地替换那一行，顺手把日志留着展开（失败信息就在里面）。
+       */
+      const offFinished = api.weBot.onRunFinished((run) => {
+        setRuns((prev) => prev.map((item) => (item.id === run.id ? run : item)))
+        setOpenLogs((prev) => new Set(prev).add(run.taskId))
+      })
+      return () => {
+        offNote()
+        offRun()
+        offFinished()
+      }
+    },
     [api, refresh]
   )
   useEffect(() => unsubscribe(), [unsubscribe])
+
+  const toggleLog = (taskId: string) => {
+    setOpenLogs((prev) => {
+      const next = new Set(prev)
+      if (next.has(taskId)) next.delete(taskId)
+      else next.add(taskId)
+      return next
+    })
+  }
 
   // 一个任务都没有时自动展开编辑器：新用户第一次进来不该只看到一个空列表，
   // 直接把「怎么建第一个任务」摆在他面前。只自动展开一次，之后尊重用户的手动收起。
@@ -150,8 +171,15 @@ export default function WeBotModule({ section }: Props) {
   }, [loading, tasks.length])
 
   const runsByTask = useMemo(() => {
-    const map = new Map<string, WeBotRun>()
-    for (const run of runs) if (!map.has(run.taskId)) map.set(run.taskId, run)
+    const map = new Map<string, WeBotRun[]>()
+    // runs 是**全量、倒序**（最新在前）的历史。旧实现每个任务只留第一条，
+    // 于是「上次失败：fetch failed」后面没有任何上下文 —— 用户看不到这次
+    // 是什么时候跑的、跑了多久、之前有没有成功过。这里按任务分组保留全部。
+    for (const run of runs) {
+      const list = map.get(run.taskId)
+      if (list) list.push(run)
+      else map.set(run.taskId, [run])
+    }
     return map
   }, [runs])
 
@@ -274,8 +302,12 @@ export default function WeBotModule({ section }: Props) {
     if (!mention) return
     const textarea = descriptionRef.current
     const current = draft.description
-    const caret = textarea?.selectionStart ?? mention.caret
-    const { value, caret: nextCaret } = applyMention(current, { start: mention.start, query: mention.query }, caret, reference.label)
+    // 光标只有在**焦点确实还在输入框里**时才可信：用户在弹层搜索框里打过字的话，
+    // textarea.selectionStart 是上一次的旧值，用它去切文本会切错位置。
+    const caret = document.activeElement === textarea ? (textarea?.selectionStart ?? mention.caret) : mention.caret
+    // **只加 chip，不往输入框里写 `@名称`**：文本与引用列表各只有一个来源，
+    // 同一份引用不会再出现两次（用户报的"名字同时出现在输入框和下面"）。
+    const { value, caret: nextCaret } = stripMention(current, { start: mention.start, query: mention.query }, caret)
     setDraft((prev) => ({
       ...prev,
       description: value,
@@ -285,6 +317,32 @@ export default function WeBotModule({ section }: Props) {
         : [...prev.references, { id: reference.id, label: reference.label, kind: reference.kind }],
     }))
     setMention(null)
+    requestAnimationFrame(() => {
+      textarea?.focus()
+      textarea?.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
+
+  /**
+   * 弹层搜索框里改了查询串 → 改写输入框里的那段 `@查询`。
+   *
+   * 查询串的唯一来源是输入框的文本，弹层只是它的另一个视图；两边各存一份
+   * 状态最后一定会跑偏（输入框里是 `@化`、列表筛的是 `化学`）。
+   */
+  const setMentionQuery = (query: string) => {
+    if (!mention) return
+    const textarea = descriptionRef.current
+    const caret = document.activeElement === textarea ? (textarea?.selectionStart ?? mention.caret) : mention.caret
+    const { value, caret: nextCaret } = rewriteMentionQuery(
+      draft.description,
+      { start: mention.start, query: mention.query },
+      caret,
+      query
+    )
+    setDraft((prev) => ({ ...prev, description: value }))
+    setMention({ start: mention.start, query: value.slice(mention.start + 1, nextCaret), caret: nextCaret })
+    // 焦点在弹层搜索框里时**不要**把它抢回 textarea —— 用户正在那里打字。
+    if (document.activeElement?.closest?.('.ref-picker')) return
     requestAnimationFrame(() => {
       textarea?.focus()
       textarea?.setSelectionRange(nextCaret, nextCaret)
@@ -308,7 +366,7 @@ export default function WeBotModule({ section }: Props) {
           <span className="webot-toolbar-sub">
             {section === 'tasks'
               ? `共 ${tasks.length} 个任务；任务到点自动执行，结果写入笔记`
-              : `共 ${notes.length} 条笔记${unread > 0 ? ` · ${unread} 条未读` : ''}`}
+              : `共 ${notes.length} 条笔记（只有成功的运行会留下笔记）`}
           </span>
         </div>
         <div className="webot-toolbar-actions">
@@ -318,10 +376,8 @@ export default function WeBotModule({ section }: Props) {
             </button>
           ) : (
             <>
-              <label className="webot-checkbox">
-                <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} />
-                <span>只看未读</span>
-              </label>
+              {/* 「只看未读」整块删除（v1.0.1）：未读/已读在 WeBot 里没有意义 ——
+                  笔记是任务的结论，不是待办收件箱。要丢掉一条就点它右上角的 ✕。 */}
               {notes.length > 0 ? (
                 <button
                   type="button"
@@ -393,22 +449,31 @@ export default function WeBotModule({ section }: Props) {
                       setMention(null)
                     }
                   }}
-                  onBlur={() => {
+                  onBlur={(e) => {
+                    // 焦点落进选择器（它渲染在 body 下的浮层里，`relatedTarget`
+                    // 仍然指向那个真实的 input）时**不要**关掉它 —— 用户点搜索框
+                    // 是想在里面打字，旧版那 120ms 的延迟关闭正好把选择器收走，
+                    // 于是"搜索框点了就没了"。
+                    if ((e.relatedTarget as HTMLElement | null)?.closest?.('.ref-picker')) return
                     // 延迟关闭：点击选择器条目时会先触发 blur。
                     setTimeout(() => setMention(null), 120)
                   }}
                 />
                 {mention ? (
-                  <div className="webot-picker-anchor">
-                    <ReferencePicker
-                      ref={pickerRef}
-                      query={mention.query}
-                      candidates={candidates}
-                      onQueryChange={(query) => setMention((prev) => (prev ? { ...prev, query } : prev))}
-                      onPick={pickReference}
-                      onClose={() => setMention(null)}
-                    />
-                  </div>
+                  <ReferencePicker
+                    ref={pickerRef}
+                    anchor={descriptionRef}
+                    query={mention.query}
+                    candidates={candidates}
+                    loading={candidatesState.loading}
+                    ok={candidatesState.ok}
+                    error={candidatesState.error}
+                    onQueryChange={setMentionQuery}
+                    onPick={pickReference}
+                    onClose={() => setMention(null)}
+                    pickedIds={draft.references.map((item) => item.id)}
+                    onReturnFocus={() => descriptionRef.current?.focus()}
+                  />
                 ) : null}
               </div>
 
@@ -490,22 +555,57 @@ export default function WeBotModule({ section }: Props) {
                           <span>日</span>
                         </label>
                       ) : null}
-                      <label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={23}
-                          value={draft.hour}
-                          onChange={(e) => setDraft((prev) => ({ ...prev, hour: Number(e.target.value) || 0 }))}
-                        />
+                      <label className="webot-clock">
+                        {/* 小时用 12 小时制下拉 + 上午/下午（用户报的："执行时间要 AM/PM，
+                            小时是 12 不是 24"）。内部分钟点仍是 0–23：调度、已落盘的任务
+                            与 `nextRunAfter` 都按 24 小时制工作，只有这一处录入/显示换算。 */}
+                        <select
+                          aria-label="小时"
+                          value={twelveHour.hour}
+                          onChange={(e) =>
+                            setDraft((prev) => ({
+                              ...prev,
+                              hour: toTwentyFourHour(Number(e.target.value), twelveHour.meridiem),
+                            }))
+                          }
+                        >
+                          {HOUR12_OPTIONS.map((value) => (
+                            <option key={value} value={value}>
+                              {value}
+                            </option>
+                          ))}
+                        </select>
                         <span>:</span>
                         <input
+                          aria-label="分钟"
                           type="number"
                           min={0}
                           max={59}
                           value={draft.minute}
                           onChange={(e) => setDraft((prev) => ({ ...prev, minute: Number(e.target.value) || 0 }))}
                         />
+                        <span className="segmented webot-meridiem" role="radiogroup" aria-label="上午或下午">
+                          {(
+                            [
+                              { id: 'am', label: '上午' },
+                              { id: 'pm', label: '下午' },
+                            ] as const
+                          ).map((option) => (
+                            <button
+                              key={option.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={twelveHour.meridiem === option.id}
+                              className="segmented-item"
+                              data-active={twelveHour.meridiem === option.id}
+                              onClick={() =>
+                                setDraft((prev) => ({ ...prev, hour: toTwentyFourHour(twelveHour.hour, option.id) }))
+                              }
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </span>
                       </label>
                     </>
                   )}
@@ -566,7 +666,10 @@ export default function WeBotModule({ section }: Props) {
             ) : null}
 
             {tasks.map((task) => {
-              const lastRun = runsByTask.get(task.id)
+              const taskRuns = runsByTask.get(task.id) || []
+              const lastRun = taskRuns[0]
+              const logOpen = openLogs.has(task.id)
+              const running = taskRuns.some((run) => run.status === 'running') || busyTaskId === task.id
               return (
                 <div className="webot-card" key={task.id} data-active={editingId === task.id} data-enabled={task.enabled}>
                   <header>
@@ -595,7 +698,48 @@ export default function WeBotModule({ section }: Props) {
                     </div>
                   ) : null}
 
-                  {lastRun?.status === 'error' ? <div className="webot-card-error">上次失败：{lastRun.error}</div> : null}
+                  {/* 上次失败只说一句话，**完整原因在运行记录里**：一句截断过的
+                      `上次失败：fetch failed` 用户既无从判断是网络还是配置，
+                      也看不到它是什么时候跑的、之前是否成功过。 */}
+                  {lastRun?.status === 'error' ? (
+                    <div className="webot-card-error">
+                      <span>上次失败：{lastRun.error}</span>
+                      <button type="button" className="ghost-btn" onClick={() => toggleLog(task.id)}>
+                        {logOpen ? '收起记录' : '查看运行记录'}
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {logOpen ? (
+                    <div className="webot-runs" aria-label={`${task.title} 的运行记录`}>
+                      {taskRuns.length === 0 ? (
+                        <div className="webot-runs-empty">这个任务还没有运行过。</div>
+                      ) : (
+                        taskRuns.slice(0, 20).map((run) => (
+                          <div className="webot-run" key={run.id} data-status={run.status}>
+                            <div className="webot-run-head">
+                              <span className="webot-run-time">{formatStamp(run.startedAt)}</span>
+                              <span className="webot-run-status" data-status={run.status}>
+                                {runStatusLabel(run.status)}
+                              </span>
+                              <span className="webot-run-duration">{formatDuration(run.durationMs)}</span>
+                            </div>
+                            {run.error ? <p className="webot-run-error">{run.error}</p> : null}
+                            {run.status === 'error' ? (
+                              // 把「失败不写笔记」这条规则写在用户看得见的地方：
+                              // 否则失败之后去笔记板找不到东西，只会以为是坏了。
+                              <p className="webot-run-note">失败不会写入笔记板，原因就是上面这行。</p>
+                            ) : run.noteId ? (
+                              <p className="webot-run-note">
+                                已写入笔记：
+                                {notes.find((note) => note.id === run.noteId)?.title || '（已删除）'}
+                              </p>
+                            ) : null}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  ) : null}
 
                   {/* 动作单独占一行：卡片宽度只有 340px 上下，把开关和三个按钮塞进
                       标题那一行会把标题挤成每行一两个字。 */}
@@ -606,6 +750,20 @@ export default function WeBotModule({ section }: Props) {
                     </button>
                     <button type="button" className="ghost-btn" onClick={() => openEdit(task)}>
                       <PenLine size={13} /> 编辑
+                    </button>
+                    {/* 运行记录入口一直存在（不只失败时）：想看「昨晚那次到底跑没跑」，
+                        不该先制造一次失败。 */}
+                    <button
+                      type="button"
+                      className="ghost-btn webot-card-log"
+                      onClick={() => toggleLog(task.id)}
+                      aria-expanded={logOpen}
+                      data-busy={running || undefined}
+                      title="运行记录"
+                    >
+                      <History size={13} />
+                      {taskRuns.length > 0 ? taskRuns.length : ''}
+                      {logOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                     </button>
                     <button
                       type="button"
@@ -630,12 +788,31 @@ export default function WeBotModule({ section }: Props) {
 
           <div className="webot-note-list">
             {notes.map((note) => (
-              <article className="webot-note" key={note.id} data-unread={!note.read} data-status={note.status}>
+              <article className="webot-note" key={note.id}>
                 <header>
                   <h4>{note.title}</h4>
                   <span className="webot-note-time">{describeRelativeTime(note.createdAt)}</span>
+                  {/* 逐条删除（v1.0.1）：右上角的 ✕。以前只有「清空全部」，
+                      想丢掉一条过期结论只能把整块板子清掉。 */}
+                  <button
+                    type="button"
+                    className="webot-note-close"
+                    aria-label={`删除笔记 ${note.title}`}
+                    title="删除这条笔记"
+                    onClick={async () => {
+                      await api.weBot.deleteNote(note.id)
+                      await refresh()
+                    }}
+                  >
+                    <X size={13} />
+                  </button>
                 </header>
-                <p>{note.summary}</p>
+                {/* 笔记正文按 **Markdown** 渲染（v1.0.1）。模型本来就输出 md
+                    （`- 第 3 题`、`**周三小测**`），旧版按纯文本渲染，用户看到的
+                    是裸露的星号和短横线。 */}
+                <div className="webot-note-body">
+                  <AiMarkdown text={note.summary} />
+                </div>
                 <footer>
                   <span className="webot-note-task">{note.taskTitle}</span>
                   {note.references.map((reference) => (
@@ -655,17 +832,6 @@ export default function WeBotModule({ section }: Props) {
                       }}
                     >
                       <Pin size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-btn"
-                      title={note.read ? '标为未读' : '标为已读'}
-                      onClick={async () => {
-                        await api.weBot.updateNote(note.id, { read: !note.read })
-                        await refresh()
-                      }}
-                    >
-                      <Check size={13} />
                     </button>
                   </div>
                 </footer>

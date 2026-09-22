@@ -101,8 +101,9 @@ class HttpService {
           }
           const taskId = String(url.searchParams.get('task') || '').trim()
           const limit = this.parseNumber(url.searchParams.get('limit'), 200, 1, 500)
-          const unreadOnly = String(url.searchParams.get('unread') || '') === '1'
-          send({ success: true, data: service.listNotes({ taskId: taskId || undefined, unreadOnly, limit }) })
+          // `unread=1` 以前用来只看未读。未读/已读整条功能在 v1.0.1 删除，参数
+          // 一律忽略（不报错：外部集成里可能还带着它，接口本该向后兼容地退化）。
+          send({ success: true, data: service.listNotes({ taskId: taskId || undefined, limit }) })
           return
         }
 

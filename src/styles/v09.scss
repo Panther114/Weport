@@ -729,11 +729,9 @@
   color: var(--accent, #60a5fa);
 }
 .sns-calendar-popover {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 6px);
-  left: 0;
-  width: 244px;
+  // 定位交给 components/ui/FloatingLayer（渲染在 body 下）：侧栏卡片是
+  // `overflow: hidden` 的，挂在文档流里的日历会被整块裁掉。
+  width: 100%;
   background: var(--panel, #151519);
   border: 1px solid var(--line-strong, #2c2c33);
   border-radius: var(--radius);

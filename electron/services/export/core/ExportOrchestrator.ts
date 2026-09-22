@@ -55,6 +55,12 @@ export class ExportOrchestrator {
         return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0
     }
 
+    /** issue #22：语音拿不到数据而跳过的条数。 */
+    private getRunVoiceFailedCount(): number {
+        const raw = Number(this.context.getMediaTelemetrySnapshot().mediaVoiceFailedFiles || 0)
+        return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0
+    }
+
     /**
      * 导出单个会话为 ChatLab 格式（并行优化版本）
      */
@@ -135,6 +141,8 @@ export class ExportOrchestrator {
         sessionOutputPaths?: Record<string, string>
         // issue #15/#5b：因缺图片解密密钥而显示为 [图片] 占位符的消息数。
         imageKeyMissingFiles?: number
+        // issue #22：语音数据拿不到而没能导出成文件的条数。
+        voiceFailedFiles?: number
         error?: string
         }> {
         let successCount = 0;
@@ -158,7 +166,7 @@ export class ExportOrchestrator {
         try {
           const conn = await this.context.ensureConnected()
           if (!conn.success) {
-            return { success: false, successCount: 0, failCount: sessionIds.length, imageKeyMissingFiles: 0, error: conn.error }
+            return { success: false, successCount: 0, failCount: sessionIds.length, imageKeyMissingFiles: 0, voiceFailedFiles: 0, error: conn.error }
           }
 
           this.context.resetMediaRuntimeState()
@@ -565,7 +573,8 @@ export class ExportOrchestrator {
               failedSessionIds,
               failedSessionErrors,
               sessionOutputPaths,
-              imageKeyMissingFiles: this.getRunImageKeyMissingCount()
+              imageKeyMissingFiles: this.getRunImageKeyMissingCount(),
+              voiceFailedFiles: this.getRunVoiceFailedCount()
             }
           }
           if (pauseRequested) {
@@ -579,7 +588,8 @@ export class ExportOrchestrator {
               failedSessionIds,
               failedSessionErrors,
               sessionOutputPaths,
-              imageKeyMissingFiles: this.getRunImageKeyMissingCount()
+              imageKeyMissingFiles: this.getRunImageKeyMissingCount(),
+              voiceFailedFiles: this.getRunVoiceFailedCount()
             }
           }
 
@@ -606,11 +616,12 @@ export class ExportOrchestrator {
             failedSessionErrors,
             sessionOutputPaths,
             imageKeyMissingFiles: this.getRunImageKeyMissingCount(),
+            voiceFailedFiles: this.getRunVoiceFailedCount(),
             error: failureSummary
           }
         } catch (e) {
           progressEmitter.flush()
-          return { success: false, successCount, failCount, imageKeyMissingFiles: this.getRunImageKeyMissingCount(), error: String(e) }
+          return { success: false, successCount, failCount, imageKeyMissingFiles: this.getRunImageKeyMissingCount(), voiceFailedFiles: this.getRunVoiceFailedCount(), error: String(e) }
         } finally {
           this.context.clearMediaRuntimeState()
         }

@@ -208,6 +208,28 @@ describe('comparePrefixFrames', () => {
     expect(comparePrefixFrames(previous, current).change).toBe('tools')
   })
 
+  it('模型路由变化 → route（换缓存域，即使字节全同也命中不了）', () => {
+    const previous = buildPrefixFrame(system, tools, wire('a'), 'opencode-go|deepseek-v4.1-flash|openai-compatible')
+    const current = buildPrefixFrame(system, tools, wire('a'), 'opencode-go|gpt-6-astra|openai')
+    const result = comparePrefixFrames(previous, current)
+    expect(result.change).toBe('route')
+    expect(result.divergedAt).toBe(0)
+    expect(result.previousLength).toBe(1)
+  })
+
+  it('路由一致时不影响 append 判定（缺省路由 = 缺省路由）', () => {
+    expect(comparePrefixFrames(buildPrefixFrame(system, tools, wire('a')), buildPrefixFrame(system, tools, wire('a', 'b'))).change).toBe('append')
+  })
+
+  it('帧经 JSON 落盘往返后仍能逐字节比较（跨重启探针的前提）', () => {
+    // PrefixFrame 就是 prefix-probe.json 的磁盘格式：只有哈希，没有正文。
+    const previous = JSON.parse(JSON.stringify(buildPrefixFrame(system, tools, wire('a', 'b'), 'prov|model|proto'))) as PrefixFrame
+    const current = buildPrefixFrame(system, tools, wire('a', 'b', 'c'), 'prov|model|proto')
+    expect(comparePrefixFrames(previous, current).change).toBe('append')
+    const rewritten = buildPrefixFrame('OTHER', tools, wire('a', 'b', 'c'), 'prov|model|proto')
+    expect(comparePrefixFrames(previous, rewritten).change).toBe('system')
+  })
+
   it('空请求数组之间也是 append', () => {
     expect(comparePrefixFrames(buildPrefixFrame(system, tools, []), buildPrefixFrame(system, tools, [])).change).toBe('append')
   })

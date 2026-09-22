@@ -7,6 +7,7 @@ import {
   FilePenLine,
   FileText,
   FolderOpen,
+  Image as ImageIcon,
   Info,
   KeyRound,
   Loader2,
@@ -42,6 +43,7 @@ export const TOOL_LABELS: Array<[string, string]> = [
   ['review_prior_analyses', '回顾既往分析'],
   ['get_group_members', '群成员名单'],
   ['read_session_messages', '读取会话消息'],
+  ['read_chat_images', '看聊天里的图片'],
   ['read_day_events', '单日跨会话时间线'],
   ['read_period_events', '区间跨会话时间线'],
   ['search_messages', '全文搜索'],
@@ -86,6 +88,8 @@ export default function AiSettingsModal({
   const [customPrompt, setCustomPrompt] = useState(setup.customPrompt)
   const [workspaceRoot, setWorkspaceRoot] = useState(setup.workspaceRoot)
   const [effort, setEffort] = useState(setup.reasoningEffort)
+  /** 图片输入开关（默认开）：关掉后 read_chat_images 只给文字线索，不发图片本体 */
+  const [imageInputs, setImageInputs] = useState(setup.imageInputs !== false)
   const [disabledTools, setDisabledTools] = useState<Set<string>>(new Set(setup.disabledTools))
   const [actions, setActions] = useState<AiAction[]>([])
   const [saving, setSaving] = useState(false)
@@ -123,18 +127,14 @@ export default function AiSettingsModal({
   ]))
 
   /**
-   * 给模型下拉项补上单价后缀。
+   * 模型下拉项就是模型 id 本身。
    *
-   * 选模型是**唯一**该看价格的时刻 —— 选完之后价格只影响账单。主进程已经把
-   * registry 里的定价解好（`setup.modelCosts`），这里只负责呈现。没有收录的
-   * 模型明确写「未定价」：一片空白会让人以为是免费的。
+   * v1.0.1 之前这里会拼一个单价后缀（`deepseek-v4-pro · $0.435/$0.87 每百万`），
+   * 数据来自 models.dev。那张表覆盖不到用户实际在用的服务商，于是绝大多数项
+   * 写着「未定价」，剩下几个数字也只是估算（缓存/阶梯/促销价都不在内）。定价
+   * 估算整体移除，这里跟着回到干净的模型 id。
    */
-  const modelOptionLabel = (model: string): string => {
-    const cost = setup?.modelCosts?.[model]
-    if (!cost || (cost.input === undefined && cost.output === undefined)) return `${model} · 未定价`
-    const one = (v: number | undefined) => (v === undefined ? '—' : `$${v}`)
-    return `${model} · ${one(cost.input)}/${one(cost.output)} 每百万`
-  }
+  const modelOptionLabel = (model: string): string => model
 
   useEffect(() => {
     void api.ai.listActions().then((r) => setActions(r.actions || [])).catch(() => undefined)
@@ -456,6 +456,7 @@ export default function AiSettingsModal({
       }
       await api.ai.setSetup({
         reasoningEffort: effort,
+        imageInputs,
         customPrompt,
         workspaceRoot: workspaceRoot.trim() || undefined,
         disabledTools: Array.from(disabledTools),
@@ -611,36 +612,9 @@ export default function AiSettingsModal({
                   <div className="field"><label htmlFor="aiModel">Model</label><select id="aiModel" className="path-input" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} disabled={selectedModels.length === 0}><option value="">{selectedModels.length ? '选择模型' : '先获取模型列表'}</option>{selectedModels.map((model) => <option key={model} value={model}>{modelOptionLabel(model)}</option>)}</select></div>
                   {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field ai-provider-custom-url"><label htmlFor="aiBaseUrl">自定义接口地址</label><input id="aiBaseUrl" className="path-input ai-input-wide" value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} spellCheck={false} /></div>}
                   {(selectedCatalog?.allowCustomBaseUrl || selectedCatalog?.id === 'custom') && <div className="field"><label htmlFor="aiProtocol">协议</label><select id="aiProtocol" className="path-input" value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value as ProviderProtocol })}>{(selectedCatalog?.protocolOptions || [selectedCatalog?.protocol || draft.protocol]).map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}</select></div>}
-                  {/* 选中模型的价格明细。列表里只有 `in/out` 两个数，这里给出完整
-                      分项 + 来源，用户才能判断该不该信这个数字。 */}
-                  {draft.model ? (
-                    <div className="ai-cost-detail">
-                      {(() => {
-                        const c = setup?.modelCosts?.[draft.model]
-                        if (!c || (c.input === undefined && c.output === undefined)) {
-                          return <span className="ai-cost-none">未收录定价（models.dev）· 请以提供商账单为准</span>
-                        }
-                        const rows: Array<[string, number | undefined]> = [
-                          ['输入', c.input],
-                          ['输出', c.output],
-                          ['缓存读', c.cacheRead],
-                          ['缓存写', c.cacheWrite],
-                          ['推理', c.reasoning],
-                        ]
-                        return (
-                          <>
-                            {rows.map(([label, value]) => (
-                              <span key={label} className="ai-cost-chip" data-missing={value === undefined}>
-                                {label} {value === undefined ? '—' : `$${value}`}
-                              </span>
-                            ))}
-                            <span className="ai-cost-unit">USD / 百万 token</span>
-                            {c.source ? <span className="ai-cost-source">来源 {c.source}</span> : null}
-                          </>
-                        )
-                      })()}
-                    </div>
-                  ) : null}
+                  {/* 这里曾经有一块「选中模型的价格明细」（输入/输出/缓存读写/推理
+                      + 来源）。定价估算在 v1.0.1 整体移除：覆盖不到用户实际在用的
+                      服务商，有值的时候也只是估算 —— 见 WeportAiPanel 顶部的说明。 */}
                 </div>
                 <div className="ai-profile-editor-foot">
                   <div className="ai-profile-discovery">
@@ -661,6 +635,14 @@ export default function AiSettingsModal({
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><FolderOpen size={13} /> 工作区</div><div className="field"><label htmlFor="aiWorkspaceRoot">工作区根目录</label><div className="path-row"><input id="aiWorkspaceRoot" className="path-input" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} /><button className="ghost-btn" type="button" onClick={() => void pickWorkspace()}>浏览</button></div></div></div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><FilePenLine size={13} /> 提示词</div><textarea id="aiCustomPrompt" className="ai-prompt-textarea" value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} rows={4} spellCheck={false} /></div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Zap size={13} /> 快捷动作</div>{actions.map((a) => <div className="ai-action-edit" key={a.id}><input className="path-input ai-action-name" value={a.name} onChange={(e) => updateAction(a.id, { name: e.target.value })} /><textarea className="ai-prompt-textarea ai-action-prompt" value={a.prompt} onChange={(e) => updateAction(a.id, { prompt: e.target.value })} rows={2} /><button type="button" className="ghost-btn danger-text" onClick={() => setActions((prev) => prev.filter((item) => item.id !== a.id))}><Trash2 size={12} /></button></div>)}<button type="button" className="ghost-btn" onClick={() => setActions((prev) => [...prev, { id: `action-${Date.now()}`, name: '新动作', prompt: '' }])}><Plus size={12} /> 添加动作</button></div>
+        <div className="ai-settings-section"><div className="ai-settings-sec-head"><ImageIcon size={13} /> 图片输入</div>
+          <label className="ai-tool-toggle">
+            <input type="checkbox" checked={imageInputs} onChange={(e) => setImageInputs(e.target.checked)} />
+            <span>把聊天里的图片交给模型看</span>
+            <code>imageInputs</code>
+          </label>
+          <p className="ai-settings-hint">开着时 <code>read_chat_images</code> 会把图片本体（最近 3 张）随请求发给模型 —— 作业照片、截图这类任务必须开着。若网关/模型不支持视觉（收到图片会 400），关掉它只保留"谁在什么时候发了一张图"的文字线索。默认开。</p>
+        </div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Settings2 size={13} /> 工具开关</div><div className="ai-tool-toggles">{TOOL_LABELS.map(([name, label]) => <label key={name} className={`ai-tool-toggle${disabledTools.has(name) ? ' off' : ''}`}><input type="checkbox" checked={!disabledTools.has(name)} onChange={() => toggleTool(name)} /><span>{label}</span><code>{name}</code></label>)}</div></div>
         <div className="modal-actions ai-settings-footer">{!inline && <button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button>}<button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
     </>

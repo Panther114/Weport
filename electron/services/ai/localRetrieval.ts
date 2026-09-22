@@ -200,3 +200,47 @@ export function buildRetrievedContext(
   }
   return parts.join('\n')
 }
+
+/**
+ * 语气样本不足时用"最近说过的话"补齐（v1.0.1）。
+ *
+ * ## 为什么需要
+ *
+ * 语气样本是**按当前话题检索**本人的原话。对方说"在忙什么"时能检索到一堆
+ * 相关的句子；但对方只发一个"hi"、"在吗"、或者一个表情时，查询词在语料里
+ * 几乎不存在，检索结果可能只有零到两条 —— 于是这一轮模型没有任何语气参照，
+ * 回复就滑回通用的助手腔。**短消息恰恰是最常见的那种消息。**
+ *
+ * 补齐用的是"最近说过的话"而不是随机抽样：人的语气在短时间尺度上是连续的，
+ * 最近几条最能代表他现在怎么说话（而随机抽到的可能是三年前的一句）。
+ *
+ * @param primary  按话题检索到的样本（优先，保持原顺序）
+ * @param fallback 最近的本人发言（新→旧），仅在 primary 不足时使用
+ * @param minCount 低于这个条数就补齐
+ * @param limit    最终条数上限
+ */
+export function topUpVoiceSamples(
+  primary: readonly string[],
+  fallback: readonly string[],
+  minCount: number,
+  limit: number
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const push = (text: string): void => {
+    const trimmed = String(text || '').trim()
+    if (!trimmed || seen.has(trimmed)) return
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  for (const text of primary) {
+    if (out.length >= limit) break
+    push(text)
+  }
+  if (out.length >= minCount) return out
+  for (const text of fallback) {
+    if (out.length >= limit) break
+    push(text)
+  }
+  return out
+}

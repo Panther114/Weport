@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
-  applyMention,
   filterReferenceCandidates,
   findActiveMention,
   referenceKindLabel,
+  resolveReferenceIndex,
+  rewriteMentionQuery,
+  stripMention,
 } from './mentionTrigger'
 
 describe('findActiveMention', () => {
@@ -50,28 +52,81 @@ describe('findActiveMention', () => {
   })
 })
 
-describe('applyMention', () => {
-  it('用 @显示名 替换查询串，并把光标移到插入内容之后', () => {
+/**
+ * 引用**不再**写回输入框（用户报的"名字同时出现在输入框和下面"）。
+ * 这些用例把"输入框里一行 `@名称` 都不留"钉死。
+ */
+describe('stripMention', () => {
+  it('把 @查询串摘掉，输入框里不留任何痕迹', () => {
     const value = '分析 @化学'
     const caret = value.length
     const mention = findActiveMention(value, caret)!
-    const result = applyMention(value, mention, caret, '化学 3 班')
-    expect(result.value).toBe('分析 @化学 3 班 ')
-    expect(result.caret).toBe(result.value.length)
+    const result = stripMention(value, mention, caret)
+    expect(result.value).toBe('分析 ')
+    expect(result.value).not.toContain('@')
+    expect(result.caret).toBe(3)
   })
 
   it('保留光标之后的文本', () => {
     const value = '@化学 的记录'
     const mention = findActiveMention(value, 3)!
-    const result = applyMention(value, mention, 3, '化学 3 班')
-    expect(result.value).toBe('@化学 3 班  的记录')
+    const result = stripMention(value, mention, 3)
+    expect(result.value).toBe(' 的记录')
+    expect(result.caret).toBe(0)
   })
 
-  it('替换一个空查询不会吃掉已有文本', () => {
+  it('摘掉一个空查询时不会吃掉已有文本', () => {
     const value = '看看 @'
     const mention = findActiveMention(value, value.length)!
-    const result = applyMention(value, mention, value.length, '家人')
-    expect(result.value).toBe('看看 @家人 ')
+    const result = stripMention(value, mention, value.length)
+    expect(result.value).toBe('看看 ')
+  })
+
+  it('光标越界时被夹到文本长度，不会切掉文本', () => {
+    const value = '@化学 的记录'
+    const result = stripMention(value, { start: 0, query: '化学' }, 999)
+    expect(result.value).toBe('')
+    expect(result.caret).toBe(0)
+  })
+
+  it('空输入安全', () => {
+    expect(stripMention('', { start: 0, query: '' }, 0)).toEqual({ value: '', caret: 0 })
+  })
+})
+
+describe('rewriteMentionQuery', () => {
+  it('弹层搜索框改查询串时同步改写输入框里的那段 @查询', () => {
+    const value = '分析 @化'
+    const caret = value.length
+    const mention = findActiveMention(value, caret)!
+    const result = rewriteMentionQuery(value, mention, caret, '化学')
+    expect(result.value).toBe('分析 @化学')
+    expect(result.caret).toBe(result.value.length)
+  })
+
+  it('清空搜索框后输入框里只剩一个 @（选择器仍然活着）', () => {
+    const value = '@化学'
+    const mention = findActiveMention(value, value.length)!
+    const result = rewriteMentionQuery(value, mention, value.length, '')
+    expect(result.value).toBe('@')
+    expect(findActiveMention(result.value, result.caret)).toEqual({ start: 0, query: '' })
+  })
+
+  it('查询串里的空白被去掉：否则 findActiveMention 会认为这次引用已结束', () => {
+    const value = '@a'
+    const mention = findActiveMention(value, value.length)!
+    const result = rewriteMentionQuery(value, mention, value.length, '化学 3 班')
+    expect(result.value).toBe('@化学3班')
+    const next = findActiveMention(result.value, result.caret)
+    expect(next).toEqual({ start: 0, query: '化学3班' })
+  })
+
+  it('保留光标之后的文本', () => {
+    const value = '@ab 的记录'
+    const mention = findActiveMention(value, 3)!
+    const result = rewriteMentionQuery(value, mention, 3, '化学')
+    expect(result.value).toBe('@化学 的记录')
+    expect(result.caret).toBe(3)
   })
 })
 
@@ -125,5 +180,44 @@ describe('referenceKindLabel', () => {
     expect(referenceKindLabel('group')).toBe('群聊')
     expect(referenceKindLabel('private')).toBe('私聊')
     expect(referenceKindLabel('official')).toBe('公众号')
+  })
+})
+
+/**
+ * 已引用过的候选灰掉之后仍然占着列表里的位置，键盘导航必须跳过它们。
+ * 没有这层跳过，用户会在灰掉的那条上按回车 —— 什么也不会发生。
+ */
+describe('resolveReferenceIndex：跳过不可选（已引用）的候选', () => {
+  const none = () => false
+  const pickedSecond = (index: number) => index === 1
+
+  it('下键跳过被灰掉的那条', () => {
+    expect(resolveReferenceIndex(4, 0, pickedSecond, 1)).toBe(2)
+  })
+
+  it('上键跳过被灰掉的那条（并环绕）', () => {
+    expect(resolveReferenceIndex(4, 0, pickedSecond, -1)).toBe(3)
+    expect(resolveReferenceIndex(4, 2, pickedSecond, -1)).toBe(0)
+  })
+
+  it('当前下标落在灰条目上时（delta=0）夹到下一个可选项', () => {
+    expect(resolveReferenceIndex(4, 1, pickedSecond, 0)).toBe(2)
+  })
+
+  it('全部可选时就是普通的上下移动', () => {
+    expect(resolveReferenceIndex(3, 1, none, 1)).toBe(2)
+    expect(resolveReferenceIndex(3, 0, none, -1)).toBe(2)
+  })
+
+  it('全都被引用时保持原位，不会卡成死循环', () => {
+    expect(resolveReferenceIndex(3, 1, () => true, 1)).toBe(1)
+  })
+
+  it('空列表返回 0', () => {
+    expect(resolveReferenceIndex(0, 5, none, 1)).toBe(0)
+  })
+
+  it('越界的当前下标先被夹回范围', () => {
+    expect(resolveReferenceIndex(3, 99, none, 0)).toBe(2)
   })
 })

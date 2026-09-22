@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Check, Loader2, MessageSquarePlus, Pencil, Send, Sparkles, Trash2, X } from 'lucide-react'
 import type { WeCloneListItem } from '../../types/weclone'
+import { splitReplyBubbles } from '../../utils/weCloneBubbles'
 
 /**
  * 和分身对话的抽屉。
@@ -117,7 +118,17 @@ export default function WeCloneChatDrawer({
         const m = res.meta
         setLastStats(
           m
-            ? `${m.model} · 本地检索命中 ${m.corpusHits} 段 · 用时 ${m.retrieveCostMs}ms`
+            ? [
+                m.model,
+                // 两路检索分开报：命中 0 段和命中 20 段是完全不同的两件事，
+                // 而"语气样本 0 条"恰好解释了"它说话怎么不像我"
+                `历史片段 ${m.corpusHits} 段`,
+                `语气样本 ${m.voiceSamples ?? 0} 条`,
+                // 敏感话题策略也摆在这里：它是**每个克隆自己的设置**，
+                // 用户看到"它怎么什么都答"时，这一句就是解释
+                m.refusal === 'off' ? '敏感话题：不设限' : '敏感话题：以本人方式带过',
+                `用时 ${m.retrieveCostMs}ms`,
+              ].join(' · ')
             : null
         )
       } else {
@@ -284,7 +295,8 @@ export default function WeCloneChatDrawer({
                   {chatId ? <span className="weclone-chat-topic"> · {chats.find((c) => c.id === chatId)?.title || '对话'}</span> : null}
                 </h3>
                 <span className="hint">
-                  人格档案与语料都在本机；每轮会先在本机检索相关聊天片段，再交给你的模型。会跟着你的语言回答。
+                  人格档案与语料都在本机；每轮先在本机检索相关历史片段，再取几条你在同一话题上
+                  说过的原话作语气参照，一起交给你的模型。会跟着你的语言回答。
                 </span>
               </div>
             </div>
@@ -299,16 +311,33 @@ export default function WeCloneChatDrawer({
                 <p>说点什么试试。它会用你聊天语料里学到的方式回答。</p>
               </div>
             )}
-            {turns.map((t, i) => (
-              <div key={i} className={`weclone-turn ${t.role}${t.error ? ' err' : ''}`}>
-                <div className="weclone-bubble">{t.content}</div>
-                {t.hint && (
-                  <p className="weclone-turn-hint">
-                    <AlertTriangle size={12} /> {t.hint}
-                  </p>
-                )}
-              </div>
-            ))}
+            {turns.map((t, i) => {
+              /**
+               * 一条回复 = **多条气泡**（v1.0.1）。
+               *
+               * 主进程的形态整形把回复按"连发短消息"切成几段、用空行连接；
+               * 旧版把整段塞进一个 `.weclone-bubble`（`white-space: pre-wrap`），
+               * 于是那些段落显示成一张卡片里的空行 —— 用户报的"多行长诗 + 莫名
+               * 两个换行"。切片规则是纯函数（utils/weCloneBubbles），有单测。
+               * 空内容（极少数失败轮次）退回原始文本，不能什么都不显示。
+               */
+              const parts = splitReplyBubbles(t.content)
+              const bubbles = parts.length > 0 ? parts : [t.content]
+              return (
+                <div key={i} className={`weclone-turn ${t.role}${t.error ? ' err' : ''}`}>
+                  {bubbles.map((part, index) => (
+                    <div className="weclone-bubble" key={index}>
+                      {part}
+                    </div>
+                  ))}
+                  {t.hint && (
+                    <p className="weclone-turn-hint">
+                      <AlertTriangle size={12} /> {t.hint}
+                    </p>
+                  )}
+                </div>
+              )
+            })}
             {sending && (
               <div className="weclone-turn assistant">
                 <div className="weclone-bubble pending">

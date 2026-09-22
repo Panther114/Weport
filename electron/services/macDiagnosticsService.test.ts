@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { classifyContainerAccessError, isRosettaTranslation, parseSignatureInfo, parseSipStatus } from './macDiagnosticsService'
+import {
+  classifyContainerAccessError,
+  isRosettaTranslation,
+  isUnsupportedWeChatVersion,
+  parseSignatureInfo,
+  parseSipStatus,
+  parseWeChatVersion,
+  summarizeDataCandidates,
+} from './macDiagnosticsService'
 
 /**
  * 这些解析函数决定了用户看到的是「关掉 SIP 试试」还是「关掉 SIP 也没用」——
@@ -81,5 +89,83 @@ describe('isRosettaTranslation', () => {
     expect(isRosettaTranslation('0\n')).toBe(false)
     expect(isRosettaTranslation('')).toBe(false)
     expect(isRosettaTranslation(null as unknown as string)).toBe(false)
+  })
+})
+
+describe('parseWeChatVersion', () => {
+  it('解析 defaults read 的裸版本号（朋友实测：3.8.10）', () => {
+    expect(parseWeChatVersion('3.8.10\n')).toBe('3.8.10')
+  })
+
+  it('解析 Info.plist XML 片段', () => {
+    expect(
+      parseWeChatVersion('<key>CFBundleShortVersionString</key>\n<string>4.1.8</string>')
+    ).toBe('4.1.8')
+  })
+
+  it('空输入返回 null 而不是抛错', () => {
+    expect(parseWeChatVersion('')).toBeNull()
+    expect(parseWeChatVersion('not bound')).toBeNull()
+  })
+})
+
+describe('isUnsupportedWeChatVersion', () => {
+  it('3.x 判定为不支持（db_storage / kvcomm / *_t.dat 都不存在）', () => {
+    expect(isUnsupportedWeChatVersion('3.8.10')).toBe(true)
+  })
+
+  it('4.x 不拦截', () => {
+    expect(isUnsupportedWeChatVersion('4.1.8')).toBe(false)
+  })
+
+  it('读不到版本时不误判', () => {
+    expect(isUnsupportedWeChatVersion(null)).toBe(false)
+    expect(isUnsupportedWeChatVersion('')).toBe(false)
+  })
+})
+
+describe('summarizeDataCandidates', () => {
+  const probe = (overrides: Partial<Parameters<typeof summarizeDataCandidates>[0][number]> = {}) => ({
+    path: '/p',
+    exists: true,
+    readable: true,
+    accountCount: 0,
+    hasSessionDb: false,
+    ...overrides,
+  })
+
+  it('v1.0.0 回归：唯一可读候选是 3.x 的 2.0b4.0.9 时不再报 OK', () => {
+    // 朋友实测的形状：可读 1 个，但 accountCount=0（没有 db_storage）。
+    const result = summarizeDataCandidates(
+      [probe({ path: '…/com.tencent.xinWeChat/2.0b4.0.9' })],
+      { wechatVersion: '3.8.10' }
+    )
+    expect(result.state).toBe('fail')
+    expect(result.detail).toContain('3.x')
+    expect(result.detail).not.toMatch(/可以读取 1 个候选/)
+  })
+
+  it('含 session.db 的候选报 ok', () => {
+    const result = summarizeDataCandidates(
+      [probe({ accountCount: 1, hasSessionDb: true })],
+      { wechatVersion: '4.1.8' }
+    )
+    expect(result.state).toBe('ok')
+  })
+
+  it('有 db_storage 但无 session.db 报 warn（未登录/未写完），不是 fail', () => {
+    const result = summarizeDataCandidates(
+      [probe({ accountCount: 2, hasSessionDb: false })],
+      { wechatVersion: '4.1.8' }
+    )
+    expect(result.state).toBe('warn')
+  })
+
+  it('一个候选都不存在报 fail', () => {
+    const result = summarizeDataCandidates(
+      [probe({ path: '/nope', exists: false, readable: false })],
+      { wechatVersion: '4.1.8' }
+    )
+    expect(result.state).toBe('fail')
   })
 })
