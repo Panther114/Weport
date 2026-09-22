@@ -6,7 +6,8 @@ import {
     NATIVE_BAND_IDS,
     useNotificationNativeAdaptiveTheme,
     useNotificationSnapshotTheme,
-    type CardLayoutRect
+    type CardLayoutRect,
+    type ThemeTextInput
 } from './useNotificationAdaptiveTheme'
 import '../components/NotificationToast.scss'
 import './NotificationWindow.scss'
@@ -14,7 +15,8 @@ import {
     NOTIFICATION_CARD_MAX_HEIGHT,
     NOTIFICATION_GLASS_DEFAULT,
     NOTIFICATION_GLASS_KEYS,
-    glassTextPolarity,
+    notificationGlassFillAlpha,
+    notificationGlassRepresentativeRgb,
     normalizeNotificationGlass,
     notificationCardPadding,
     notificationGlassRenderParams,
@@ -477,13 +479,19 @@ export default function NotificationWindow() {
     }, [])
 
     /**
-     * 文字极性由**用户的玻璃填充色**固定，不再跟随背景采样 —— 用户反馈
-     * "弹窗文字有时候是白的，确保它不要自动调整"。见 glassTextPolarity 的说明。
-     * 纱层（--noti-tint）与光晕仍然自适应：它们决定卡片显不显形，不决定文字颜色。
+     * 文字极性：**由"填充 × 不透明度"叠在采样到的背景上**决定（v1.0.1 修正）。
+     *
+     * 用户报的："自适应只看了渐变/填充色，没考虑乘上不透明度之后的实际效果。"
+     * 极性的输入因此不只是填充色，而是 `fill`（填充不透明度 + 填充本身亮度，
+     * 渐变给两端）—— 引擎拿到桌面采样后按 `α·填充 + (1-α)·背景` 合成再判。
+     * 折射全关时卡片就是"填充叠桌面"，这个合成值就是眼睛看到的那张卡。
      */
-    const textPolarity = useMemo(() => glassTextPolarity(glass), [glass])
-    useNotificationNativeAdaptiveTheme(nativeBackdrop, cardLayout, textPolarity)
-    useNotificationSnapshotTheme(backdrop, cardLayout, textPolarity)
+    const themeText = useMemo<ThemeTextInput>(
+        () => ({ fill: { alpha: notificationGlassFillAlpha(glass), rgb: notificationGlassRepresentativeRgb(glass) } }),
+        [glass]
+    )
+    useNotificationNativeAdaptiveTheme(nativeBackdrop, cardLayout, themeText)
+    useNotificationSnapshotTheme(backdrop, cardLayout, themeText)
 
     // 折射管线状态挂在 <html data-glass> 上：截图 QA 据此断言"弹窗真的是实时
     // 玻璃"，而不是只在代码里以为接上了（采集失败会静默退回静态快照）。

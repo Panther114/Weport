@@ -494,7 +494,13 @@ export default function LiquidGlass({
                         backgroundImage: `url(${lensMap.specularUrl})`,
                         backgroundSize: '100% 100%',
                         mixBlendMode: 'screen',
-                        opacity: 'calc(0.85 * var(--liquid-glass-ring, 1))'
+                        /**
+                         * 下限 0.35：镜面高光是"这是玻璃"最直接的证据，不能因为用户把
+                         * 「边缘高光」拉到 0 就整层消失 —— 那正好把玻璃读成一块纯色板
+                         * （实测：`--glass-ring` 来自描边不透明度，默认 0，于是这一层
+                         * 在默认配置下完全不显示，白做）。滑块只负责往上加。
+                         */
+                        opacity: 'max(0.35, calc(0.85 * var(--liquid-glass-ring, 1)))'
                     }}
                 />
             )}
@@ -514,7 +520,8 @@ export default function LiquidGlass({
                     boxShadow: 'none',
                     background:
                         'linear-gradient(180deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.10) 18%, rgba(255,255,255,0) 42%, rgba(0,0,0,0) 62%, rgba(0,0,0,0.16) 100%)',
-                    opacity: 'calc(0.9 * var(--liquid-glass-ring, 1))'
+                    // 同上：厚度是材质线索，给一个下限，滑块只负责往上加。
+                    opacity: 'max(0.3, calc(0.9 * var(--liquid-glass-ring, 1)))'
                 }}
             />
 

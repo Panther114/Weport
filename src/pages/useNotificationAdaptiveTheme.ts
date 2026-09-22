@@ -28,6 +28,7 @@
  */
 
 import { useEffect, useRef } from 'react'
+import { glassTextPolarityFromFill, type GlassFillComposite } from '../utils/notificationGlass'
 
 const clamp255 = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v)
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v)
@@ -599,8 +600,7 @@ export interface NativeBandStat {
 export function useNotificationNativeAdaptiveTheme(
     enabled: boolean,
     layout: () => CardLayoutRect[],
-    /** 固定文字极性（来自用户的玻璃填充色）。见 resolveNotificationTheme 的说明。 */
-    textPolarity?: 'dark' | 'light'
+    themeText?: ThemeTextInput
 ) {
     const resolverRef = useRef<ReturnType<typeof createOneShotThemeResolver> | null>(null)
     if (!resolverRef.current) resolverRef.current = createOneShotThemeResolver()
@@ -636,10 +636,10 @@ export function useNotificationNativeAdaptiveTheme(
                 },
                 layout(),
                 window.devicePixelRatio || 1,
-                { textPolarity }
+                { textPolarity: resolveThemeTextPolarity(themeText, card.mean) }
             )
         })
-    }, [enabled, layout, textPolarity])
+    }, [enabled, layout, themeText])
 }
 
 /**
@@ -689,8 +689,7 @@ function offsetSampleOutsideWindow(
 export function useNotificationSnapshotTheme(
     backdrop: { width: number; height: number; screenX: number; screenY: number; winW?: number; winH?: number; dataUrl?: string | null } | undefined,
     layout: () => CardLayoutRect[],
-    /** 固定文字极性（来自用户的玻璃填充色）。见 resolveNotificationTheme 的说明。 */
-    textPolarity?: 'dark' | 'light'
+    themeText?: ThemeTextInput
 ) {
     const resolverRef = useRef<ReturnType<typeof createOneShotThemeResolver> | null>(null)
     if (!resolverRef.current) resolverRef.current = createOneShotThemeResolver()
@@ -718,12 +717,40 @@ export function useNotificationSnapshotTheme(
                 title: rects[1] ? read(rects[1]) : null,
                 body: rects[2] ? read(rects[2]) : null
             }
-            resolver.settle(raw, rects.map((r) => ({ ...r })), window.devicePixelRatio || 1, { textPolarity })
+            resolver.settle(raw, rects.map((r) => ({ ...r })), window.devicePixelRatio || 1, {
+                textPolarity: resolveThemeTextPolarity(themeText, raw.card?.mean)
+            })
         }
         img.src = backdrop.dataUrl
         return () => {
             disposed = true
             img.onload = null
         }
-    }, [backdrop, layout, textPolarity])
+    }, [backdrop, layout, themeText])
+}
+
+/**
+ * 文字极性的输入。
+ *
+ * `textPolarity` = 完全固定（老行为）；`fill` = 按填充 + 不透明度**叠在这一帧采样到的
+ * 背景上**合成后决定（用户报的"自适应没考虑不透明度"）。两者都没给就完全交给引擎
+ * 按背景算。
+ */
+export interface ThemeTextInput {
+    textPolarity?: 'dark' | 'light'
+    fill?: GlassFillComposite
+}
+
+/**
+ * 把采样到的背景亮度折成极性输入。
+ *
+ * 采样是 RGB 均值 —— 用**相对亮度**（gamma 化）而不是通道平均，否则中灰与"暗绿"
+ * 会被判成同一档（见 resolveNotificationTheme 里用 gammaLuma 的原因）。
+ */
+export function resolveThemeTextPolarity(themeText: ThemeTextInput | undefined, sampleMean?: [number, number, number]): 'dark' | 'light' | undefined {
+    if (!themeText) return undefined
+    if (themeText.textPolarity) return themeText.textPolarity
+    if (!themeText.fill) return undefined
+    const backdropLuma = sampleMean ? gammaLuma(sampleMean) / 255 : 0.5
+    return glassTextPolarityFromFill(themeText.fill, backdropLuma)
 }

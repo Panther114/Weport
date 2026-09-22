@@ -109,22 +109,22 @@ describe('弹窗文字颜色：不随背景自动调整', () => {
   })
 })
 
-describe('glassTextPolarity：极性只由用户填的玻璃颜色决定', () => {
+describe('glassTextPolarity：极性由「填充 × 不透明度」合成后的实际观感决定', () => {
   const withGlass = (patch: Partial<NotificationGlass>): NotificationGlass => ({ ...NOTIFICATION_GLASS_DEFAULT, ...patch })
 
-  it('默认（白色填充 16%）→ 深色文字', () => {
+  it('默认（浅色渐变 60%）→ 深色文字', () => {
     expect(glassTextPolarity(NOTIFICATION_GLASS_DEFAULT)).toBe('dark')
   })
 
-  it('任意亮色填充 → 深色文字', () => {
+  it('不透明的亮色填充 → 深色文字', () => {
     for (const fillColor of ['#ffffff', '#f5f5f5', '#e0e0e0', '#c8c8c8', '#80c0ff']) {
-      expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor })), fillColor).toBe('dark')
+      expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor, fillOpacity: 100 }), 0.5), fillColor).toBe('dark')
     }
   })
 
-  it('暗色填充 → 浅色文字', () => {
+  it('不透明的暗色填充 → 浅色文字', () => {
     for (const fillColor of ['#000000', '#161412', '#333333', '#2b2b3a']) {
-      expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor })), fillColor).toBe('light')
+      expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor, fillOpacity: 100 }), 0.5), fillColor).toBe('light')
     }
   })
 
@@ -137,12 +137,54 @@ describe('glassTextPolarity：极性只由用户填的玻璃颜色决定', () =>
     expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '' }))).toBe('dark')
   })
 
+  /**
+   * 用户报的第二个问题：
+   *
+   *  「文字色的自适应只看了渐变/填充色，没考虑这些颜色乘上**不透明度**之后的实际效果。」
+   *
+   * 旧实现只看填充色本身，于是"20% 的黑"（实际上几乎是透明的）被当成"暗色填充"配白字，
+   * 落在亮桌面上就是浅底白字。这里的四组断言把两件事分别钉住：
+   *  · 低不透明度时结论**跟着背景走**（因为背景才是画面里的大头）；
+   *  · 同一个填充色在满不透明度下结论**相反** —— 证明确实是"合成"在起作用，
+   *    而不是又退回"看填充色"。
+   */
+  it('低不透明度时按合成结果判：浅底配深字、暗底配浅字', () => {
+    const translucentBlack = withGlass({ fillMode: 'solid', fillColor: '#000000', fillOpacity: 20 })
+    // 20% 黑落在亮桌面（0.82）→ 合成 ≈ 0.66 → 深字
+    expect(glassTextPolarity(translucentBlack, 0.82)).toBe('dark')
+    // 10% 白落在近黑桌面（0.02）→ 合成 ≈ 0.12 → 浅字
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '#ffffff', fillOpacity: 10 }), 0.02)).toBe('light')
+
+    // 同样两个颜色，满不透明度下结论翻转（证明确实是"合成"在起作用）
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '#000000', fillOpacity: 100 }), 0.82)).toBe('light')
+    expect(glassTextPolarity(withGlass({ fillMode: 'solid', fillColor: '#ffffff', fillOpacity: 100 }), 0.06)).toBe('dark')
+  })
+
+  it('渐变按代表色合成：整张卡只有一个极性，不让一端翻车', () => {
+    // #ffffff → #000000（代表色≈中灰 0.216），60% 不透明度
+    const glass = withGlass({ fillMode: 'gradient', fillGradientFrom: '#ffffff', fillGradientTo: '#000000', fillOpacity: 60 })
+    // 中灰背景（0.5）：合成 ≈ 0.33 → 深字
+    expect(glassTextPolarity(glass, 0.5)).toBe('dark')
+    // 近黑背景（0.0）：合成 ≈ 0.13 → 浅字
+    expect(glassTextPolarity(glass, 0.0)).toBe('light')
+  })
+
+  it('没有背景采样时按中灰（0.5）估：不确定的假设不把任一端判死', () => {
+    const glass = withGlass({ fillMode: 'solid', fillColor: '#808080', fillOpacity: 60 })
+    // 合成 = 0.6*0.216 + 0.4*0.5 = 0.33 → 深字（对比度 6.4 vs 2.9）
+    expect(glassTextPolarity(glass, 0.5)).toBe('dark')
+  })
+
   it('渐变填充取两端中点判极性：每一对预设都与它声明的极性一致', () => {
     // 预设自带 `expect`（这一对**应该**配什么颜色的文字）。这里拿函数对它账，
     // 而不是反过来写死"除了石墨都是深字" —— 那样新增一个暗色预设就会静默判错。
+    // 用 100% 不透明度：预设的 expect 描述的是"这套配色本身"，与背景无关。
     for (const preset of GRADIENT_PRESETS) {
       expect(
-        glassTextPolarity(withGlass({ fillMode: 'gradient', fillGradientFrom: preset.from, fillGradientTo: preset.to })),
+        glassTextPolarity(
+          withGlass({ fillMode: 'gradient', fillGradientFrom: preset.from, fillGradientTo: preset.to, fillOpacity: 100 }),
+          0.5
+        ),
         preset.id
       ).toBe(preset.expect)
     }
@@ -176,11 +218,20 @@ describe('glassTextPolarity：极性只由用户填的玻璃颜色决定', () =>
       expect(vars['--noti-title-color']).not.toBe('#ffffff')
     })
 
-    it('暗色填充 → 预览文字变浅色（说明控件真的动了）', () => {
+    it('暗色填充（不透明）→ 预览文字变浅色（说明控件真的动了）', () => {
       const vars = notificationGlassTextVars(
-        withGlass({ fillMode: 'gradient', fillGradientFrom: '#3a3d45', fillGradientTo: '#1c1e23' })
+        withGlass({ fillMode: 'gradient', fillGradientFrom: '#3a3d45', fillGradientTo: '#1c1e23', fillOpacity: 100 })
       )
       expect(luma(vars['--noti-title-color'])).toBeGreaterThan(0.6)
+    })
+
+    it('预览也按"填充 × 不透明度"合成：极淡的暗色填充落在亮底上仍配深字', () => {
+      // 10% 的黑几乎透明 —— 预览（中灰底）里它依然是浅色板，配深字
+      const vars = notificationGlassTextVars(
+        withGlass({ fillMode: 'solid', fillColor: '#000000', fillOpacity: 10 }),
+        0.5
+      )
+      expect(luma(vars['--noti-title-color'])).toBeLessThan(0.12)
     })
 
     it('关掉填充 → 仍是深色，且四个变量都给全（缺一个就会退回兜底白）', () => {

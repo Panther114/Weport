@@ -434,24 +434,64 @@ export function notificationShadowCss(shadow: number): string | null {
  *
  * 用户显式指定文字色时不走这里（`--glass-text-color` 优先级更高）。
  */
-export function glassTextPolarity(glass: NotificationGlass): 'dark' | 'light' {
-    if (!glass.fill) return 'dark'
-    // 渐变取两端中点当代表色：极性必须是一个值，否则同一张卡片的左半边和
-    // 右半边会得到相反的结论（见 notificationGlassRepresentativeRgb）。
-    const [r, g, b] = notificationGlassRepresentativeRgb(glass)
+export function glassTextPolarity(glass: NotificationGlass, backdropLuma = 0.5): 'dark' | 'light' {
+    return glassTextPolarityFromFill(
+        { alpha: notificationGlassFillAlpha(glass), rgb: notificationGlassRepresentativeRgb(glass) },
+        backdropLuma
+    )
+}
+
+/** 填充的不透明度 0-1（关掉填充时是 0）。 */
+export function notificationGlassFillAlpha(glass: NotificationGlass): number {
+    if (!glass.fill) return 0
+    return Math.min(1, Math.max(0, Number(glass.fillOpacity) || 0) / 100)
+}
+
+export interface GlassFillComposite {
+    /** 填充不透明度 0-1 */
+    alpha: number
+    /**
+     * 填充的代表色（纯色 / 渐变两端的中点，与 `notificationGlassRepresentativeRgb` 同一口径）。
+     *
+     * 为什么用"代表色"而不是"两端分别算"：一张卡片只能有一个文字色，两端各自算会
+     * 得到互相矛盾的结论（预设色板里就有好几对一端亮一端暗）。代表色是这两种观感的
+     * 中间值，也是这套色板当初标注极性时用的口径 —— 换口径会让整套预设的极性声明失效。
+     */
+    rgb: [number, number, number]
+}
+
+/**
+ * 卡片**实际呈现出来**的亮度 → 文字极性。
+ *
+ * 用户报的原话：「文字色的自适应只看了渐变/填充色，没有考虑这些颜色乘上不透明度
+ * 之后的实际效果」。旧实现确实只看填充色本身：一个**深色**填充放在 **20%** 的
+ * 不透明度上，实际呈现几乎是透明的，在亮桌面上它依然是亮的，却因为"填充是深色"
+ * 而配了白字（浅底白字，正是要修的那件事）。反过来浅色填充极低透明度落在暗桌面上
+ * 也一样会配错。
+ *
+ * 判据改成**合成后的亮度**：`composite = α·填充亮度 + (1-α)·背景亮度`，
+ * 极性仍按对比度取更大的那一侧（锚点与自适应引擎一致）。
+ *
+ * `backdropLuma` 是同一个采样点的背景亮度（0-1）。没有采样时用 0.5（中灰）：
+ * 那是最不确定的假设，也是唯一不会把某一端判死的选择。
+ */
+export function glassTextPolarityFromFill(fill: GlassFillComposite, backdropLuma: number): 'dark' | 'light' {
+    const alpha = Math.min(1, Math.max(0, fill.alpha))
+    const backdrop = Math.min(1, Math.max(0, backdropLuma))
+    const [r, g, b] = fill.rgb
     const lin = (v: number) => {
-        const s = v / 255
+        const s = Math.min(255, Math.max(0, v)) / 255
         return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
     }
     const fillLuma = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    const composite = alpha * fillLuma + (1 - alpha) * backdrop
+
     /**
      * 用**对比度**而不是亮度阈值来判：亮度的 0.5 分界在饱和色上会判错 ——
      * 例如 #80c0ff（很浅的天蓝）相对亮度只有 0.495，卡在阈值下方，却明显该配深字。
-     * 对比度是同一件事的正确口径，也是自适应引擎自己用的判据（`bestDark >= bestLight`）。
-     *
      * 两个锚点取引擎里的取值（ANCHORS.*.strong）：
      *   深字 [10,10,10] → 相对亮度 0.0033   浅字 [255,255,255] → 1
-     * 交叉点因此落在填充亮度 ≈ 0.18 处，而不是 0.5。
+     * 交叉点因此落在合成亮度 ≈ 0.18 处，而不是 0.5。
      */
     const DARK_TEXT_LUMA = 0.0033
     const LIGHT_TEXT_LUMA = 1
@@ -459,7 +499,7 @@ export function glassTextPolarity(glass: NotificationGlass): 'dark' | 'light' {
         const [hi, lo] = a >= b ? [a, b] : [b, a]
         return (hi + 0.05) / (lo + 0.05)
     }
-    return ratio(fillLuma, DARK_TEXT_LUMA) >= ratio(fillLuma, LIGHT_TEXT_LUMA) ? 'dark' : 'light'
+    return ratio(composite, DARK_TEXT_LUMA) >= ratio(composite, LIGHT_TEXT_LUMA) ? 'dark' : 'light'
 }
 
 function hexToRgbTriple(hex: string, fallback: string): string {
@@ -570,7 +610,7 @@ export function applyNotificationGlassVars(
 }
 
 /**
- * 文字相关的 `--noti-*` 变量 —— 由**填充色**定极性，供"不在弹窗文档里"的场合使用。
+ * 文字相关的 `--noti-*` 变量 —— 由**合成后的填充**定极性，供"不在弹窗文档里"的场合使用。
  *
  * 为什么需要它：`--noti-title-color` / `--noti-body-color` / `--noti-title-tertiary`
  * 原本只由 `applyNotificationTheme()` 写进**弹窗**的 `<html>`。设置页的预览跑在主窗口
@@ -582,9 +622,12 @@ export function applyNotificationGlassVars(
  * 会解到的那个值；弹窗自己仍会按实际背景在极性内部微调（44 vs 10 这类），
  * 预览不跟随 —— 预览要的是"这套配置长什么样"，不是"此刻这张壁纸什么颜色"。
  * 改这里的数值要同步 `src/pages/useNotificationAdaptiveTheme.ts` 的 `ANCHORS`。
+ *
+ * `backdropLuma`：合成极性要用的背景亮度（0-1）。预览用默认 0.5（中灰）；
+ * 真弹窗在首帧也用它 —— 拿到第一张桌面采样后由自适应引擎按真实背景重算。
  */
-export function notificationGlassTextVars(glass: NotificationGlass): Record<string, string> {
-    const dark = glassTextPolarity(glass) === 'dark'
+export function notificationGlassTextVars(glass: NotificationGlass, backdropLuma = 0.5): Record<string, string> {
+    const dark = glassTextPolarity(glass, backdropLuma) === 'dark'
     const title = dark ? 'rgb(10, 10, 10)' : 'rgb(255, 255, 255)'
     const tertiary = dark ? 'rgb(61, 61, 61)' : 'rgb(216, 213, 207)'
     return {
