@@ -157,6 +157,43 @@ auto-switches to per-session dirs. `export_log.txt` is only updated for TXT
 and JSON runs (legacy v0.6.x format: `TXT: <time> · success=N fail=N` lines);
 清空导出库 clears every format folder + the log.
 
+## Export Media: Image Tiers & Where `node_modules` Lives
+
+Two traps that both shipped as user-visible bugs (issues #22 / #23) — read this
+before touching `imageDecryptService` / `chatService` media paths.
+
+**1. An image has three tiers on disk.** WeChat V4 keeps `<md5>_h.dat` 原图 >
+`<md5>.dat` 显示版 > `<md5>_t.dat` 缩略图. "Good enough?" is **not** a boolean
+(`isHdPath()` only answered 原图 / 非原图, so the 显示版 tier did not exist in the
+promote/resolve logic at all — a `_t` cache was only upgraded once `_h` appeared,
+and `resolveDatPath`'s hardlink branch returned `_t.dat` without checking the
+tier). Use `getDatTier()` / `getCachedPathTier()` (3 > 2 > 1) and the
+`excludeThumbnail` option: export passes `true` (「不甘于缩略图」, still falls back
+to `_t` when nothing better exists — never drop the file), the chat view does
+not, which keeps its "先给图、后变清" behaviour.
+
+**2. Packaged builds have two different `resources` dirs.**
+
+- `process.resourcesPath` = `<app>/resources` — **`node_modules` lives here**
+  (`app.asar.unpacked/node_modules/...`);
+- `resolveResourcesPath()` (appMain) = `<app>/resources/resources` — only the
+  app's own assets (`key/`, `wcdb/`, `wedecrypt/`, `runtime/`).
+
+`chatService` receives the *second* one as `resourcesPath` via
+`setRuntimeConfig`, so joining `node_modules` onto it yields
+`resources/resources/node_modules/...` — always missing. That is what silently
+killed every voice export (`silk.wasm not found` → `decodeSilkToPcm` returned
+`null` before ever decoding). `resolveSilkWasmPath()` now tries
+`require.resolve('silk-wasm/lib/silk.wasm')` first, then `process.resourcesPath`
+in both layouts, then appPath/cwd, and only *warns* when all fail (silk-wasm
+resolves its own wasm, so path inference must never gate the decode). `ffmpeg`
+probing is shared through `electron/services/ffmpegLocator.ts` (system installs
+only — the project deliberately does **not** bundle ffmpeg, see
+`backgroundVideoService`).
+
+Silent media loss is itself a bug: `voiceFailedFiles` flows telemetry → export
+result → completion toast, the way `imageKeyMissingFiles` already did.
+
 ## Contact Name Warmup
 
 `appMain.ts::warmupContactNames()` preloads the first 600 sessions' display
