@@ -1301,8 +1301,11 @@ export default function App() {
       // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
       const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
+      // issue #22：语音拿不到数据时以前是静默丢文件，用户只看到"导出的语音没有文件"。
+      const voiceFailed = Math.max(0, Math.floor(Number(result.voiceFailedFiles || 0)))
+      const voiceWarning = voiceFailed > 0 ? ` · ${voiceFailed} 条语音未能导出（微信里没有完整语音文件，先在微信里播放一次再导）` : ''
       if (result.success) {
-        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}`, imageKeyMissing > 0 ? 12000 : 7000)
+        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}${voiceWarning}`, (imageKeyMissing > 0 || voiceFailed > 0) ? 12000 : 7000)
         // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
         // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
         exportProgressRef.current?.complete()

@@ -9975,27 +9975,54 @@ class ChatService {
 
 
   /**
+   * 定位 `silk-wasm/lib/silk.wasm`。
+   *
+   * 打包后有**两个完全不同的 resources 目录**，这里最容易踩：
+   * - `process.resourcesPath`（`<app>/resources`）—— `node_modules` 在这里；
+   * - app 自己的资源目录（`<app>/resources/resources`，只有 key/wcdb/wedecrypt），
+   *   也就是 `resolveResourcesPath()` 的返回值，它会经 `setRuntimeConfig` 传进来。
+   *
+   * 旧代码把后者当成了前者，拼出 `resources/resources/node_modules/...` —— 打包版
+   * 永远拿不到 wasm，语音解码全灭（issue #22：导出的语音一条文件都没有）。
+   */
+  private resolveSilkWasmPath(): string | null {
+    const candidates: string[] = []
+    const appPath = this.runtimeConfig?.appPath ?? app.getAppPath()
+
+    // 1) 让模块自己解析（asarUnpack 之后这条路径就是真实文件）
+    try {
+      const requireFromApp = createRequire(join(appPath, 'package.json'))
+      candidates.push(requireFromApp.resolve('silk-wasm/lib/silk.wasm'))
+    } catch {
+      // 模块解析失败时继续用下面的候选
+    }
+
+    // 2) 打包：node_modules 在 process.resourcesPath 下，不在 app 的资源目录下
+    const realResourcesPath = process.resourcesPath
+    if (realResourcesPath) {
+      candidates.push(join(realResourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm'))
+      candidates.push(join(realResourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm'))
+    }
+
+    // 3) 开发环境 / 兜底
+    for (const base of [appPath, process.cwd()]) {
+      if (base) candidates.push(join(base, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm'))
+    }
+
+    return candidates.find((candidate) => candidate && existsSync(candidate)) || null
+  }
+
+  /**
    * 解码 Silk 数据为 PCM (silk-wasm)
    */
   private async decodeSilkToPcm(silkData: Buffer, sampleRate: number): Promise<Buffer | null> {
     try {
-      let wasmPath: string
-      const isPackaged = this.runtimeConfig?.isPackaged ?? app.isPackaged
-      const resourcesPath = this.runtimeConfig?.resourcesPath ?? process.resourcesPath
       const appPath = this.runtimeConfig?.appPath ?? app.getAppPath()
-
-      if (isPackaged) {
-        wasmPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
-        if (!existsSync(wasmPath)) {
-          wasmPath = join(resourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
-        }
-      } else {
-        wasmPath = join(appPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
-      }
-
-      if (!existsSync(wasmPath)) {
-        console.error('[ChatService][Voice] silk.wasm not found at:', wasmPath)
-        return null
+      const wasmPath = this.resolveSilkWasmPath()
+      if (!wasmPath) {
+        // **不再直接失败**：silk-wasm 自己按 `lib/silk.wasm` 实例化，这里只是路径推断。
+        // 推断不出来只记一条日志，解码照常尝试（旧版在这里 return null 是 issue #22 的根因）。
+        console.warn('[ChatService][Voice] 未定位到 silk.wasm，仍尝试直接解码')
       }
 
       // 在 worker 环境中使用 createRequire 来正确加载模块

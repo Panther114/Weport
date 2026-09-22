@@ -435,7 +435,8 @@ export class ExportContext {
           cacheFillFiles: 0,
           dedupReuseFiles: 0,
           bytesWritten: 0,
-          imageKeyMissingFiles: 0
+          imageKeyMissingFiles: 0,
+          voiceFailedFiles: 0
         }
     }
 
@@ -504,7 +505,8 @@ export class ExportContext {
           mediaCacheFillFiles: stats.cacheFillFiles,
           mediaDedupReuseFiles: stats.dedupReuseFiles,
           mediaBytesWritten: stats.bytesWritten,
-          mediaImageKeyMissingFiles: stats.imageKeyMissingFiles
+          mediaImageKeyMissingFiles: stats.imageKeyMissingFiles,
+          mediaVoiceFailedFiles: stats.voiceFailedFiles
         }
     }
 
@@ -532,6 +534,10 @@ export class ExportContext {
 
         if (Number.isFinite(delta.imageKeyMissingFiles)) {
           this.mediaExportTelemetry.imageKeyMissingFiles += Math.max(0, Math.floor(Number(delta.imageKeyMissingFiles || 0)))
+        }
+
+        if (Number.isFinite(delta.voiceFailedFiles)) {
+          this.mediaExportTelemetry.voiceFailedFiles += Math.max(0, Math.floor(Number(delta.voiceFailedFiles || 0)))
         }
 
         if (Number.isFinite(delta.bytesWritten)) {
@@ -3388,6 +3394,9 @@ export class ExportContext {
             msg?.senderUsername || undefined
           )
           if (!voiceResult.success || !voiceResult.data) {
+            // issue #22：以前这里静默返回 null —— 用户只看到"导出的语音没有文件"。
+            // 记进统计，导出结束时按条数提示（原因多半是微信里没有完整语音文件）。
+            this.noteMediaTelemetry({ voiceFailedFiles: 1 })
             return null
           }
 
@@ -3405,6 +3414,7 @@ export class ExportContext {
             kind: 'voice'
           }
         } catch (e) {
+          this.noteMediaTelemetry({ voiceFailedFiles: 1 })
           return null
         }
     }
