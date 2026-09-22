@@ -3097,7 +3097,9 @@ export class ExportContext {
                   hardlinkOnly: true,
                   disableUpdateCheck: true,
                   allowCacheIndex: true,
-                  suppressEvents: true
+                  suppressEvents: true,
+                  // 导出要画质：缓存里是缩略图、而磁盘上已有显示版 / 原图时必须换掉
+                  excludeThumbnail: true
                 })
                 return pickResolvedImagePath(cachedResult)
               }
@@ -3115,7 +3117,8 @@ export class ExportContext {
                 force: false,
                 preferFilePath: true,
                 hardlinkOnly: true,
-                allowCacheIndex: true
+                allowCacheIndex: true,
+                excludeThumbnail: true
               })
               if (decryptResult.failureKind === 'missing_key') sawMissingImageKey = true
               const decryptedPath = pickResolvedImagePath(decryptResult)
@@ -3123,7 +3126,7 @@ export class ExportContext {
 
               const localId = Number(msg?.localId || 0)
               if (Number.isFinite(localId) && localId > 0) {
-                const fallback = await chatService.getImageData(sessionId, String(localId))
+                const fallback = await chatService.getImageData(sessionId, String(localId), { excludeThumbnail: true })
                 if (fallback.success && fallback.data) {
                   const buffer = Buffer.from(fallback.data, 'base64')
                   const mime = this.detectMimeType(buffer) || 'image/jpeg'

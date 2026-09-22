@@ -9109,8 +9109,14 @@ class ChatService {
   }
   /**
    * 获取图片数据（解密后的）
+   *
+   * `options.excludeThumbnail`：磁盘上还有显示版 / 原图时不要交回缩略图（导出用）。
    */
-  async getImageData(sessionId: string, msgId: string): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getImageData(
+    sessionId: string,
+    msgId: string,
+    options?: { excludeThumbnail?: boolean }
+  ): Promise<{ success: boolean; data?: string; error?: string }> {
     try {
       const localId = parseInt(msgId, 10)
       if (!this.connected) await this.connect()
@@ -9137,7 +9143,8 @@ class ChatService {
         createTime: msg.createTime,
         force: false,
         preferFilePath: true,
-        hardlinkOnly: true
+        hardlinkOnly: true,
+        excludeThumbnail: options?.excludeThumbnail === true
       })
 
       if (!result.success || !result.localPath) {
