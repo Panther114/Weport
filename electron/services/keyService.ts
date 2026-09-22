@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { join, dirname, basename } from 'path'
-import { existsSync, copyFileSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { existsSync, copyFileSync, mkdirSync, readdirSync, statSync, type Dirent } from 'fs'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import os from 'os'
@@ -24,6 +24,63 @@ export type ImageKeyCacheAccount = {
 
 /** 上游 `GetImageKey` 的 JSON 载荷。 */
 export type ImageKeyCachePayload = { accounts?: ImageKeyCacheAccount[] }
+
+/**
+ * 直接从微信 MMKV 缓存文件名里读「密钥码」（`key_<code>_*.statistic`）。
+ *
+ * 为什么需要它：`wx_key.dll` 那条路（{@link KeyService.autoGetImageKey} 里的
+ * `getImageKeyDll`）在微信 4.1.x 上经常返回空账号列表，于是旧实现只能让用户去点
+ * 「内存扫描」——而内存扫描要求"先在微信里打开 2-3 张大图"，是本机最容易失败的一步。
+ *
+ * 密钥码根本不用扫内存：它就躺在本机 MMKV 的**文件名**里
+ * （`%APPDATA%\Tencent\xwechat\net*\kvcomm\key_<code>_<...>.statistic`），
+ * 拿到 code 后 `md5(String(code) + 清洗过后缀的 wxid)` 的前 16 个十六进制字符就是
+ * AES 密钥、`code & 0xFF` 就是 XOR 密钥（见 {@link deriveImageKeysForWxid}）。
+ * 派生是纯离线计算，本机实测一把命中：`code=52494578` +
+ * `wxid_gsnpwh6vh2z012`（原始 wxid 带 `_64b5` 后缀，必须去掉）→
+ * 解出的第一块是 `FF D8 FF E0`（JPEG）。
+ *
+ * 只返回候选码，**不**决定用哪个 —— 归属仍由模板校验（{@link selectVerifiedImageKey}）
+ * 判定，多几个候选的代价只是几次 md5。
+ */
+export function readImageKeyCodesFromMmkv(): number[] {
+  const appData = process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming')
+  const roots = [
+    join(appData, 'Tencent', 'xwechat'),
+    join(appData, 'Tencent', 'WeChat'),
+    join(appData, 'Tencent', 'xwechat', 'ilink')
+  ]
+  const codes = new Set<number>()
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 3) return
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        // kvcomm 目录最常见，但别只认它 —— 版本升级换过好几层目录名
+        if (/kvcomm|ilink|net/i.test(entry.name) || depth === 0) walk(full, depth + 1)
+        continue
+      }
+      const match = /^key_(\d+)_/.exec(entry.name)
+      if (!match) continue
+      const code = Number(match[1])
+      if (Number.isFinite(code) && code > 0) codes.add(code)
+    }
+  }
+  for (const root of roots) walk(root, 0)
+  return Array.from(codes)
+}
+
+/** MMKV 候选码 → 上游 JSON 结构（与 `wx_key.dll` 的返回同形）。 */
+function imageKeyPayloadFromMmkv(codes: number[]): ImageKeyCachePayload {
+  if (codes.length === 0) return { accounts: [] }
+  return { accounts: [{ keys: codes.map((code) => ({ code })) }] }
+}
 
 /**
  * 一个 wxid 可能对应的几种写法。
@@ -1206,10 +1263,25 @@ export class KeyService {
     }
 
     const accounts: ImageKeyCacheAccount[] = Array.isArray(parsed.accounts) ? parsed.accounts : []
-    if (!accounts.length || !accounts.some((account) => (account.keys || []).length)) {
+    const dllHasKeys = accounts.some((account) => (account.keys || []).length > 0)
+    if (!dllHasKeys) {
+      // wx_key.dll 这条路在微信 4.1.x 上常常是空的（返回 accounts:[]）。密钥码其实就
+      // 在 MMKV 文件名里，不需要扫内存也不需要打开图片大图 —— 纯离线读出候选码，
+      // 后面照样要过模板校验才算数。
+      const mmkvCodes = readImageKeyCodesFromMmkv()
+      if (mmkvCodes.length > 0) {
+        parsed = imageKeyPayloadFromMmkv(mmkvCodes)
+        onProgress?.(`缓存目录里读到 ${mmkvCodes.length} 个候选密钥码，正在用本账号图片模板校验…`)
+        console.log('[ImageKey] wx_key.dll 没给出密钥码，改用 MMKV 文件名派生候选:', mmkvCodes)
+      }
+    }
+    if (!parsed.accounts?.length || !parsed.accounts.some((account) => (account.keys || []).length)) {
       return {
         success: false,
-        tried: ['读取微信 kvcomm 缓存（key_<code>_*.statistic）'],
+        tried: [
+          '读取微信 kvcomm 缓存（key_<code>_*.statistic）',
+          '从 MMKV 文件名派生密钥码（%APPDATA%\\Tencent\\xwechat\\**\\kvcomm\\key_<code>_*.statistic）'
+        ],
         error: '微信缓存里没有找到图片密钥码（kvcomm 缓存为空或缺 key_<code>_*.statistic 文件）。'
           + '下一步：启动并登录微信，在任意聊天里打开 2-3 张图片后重试；'
           + '若微信刚装好或刚清过缓存，需要先在微信里收发/查看过图片'

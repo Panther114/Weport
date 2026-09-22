@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { anthropicMessages, getProviderAdapter, googleContents, openAIChatBody, openAIChatMessages, selectAdapter } from './providerAdapters'
+import { anthropicMessages, getProviderAdapter, googleContents, openAIChatBody, openAIChatMessages, selectAdapter, usageFromAnthropic, usageFromOpenAI } from './providerAdapters'
 import type { ProviderProfile, ProviderStreamInput } from './providerTypes'
 
 function profile(patch: Partial<ProviderProfile> = {}): ProviderProfile {
@@ -75,6 +75,57 @@ describe('wire body has no per-request volatility', () => {
     // Anthropic fell back to a hard-coded 32768 on the main call path.
     expect(openAIChatBody(streamInput({ maxOutputTokens: 64000 })).max_tokens).toBe(64000)
   })
+
+  it('stream_options.include_usage 现在无条件下发（非 deepseek 也一样）', () => {
+    // 旧实现只在 deepseek 上带它 —— 严格遵循 OpenAI 语义的 chat-completions
+    // 网关**没有 include_usage 就完全不回 usage**：TPS 徽标和命中率读数双双归零。
+    const body = openAIChatBody(streamInput({ profile: profile({ providerId: 'custom', model: 'some-model' }) }))
+    expect(body.stream_options).toEqual({ include_usage: true })
+  })
+
+  it('reasoning_effort 仍然只发给 deepseek 系（协议差异，不是缓存问题）', () => {
+    const foreign = openAIChatBody(streamInput({ profile: profile({ providerId: 'custom', model: 'some-model' }) }))
+    expect(Object.prototype.hasOwnProperty.call(foreign, 'reasoning_effort')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(openAIChatBody(streamInput()), 'reasoning_effort')).toBe(true)
+  })
+})
+
+/**
+ * 命中率读数的字段链：不同上游报不同的字段（DeepSeek `prompt_cache_hit_tokens`、
+ * OpenAI `prompt_tokens_details.cached_tokens`、Anthropic 中继 `cache_read_input_tokens`），
+ * 漏读任何一种都会把真实的 98% 显示成 0%。
+ */
+describe('usage 归一化', () => {
+  it('读 OpenAI 形状的 cached_tokens', () => {
+    expect(usageFromOpenAI({ prompt_tokens: 1000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 900 } })).toMatchObject({
+      promptTokens: 1000,
+      promptCacheHitTokens: 900,
+    })
+  })
+
+  it('缺 cached_tokens 时回落到 DeepSeek 原生 prompt_cache_hit_tokens', () => {
+    expect(usageFromOpenAI({ prompt_tokens: 12000, completion_tokens: 5, prompt_cache_hit_tokens: 11776 })).toMatchObject({
+      promptTokens: 12000,
+      promptCacheHitTokens: 11776,
+    })
+  })
+
+  it('缺 usage 时返回 undefined（而不是全 0 假装读到了）', () => {
+    expect(usageFromOpenAI(undefined)).toBeUndefined()
+    expect(usageFromAnthropic(undefined)).toBeUndefined()
+  })
+
+  it('Anthropic usage 归一到「prompt 含缓存」的统一口径', () => {
+    // Anthropic 的 input_tokens 与缓存桶是**不相交**的：input=100 + read=800 +
+    // write=50 才是这次请求的全部输入。UI 只有一个公式 hit/prompt，不归一就会
+    // 算出 800% 这种命中率。
+    const usage = usageFromAnthropic({ input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 800, cache_creation_input_tokens: 50 })
+    expect(usage).toMatchObject({ promptTokens: 950, promptCacheHitTokens: 800, completionTokens: 20, totalTokens: 970 })
+  })
+
+  it('Anthropic 没有缓存桶时就是裸 token 数', () => {
+    expect(usageFromAnthropic({ input_tokens: 42, output_tokens: 7 })).toMatchObject({ promptTokens: 42, promptCacheHitTokens: 0 })
+  })
 })
 
 /**
@@ -119,18 +170,23 @@ describe('工具结果里的图片 → 内容块', () => {
     },
   ]
 
-  it('带图的消息转成 text + image_url 两块', () => {
-    const [toolMessage] = openAIChatMessages(withImage()).filter((message) => message.role === 'tool')
-    expect(Array.isArray(toolMessage.content)).toBe(true)
-    expect(toolMessage.content).toEqual([
-      { type: 'text', text: '「化学群」已附上 1 张图片' },
-      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
-    ])
+  it('图片走 tool 之后的一条 user 消息（tool 的 content 必须仍是字符串）', () => {
+    const converted = openAIChatMessages(withImage())
+    const toolMessage = converted.find((message) => message.role === 'tool')
+    // 网关只接受字符串 content —— 这条是本轮修的那个 422
+    expect(typeof toolMessage?.content).toBe('string')
+    const imageMessage = converted[converted.length - 1]
+    expect(imageMessage.role).toBe('user')
+    expect((imageMessage.content as Array<Record<string, unknown>>)[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: 'data:image/jpeg;base64,AAAA' },
+    })
   })
 
   it('没有图片的消息**原样透传**（多一次改写就多一次前缀缓存失效）', () => {
     const messages = [{ role: 'tool', tool_call_id: 'call_9', content: '纯文本结果' }]
     expect(openAIChatMessages(messages)[0]).toBe(messages[0])
+    expect(openAIChatMessages(messages).length).toBe(1)
   })
 
   it('形状坏掉的图片被丢掉，而不是把整个请求搞成 400', () => {
@@ -139,8 +195,9 @@ describe('工具结果里的图片 → 内容块', () => {
     ]
     expect(openAIChatMessages(messages)[0]).toBe(messages[0])
     const partial = [{ role: 'tool', tool_call_id: 'call_1', content: 'x', images: [{ mimeType: 'image/png', data: 'BBBB' }, { data: 'CCCC' }] }]
-    const [converted] = openAIChatMessages(partial)
-    expect((converted.content as unknown[]).length).toBe(2)
+    const converted = openAIChatMessages(partial)
+    expect(converted.length).toBe(2)
+    expect((converted[1].content as unknown[]).length).toBe(2)
   })
 
   it('非 tool 角色上的 images 字段被忽略（不会伪造出一条图片消息）', () => {
@@ -150,8 +207,11 @@ describe('工具结果里的图片 → 内容块', () => {
 
   it('openAIChatBody 也走同一条转换（否则图片静默丢失）', () => {
     const body = openAIChatBody(streamInput({ messages: withImage() }))
-    const toolMessage = (body.messages as Array<Record<string, unknown>>).find((message) => message.role === 'tool')
-    expect(Array.isArray(toolMessage?.content)).toBe(true)
+    const messages = body.messages as Array<Record<string, unknown>>
+    const toolMessage = messages.find((message) => message.role === 'tool')
+    expect(typeof toolMessage?.content).toBe('string')
+    expect(messages[messages.length - 1].role).toBe('user')
+    expect(JSON.stringify(messages)).toContain('image_url')
   })
 
   it('同一份输入两次转换结果逐字节一致（前缀缓存不能被打散）', () => {

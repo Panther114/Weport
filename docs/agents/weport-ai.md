@@ -34,6 +34,44 @@ The harness is a DSH-derived port: it keeps DSH's cache discipline and evidence 
 - Deletion of a `memory/` or `notes/` file always goes through a confirmation dialog
   (`noteDeleteTarget`); those files are the only copy.
 
+## Parallel tool calls + per-step transcript — v1.1
+
+- **DSH scheduler.** `electron/services/ai/toolSchedule.ts` ports `dsh-agent-loop`
+  `tool-calls.ts`: parallel-safe calls share a bounded pool (`weportAiMaxParallelToolCalls`,
+  default 4 — the WCDB FFI host's message cursors are the scarce resource, not CPU),
+  `EXCLUSIVE_TOOLS` (`write_note`, `sync_chat_history`, `create_connector_task`) run alone
+  as ordering barriers, and results always refill in **submission order** so the wire array
+  stays byte-identical regardless of completion order. System-prompt rule 8 lets the model
+  batch up to 4 independent evidence-heavy calls per step (fewer round trips).
+- **Every assistant step lands in the transcript immediately**, tool results attached
+  (`assistant_message` fires after each tool batch, not only for the final answer). The
+  panel archives the step and starts a **fresh live bubble**: tool chips never pile up
+  across steps, and the live TPS window is per-step (no tool-execution or next-TTFT time
+  in the denominator). Live token estimate is CJK-aware (0.6 tok/中文字符, 0.3 tok/ASCII —
+  DeepSeek's own ratio); the old `chars/2.5` was the compaction-safety constant and read
+  Chinese-heavy streams ~1/3 slow.
+- **Delta batching.** `emit()` coalesces text/reasoning deltas into one `deltas` event per
+  50 ms (flushed before any non-delta event, so ordering holds). Per-token IPC + per-token
+  full-markdown reparse was O(n²) on the renderer.
+- **The prefix probe is durable and route-aware.** `PrefixFrame` = `{systemHash, toolsHash,
+  route, wireHashes[]}` (hashes only, no message text), persisted to
+  `weport-ai/prefix-probe.json`; a restart compares against the last frame instead of
+  pretending `first`. New change kind `route` (`provider|model|protocol`) reports a model
+  swap as the cache reset it is. Every `kind:"request"` debug row now carries
+  prompt/hit/miss/rate + completion/reasoning tokens — per-step usage is the ground truth
+  for the in-app reading.
+- **Usage normalization.** `usageFromOpenAI` falls back through
+  `prompt_tokens_details.cached_tokens → prompt_cache_hit_tokens → cache_read_input_tokens`;
+  `stream_options.include_usage` is unconditional on chat-completions (without it a strict
+  OpenAI-shaped gateway returns *no* usage → TPS and hit rate silently read 0);
+  `usageFromAnthropic` converts Anthropic's disjoint buckets into the same inclusive
+  `promptTokens` the UI's `hit/prompt` formula expects, and `message_delta` can no longer
+  overwrite a real prompt total with 0.
+- **Image tool results**: pixels still never hit disk (per-step resend cost), but content
+  bytes are no longer mutated on persist — the one cross-run `head-rewrite` an image view
+  causes is real and now logged honestly by the durable probe instead of hidden behind a
+  rewritten sentence.
+
 ---
 
 ## 聊天数据的新鲜度 — v1.0.1（`sync_chat_history`）

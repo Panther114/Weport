@@ -46,6 +46,7 @@ import type { ProviderConsumer, ProviderProfileInput, ProviderProfileSummary, Pr
 import { buildFallbackTitle, hasCjk, normaliseTitle, titleEchoesSource } from './ai/chatTitle'
 import { describeNetworkFailure } from './ai/netError'
 import { imagePartFromBase64, type AiImagePart } from './ai/imageParts'
+import { runToolBatch } from './ai/toolSchedule'
 export type { AiImagePart } from './ai/imageParts'
 
 /**
@@ -100,6 +101,8 @@ export interface AiMessage {
   toolCalls?: AiToolCall[]
   toolCallId?: string
   toolName?: string
+  /** 这条结果附带了几张图（图片本体不落盘，张数留作证据标记） */
+  imageCount?: number
   createdAt: number
   /** 本轮解码计时，用于消息尾部的 `N tok/s` 读数 */
   timing?: AiStepTiming
@@ -142,6 +145,8 @@ export interface AiSetupInfo {
   baseUrlError?: string
   model: string
   reasoningEffort: 'low' | 'high' | 'max'
+  /** 图片输入开关（默认开）：关掉后 `read_chat_images` 不再把图片本体交给模型 */
+  imageInputs: boolean
   customPrompt: string
   workspaceRoot: string
   exportPath: string
@@ -166,6 +171,12 @@ export type AiEvent =
   | { type: 'status'; chatId: string; running: boolean }
   | { type: 'reasoning_delta'; chatId: string; delta: string }
   | { type: 'text_delta'; chatId: string; delta: string }
+  /**
+   * 批量 delta（50ms 窗口聚合）。逐 delta 送 IPC 会让渲染层每 token 重渲染
+   * 一整段 markdown —— O(n²) 的解析白白拖慢流式跟读；聚合成批后每秒 ≤20 次
+   * 状态更新，事件顺序仍在任何非 delta 事件之前 flush。
+   */
+  | { type: 'deltas'; chatId: string; items: Array<{ kind: 'text' | 'reasoning'; delta: string }> }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
   | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string; imageCount?: number }
   | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: AiStepTiming }
@@ -266,7 +277,7 @@ const SYSTEM_PROMPT = `You are WeportAI (exactly this spelling: capital W, "Wepo
 5. CROSS-CHAT VISION. Chats are NOT isolated: the same person appears in multiple chats and the same event shows up across chats on the same day. Prefer read_day_events / read_period_events to see a full day's picture in chronological order across ALL chats, instead of only reading one chat linearly.
 6. SCOPE & PRIVACY. Analyze only the local data of this account. Never ask the user to export anything; never instruct file operations outside write_note. Do not reveal raw wxids when a display name exists.
 7. LEARN FROM PRIOR RUNS WITHOUT COPYING THEIR CONCLUSIONS. review_prior_analyses can show earlier questions, investigation tool sequences, and final conclusions. Use these as leads and coverage hints only; independently verify anything reused. A prior AI answer and a memory file are secondary sources, not ground truth.
-8. CACHE-EFFICIENT INVESTIGATION. Prefer compact survey/stratified tools over repeatedly dumping large raw windows. Keep tool-planning reasoning concise. Fetch raw detail only for claims that will affect the answer, and use cursors/focused time windows rather than repeating overlapping reads. Call at most 2 evidence-heavy tools (read/session/sample/search/period) in one assistant step so each receives a useful result budget.
+8. CACHE-EFFICIENT INVESTIGATION. Prefer compact survey/stratified tools over repeatedly dumping large raw windows. Keep tool-planning reasoning concise. Fetch raw detail only for claims that will affect the answer, and use cursors/focused time windows rather than repeating overlapping reads. Batch UP TO 4 **independent** evidence-heavy calls (read/session/sample/search/period) in one assistant step — independent reads execute in parallel, so batching saves whole round trips — but keep each call focused (tight windows, small limits) so every result stays useful within the per-step budget. Sequence dependent calls (step 2 needs step 1's ids) with separate steps instead.
 9. ASSUME YOUR CHAT DATA IS STALE — AND MAKE IT FRESH. You read the local WeChat database directly, but the *account owner keeps chatting while you work*: messages arrive continuously, and both this conversation and any WeBot task (a scheduled run, a note, a summary you produced earlier) can be holding a snapshot that is minutes or hours old. Two consequences you must apply:
    - Anything you read earlier in THIS conversation is a snapshot, not the current state. Before any claim that depends on "now / today / latest / 最近 / 刚刚 / 有没有新消息", call sync_chat_history first (it drops the cached cursors, statistics and message snapshots) and re-read the chat with read_session_messages. Never answer a "what's new" question from an earlier tool result.
    - Your own memory files and the notes you (or a WeBot task) wrote earlier are even older. Date-stamp freshness when you rely on them ("截至 <时间>"), and re-verify before repeating them as current fact.
@@ -399,6 +410,13 @@ const clampInt = (v: unknown, min: number, max: number, fallback: number): numbe
  */
 const MAX_TOOL_IMAGES = 3
 
+/**
+ * 会改状态的工具 —— DSH 的「exclusive barrier」分类（`dsh-tools/README.md`：
+ * "safe calls run concurrently; mutating calls run alone, in submission order"）。
+ * 这些调用在一批里单独顺序执行；其余（纯读）进有界并发池。
+ */
+const EXCLUSIVE_TOOLS = new Set(['write_note', 'sync_chat_history', 'create_connector_task'])
+
 /** 归一化为 Unix 秒。接受：ISO 日期/时间字符串、Unix 秒、Unix 毫秒。0 → 0（不限） */
 function normalizeTimeSec(v: unknown): number {
   if (v === undefined || v === null || v === '') return 0
@@ -505,10 +523,17 @@ class WeportAiService {
   private previousApiInput = new Map<string, string>()
   /**
    * 前缀稳定性探针的上一帧（见 {@link probePrefixChange}）。
-   * 只在内存中保留哈希与逐条序列化结果，不落盘、不含原始正文。
+   * 内存帧是热路径；磁盘帧（`prefix-probe.json`）让**重启后**的第一次请求也能
+   * 和上一次进程的帧逐字节比较 —— 否则每次重启都记成 `first`，跨重启的
+   * system/tools/route 变化（真正的全量缓存失效）永远看不见。
    */
   private prefixProbe = new Map<string, PrefixFrame>()
+  private prefixProbeDisk: Map<string, PrefixFrame> | null = null
   private emitter: EventEmitter | null = null
+  /** 待 flush 的 delta 批（见 {@link emit}） */
+  private deltaBuffer: Array<{ kind: 'text' | 'reasoning'; delta: string }> = []
+  private deltaChatId = ''
+  private deltaTimer: ReturnType<typeof setTimeout> | null = null
   private sessionListCache: { at: number; sessions: ChatSession[] } = { at: 0, sessions: [] }
   private titleUpgrading = new Set<string>()
   /** 标题生成的追踪开关（WEPORT_TITLE_PROBE=1 时把结果写进 debug.log） */
@@ -561,8 +586,38 @@ class WeportAiService {
   }
 
   private emit(event: AiEvent): void {
+    // Delta 聚合：文本/思考增量攒 50ms 一批再派发（渲染层一次状态更新吃一批）。
+    // 任何非 delta 事件都先 flush —— 事件顺序（delta → assistant_message → done）
+    // 必须保持，否则面板会把上一步的尾巴画进下一步的气泡里。
+    if (event.type === 'text_delta' || event.type === 'reasoning_delta') {
+      if (this.deltaTimer && this.deltaChatId !== event.chatId) this.flushDeltas()
+      this.deltaChatId = event.chatId
+      this.deltaBuffer.push({ kind: event.type === 'text_delta' ? 'text' : 'reasoning', delta: event.delta })
+      if (!this.deltaTimer) {
+        this.deltaTimer = setTimeout(() => this.flushDeltas(), 50)
+        ;(this.deltaTimer as { unref?: () => void }).unref?.()
+      }
+      return
+    }
+    this.flushDeltas()
     try {
       this.emitter?.(event)
+    } catch (e) {
+      console.warn('[WeportAI] 事件派发失败:', e)
+    }
+  }
+
+  private flushDeltas(): void {
+    if (this.deltaTimer) {
+      clearTimeout(this.deltaTimer)
+      this.deltaTimer = null
+    }
+    if (this.deltaBuffer.length === 0) return
+    const items = this.deltaBuffer
+    const chatId = this.deltaChatId
+    this.deltaBuffer = []
+    try {
+      this.emitter?.({ type: 'deltas', chatId, items })
     } catch (e) {
       console.warn('[WeportAI] 事件派发失败:', e)
     }
@@ -752,14 +807,19 @@ class WeportAiService {
       const tmp = `${target}.${process.pid}.tmp`
       writeFileSync(
         tmp,
-        // 图片只活在内存里：base64 落盘会让一个「看作业照片」的会话文件涨几 MB，
-        // 而它下次运行时**仍然会被重新读一次**（工具结果里的文字说明还在）。
-        // 这里保留张数与类型，去掉像素本身 —— 历史里能看出"当时看过几张图"。
+        // 图片本体只活在内存里：base64 落盘会让一个「看作业照片」的会话文件涨几
+        // MB，而且**每一步都要重发整段前缀**，等于把后续所有请求的输入都撑大一个
+        // 量级。这里只去掉像素，**绝不改 content 的字节** —— 改了正文就等于把
+        // 上一次真实发出去的前缀偷偷改掉，下一次运行必然从这条消息起全量 miss。
+        // 代价是明知的：跨运行重放到这条消息会触发一次 head-rewrite，持久化探针
+        // （prefix-probe.json）会把它如实记成 `head-rewrite` 而不是装作没发生。
+        // 张数记在 `imageCount` 字段上：buildApiMessages 逐字段构造 wire 消息，
+        // 多余字段不上线，不参与任何字节比较。
         JSON.stringify({
           chatId,
           messages: messages.map((message) =>
             message.images?.length
-              ? { ...message, images: undefined, content: `${message.content}\n（本次附带了 ${message.images.length} 张图片，图片本身不随历史保存）` }
+              ? { ...message, images: undefined, imageCount: message.images.length }
               : message
           ),
           compressed,
@@ -978,6 +1038,7 @@ class WeportAiService {
     this.running.delete(chatId)
     chats.splice(idx, 1)
     this.previousApiInput.delete(chatId)
+    this.dropPrefixProbe(chatId)
     this.persistChats()
     try {
       rmSync(this.chatFilePath(chatId), { force: true })
@@ -1242,6 +1303,7 @@ class WeportAiService {
       baseUrlError: String(this.configService.get('weportAiBaseUrlError') || '').trim(),
       model: String(active?.model || this.configService.get('weportAiModel') || 'deepseek-v4-flash').trim(),
       reasoningEffort: this.configService.get('weportAiReasoningEffort') || 'high',
+      imageInputs: this.configService.get('weportAiImageInputs') !== false,
       customPrompt: String(this.configService.get('weportAiCustomPrompt') || ''),
       workspaceRoot: this.getWorkspaceRoot(),
       exportPath: String(this.configService.get('exportPath') || ''),
@@ -1377,6 +1439,7 @@ class WeportAiService {
 
   updateSetup(patch: {
     reasoningEffort?: string
+    imageInputs?: boolean
     customPrompt?: string
     workspaceRoot?: string
     disabledTools?: string[]
@@ -1399,6 +1462,9 @@ class WeportAiService {
 
     if (patch.reasoningEffort === 'low' || patch.reasoningEffort === 'high' || patch.reasoningEffort === 'max') {
       this.configService.set('weportAiReasoningEffort', patch.reasoningEffort)
+    }
+    if (typeof patch.imageInputs === 'boolean') {
+      this.configService.set('weportAiImageInputs', patch.imageInputs)
     }
     if (typeof patch.customPrompt === 'string') {
       this.configService.set('weportAiCustomPrompt', patch.customPrompt)
@@ -1942,10 +2008,14 @@ class WeportAiService {
               continue
             }
             const { part, reason } = imagePartFromBase64(decoded.data)
-            if (part && attached < MAX_TOOL_IMAGES) {
+            if (part && attached < MAX_TOOL_IMAGES && this.configService.get('weportAiImageInputs') !== false) {
               attached += 1
               ctx.attachImages([part])
               lines.push(`- [${when}] ${sender}：图片 #${attached}（见附件，请直接看图回答）`)
+            } else if (part && attached < MAX_TOOL_IMAGES) {
+              // 图片输入被用户关掉（设置 → WeportAI → 图片输入）：不解码成附件，只留
+              // 文字线索 —— 不支持视觉的模型/网关收到 image_url 会直接报错。
+              lines.push(`- [${when}] ${sender}：图片（图片输入已关闭，只能给文字线索）`)
             } else {
               lines.push(`- [${when}] ${sender}：图片未附上（${reason || '超过本次上限'}）`)
             }
@@ -2709,7 +2779,8 @@ class WeportAiService {
         chatId,
         sessionsByName: sessionMap,
         myWxid: String(this.configService.getMyWxidCleaned() || this.configService.get('myWxid') || ''),
-        emit: this.emit,
+        // 绑定到实例：emit 现在要碰 delta 缓冲区，裸方法引用会在调用时丢 `this`。
+        emit: (event) => this.emit(event),
         getSessionName: (id: string) => {
           const s = sessionMap.get(id)
           return s?.displayName || id
@@ -2774,7 +2845,7 @@ class WeportAiService {
             cacheHitTokens: usage.promptCacheHitTokens,
             lastRequestTokens,
             recentRate: Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10,
-            contextWindow: this.resolveContextWindow(consumer, activeProfile),
+            contextWindow,
           })
         }
 
@@ -2802,41 +2873,29 @@ class WeportAiService {
           break
         }
 
-        // 执行工具调用
+        // 执行工具调用 —— DSH 式调度（`dsh-agent-loop` tool-calls）：
+        // 并行安全的调用共享一个有界并发池，会改状态的调用（EXCLUSIVE_TOOLS）
+        // 单独成顺序屏障；结果一律按**提交顺序**回填，无论谁先跑完，wire 上的
+        // 消息数组逐字节不变（前缀缓存的必要条件）。这同时把一批工具的墙钟时间
+        // 从「Σ每个工具」压到「最慢的那个」。
         const configuredToolBudget = Number(this.configService.get('weportAiMaxToolChars')) || 12000
-        // 旧实现在这里把工具预算压到「新鲜后缀 ≤ 会话的 1/21」，注释里写明目标
-        // 就是 ~95.5% —— 这正是 UI 上显示 95% 的原因。
-        //
-        // 命中率 = Σ 新增 token / Σ 请求 token。压制后缀只是把分子变小，代价却是
-        // 强迫 agent 用更多步数拿到同样的证据，而**每一步都要重发整段前缀**；
-        // 工具被饿到拿不到东西时，agent 还会反复检索同一批证据。真正让命中率上升
-        // 的是「步数变多、每一步新增变少」，也就是 DSH 的形态（443 步 → 99%）。
-        // 因此这里直接用配置预算，不再做 1/21 截断。
         const stepToolBudget = Math.max(1000, configuredToolBudget)
-        let remainingToolBudget = stepToolBudget
-        let stepToolChars = 0
-        for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
-          const call = toolCalls[toolIndex]
-          if (ctrl.signal.aborted) break
-          const tool = runToolsByName.get(call.name)
-          let ok = false
-          let result = ''
-          // 这次调用可以附给模型的图片（上限 MAX_TOOL_IMAGES 张）。
-          const callImages: AiImagePart[] = []
-          if (!tool) {
-            result = `错误：未知工具 ${call.name}`
-          } else {
-            call.friendly = tool.friendly(call.args, ctx)
-            this.emit({
-              type: 'tool_start',
-              chatId,
-              callId: call.id,
-              name: call.name,
-              args: call.args,
-              friendly: call.friendly,
-            })
+        // 默认 4 而不是 DSH 的 10：这里的工具打的是**同一个 WCDB FFI 宿主**，
+        // 消息游标是有限资源（readPeriodEvents 内部就按 4 分批）。可配置。
+        const maxParallelTools = Math.max(1, Number(this.configService.get('weportAiMaxParallelToolCalls')) || 4)
+        const callImagesByIndex: AiImagePart[][] = toolCalls.map(() => [])
+
+        const batchStartedAt = Date.now()
+        const outcomes = await runToolBatch<{ ok: boolean; result: string }>(
+          toolCalls.map((call) => ({ name: call.name })),
+          { maxParallel: maxParallelTools, isExclusive: (name) => EXCLUSIVE_TOOLS.has(name) },
+          async (index) => {
+            const call = toolCalls[index]
+            const tool = runToolsByName.get(call.name)
+            if (!tool) return { ok: false, result: `错误：未知工具 ${call.name}` }
+            const callImages = callImagesByIndex[index]
             try {
-              result = await tool.handler(call.args, {
+              const result = await tool.handler(call.args, {
                 ...ctx,
                 attachImages: (images) => {
                   for (const image of images) {
@@ -2845,13 +2904,54 @@ class WeportAiService {
                   }
                 },
               })
-              ok = true
+              return { ok: true, result }
             } catch (e) {
-              result = `工具执行异常：${String((e as Error)?.message || e)}`
+              return { ok: false, result: `工具执行异常：${String((e as Error)?.message || e)}` }
             }
+          },
+          {
+            onStart: (index) => {
+              const call = toolCalls[index]
+              const tool = runToolsByName.get(call.name)
+              if (!tool) return
+              try {
+                call.friendly = tool.friendly(call.args, ctx)
+              } catch {
+                call.friendly = call.name
+              }
+              this.emit({
+                type: 'tool_start',
+                chatId,
+                callId: call.id,
+                name: call.name,
+                args: call.args,
+                friendly: call.friendly,
+              })
+            },
+            shouldAbort: () => ctrl.signal.aborted,
+          },
+        )
+
+        // Strict aggregate budget, divided fairly across the calls that are
+        // still pending. Short results return unused space to later calls —
+        // identical to the old serial semantics because this loop runs in
+        // submission order regardless of completion order.
+        let remainingToolBudget = stepToolBudget
+        let stepToolChars = 0
+        for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
+          const call = toolCalls[toolIndex]
+          const outcome = outcomes[toolIndex]
+          const ok = Boolean(outcome?.started && outcome.result?.ok)
+          let result: string
+          if (!outcome || !outcome.started) {
+            // 中止时未启动的调用也要占位：assistant.tool_calls 必须配对完整，
+            // 否则下一次运行会把整轮从 wire 上丢掉（前缀被悄悄改掉 + 证据丢失）。
+            result = '（本次运行已中止，该调用未执行）'
+          } else if (outcome.error) {
+            result = `工具执行异常：${String((outcome.error as Error)?.message || outcome.error)}`
+          } else {
+            result = outcome.result?.result ?? ''
           }
-          // Strict aggregate budget, divided fairly across the calls that are
-          // still pending. Short results return unused space to later calls.
           const callsRemaining = toolCalls.length - toolIndex
           const resultBudget = Math.max(0, Math.floor(remainingToolBudget / Math.max(1, callsRemaining)))
           if (result.length > resultBudget) {
@@ -2865,6 +2965,7 @@ class WeportAiService {
           remainingToolBudget = Math.max(0, remainingToolBudget - result.length)
           call.ok = ok
           call.result = result
+          const callImages = callImagesByIndex[toolIndex]
           messages.push({
             id: randomUUID(),
             role: 'tool',
@@ -2873,6 +2974,7 @@ class WeportAiService {
             toolName: call.name,
             createdAt: Date.now(),
             images: callImages.length > 0 ? callImages : undefined,
+            imageCount: callImages.length || undefined,
           })
           this.emit({
             type: 'tool_result',
@@ -2890,6 +2992,10 @@ class WeportAiService {
           kind: 'tool_batch',
           chatId,
           calls: toolCalls.length,
+          maxParallel: maxParallelTools,
+          exclusive: toolCalls.filter((call) => EXCLUSIVE_TOOLS.has(call.name)).length,
+          // 并行的直接证据：串行实现里 batchMs ≈ Σ每个工具耗时，并行后 ≈ 最慢的那个。
+          batchMs: Date.now() - batchStartedAt,
           configuredBudgetChars: configuredToolBudget,
           budgetChars: stepToolBudget,
           actualChars: stepToolChars,
@@ -2898,6 +3004,11 @@ class WeportAiService {
         })
 
         this.persistMessages(chatId, messages, compressed)
+        // 每个工具轮次也在完成后立刻进 transcript：面板据此把这一轮的思考/工具卡
+        // 追加进历史并开一个**全新的** live 气泡。三个症状一起解决：工具卡不再
+        // 整轮堆在一个气泡顶部；实时 TPS 的时间窗回到「这一步」（不含工具执行与
+        // 下一次 TTFT）；中间步骤的计时读数也不再被丢掉。
+        this.emit({ type: 'assistant_message', chatId, message: assistant, timing: stepResult.timing })
         if (ctrl.signal.aborted) {
           aborted = true
           break
@@ -2929,7 +3040,7 @@ class WeportAiService {
         recentRate: recentRates.length
           ? Math.round((recentRates.reduce((a, b) => a + b, 0) / recentRates.length) * 10) / 10
           : 0,
-        contextWindow: this.resolveContextWindow(consumer, activeProfile),
+        contextWindow,
       }
       // 每次运行结束都记录本会话的用量/命中统计（切换会话后仍显示各自的数据）
       this.persistMessages(chatId, messages, compressed, {
@@ -3182,15 +3293,16 @@ class WeportAiService {
   }
 
   /**
-   * 前缀稳定性探针（逐字节）。
+   * 前缀稳定性探针（逐字节，含跨重启）。
    *
-   * 每次请求都把「系统提示 + 工具定义 + 完整请求数组」与前一次请求逐条对比，
-   * 并给出**为什么**前缀变了：
+   * 每次请求都把「系统提示 + 工具定义 + 模型路由 + 完整请求数组」与前一次请求
+   * 逐条对比，并给出**为什么**前缀变了：
    *
-   * - `first`        本会话的第一条请求；
+   * - `first`        本会话（连磁盘也没有帧）的第一条请求；
    * - `append`       上一次请求是本次请求的逐字节前缀 —— 唯一健康的形态；
    * - `system`       系统提示变了 —— 整段前缀失效；
    * - `tools`        工具定义变了 —— 整段前缀失效；
+   * - `route`        provider/model/protocol 换了 —— 换缓存域，全量重算；
    * - `head-rewrite` 历史中段被改写（压缩，或丢弃了历史头部）—— 从分歧点起失效。
    *
    * 这是把「命中率莫名掉到 95%」变成可定位问题的关键工具。DSH 正是靠
@@ -3198,18 +3310,71 @@ class WeportAiService {
    * （见 docs/reference/dsh-cache-architecture.md §D.3）。
    *
    * 期望的健康形态：一整轮里全是 `append`；一次压缩对应**恰好一次**
-   * `head-rewrite`，位置就等于保留窗口的起点。
+   * `head-rewrite`，位置就等于保留窗口的起点；重启后的第一条请求是带
+   * `restored: true` 的 `append`（或如实报出 `system`/`tools`/`route`）。
    */
   private probePrefixChange(
     chatId: string,
     systemContent: string,
     tools: unknown,
+    route: string,
     apiMessages: Array<Record<string, unknown>>
   ): PrefixChange {
-    const frame = buildPrefixFrame(systemContent, tools, apiMessages)
-    const change = comparePrefixFrames(this.prefixProbe.get(chatId), frame)
+    const frame = buildPrefixFrame(systemContent, tools, apiMessages, route)
+    const inMemory = this.prefixProbe.get(chatId)
+    const previous = inMemory || this.loadPrefixProbeDisk().get(chatId)
+    const change = comparePrefixFrames(previous, frame)
+    if (!inMemory && previous) change.restored = true
     this.prefixProbe.set(chatId, frame)
+    this.savePrefixProbeDisk(chatId, frame)
     return change
+  }
+
+  private prefixProbePath(): string {
+    this.ensureDirs()
+    return join(this.dataDir, 'prefix-probe.json')
+  }
+
+  /** 每帧只有哈希，没有正文 —— 这个文件多大都不会泄露对话内容。 */
+  private loadPrefixProbeDisk(): Map<string, PrefixFrame> {
+    if (this.prefixProbeDisk) return this.prefixProbeDisk
+    const loaded = new Map<string, PrefixFrame>()
+    try {
+      const path = this.prefixProbePath()
+      if (existsSync(path)) {
+        const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, PrefixFrame>
+        for (const [key, frame] of Object.entries(raw)) {
+          if (frame && Array.isArray(frame.wireHashes)) loaded.set(key, frame)
+        }
+      }
+    } catch { /* 坏文件当成没有帧 —— 最多退回 `first` */ }
+    this.prefixProbeDisk = loaded
+    return loaded
+  }
+
+  private savePrefixProbeDisk(chatId: string, frame: PrefixFrame): void {
+    try {
+      const disk = this.loadPrefixProbeDisk()
+      disk.set(chatId, frame)
+      const path = this.prefixProbePath()
+      const tmp = `${path}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify(Object.fromEntries(disk)), 'utf8')
+      renameSync(tmp, path)
+    } catch { /* 诊断文件写不进去不能影响对话 */ }
+  }
+
+  private dropPrefixProbe(chatId: string): void {
+    this.prefixProbe.delete(chatId)
+    const disk = this.prefixProbeDisk
+    if (disk && disk.has(chatId)) {
+      disk.delete(chatId)
+      try {
+        const path = this.prefixProbePath()
+        const tmp = `${path}.${process.pid}.tmp`
+        writeFileSync(tmp, JSON.stringify(Object.fromEntries(disk)), 'utf8')
+        renameSync(tmp, path)
+      } catch { /* noop */ }
+    }
   }
 
   private async callModel(
@@ -3238,9 +3403,17 @@ class WeportAiService {
     if (!profile?.apiKey && !getProviderCatalogEntry(profile?.providerId || '')?.apiKeyOptional) return { ok: false, error: '未配置 AI API Key，请在 WeportAI 设置中添加服务配置' }
     if (!profile?.baseUrl) return { ok: false, error: '未配置 AI 服务地址，请在 WeportAI 设置中完善服务配置' }
     const apiMessages = this.buildApiMessages(history, compressed, requestShape.systemContent, { preserveReasoning: profile.providerId === 'deepseek' })
-    // 逐字节前缀稳定性探针：把「为什么这次请求没命中缓存」变成可查的日志事实，
-    // 而不是靠猜。健康状态是一整轮全为 append，一次压缩只有一次 head-rewrite。
-    const prefixChange = this.probePrefixChange(chatId, requestShape.systemContent, requestShape.tools, apiMessages)
+    // 按模型解析协议 / 输出上限（纯本地：registry 缓存 + bundled snapshot）。
+    // 网关是按模型挑协议的，用 profile.protocol 一个值兜所有模型会把
+    // `grok-4.6` 这类模型发到错误的端点。必须在探针之前解析：路由本身就是
+    // 前缀身份的一部分（换模型 = 换缓存域）。
+    const resolved = this.resolveProfileModel(profile)
+    this.persistResolvedModelMetadata(profile, resolved)
+    // 逐字节前缀稳定性探针（跨重启）：把「为什么这次请求没命中缓存」变成可查的
+    // 日志事实，而不是靠猜。健康状态是一整轮全为 append，一次压缩只有一次
+    // head-rewrite，重启后的第一条是 restored append。
+    const route = `${profile.providerId}|${profile.model}|${resolved.protocol}`
+    const prefixChange = this.probePrefixChange(chatId, requestShape.systemContent, requestShape.tools, route, apiMessages)
     this.appendDebugLog({
       kind: 'prefix',
       chatId,
@@ -3249,13 +3422,10 @@ class WeportAiService {
       previousLength: prefixChange.previousLength,
       messages: apiMessages.length,
       prefixHash: requestShape.hash,
+      route,
+      ...(prefixChange.restored ? { restored: true } : {}),
     })
     const startedAt = Date.now()
-    // 按模型解析协议 / 输出上限（纯本地：registry 缓存 + bundled snapshot）。
-    // 网关是按模型挑协议的，用 profile.protocol 一个值兜所有模型会把
-    // `grok-4.6` 这类模型发到错误的端点。
-    const resolved = this.resolveProfileModel(profile)
-    this.persistResolvedModelMetadata(profile, resolved)
     const callProfile: ProviderProfile = { ...this.withGatewayHeaders(profile), modelProtocol: resolved.protocol }
     try {
       // 解码计时：首个 delta（思考或正文）到达即认为开始解码，和 DSH 的
@@ -3283,6 +3453,11 @@ class WeportAiService {
           markFirstToken()
           this.emit({ type: 'text_delta', chatId, delta })
         },
+        // tool-only 步骤也要有「首 token」：参数流的第一个增量就是解码的开始，
+        // 否则这类步骤 decodeMs=0、整段时间被错记成 TTFT、速度徽标直接不显示。
+        onToolArgs: () => {
+          markFirstToken()
+        },
       })
       const finishedAt = Date.now()
       const decodeStartedAt = firstTokenAt ?? finishedAt
@@ -3291,7 +3466,30 @@ class WeportAiService {
         decodeMs: Math.max(0, finishedAt - decodeStartedAt),
         outputTokens: Math.max(0, result.usage?.completionTokens || 0),
       }
-      this.appendDebugLog({ kind: 'request', chatId, model: profile.model, provider: profile.providerId, protocol: resolved.protocol, messages: history.length, tools: requestShape.tools.length, durationMs: Date.now() - startedAt, ttftMs: timing.ttftMs, decodeMs: timing.decodeMs })
+      // 每步用量落日志：真实命中率的地面真值。旧版本只记了时长，命中率只能靠
+      // UI 实时读数看一眼、无法回放分析（Reasonix `cache_shape.go` 每请求都记
+      // hit/miss/tools-hash —— 这里对齐它）。
+      const promptTokens = result.usage?.promptTokens || 0
+      const cacheHitTokens = result.usage?.promptCacheHitTokens || 0
+      this.appendDebugLog({
+        kind: 'request',
+        chatId,
+        model: profile.model,
+        provider: profile.providerId,
+        protocol: resolved.protocol,
+        prefixChange: prefixChange.change,
+        messages: history.length,
+        tools: requestShape.tools.length,
+        durationMs: Date.now() - startedAt,
+        ttftMs: timing.ttftMs,
+        decodeMs: timing.decodeMs,
+        promptTokens,
+        cacheHitTokens,
+        promptCacheMissTokens: Math.max(0, promptTokens - cacheHitTokens),
+        promptCacheHitRate: promptTokens > 0 ? Math.round((cacheHitTokens / promptTokens) * 10000) / 100 : null,
+        completionTokens: result.usage?.completionTokens || 0,
+        reasoningTokens: result.usage?.reasoningTokens || 0,
+      })
       return {
         ok: true,
         content: result.content,

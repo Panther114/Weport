@@ -61,6 +61,13 @@ export interface LiquidGlassBackdropImage {
      */
     winW?: number
     winH?: number
+    /**
+     * 快速采集路径的原始帧（主进程 koffi BitBlt，只抓卡片附近 ≈5~22ms）。
+     *
+     * 有它时玻璃把像素画进一张内部 canvas（见组件内 `frameSourceHostRef` 的说明），
+     * `dataUrl` 那条整屏 JPEG 路只在 koffi 不可用时才走。
+     */
+    pixels?: ImageData
 }
 
 export interface LiquidGlassProps {
@@ -157,6 +164,9 @@ export default function LiquidGlass({
     const [mouse, setMouse] = useState<MouseState>(IDLE_MOUSE)
     const videoRef = useRef<HTMLVideoElement>(null)
     const canvasRef = useRef<HTMLCanvasElement>(null)
+    const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
+    /** 帧 canvas 的宿主（canvas 由 effect 创建并挂进去，见下面的说明） */
+    const frameSourceHostRef = useRef<HTMLSpanElement | null>(null)
     // 视频流出帧后才切换显示，避免黑帧闪烁
     const [streamLive, setStreamLive] = useState(false)
     // WebGL 渲染器初始化失败时回退 <video> + SVG 滤镜管线
@@ -252,6 +262,35 @@ export default function LiquidGlass({
         observer.observe(el)
         return () => observer.disconnect()
     }, [])
+
+    /**
+     * 快速采集帧 → 一张由 effect 直接挂进 DOM 的 canvas。
+     *
+     * 为什么不是 React 渲染出来的 `<img src={canvas.toDataURL()}>`：那样每帧都要一次
+     * JPEG 编码（15fps 下是这条路上最贵的一步）。canvas 挂在 DOM 里之后内容自己更新，
+     * 浏览器下一帧直接重绘，每帧只剩一次 `putImageData`。
+     */
+    const framePixels = backdropImage?.pixels
+    useEffect(() => {
+        const host = frameSourceHostRef.current
+        if (!host) return
+        let canvas = frameCanvasRef.current
+        if (!canvas || canvas.parentNode !== host) {
+            canvas = document.createElement('canvas')
+            canvas.setAttribute('data-glass-frame', '1')
+            canvas.style.cssText = 'position:absolute;left:0;top:0;display:block;pointer-events:none'
+            frameCanvasRef.current = canvas
+            host.replaceChildren(canvas)
+        }
+        canvas.style.width = `${backdropImage?.width ?? 0}px`
+        canvas.style.height = `${backdropImage?.height ?? 0}px`
+        if (!framePixels) return
+        if (canvas.width !== framePixels.width || canvas.height !== framePixels.height) {
+            canvas.width = framePixels.width
+            canvas.height = framePixels.height
+        }
+        canvas.getContext('2d')?.putImageData(framePixels, 0, 0)
+    }, [framePixels, backdropImage?.width, backdropImage?.height])
 
     // 鼠标接近时的弹性形变（rAF 节流；远离激活区时不重复 setState）
     useEffect(() => {
@@ -434,7 +473,10 @@ export default function LiquidGlass({
                                 filter: `blur(${effectiveBlurPx}px) saturate(${saturation}%)`
                             }}
                         >
-                            {backdropImage.dataUrl && !streamLive && (
+                            {backdropImage.pixels ? (
+                                <span ref={frameSourceHostRef} style={backdropPixelSourceStyle} />
+                            ) : null}
+                            {backdropImage.dataUrl && !streamLive && !backdropImage.pixels && (
                                 <img src={backdropImage.dataUrl} alt="" style={backdropPixelSourceStyle} />
                             )}
                             {backdropStream && (

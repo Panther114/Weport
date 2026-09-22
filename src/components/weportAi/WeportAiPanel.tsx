@@ -55,6 +55,7 @@ type AiEvent =
   | { type: 'status'; chatId: string; running: boolean }
   | { type: 'reasoning_delta'; chatId: string; delta: string }
   | { type: 'text_delta'; chatId: string; delta: string }
+  | { type: 'deltas'; chatId: string; items: Array<{ kind: 'text' | 'reasoning'; delta: string }> }
   | { type: 'tool_start'; chatId: string; callId: string; name: string; args: Record<string, unknown>; friendly: string }
   | { type: 'tool_result'; chatId: string; callId: string; name: string; ok: boolean; summary: string; detail?: string; imageCount?: number }
   | { type: 'assistant_message'; chatId: string; message: AiMessage; timing?: { ttftMs: number; decodeMs: number; outputTokens: number } }
@@ -70,6 +71,30 @@ type LiveTool = { id: string; name: string; friendly: string; args?: Record<stri
 type LiveState = { reasoning: string; text: string; tools: LiveTool[]; firstTokenAt?: number; lastTokenAt?: number }
 
 /**
+ * 每个模型步骤一个全新的 live 气泡：服务端在**每个** assistant 步骤（含工具
+ * 轮次）完成后都会发 `assistant_message`，面板收到后把这一轮归档进 transcript
+ * 并重置 live。于是：
+ * - 工具卡只在当前步骤的气泡里出现，不再整轮堆在一个气泡顶部；
+ * - `firstTokenAt`/`lastTokenAt` 每步重来 —— 实时 TPS 的分母是「这一步的解码」，
+ *   不再把工具执行耗时和下一步的 TTFT 摊进去。
+ */
+function emptyLive(): LiveState {
+  return { reasoning: '', text: '', tools: [], firstTokenAt: undefined, lastTokenAt: undefined }
+}
+
+function applyDelta(prev: LiveState | null, kind: 'text' | 'reasoning', delta: string): LiveState {
+  const base = prev || emptyLive()
+  const now = Date.now()
+  return {
+    reasoning: kind === 'reasoning' ? base.reasoning + delta : base.reasoning,
+    text: kind === 'text' ? base.text + delta : base.text,
+    tools: base.tools,
+    firstTokenAt: base.firstTokenAt ?? now,
+    lastTokenAt: now,
+  }
+}
+
+/**
  * 输出速度读数，口径与 DSH 一致：
  *
  *   TPS = outputTokens / (decodeMs / 1000)
@@ -82,6 +107,28 @@ type LiveState = { reasoning: string; text: string; tools: LiveTool[]; firstToke
 function formatTokensPerSecond(tps: number): string {
   const clamped = Math.max(0, tps)
   return clamped >= 10 ? String(Math.round(clamped)) : String(Math.round(clamped * 10) / 10)
+}
+
+/**
+ * 流式阶段的 token 估算（无 usage 时才用）。按 DeepSeek 官方换算：
+ * 1 个中文字符 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。
+ *
+ * 旧实现用压缩预算那个 `chars / 2.5`（0.4 tok/char）—— 那是「宁可早压缩」的
+ * 保守系数，不是估算器：对中文为主的思考流它把读数**系统性压低约 1/3**，
+ * 正是「TPS 看着偏低」的来源之一。
+ */
+function estimateTokens(text: string): number {
+  let cjk = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i)
+    if (
+      (code >= 0x3400 && code <= 0x9fff) || // CJK 扩展 A + 区间
+      (code >= 0xf900 && code <= 0xfaff) || // 兼容表意
+      (code >= 0x3000 && code <= 0x303f) || // CJK 标点
+      (code >= 0xff00 && code <= 0xffef) // 全角形式
+    ) cjk += 1
+  }
+  return cjk * 0.6 + (text.length - cjk) * 0.3
 }
 
 /** 一轮结束后的读数：`52.3 tok/s`；没有计时数据（旧记录）时返回 null。 */
@@ -205,7 +252,6 @@ function formatToolArgs(args: Record<string, unknown> | undefined): string {
 
 function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
   const [open, setOpen] = useState(false)
-  const Icon = TOOL_ICON[call.name] || Info
   const hasResult = typeof call.result === 'string' && call.result.length > 0
   const argsText = formatToolArgs(call.args)
   const hasArgs = argsText.length > 0
@@ -215,6 +261,8 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
   const isMemoryWrite =
     call.name === 'write_note' &&
     (String(call.args?.path || '').startsWith('memory/') || call.friendly.includes('memory/'))
+  // 超紧凑单行：名字 + 证据标记 + 状态字形。没有卡片盒子、没有图标配对、没有
+  // 徽章胶囊 —— 调用是**过程**，密度优先；细节全在点开后的 pre 里。
   return (
     <div className={`ai-tool-card${call.ok ? ' ok' : call.ok === false ? ' err' : ''}${live ? ' live' : ''}${isMemoryWrite ? ' memory-write' : ''}`}>
       <button
@@ -225,25 +273,17 @@ function ToolChip({ call, live }: { call: AiToolCall; live?: boolean }) {
         aria-expanded={open}
         title={expandable ? (open ? '收起详情' : '展开参数与结果') : undefined}
       >
-        {expandable ? (
-          <ChevronDown size={12} className={`ai-tool-chev${open ? ' open' : ''}`} />
-        ) : (
-          <span className="ai-tool-chev-placeholder" />
-        )}
-        <span className="ai-tool-icon">
-          <Icon size={13} strokeWidth={1.8} />
-        </span>
+        <span className="ai-tool-chev">{open ? '▾' : '▸'}</span>
         <span className="ai-tool-friendly">{call.friendly}</span>
-        {isMemoryWrite && <span className="ai-memory-write-badge">长期记忆已修改</span>}
+        {isMemoryWrite && <span className="ai-memory-write-badge">记忆</span>}
         {/* 「看过图」必须看得见：用户要能确认这次回答是基于画面，而不是模型猜的。 */}
         {call.imageCount ? (
           <span className="ai-tool-image-badge" title={`已把 ${call.imageCount} 张图片附给模型看`}>
-            <Images size={11} strokeWidth={1.9} />
-            {call.imageCount} 张
+            图×{call.imageCount}
           </span>
         ) : null}
         <span className="ai-tool-status">
-          {call.ok === true ? <CheckCircle2 size={13} /> : call.ok === false ? <XCircle size={13} /> : live ? <span className="ai-spinner" /> : null}
+          {call.ok === true ? '✓' : call.ok === false ? '✗' : live ? <span className="ai-spinner" /> : ''}
         </span>
       </button>
       {open && expandable && (
@@ -458,29 +498,22 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           setCtxStats({ promptTokens: e.promptTokens, cacheHitTokens: e.cacheHitTokens, lastRequestTokens: e.lastRequestTokens, recentRate: e.recentRate, contextWindow: e.contextWindow })
           break
         case 'reasoning_delta':
-          setLive((prev) => {
-            const now = Date.now()
-            return {
-              reasoning: (prev?.reasoning || '') + e.delta,
-              text: prev?.text || '',
-              tools: prev?.tools || [],
-              firstTokenAt: prev?.firstTokenAt ?? now,
-              lastTokenAt: now,
-            }
-          })
+          setLive((prev) => applyDelta(prev, 'reasoning', e.delta))
           break
         case 'text_delta':
+          setLive((prev) => applyDelta(prev, 'text', e.delta))
+          break
+        case 'deltas': {
+          // 批量 delta：一批只做一次状态更新（逐 token 更新会把整段 markdown
+          // 每个 delta 都重新解析一遍，长回复下渲染层自己把自己拖慢）。
+          const items = e.items
           setLive((prev) => {
-            const now = Date.now()
-            return {
-              reasoning: prev?.reasoning || '',
-              text: (prev?.text || '') + e.delta,
-              tools: prev?.tools || [],
-              firstTokenAt: prev?.firstTokenAt ?? now,
-              lastTokenAt: now,
-            }
+            let cur = prev
+            for (const item of items) cur = applyDelta(cur, item.kind, item.delta)
+            return cur
           })
           break
+        }
         case 'tool_start':
           setLive((prev) => ({
             reasoning: prev?.reasoning || '',
@@ -508,9 +541,11 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           if (e.name === 'write_note' || e.name === 'list_notes') setNotesDirty(true)
           break
         case 'assistant_message': {
-          setLive(null)
+          // 每个步骤（含工具轮次）归档进 transcript，live 开一个全新的气泡 ——
+          // 工具卡不再跨步骤累积，TPS 时间窗也回到本步（见 emptyLive 注释）。
+          setLive(emptyLive())
           const msg = e as unknown as { message: AiMessage; timing?: AiMessage['timing'] }
-          setMessages((prev) => [...prev, msg.timing ? { ...msg.message, timing: msg.timing } : msg.message])
+          setMessages((prev) => (prev.some((m) => m.id === msg.message.id) ? prev : [...prev, msg.timing ? { ...msg.message, timing: msg.timing } : msg.message]))
           break
         }
         case 'chat_title':
@@ -574,10 +609,44 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
   }, [messages, live])
 
+  /**
+   * 用户往上滚一次就**停跟随**，直到他滑回底部（或点"回到最新"）。
+   *
+   * 旧实现只看"距底 < 120px"：流式输出每来一个 delta 都会执行上面那个"贴底就滚到底"
+   * 的 effect，用户刚往上拖 60px（还在判定区内）就被下一个 delta 拽回底部 ——
+   * 表现就是"想上滚，画面一顿一顿地往下坠"。拖动滚动条时每次 scroll 事件也都在
+   * 判定区内，所以只按距离判断永远拦不住。
+   *
+   * 现在改成**显式的用户意图**：滚轮 / 触摸拖动 / 拖动滚动条（pointerdown 后 600ms
+   * 内的滚动）任一发生且不在底部，就停跟随；判定阈值也从 120px 收到 24px。
+   */
+  const userScrollIntentAt = useRef(0)
+  const markUserScrollIntent = useCallback(() => {
+    userScrollIntentAt.current = Date.now()
+  }, [])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.addEventListener('wheel', markUserScrollIntent, { passive: true })
+    el.addEventListener('touchmove', markUserScrollIntent, { passive: true })
+    el.addEventListener('pointerdown', markUserScrollIntent)
+    return () => {
+      el.removeEventListener('wheel', markUserScrollIntent)
+      el.removeEventListener('touchmove', markUserScrollIntent)
+      el.removeEventListener('pointerdown', markUserScrollIntent)
+    }
+  }, [markUserScrollIntent])
+
   const handleThreadScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+    if (!atBottom && Date.now() - userScrollIntentAt.current < 600) {
+      stickToBottom.current = false
+      setFollowPaused(true)
+      return
+    }
     stickToBottom.current = atBottom
     // 只有"用户自己滚上去"才切到暂停跟随；程序化滚动到底部不算改变意图。
     setFollowPaused(!atBottom)
@@ -598,16 +667,17 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     return () => window.clearInterval(timer)
   }, [live])
 
-  // 实时 TPS：与 messageTps 同口径，只是 token 数用字符数估算（流式阶段拿不到
-  // usage）。解码时间同样从首个 token 起算，不含首 token 等待。
+  // 实时 TPS：与 messageTps 同口径，只是 token 数用 CJK 感知的估算（流式阶段
+  // 拿不到 usage）。解码时间同样从首个 token 起算，且因为每个步骤都重置 live，
+  // 分母**不含**工具执行与下一步 TTFT —— 以前整轮一个气泡时这些全被摊进来。
   const liveTps = useMemo(() => {
     if (!live?.firstTokenAt) return null
-    const chars = (live.text?.length || 0) + (live.reasoning?.length || 0)
-    if (chars === 0) return null
+    const tokens = estimateTokens((live.text || '') + (live.reasoning || ''))
+    if (tokens === 0) return null
     // 用「最后一个 delta 的时间」而不是 Date.now()：模型停住时读数应当跟着停住，
     // 而不是被一个不断变大的分母慢慢稀释成越来越小的数字。
     const decodeMs = Math.max(1, (live.lastTokenAt || live.firstTokenAt) - live.firstTokenAt)
-    return chars / 2.5 / (decodeMs / 1000)
+    return tokens / (decodeMs / 1000)
   }, [live, nowTick])
 
   useEffect(() => {
@@ -1097,27 +1167,30 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             ) : (
               <div key={m.id} className="ai-msg assistant">
                 {m.toolCalls && m.toolCalls.length > 0 ? (
-                  /* 工具轮次：思考片段与工具调用交错展示 */
-                  <div className="ai-step-stack">
-                    {m.toolCalls.map((c, i) => {
-                      const chunks = splitReasoning(m.reasoning || '', m.toolCalls?.length || 0)
-                      const chunk = chunks[i]
-                      return (
-                        <div key={c.id} className="ai-step">
-                          {chunk && (
-                            <details className="ai-reasoning inline">
-                              <summary>
-                                <Brain size={12} />
-                                思考
-                              </summary>
-                              <pre>{chunk}</pre>
-                            </details>
-                          )}
-                          <ToolChip call={c} />
-                        </div>
-                      )
-                    })}
-                  </div>
+                  /* 工具轮次：模型先说的计划文字 + 思考片段与工具调用交错展示 */
+                  <>
+                    {m.content ? <AiMarkdown text={m.content} /> : null}
+                    <div className="ai-step-stack">
+                      {m.toolCalls.map((c, i) => {
+                        const chunks = splitReasoning(m.reasoning || '', m.toolCalls?.length || 0)
+                        const chunk = chunks[i]
+                        return (
+                          <div key={c.id} className="ai-step">
+                            {chunk && (
+                              <details className="ai-reasoning inline">
+                                <summary>
+                                  <Brain size={12} />
+                                  思考
+                                </summary>
+                                <pre>{chunk}</pre>
+                              </details>
+                            )}
+                            <ToolChip call={c} />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
                 ) : (
                   <>
                     {m.reasoning && (
@@ -1148,16 +1221,6 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
 
           {live && (
             <div className="ai-msg assistant live">
-              {live.tools.length > 0 && (
-                <div className="ai-tool-stack">
-                  {live.tools.map((t) => (
-                    <ToolChip
-                      key={t.id}
-                      call={{ id: t.id, name: t.name, args: t.args || {}, friendly: t.friendly, ok: t.ok, result: t.result, imageCount: t.imageCount }}                      live={t.running}
-                    />
-                  ))}
-                </div>
-              )}
               {live.reasoning && (
                 <details className="ai-reasoning" open={!live.text && live.tools.length === 0}>
                   <summary>
@@ -1184,9 +1247,21 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                   {live.tools.length > 0 ? <span className="ai-thinking-hint">（正在分析上一步结果…）</span> : <span>…</span>}
                 </div>
               )}
+              {/* 工具行排在文字**之后**：模型先说、再调用，时间序即视觉序。旧实现
+                  把工具栈放最上面，新一轮的卡一来就压在上一段文字头顶上。 */}
+              {live.tools.length > 0 && (
+                <div className="ai-tool-stack">
+                  {live.tools.map((t) => (
+                    <ToolChip
+                      key={t.id}
+                      call={{ id: t.id, name: t.name, args: t.args || {}, friendly: t.friendly, ok: t.ok, result: t.result, imageCount: t.imageCount }}                      live={t.running}
+                    />
+                  ))}
+                </div>
+              )}
               {/* 流式期间的实时读数：与 DSH 同一口径（首 token 之后的解码速度）。
-                  token 数按字符数 / CHARS_PER_TOKEN 估算 —— 流式阶段没有 usage，
-                  估算值用来给量级感知，落库后的正式读数走 messageTps。 */}
+                  token 数用 CJK 感知估算；每个步骤 live 都会重置，所以分母只含
+                  本步解码，不含工具执行与下一次 TTFT。 */}
               {liveTps !== null && (
                 <div className="ai-msg-stats live">
                   <span className="ai-msg-tps">{formatTokensPerSecond(liveTps)} tok/s</span>

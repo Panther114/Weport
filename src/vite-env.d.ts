@@ -274,10 +274,18 @@ interface ElectronApi {
      * 主题采样按"窗口在屏幕上的位置"把取样点挪出窗口，坐标过时就会读到别处的桌面。
      */
     onGeometry: (callback: (event: any, data: { winX: number; winY: number; winW: number; winH: number }) => void) => () => void
-    /** 主进程的定帧折射帧（弹窗可见期间约 3fps） */
-    onBackdrop: (callback: (frame: { seq: number; dataUrl: string; winX: number; winY: number; width: number; height: number }) => void) => () => void
+    /**
+     * 主进程的定帧折射帧。
+     *
+     * 两种形态（v1.1）：
+     *  - 快速路径（koffi BitBlt，只抓卡片附近 ≈5~22ms）：`pixelsBase64` + `frameX/Y/Width/Height`；
+     *  - 兜底路径（desktopCapturer 整屏 JPEG ≈150~208ms）：`dataUrl` + `winX/winY/width/height`。
+     */
+    onBackdrop: (callback: (frame: any) => void) => () => void
     /** 通知主进程：渲染层的实时视频流已接管折射，不必再抓帧 */
     setGlassMode: (mode: 'stream' | 'frames' | 'native') => void
+    /** 上报 WGC 采集尝试结果：`ok:false` = 这台机器上采集流起不来，后续通知跳过尝试 */
+    reportDesktopStream: (ok: boolean) => void
   }
   dialog: {
     openDirectory: (options?: any) => Promise<string | null>

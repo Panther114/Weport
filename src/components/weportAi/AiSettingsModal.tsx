@@ -7,6 +7,7 @@ import {
   FilePenLine,
   FileText,
   FolderOpen,
+  Image as ImageIcon,
   Info,
   KeyRound,
   Loader2,
@@ -87,6 +88,8 @@ export default function AiSettingsModal({
   const [customPrompt, setCustomPrompt] = useState(setup.customPrompt)
   const [workspaceRoot, setWorkspaceRoot] = useState(setup.workspaceRoot)
   const [effort, setEffort] = useState(setup.reasoningEffort)
+  /** 图片输入开关（默认开）：关掉后 read_chat_images 只给文字线索，不发图片本体 */
+  const [imageInputs, setImageInputs] = useState(setup.imageInputs !== false)
   const [disabledTools, setDisabledTools] = useState<Set<string>>(new Set(setup.disabledTools))
   const [actions, setActions] = useState<AiAction[]>([])
   const [saving, setSaving] = useState(false)
@@ -453,6 +456,7 @@ export default function AiSettingsModal({
       }
       await api.ai.setSetup({
         reasoningEffort: effort,
+        imageInputs,
         customPrompt,
         workspaceRoot: workspaceRoot.trim() || undefined,
         disabledTools: Array.from(disabledTools),
@@ -631,6 +635,14 @@ export default function AiSettingsModal({
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><FolderOpen size={13} /> 工作区</div><div className="field"><label htmlFor="aiWorkspaceRoot">工作区根目录</label><div className="path-row"><input id="aiWorkspaceRoot" className="path-input" value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} /><button className="ghost-btn" type="button" onClick={() => void pickWorkspace()}>浏览</button></div></div></div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><FilePenLine size={13} /> 提示词</div><textarea id="aiCustomPrompt" className="ai-prompt-textarea" value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} rows={4} spellCheck={false} /></div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Zap size={13} /> 快捷动作</div>{actions.map((a) => <div className="ai-action-edit" key={a.id}><input className="path-input ai-action-name" value={a.name} onChange={(e) => updateAction(a.id, { name: e.target.value })} /><textarea className="ai-prompt-textarea ai-action-prompt" value={a.prompt} onChange={(e) => updateAction(a.id, { prompt: e.target.value })} rows={2} /><button type="button" className="ghost-btn danger-text" onClick={() => setActions((prev) => prev.filter((item) => item.id !== a.id))}><Trash2 size={12} /></button></div>)}<button type="button" className="ghost-btn" onClick={() => setActions((prev) => [...prev, { id: `action-${Date.now()}`, name: '新动作', prompt: '' }])}><Plus size={12} /> 添加动作</button></div>
+        <div className="ai-settings-section"><div className="ai-settings-sec-head"><ImageIcon size={13} /> 图片输入</div>
+          <label className="ai-tool-toggle">
+            <input type="checkbox" checked={imageInputs} onChange={(e) => setImageInputs(e.target.checked)} />
+            <span>把聊天里的图片交给模型看</span>
+            <code>imageInputs</code>
+          </label>
+          <p className="ai-settings-hint">开着时 <code>read_chat_images</code> 会把图片本体（最近 3 张）随请求发给模型 —— 作业照片、截图这类任务必须开着。若网关/模型不支持视觉（收到图片会 400），关掉它只保留"谁在什么时候发了一张图"的文字线索。默认开。</p>
+        </div>
         <div className="ai-settings-section"><div className="ai-settings-sec-head"><Settings2 size={13} /> 工具开关</div><div className="ai-tool-toggles">{TOOL_LABELS.map(([name, label]) => <label key={name} className={`ai-tool-toggle${disabledTools.has(name) ? ' off' : ''}`}><input type="checkbox" checked={!disabledTools.has(name)} onChange={() => toggleTool(name)} /><span>{label}</span><code>{name}</code></label>)}</div></div>
         <div className="modal-actions ai-settings-footer">{!inline && <button className="secondary-btn" type="button" disabled={saving} onClick={onClose}>取消</button>}<button className="primary-btn" type="button" disabled={saving} onClick={() => void saveAll()}><KeyRound size={13} /> 保存设置</button></div>
     </>

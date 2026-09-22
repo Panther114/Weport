@@ -499,3 +499,32 @@ Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChan
   1px/2px + 2px/5px（合计 7px，正好在留白里），要更大的影子就动「投影」滑块，留白会跟着长。
 - 验证：`scripts/capture-ui.ps1`（照 `%TEMP%\weport-electron-screenshots\popup.png` 直接看像素），
   `npm run bench` 的满档玻璃 CPU / 帧 p95（加了这三层后仍是 3.25% / 17.4ms）。
+
+## 实时桌面折射的帧率 — v1.1（koffi BitBlt 快采）
+
+用户报的"玻璃刚出现那一两下会卡"。量出来的是**帧率**，不是弹窗延迟（冷 248ms / 热 5ms
+本来就不慢）：两条采集路里 WGC 视频流在这台机器上永远起不来，只剩主进程定帧推送，
+而当时"抓一帧"用的是 `desktopCapturer.getSources()`，实测稳态 **0.7fps**。
+
+- **先量成本，别猜分辨率。** 实测 `getSources`：320×180 = 208ms、192×108 = 199ms、
+  128×72 = 197ms、90×50 = 168ms —— **与输出像素数几乎无关**，那是 Chromium 采集管线的
+  固定开销。所以"把抓帧分辨率再调小"没有意义，必须换实现。只要 source id
+  （`thumbnailSize:{0,0}`）也要 150ms。
+- **本机 WGC 是硬失败**：`getUserMedia` 与 `getDisplayMedia`（安全上下文 + Electron
+  `setDisplayMediaRequestHandler`）都是 `NotReadableError: Could not start video source`，
+  Chromium 日志 `wgc_capture_source.cc CreateForMonitor failed with hr: -2147024891`
+  （E_ACCESSDENIED，Iris Xe + 该驱动）。渲染层那段 getUserMedia 因此**每条通知都白等
+  ~150ms** 才失败回落 —— 它不是罕见路径。
+- **快采路径**：`electron/services/glassCapture.ts` 用 koffi（项目已有依赖，WCDB 在用）
+  直调 GDI —— 一个 `BitBlt` + 一次 `GetDIBits` 抓**玻璃所在的那一小块**（卡片 + 40px
+  模糊边距，约 420×144 物理像素）：实测 5~22ms（中位 ~12ms），比整屏 JPEG 快 10~17 倍
+  （整屏 BitBlt 35.6ms，也没必要）。任何一步失败返回 null，调用方回落老路。
+- **帧的形态**：快采帧是原始 BGRA（`pixelsBase64` + `frameX/Y/Width/Height` 屏幕矩形），
+  渲染层解成 `ImageData` 交给玻璃画进一张内部 canvas（`data-glass-frame`），不走 JPEG
+  编解码也不走 dataURL —— 每帧只剩 base64 编解码 + 一次 `putImageData`。`data-glass`
+  仍是 `frames`（`stream` 只在 WGC 真的起来时才出现）。
+- **帧间隔**：快采路 `max(33, min(100, 成本×3))`（实测稳态 ~14fps，之前 0.7fps）；老路
+  沿用 3× 成本、200~1000ms。`WEPORT_GLASS_NOCAPTURE=1` 强制回老路（排查采集问题用）。
+- **量它的探针**：`.ui-probe/probe-popup-latency.mjs` 只看弹窗出现延迟；看帧率要读弹窗
+  里的 `data-glass-seq` 随时间的变化。注意：主窗口移出屏幕后，Chromium 会让弹窗页的
+  DOM 查询返回空（`#root` 长度 0）—— 那是探针假象，不是渲染失败。

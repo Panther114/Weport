@@ -9,9 +9,11 @@
  *
  * 期望的健康形态（见 docs/reference/dsh-cache-architecture.md §D.3）：
  *   - 一整轮里全是 `append`；
- *   - `first` 只出现在每一轮的第一步；
+ *   - `first` 只出现在每一轮的第一步（帧从 prefix-probe.json 恢复后，重启后的
+ *     第一条应是带 `restored` 的 `append`，`first` 只属于全新会话）；
  *   - `head-rewrite` 只在压缩之后出现，且每一轮次数很少；
- *   - `system` / `tools` 在同一个会话里**永远不该出现** —— 出现即前缀整段失效。
+ *   - `system` / `tools` / `route` 在同一个会话里**永远不该出现** —— 出现即
+ *     前缀整段失效（route = provider/model/protocol 换了缓存域）。
  *
  * 用法：
  *   node scripts/verify-cache-prefix.mjs [debug.log 路径]
@@ -79,12 +81,13 @@ for (const [chatId, list] of byChat) {
   const rewrite = counts.get('head-rewrite') || 0
   const system = counts.get('system') || 0
   const tools = counts.get('tools') || 0
+  const route = counts.get('route') || 0
   const explained = append + first + rewrite
 
   const rate = list.length > 0 ? ((append + first) / list.length) * 100 : 0
 
   console.log(`会话 ${chatId.slice(0, 8)}…  请求 ${list.length} 条`)
-  console.log(`  append=${append}  first=${first}  head-rewrite=${rewrite}  system=${system}  tools=${tools}`)
+  console.log(`  append=${append}  first=${first}  head-rewrite=${rewrite}  system=${system}  tools=${tools}  route=${route}`)
   console.log(`  可复用前缀比例：${rate.toFixed(1)}%（head-rewrite 之后的那一条必然失效）`)
 
   if (system > 0) {
@@ -93,6 +96,10 @@ for (const [chatId, list] of byChat) {
   }
   if (tools > 0) {
     console.log('  ✗ 会话中途工具定义发生变化 —— 整段前缀失效')
+    failures += 1
+  }
+  if (route > 0) {
+    console.log('  ✗ 会话中途模型路由（provider/model/protocol）变化 —— 换了缓存域，全量重算')
     failures += 1
   }
   // 压缩以外的 head-rewrite 说明历史被改写；正常一轮不会有几次。

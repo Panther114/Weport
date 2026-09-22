@@ -177,6 +177,12 @@ export interface ProviderStreamInput {
   signal: AbortSignal
   onReasoning: (text: string) => void
   onText: (text: string) => void
+  /**
+   * 工具调用参数的流式增量。存在的唯一理由是**计时**：tool-only 步骤既不产生
+   * 正文也不产生思考，没有这个回调就永远等不到「首 token」，decodeMs=0、
+   * 整步耗时被错记进 ttft、TPS 徽标直接消失。可选 —— 不传不影响任何调用方。
+   */
+  onToolArgs?: (delta: string) => void
 }
 
 export interface ProviderStreamResult {

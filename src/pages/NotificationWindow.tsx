@@ -60,8 +60,27 @@ function traceDelta(label: string): number {
     return delta
 }
 
-/** 用户配置 → 原生面板参数（与渲染层同一个换算函数，两条路径观感一致）。 */
-function nativeGlassParams(glass: NotificationGlass) {
+/**
+ * 主进程快速采集帧（base64 的 BGRA）→ `ImageData`。
+ *
+ * 主进程侧的 `Buffer.toString('base64')` 实测 <1ms，渲染层 `atob` + 一次类型化数组
+ * 复制也在这个量级 —— 比走 JPEG 编码/解码（每帧 3~10ms）便宜一个数量级。
+ * 解不出来（长度对不上）时返回 null，调用方保持上一帧。
+ */
+function decodeBackdropPixels(base64: string, rect: { width: number; height: number }): ImageData | null {
+    try {
+        const binary = atob(base64)
+        const expected = rect.width * rect.height * 4
+        if (binary.length !== expected) return null
+        const bytes = new Uint8ClampedArray(expected)
+        for (let i = 0; i < expected; i += 1) bytes[i] = binary.charCodeAt(i)
+        return new ImageData(bytes, rect.width, rect.height)
+    } catch {
+        return null
+    }
+}
+
+/** 用户配置 → 原生面板参数（与渲染层同一个换算函数，两条路径观感一致）。 */function nativeGlassParams(glass: NotificationGlass) {
     const render = notificationGlassRenderParams(glass)
     return {
         cornerRadius: glass.radius,
@@ -143,6 +162,8 @@ export default function NotificationWindow() {
     const [measured, setMeasured] = useState<{ width: number; height: number } | null>(null)
     // 采集源 ID：与窗口/流生命周期解耦，事件回调里读 ref
     const sourceIdRef = useRef<string | null>(null)
+    /** WGC 采集流是否已被证明不可用（主进程随 payload 下发，见 notificationWindow.ts） */
+    const streamUnavailableRef = useRef(false)
     /** 已处理过的投递 id（幂等去重，见 handleShow 里的说明） */
     const lastPayloadIdRef = useRef<string | null>(null)
 
@@ -252,6 +273,9 @@ export default function NotificationWindow() {
                 })
                 setNativeBackdrop(Boolean(data.backdrop.native))
                 sourceIdRef.current = data.backdrop.sourceId ?? null
+                // 这台机器上 WGC 采集流已经被证明起不来（主进程记着上次的失败结果）：
+                // 不再每次弹窗都去试一遍 —— 本机实测那次尝试要 ~150ms，全部白等。
+                streamUnavailableRef.current = Boolean(data.backdrop.streamUnavailable)
             }
 
             if (notificationRef.current && newNoti.notificationAnimationEnabled !== false) {
@@ -384,6 +408,9 @@ export default function NotificationWindow() {
         if (!visible || nativeBackdrop) return
         const sourceId = sourceIdRef.current
         if (!sourceId) return
+        // 这台机器上采集流已经失败过：直接走主进程的定帧推送，不再付那次注定失败的
+        // 尝试（本机实测 ~150ms/条通知）。进程重启后主进程的记忆清空，会再试一次。
+        if (streamUnavailableRef.current) return
         let stream: MediaStream | null = null
         let cancelled = false
         void (async () => {
@@ -404,10 +431,13 @@ export default function NotificationWindow() {
                 setBackdropStream(media)
                 // 告诉主进程：折射由视频流接管，别再抓帧了
                 window.electronAPI?.notification?.setGlassMode?.('stream')
+                window.electronAPI?.notification?.reportDesktopStream?.(true)
             } catch (error) {
                 // 采集失败（权限/驱动/虚拟桌面）时不要放弃：主进程的定帧推送继续
                 // 供帧，玻璃依然是"跟着桌面走"的，只是帧率低一些
                 console.warn('[NotificationWindow] WGC desktop stream unavailable, falling back to main-process frames:', error)
+                // 告诉主进程"这台机器起不来"：后续通知不再重复这次尝试
+                window.electronAPI?.notification?.reportDesktopStream?.(false)
             }
         })()
         return () => {
@@ -432,22 +462,38 @@ export default function NotificationWindow() {
                 first = false
                 console.log('[NotificationWindow] first backdrop frame received')
             }
-            // 每帧内容指纹（长度 + 中段字符）+ 帧序号：截图 QA 用它们断言
-            // “玻璃上显示的确实是主进程最新发出的那一帧”，比只看像素差少一层猜测。
+            /**
+             * 两条帧形态（v1.1）：
+             *
+             * - **快速路径**（主进程 koffi BitBlt，只抓卡片附近 ≈5~22ms）：`pixelsBase64`
+             *   是原始 BGRA 像素，`frameX/Y/Width/Height` 是它在屏幕逻辑坐标里的矩形。
+             *   玻璃把它画成 ImageData 直接用 —— 不经过 JPEG 编解码。
+             * - **兜底路径**（`desktopCapturer` 整屏 JPEG ≈150~208ms）：`dataUrl` 整屏图，
+             *   窗口位置给 `winX/winY`。
+             */
+            const raw = frame as Record<string, unknown>
+            const rect = raw.frameWidth
+                ? { x: Number(raw.frameX) || 0, y: Number(raw.frameY) || 0, width: Number(raw.frameWidth) || 0, height: Number(raw.frameHeight) || 0 }
+                : null
+            const pixels = raw.pixelsBase64 && rect ? decodeBackdropPixels(String(raw.pixelsBase64), rect) : null
+            // 每帧内容指纹 + 帧序号：截图 QA 用它们断言"玻璃上显示的确实是主进程最新
+            // 发出的那一帧"，比只看像素差少一层猜测。
             try {
-                const url = String(frame.dataUrl || '')
-                document.documentElement.dataset.glassHash = `${url.length}:${url.slice(2000, 2012)}`
-                document.documentElement.dataset.glassSeq = String(frame.seq ?? '')
+                document.documentElement.dataset.glassHash = pixels
+                    ? `fast:${String(raw.pixelsBase64).length}:${raw.seq}`
+                    : `${String(raw.dataUrl || '').length}:${String(raw.dataUrl || '').slice(2000, 2012)}`
+                document.documentElement.dataset.glassSeq = String(raw.seq ?? '')
             } catch { /* noop */ }
             setBackdrop(prev => ({
-                width: frame.width,
-                height: frame.height,
-                screenX: frame.winX,
-                screenY: frame.winY,
+                width: pixels && rect ? rect.width : Number(raw.width) || 0,
+                height: pixels && rect ? rect.height : Number(raw.height) || 0,
+                screenX: pixels && rect ? rect.x : Number(raw.winX) || 0,
+                screenY: pixels && rect ? rect.y : Number(raw.winY) || 0,
                 // 窗口尺寸按上一份沿用：定帧推送里不带它，但采样要靠它把取样点挪出窗口
                 winW: prev?.winW,
                 winH: prev?.winH,
-                dataUrl: frame.dataUrl
+                dataUrl: pixels ? null : (raw.dataUrl as string | null) ?? null,
+                ...(pixels ? { pixels } : {})
             }))
             // 收到真实帧才算"动起来了"；在此之前 data-glass 保持 snapshot
             setFrameCount(count => (count < 1000 ? count + 1 : count))

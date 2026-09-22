@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onBackdrop: (callback: (frame: any) => void) => subscribe('notification:backdrop', callback),
     // 渲染层的 WGC 视频流已接管折射，主进程可以停掉抓帧
     setGlassMode: (mode: string) => ipcRenderer.send('notification:glassMode', { mode }),
+    /** 上报 WGC 采集尝试的结果：`ok:false` = 这台机器上采集流起不来，后续跳过尝试 */
+    reportDesktopStream: (ok: boolean) => ipcRenderer.send('notification:desktopStream', { ok }),
     onShow: (callback: (event: any, data: any) => void) => subscribe('notification:show', callback),
     /** 窗口真正显示出来了（主进程在 showInactive 之后发）：入场动画的起跑信号。 */
     onShown: (callback: (event: any, data: any) => void) => subscribe('notification:shown', callback),

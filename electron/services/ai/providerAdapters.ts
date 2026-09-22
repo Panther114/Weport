@@ -32,24 +32,40 @@ function imageDataUrl(image: { mimeType: string; data: string }): string {
 /**
  * 工具消息带图片时的 OpenAI 兼容转换。
  *
- * 图片必须是**独立的内容块**（`image_url`），不能拼进文本：拼进去模型只会
- * 收到一坨 base64 字符。没有图片的消息原样透传 —— 这条路径每一步都要重发整段
- * 前缀，多余的改写会毁掉提供商的 prefix cache。
+ * **图片放在紧跟其后的 user 消息里，不放进 tool 消息的 content 数组**（v1.1）。
+ *
+ * 旧实现是把 `content` 换成 `[{type:'text'},{type:'image_url'}]`：结构上完全合规，
+ * 但实测网关（opencode-go → deepseek-v4.1-flash）会直接 422
+ * `invalid_request_error: Input should be a valid string` —— 它对 tool 角色的
+ * content 只接受字符串。图片是**这一轮唯一的新信息**，整段前缀重发都指望着它，
+ * 所以不能赌某个网关的宽容度：tool 消息保持纯文本（原样透传），图片作为一条
+ * 独立的 user 消息追加在后面 —— 这是各家中转/原生 DeepSeek 都接受的多模态形状。
+ *
+ * 形状坏掉（缺 mimeType/data）的图片被丢掉，不把整轮请求搞成 400。
  */
 export function openAIChatMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return messages.map((message) => {
-    if (message.role !== 'tool') return message
+  const out: Array<Record<string, unknown>> = []
+  for (const message of messages) {
+    if (message.role !== 'tool') {
+      out.push(message)
+      continue
+    }
     const images = imageParts(message.images)
-    if (images.length === 0) return message
-    return {
-      role: 'tool',
-      tool_call_id: message.tool_call_id,
+    if (images.length === 0) {
+      out.push(message)
+      continue
+    }
+    // 纯文本的 tool 结果原样透传（多一次改写就多一次前缀缓存失效），图片另起一条
+    out.push({ role: 'tool', tool_call_id: message.tool_call_id, content: String(message.content || '') })
+    out.push({
+      role: 'user',
       content: [
-        { type: 'text', text: String(message.content || '') },
+        { type: 'text', text: '（工具返回的图片，见下）' },
         ...images.map((image) => ({ type: 'image_url', image_url: { url: imageDataUrl(image) } })),
       ],
-    }
-  })
+    })
+  }
+  return out
 }
 
 /**
@@ -186,14 +202,28 @@ function emptyResult(): ProviderStreamResult {
   return { content: '', reasoning: '', toolCalls: [], usage: undefined }
 }
 
-function usageFromOpenAI(usage: any) {
+/**
+ * OpenAI-shaped usage → harness usage.
+ *
+ * Exported for tests: cache accounting IS the product's cost model, and the
+ * field chain below is exactly the kind of silent-zero regression that showed
+ * up as "hit rate mysteriously low" — DeepSeek gateways report
+ * `prompt_cache_hit_tokens`, OpenAI reports `prompt_tokens_details.cached_tokens`,
+ * Anthropic-shaped relays report `cache_read_input_tokens`. Read them all.
+ */
+export function usageFromOpenAI(usage: any) {
   if (!usage) return undefined
+  const cacheHit =
+    usage.prompt_tokens_details?.cached_tokens ??
+    usage.input_tokens_details?.cached_tokens ??
+    usage.prompt_cache_hit_tokens ??
+    usage.cache_read_input_tokens
   return {
     promptTokens: Number(usage.prompt_tokens ?? usage.input_tokens) || 0,
     completionTokens: Number(usage.completion_tokens ?? usage.output_tokens) || 0,
     reasoningTokens: Number(usage.completion_tokens_details?.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens) || 0,
     totalTokens: Number(usage.total_tokens) || 0,
-    promptCacheHitTokens: Number(usage.prompt_tokens_details?.cached_tokens ?? usage.input_tokens_details?.cached_tokens) || 0,
+    promptCacheHitTokens: Number(cacheHit) || 0,
   }
 }
 
@@ -276,7 +306,9 @@ const openAIResponsesAdapter: ProviderAdapter = {
       } else if (item.event === 'response.function_call_arguments.delta' || data.type === 'response.function_call_arguments.delta') {
         const id = String(data.call_id || data.item_id || '')
         const call = calls.get(id)
-        if (call) call.args += String(data.delta || '')
+        const piece = String(data.delta || '')
+        if (call) call.args += piece
+        input.onToolArgs?.(piece)
       } else if (item.event === 'response.completed' || data.type === 'response.completed') {
         result.usage = usageFromOpenAI(data.response?.usage || data.usage)
         result.finishReason = String(data.response?.status || 'completed')
@@ -305,8 +337,12 @@ export function openAIChatBody(input: ProviderStreamInput): Record<string, unkno
     body.tools = toolDefinitions(input)
     body.tool_choice = 'auto'
   }
+  // Unconditional: on the chat-completions wire, OpenAI (and any gateway that
+  // follows it strictly) returns NO usage at all without `include_usage` — no
+  // usage means no TPS badge and no cache-hit reading, silently. DeepSeek
+  // needs it too; everyone else treats it as a harmless no-op.
+  body.stream_options = { include_usage: true }
   if (input.profile.providerId === 'deepseek' || /deepseek/i.test(input.profile.model)) {
-    body.stream_options = { include_usage: true }
     body.reasoning_effort = input.reasoningEffort
   }
   return body
@@ -339,6 +375,8 @@ const openAICompatibleAdapter: ProviderAdapter = {
         if (toolCall.function?.name) current.name += String(toolCall.function.name)
         if (typeof toolCall.function?.arguments === 'string') current.args += toolCall.function.arguments
         calls.set(index, current)
+        // tool-only 步骤的「首 token」就在这里 —— 计时用，不外发任何东西。
+        if (toolCall.function?.name || toolCall.function?.arguments) input.onToolArgs?.(String(toolCall.function?.arguments || toolCall.function?.name || ''))
       }
     }
     result.toolCalls = Array.from(calls.values()).filter((call) => call.name).map((call) => ({ id: call.id, name: call.name, args: parseArgs(call.args) }))
@@ -429,11 +467,25 @@ const anthropicAdapter: ProviderAdapter = {
       if (data.type === 'content_block_delta') {
         if (data.delta?.type === 'text_delta') { const text = String(data.delta.text || ''); result.content += text; input.onText(text) }
         if (data.delta?.type === 'thinking_delta') { const text = String(data.delta.thinking || ''); result.reasoning += text; input.onReasoning(text) }
-        if (data.delta?.type === 'input_json_delta') { const call = calls.get(Number(data.index)); if (call) call.args += String(data.delta.partial_json || '') }
+        if (data.delta?.type === 'input_json_delta') { const call = calls.get(Number(data.index)); const piece = String(data.delta.partial_json || ''); if (call) call.args += piece; input.onToolArgs?.(piece) }
       }
       if (data.type === 'message_delta') {
         result.finishReason = String(data.delta?.stop_reason || '')
-        if (data.usage) result.usage = { ...(result.usage || emptyUsage()), ...usageFromAnthropic(data.usage) }
+        if (data.usage) {
+          const incremental = usageFromAnthropic(data.usage)
+          if (incremental) {
+            // `message_delta.usage` may omit input-side fields; never let an
+            // absent bucket overwrite a real promptTokens with 0 (that used to
+            // zero the denominator and collapse the hit-rate reading).
+            const base = result.usage || emptyUsage()
+            result.usage = {
+              ...base,
+              ...incremental,
+              promptTokens: incremental.promptTokens || base.promptTokens,
+              promptCacheHitTokens: incremental.promptCacheHitTokens || base.promptCacheHitTokens,
+            }
+          }
+        }
       }
     }
     result.toolCalls = Array.from(calls.values()).filter((call) => call.name).map((call) => ({ id: call.id, name: call.name, args: parseArgs(call.args) }))
@@ -451,11 +503,32 @@ const anthropicAdapter: ProviderAdapter = {
 
 function emptyUsage() { return { promptTokens: 0, completionTokens: 0, reasoningTokens: 0, totalTokens: 0, promptCacheHitTokens: 0 } }
 
-function usageFromAnthropic(usage: any) {
+/**
+ * Anthropic usage → the harness's **inclusive** prompt convention.
+ *
+ * Anthropic reports `input_tokens` DISJOINT from the cache buckets
+ * (`input_tokens` excludes both cache reads and cache writes), while DeepSeek's
+ * `prompt_tokens` INCLUDES cache hits. The UI computes one hit rate
+ * (`hit / promptTokens`), so the adapter must normalize to one convention —
+ * otherwise the same formula means "hit share" on one provider and
+ * "hit-over-uncached" (often >100 %) on another. `cache_creation_input_tokens`
+ * is a miss (fresh write) and belongs in the denominator.
+ *
+ * Exported for tests.
+ */
+export function usageFromAnthropic(usage: any) {
   if (!usage) return undefined
-  const prompt = Number(usage.input_tokens) || 0
+  const cacheRead = Number(usage.cache_read_input_tokens) || 0
+  const cacheWrite = Number(usage.cache_creation_input_tokens) || 0
+  const prompt = (Number(usage.input_tokens) || 0) + cacheRead + cacheWrite
   const completion = Number(usage.output_tokens) || 0
-  return { promptTokens: prompt, completionTokens: completion, reasoningTokens: 0, totalTokens: prompt + completion, promptCacheHitTokens: Number(usage.cache_read_input_tokens) || 0 }
+  return {
+    promptTokens: prompt,
+    completionTokens: completion,
+    reasoningTokens: 0,
+    totalTokens: prompt + completion,
+    promptCacheHitTokens: cacheRead,
+  }
 }
 
 /**
@@ -511,7 +584,7 @@ const googleAdapter: ProviderAdapter = {
       for (const part of parts) {
         if (part.thought === true && typeof part.text === 'string') { result.reasoning += part.text; input.onReasoning(part.text) }
         else if (typeof part.text === 'string') { result.content += part.text; input.onText(part.text) }
-        if (part.functionCall) result.toolCalls.push({ id: `call_${randomUUID()}`, name: String(part.functionCall.name || ''), args: (part.functionCall.args || {}) as Record<string, unknown> })
+        if (part.functionCall) { result.toolCalls.push({ id: `call_${randomUUID()}`, name: String(part.functionCall.name || ''), args: (part.functionCall.args || {}) as Record<string, unknown> }); input.onToolArgs?.(String(part.functionCall.name || '')) }
       }
       const usage = payload?.usageMetadata
       if (usage) result.usage = { promptTokens: Number(usage.promptTokenCount) || 0, completionTokens: Number(usage.candidatesTokenCount) || 0, reasoningTokens: Number(usage.thoughtsTokenCount) || 0, totalTokens: Number(usage.totalTokenCount) || 0, promptCacheHitTokens: Number(usage.cachedContentTokenCount) || 0 }

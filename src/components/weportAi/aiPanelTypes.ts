@@ -61,6 +61,8 @@ export type SetupInfo = {
   baseUrlError?: string
   model: string
   reasoningEffort: string
+  /** 图片输入开关（默认开）：关掉后 read_chat_images 不再把图片本体发给模型 */
+  imageInputs?: boolean
   customPrompt: string
   workspaceRoot: string
   exportPath: string

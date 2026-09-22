@@ -185,6 +185,15 @@ interface ConfigSchema {
   weportAiModel: string
   weportAiMaxTokens: number
   weportAiReasoningEffort: 'low' | 'high' | 'max'
+  /**
+   * 图片输入开关（v1.1，默认开）。
+   *
+   * 关掉后 `read_chat_images` 只回报"这个窗口里有几张图、谁发的、什么时候"，不再把
+   * 图片本体交给模型 —— 给**不支持视觉**的模型/网关用（有些 OpenAI 兼容网关收到
+   * `image_url` 内容块会直接 400）。默认开，因为默认模型（deepseek-v4.1-flash 一类）
+   * 都是视觉模型，作业照片这类任务必须真的看图。
+   */
+  weportAiImageInputs: boolean
   weportAiMaxSteps: number
   weportAiCustomPrompt: string
   weportAiWorkspaceRoot: string
@@ -193,6 +202,8 @@ interface ConfigSchema {
   weportAiDisabledTools: string[]
   weportAiActions: Array<{ id: string; name: string; prompt: string }>
   weportAiMaxToolChars: number
+  /** 一批工具调用里的并行安全并发上限（DSH maxParallelToolCalls 的对应项） */
+  weportAiMaxParallelToolCalls: number
   weportAiContextWindow: number
 
   // WeClone（人格克隆）—— v1.0 起**纯本地**
@@ -391,6 +402,8 @@ export class ConfigService {
       weportAiModel: 'deepseek-v4-flash',
       weportAiMaxTokens: 32768,
       weportAiReasoningEffort: 'high',
+      // 图片输入默认开：默认模型都是视觉模型，作业照片/截图这类任务必须真的看图
+      weportAiImageInputs: true,
       weportAiMaxSteps: 48,
       weportAiCustomPrompt: '',
       weportAiWorkspaceRoot: '',
@@ -415,6 +428,9 @@ export class ConfigService {
         },
       ],
       weportAiMaxToolChars: 12000,
+      // 并行工具并发：4 而不是 DSH 默认 10 —— 这里的工具打的是同一个 WCDB FFI
+      // 宿主，消息游标是有限资源（工具内部本身也按 4 分批翻页）。
+      weportAiMaxParallelToolCalls: 4,
       // deepseek-v4-flash 官方上下文窗口 1M tokens
       weportAiContextWindow: 1000000,
       weCloneLastCutoff: '',

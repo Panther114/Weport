@@ -164,13 +164,25 @@ export function compressOverflow<T extends CompressibleMessage>(
 // 前缀稳定性探针
 // ---------------------------------------------------------------------------
 
-export type PrefixChangeKind = 'first' | 'append' | 'system' | 'tools' | 'head-rewrite'
+export type PrefixChangeKind = 'first' | 'append' | 'system' | 'tools' | 'route' | 'head-rewrite'
 
 export interface PrefixFrame {
   systemHash: string
   toolsHash: string
-  /** 每一条请求消息单独序列化后的结果，用于逐字节比较。 */
-  wire: string[]
+  /**
+   * 模型路由（`providerId|model|protocol`）。DSH 把 route change 当作与
+   * compaction 同级的「缓存重置点」——换模型 = 换缓存域，哪怕 system/tools/
+   * messages 逐字节不变也命中不了。这一项让探针**报得出**那种全量失效。
+   */
+  route: string
+  /**
+   * 每一条请求消息单独序列化后的哈希，用于逐条比较。
+   *
+   * 存哈希而不是原文：这一帧要**落盘**（跨重启也要能发现 system/tools/route
+   * 变化），哈希足以做逐字节等价判断，又不会把对话正文写进诊断文件。
+   * `JSON.stringify(frame)` 就是磁盘格式。
+   */
+  wireHashes: string[]
 }
 
 export interface PrefixChange {
@@ -178,22 +190,29 @@ export interface PrefixChange {
   /** 与上一次请求第一处分歧的消息下标；`append` 时等于上一次的长度。 */
   divergedAt: number
   previousLength: number
+  /** 上一帧来自磁盘（进程重启过）而非内存 —— 重启后的 `append` 才解释得通。 */
+  restored?: boolean
 }
 
 /**
- * 生成一帧前缀指纹。`wire` 必须用 `JSON.stringify(message)` 逐条序列化：
- * 请求数组里的消息都是逐字段显式构造的（不是 spread 出来的内部对象），
+ * 生成一帧前缀指纹。消息必须用 `JSON.stringify(message)` 逐条序列化后再取
+ * 哈希：请求数组里的消息都是逐字段显式构造的（不是 spread 出来的内部对象），
  * 所以键顺序稳定，序列化结果可以当作字节级的身份。
+ *
+ * `route` 形如 `opencode-go|deepseek-v4.1-flash|openai-compatible`，由调用方
+ * 传入（这里保持纯函数，不 import 任何 provider 类型）。
  */
 export function buildPrefixFrame(
   systemContent: string,
   tools: unknown,
-  apiMessages: Array<Record<string, unknown>>
+  apiMessages: Array<Record<string, unknown>>,
+  route = '',
 ): PrefixFrame {
   return {
     systemHash: sha256(systemContent),
     toolsHash: sha256(JSON.stringify(tools)),
-    wire: apiMessages.map((message) => JSON.stringify(message)),
+    route,
+    wireHashes: apiMessages.map((message) => sha256(JSON.stringify(message))),
   }
 }
 
@@ -204,27 +223,32 @@ export function buildPrefixFrame(
  * - `append`       上一次请求是本次请求的逐字节前缀 —— 唯一健康的形态；
  * - `system`       系统提示变了 —— 整段前缀失效；
  * - `tools`        工具定义变了 —— 整段前缀失效；
+ * - `route`        模型路由（provider/model/protocol）换了 —— 换了缓存域，
+ *                  即便字节全同也只能全量重算（DSH 的 cache reset point）；
  * - `head-rewrite` 历史中段被改写（压缩，或丢弃了历史头部）—— 从分歧点起失效。
  */
 export function comparePrefixFrames(previous: PrefixFrame | undefined, current: PrefixFrame): PrefixChange {
   if (!previous) return { change: 'first', divergedAt: 0, previousLength: 0 }
   if (previous.systemHash !== current.systemHash) {
-    return { change: 'system', divergedAt: 0, previousLength: previous.wire.length }
+    return { change: 'system', divergedAt: 0, previousLength: previous.wireHashes.length }
   }
   if (previous.toolsHash !== current.toolsHash) {
-    return { change: 'tools', divergedAt: 0, previousLength: previous.wire.length }
+    return { change: 'tools', divergedAt: 0, previousLength: previous.wireHashes.length }
+  }
+  if ((previous.route || '') !== (current.route || '')) {
+    return { change: 'route', divergedAt: 0, previousLength: previous.wireHashes.length }
   }
 
-  const limit = Math.min(previous.wire.length, current.wire.length)
+  const limit = Math.min(previous.wireHashes.length, current.wireHashes.length)
   for (let i = 0; i < limit; i += 1) {
-    if (previous.wire[i] !== current.wire[i]) {
-      return { change: 'head-rewrite', divergedAt: i, previousLength: previous.wire.length }
+    if (previous.wireHashes[i] !== current.wireHashes[i]) {
+      return { change: 'head-rewrite', divergedAt: i, previousLength: previous.wireHashes.length }
     }
   }
-  if (current.wire.length < previous.wire.length) {
-    return { change: 'head-rewrite', divergedAt: current.wire.length, previousLength: previous.wire.length }
+  if (current.wireHashes.length < previous.wireHashes.length) {
+    return { change: 'head-rewrite', divergedAt: current.wireHashes.length, previousLength: previous.wireHashes.length }
   }
-  return { change: 'append', divergedAt: limit, previousLength: previous.wire.length }
+  return { change: 'append', divergedAt: limit, previousLength: previous.wireHashes.length }
 }
 
 /**

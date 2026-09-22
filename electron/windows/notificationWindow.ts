@@ -1,5 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell } from "electron";
 import { join } from "path";
+import { captureScreenRegion, dipRectToPhysical, fastCaptureAvailable } from "../services/glassCapture";
 import { existsSync, writeFileSync } from "fs";
 import { ConfigService } from "../services/config";
 import {
@@ -421,6 +422,16 @@ let backdropLastSeq = 0;
 let backdropFramesSent = 0;
 /** 最近一次单帧实测耗时，用于自适应间隔（慢机器上主动降帧） */
 let lastFrameCostMs = 0;
+/**
+ * 渲染层 WGC 视频流是否已被证明**起不来**（`getUserMedia` 返回 NotReadableError）。
+ *
+ * 本机实测（Iris Xe + 当前驱动）：Chromium 的 `wgc_capture_source.cc
+ * CreateForMonitor` 恒 failure（E_ACCESSDENIED），`getUserMedia` 与
+ * `getDisplayMedia` 两条路都 `NotReadableError`。渲染层每次弹窗都要先试一遍才回落，
+ * 那一次尝试实测 ~150ms —— 全都白等。这里把"试过、失败"记下来，随下一次 payload
+ * 下发，渲染层就不再试（换显示器/驱动后重启进程即恢复尝试）。
+ */
+let desktopStreamUnavailable = false;
 /** 渲染层报上来的折射模式：stream = WGC 视频流已接管，主进程不需要再抓帧 */
 let backdropMode: "frames" | "stream" | "native" = "frames";
 
@@ -452,6 +463,42 @@ function stopBackdropStream() {
 const BACKDROP_CAPTURE_SCALE = 0.25
 /** JPEG 质量：玻璃会再模糊一次，压缩噪点看不见，但编码成本差很多 */
 const BACKDROP_JPEG_QUALITY = 55
+/** 快速路径向外多抓的边距（CSS px）：LiquidGlass 的 BLUR_MARGIN 是 40 */
+const FAST_CAPTURE_MARGIN = 40
+/**
+ * 快速路径是否可用（本机 Win32 + koffi 能加载 GDI）。
+ *
+ * 环境变量 `WEPORT_GLASS_NOCAPTURE=1` 可强制关掉，回到 desktopCapturer 整屏 JPEG
+ * 那条老路（排查采集相关问题时用）。
+ */
+function fastBackdropEnabled(): boolean {
+  if (process.env.WEPORT_GLASS_NOCAPTURE === "1") return false;
+  return fastCaptureAvailable();
+}
+
+/**
+ * 抓一帧「玻璃所在的那一小块屏幕」——koffi BitBlt 快速路径。
+ *
+ * 返回 BGRA 像素（base64）+ 它在屏幕逻辑坐标里的矩形；渲染层把它画成 ImageData 后
+ * 交给玻璃。实测 5~22ms/帧，而 desktopCapturer 整屏 JPEG 是 150~208ms/帧。
+ */
+function grabFastBackdropFrame(): { data: string; pixels: number; rect: { x: number; y: number; width: number; height: number } } | null {
+  if (!notificationWindow || notificationWindow.isDestroyed()) return null;
+  const [winX, winY] = notificationWindow.getPosition();
+  const [winW, winH] = notificationWindow.getSize();
+  const display = screen.getPrimaryDisplay();
+  const work = display.bounds;
+  // 卡片附近 + 模糊边距，并 clamp 到显示器内（越界 BitBlt 回来的是黑块）
+  const x = Math.max(work.x, winX - FAST_CAPTURE_MARGIN);
+  const y = Math.max(work.y, winY - FAST_CAPTURE_MARGIN);
+  const right = Math.min(work.x + work.width, winX + winW + FAST_CAPTURE_MARGIN);
+  const bottom = Math.min(work.y + work.height, winY + winH + FAST_CAPTURE_MARGIN);
+  const rect = { x, y, width: right - x, height: bottom - y };
+  if (rect.width < 8 || rect.height < 8) return null;
+  const captured = captureScreenRegion(dipRectToPhysical(rect.x, rect.y, rect.width, rect.height));
+  if (!captured) return null;
+  return { data: captured.pixels.toString("base64"), pixels: captured.pixels.length, rect };
+}
 
 async function grabDesktopFrame(): Promise<string | null> {
   const startedAt = Date.now();
@@ -518,9 +565,42 @@ async function runBackdropStream() {
       }
     } else {
       invisibleStreak = 0;
-      const dataUrl = await grabDesktopFrame();
+      /**
+       * 两条采集路（v1.1）：
+       *
+       * - **快速路径**（koffi BitBlt，只抓卡片附近 ~420×144）：一次 5~22ms，帧是原始
+       *   BGRA 像素，渲染层直接画成 ImageData。实测老路 0.7fps → 这条路至少 10fps。
+       * - **兜底路径**（`desktopCapturer` 整屏 JPEG）：一次 150~208ms，与输出分辨率
+       *   无关（Chromium 采集管线的固定开销），只能跑到 ~0.7fps —— 用户看到的
+       *   "玻璃跟不上桌面"就是它。koffi 不可用时才走这里。
+       *
+       * 两条路都只在弹窗可见期间跑，隐藏即停。
+       */
+      const fastEnabled = fastBackdropEnabled();
+      const frameStartedAt = Date.now();
+      const fastFrame = fastEnabled ? grabFastBackdropFrame() : null;
+      if (fastFrame) lastFrameCostMs = Math.max(1, Date.now() - frameStartedAt);
+      const dataUrl = fastFrame ? null : await grabDesktopFrame();
       if (!backdropRunning) break;
-      if (dataUrl && notificationWindow && !notificationWindow.isDestroyed()) {
+      if (fastFrame && notificationWindow && !notificationWindow.isDestroyed()) {
+        backdropLastSeq += 1;
+        notificationWindow.webContents.send("notification:backdrop", {
+          seq: backdropLastSeq,
+          pixelsBase64: fastFrame.data,
+          frameX: fastFrame.rect.x,
+          frameY: fastFrame.rect.y,
+          frameWidth: fastFrame.rect.width,
+          frameHeight: fastFrame.rect.height,
+          winX: fastFrame.rect.x,
+          winY: fastFrame.rect.y,
+          costMs: lastFrameCostMs,
+        });
+        frameIndex += 1;
+        backdropFramesSent += 1;
+        if (frameIndex === 1 || frameIndex % 30 === 0) {
+          console.log(`[NotificationWindow] backdrop fast frame #${frameIndex} (${lastFrameCostMs}ms)`);
+        }
+      } else if (dataUrl && notificationWindow && !notificationWindow.isDestroyed()) {
         const [winX, winY] = notificationWindow.getPosition();
         const display = screen.getPrimaryDisplay();
         backdropLastSeq += 1;
@@ -544,7 +624,11 @@ async function runBackdropStream() {
         }
       }
     }
-    const interval = Math.max(200, Math.min(1000, Math.round(lastFrameCostMs * 3) || 300));
+    // 帧间隔：快速路径 5~22ms/帧，间隔按 3× 成本取 33~66ms（约 15~30fps）；
+    // 兜底路径仍是 3× 成本、200~1000ms（约 0.7~5fps）
+    const interval = fastBackdropEnabled()
+      ? Math.max(33, Math.min(100, Math.round(lastFrameCostMs * 3) || 50))
+      : Math.max(200, Math.min(1000, Math.round(lastFrameCostMs * 3) || 300));
     await new Promise<void>((resolve) => {
       backdropTimer = setTimeout(resolve, interval);
       backdropTimer.unref?.();
@@ -984,8 +1068,11 @@ async function showAndSend(win: BrowserWindow, data: any) {
       : {
           native: Boolean(nativeGlass),
           // 渲染层优先用它开 WGC 视频流（30fps、GPU 合成、主进程零成本）；不可用时
-          // 自动落到主进程的定帧循环（runBackdropStream）
+          // 自动落到主进程的定帧循环（runBackdropStream）。
+          // `streamUnavailable`：这台机器上 WGC 已经被证明起不来（见上面的说明），
+          // 渲染层据此**跳过**那次注定失败的 getUserMedia（省掉每条约 150ms）。
           sourceId: nativeGlass ? null : cachedSourceId,
+          streamUnavailable: desktopStreamUnavailable,
           ...backdropGeometry,
         },
   };
@@ -1064,6 +1151,16 @@ export async function registerNotificationHandlers() {
   // 反向切回（流中断）不需要处理：流一旦建立就由渲染层持有到弹窗隐藏。
   ipcMain.on("notification:glassMode", (_event, payload: { mode?: string }) => {
     if (payload?.mode === "stream") backdropMode = "stream";
+  });
+
+  /**
+   * 渲染层报告 WGC 采集尝试的结果。
+   *
+   * `ok:false` 时记下来：这台机器上采集流起不来，后续通知直接跳过那次尝试
+   * （本机实测一次尝试 ~150ms，全部白等）。
+   */
+  ipcMain.on("notification:desktopStream", (_event, payload: { ok?: boolean }) => {
+    desktopStreamUnavailable = payload?.ok === false;
   });
 
   // —— 原生玻璃面板生命周期（仅 nativeGlass 可用时渲染层才会发这些消息）——
