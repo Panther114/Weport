@@ -1,10 +1,16 @@
 import { app } from 'electron'
-import { basename, join } from 'path'
+import { join } from 'path'
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
-import { execFile, exec, spawn } from 'child_process'
+import { execFile, exec } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
 import { createRequire } from 'module';
+import {
+  defaultCommandEnvironment,
+  findWeChatRootPid,
+  launchWeChat,
+  resolveExecutable,
+} from './wechatLinux'
 const require = createRequire(__filename);
 
 const execFileAsync = promisify(execFile)
@@ -15,161 +21,12 @@ type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; veri
 
 export class KeyServiceLinux {
   private sudo: any
-  /** Process names used by native, UOS and Flatpak WeChat builds. */
-  private readonly wechatProcessNames = ['xwechat', 'wechat-uos', 'weixin', 'wechat', 'wechat-bin']
-  /** Ordered launch candidates.  At most one candidate is ever started. */
-  private readonly wechatLaunchCandidates = [
-    { command: 'xwechat', args: [], label: 'xwechat' },
-    { command: 'wechat-uos', args: [], label: 'wechat-uos' },
-    { command: 'weixin', args: [], label: 'weixin' },
-    { command: 'wechat', args: [], label: 'wechat' },
-    { command: 'wechat-bin', args: [], label: 'wechat-bin' },
-    { command: '/opt/wechat/wechat', args: [], label: '/opt/wechat/wechat' },
-    { command: '/opt/apps/com.tencent.wechat/files/wechat', args: [], label: 'UOS WeChat' },
-    { command: '/usr/bin/wechat', args: [], label: '/usr/bin/wechat' },
-    { command: '/usr/local/bin/wechat', args: [], label: '/usr/local/bin/wechat' },
-    { command: '/usr/bin/wechat-bin', args: [], label: '/usr/bin/wechat-bin' },
-    { command: '/usr/local/bin/wechat-bin', args: [], label: '/usr/local/bin/wechat-bin' },
-    { command: 'flatpak', args: ['run', 'com.tencent.WeChat'], label: 'Flatpak com.tencent.WeChat' },
-  ]
 
   constructor() {
     try {
       this.sudo = require('@vscode/sudo-prompt');
     } catch (e) {
       console.error('Failed to load @vscode/sudo-prompt', e);
-    }
-  }
-
-  private getCommandEnvironment(): NodeJS.ProcessEnv {
-    const pathEntries = [
-      ...(process.env.PATH || '').split(':').filter(Boolean),
-      '/bin',
-      '/usr/bin',
-      '/sbin',
-      '/usr/sbin',
-      '/usr/local/bin',
-    ]
-    return {
-      ...process.env,
-      PATH: [...new Set(pathEntries)].join(':'),
-    }
-  }
-
-  private parsePidOutput(stdout: string): number[] {
-    return String(stdout || '')
-      .split(/\s+/)
-      .map((value) => Number.parseInt(value, 10))
-      .filter((pid) => Number.isInteger(pid) && pid > 0)
-  }
-
-  /**
-   * Find exact WeChat process names without shell interpolation.  `pgrep -x`
-   * is preferred; the `ps` fallback keeps this working on minimal distros
-   * where pgrep is not installed.
-   */
-  private async findWeChatPids(env: NodeJS.ProcessEnv): Promise<number[]> {
-    const found = new Set<number>()
-    const pgrepPaths = ['/usr/bin/pgrep', '/bin/pgrep']
-
-    for (const pgrepPath of pgrepPaths) {
-      if (!existsSync(pgrepPath)) continue
-      for (const name of this.wechatProcessNames) {
-        try {
-          const { stdout } = await execFileAsync(pgrepPath, ['-x', name], { env })
-          for (const pid of this.parsePidOutput(stdout)) found.add(pid)
-        } catch {
-          // Exit code 1 means the exact name is not running.
-        }
-      }
-      if (found.size > 0) break
-    }
-
-    if (found.size === 0) {
-      try {
-        const psPath = existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps'
-        const { stdout } = await execFileAsync(psPath, ['-A', '-o', 'pid=,comm='], { env })
-        for (const line of String(stdout || '').split(/\r?\n/)) {
-          const match = line.trim().match(/^(\d+)\s+(\S+)$/)
-          if (!match) continue
-          const pid = Number.parseInt(match[1], 10)
-          const comm = basename(match[2])
-          if (this.wechatProcessNames.includes(comm) && pid > 0) found.add(pid)
-        }
-      } catch {
-        // Report no process; the caller provides the actionable message.
-      }
-    }
-
-    return [...found].sort((a, b) => a - b)
-  }
-
-  private async findWeChatPid(env: NodeJS.ProcessEnv): Promise<number | null> {
-    const pids = await this.findWeChatPids(env)
-    if (pids.length === 0) return null
-
-    // Prefer an oldest root process over a newer helper/renderer with the same
-    // executable name. Picking the highest PID commonly attaches to a child.
-    const pidSet = new Set(pids)
-    for (const pid of pids) {
-      try {
-        const status = readFileSync(`/proc/${pid}/status`, 'utf8')
-        const parentPid = Number.parseInt(status.match(/^PPid:\s*(\d+)/m)?.[1] || '0', 10)
-        if (!pidSet.has(parentPid)) return pid
-      } catch {
-        // Fall through to the oldest discovered PID when /proc is restricted.
-      }
-    }
-    return pids[0]
-  }
-
-  private resolveExecutable(command: string, env: NodeJS.ProcessEnv): string | null {
-    if (command.includes('/')) {
-      try {
-        if (existsSync(command) && (statSync(command).mode & 0o111) !== 0) return command
-      } catch { }
-      return null
-    }
-
-    for (const directory of String(env.PATH || '').split(':').filter(Boolean)) {
-      const candidate = join(directory, command)
-      try {
-        if (existsSync(candidate) && (statSync(candidate).mode & 0o111) !== 0) return candidate
-      } catch { }
-    }
-    return null
-  }
-
-  /** Start one known client only when no exact-name process is already alive. */
-  private launchOneWeChat(env: NodeJS.ProcessEnv, onStatus?: (message: string, level: number) => void): boolean {
-    const candidate = this.wechatLaunchCandidates.find((item) => this.resolveExecutable(item.command, env))
-    if (!candidate) return false
-
-    const executable = this.resolveExecutable(candidate.command, env)
-    if (!executable) return false
-
-    const cleanEnv = { ...env }
-    delete cleanEnv.ELECTRON_RUN_AS_NODE
-    delete cleanEnv.ELECTRON_NO_ATTACH_CONSOLE
-    delete cleanEnv.APPDIR
-    delete cleanEnv.APPIMAGE
-
-    try {
-      const child = spawn(executable, candidate.args, {
-        detached: true,
-        stdio: 'ignore',
-        env: cleanEnv,
-      })
-      child.once('error', (error) => {
-        console.warn(`[KeyServiceLinux] 启动 ${candidate.label} 失败:`, error.message)
-      })
-      child.unref()
-      console.log(`[KeyServiceLinux] 已尝试启动单个微信客户端: ${candidate.label}`)
-      onStatus?.(`正在启动微信客户端（${candidate.label}）...`, 0)
-      return true
-    } catch (error: any) {
-      console.warn(`[KeyServiceLinux] 启动 ${candidate.label} 发生异常:`, error?.message || error)
-      return false
     }
   }
 
@@ -201,8 +58,8 @@ export class KeyServiceLinux {
       fatal.push(String(error?.message || '找不到 xkey_helper_linux'))
     }
 
-    const env = this.getCommandEnvironment()
-    const ldd = this.resolveExecutable('ldd', env)
+    const env = defaultCommandEnvironment()
+    const ldd = resolveExecutable('ldd', env)
     if (ldd) {
       const targets = [helperPath, this.getWcdbLibraryPath()].filter((value): value is string => !!value && existsSync(value))
       for (const target of targets) {
@@ -292,13 +149,13 @@ export class KeyServiceLinux {
         return { success: false, error }
       }
 
-      const envWithPath = this.getCommandEnvironment()
+      const envWithPath = defaultCommandEnvironment()
       onStatus?.('正在查找已运行的微信进程...', 0)
-      let pid = await this.findWeChatPid(envWithPath)
+      let pid = await findWeChatRootPid(envWithPath)
 
       if (!pid) {
         onStatus?.('未检测到微信，尝试启动一个可用客户端...', 0)
-        const launched = this.launchOneWeChat(envWithPath, onStatus)
+        const launched = launchWeChat(envWithPath, onStatus)
         if (!launched) {
           onStatus?.('未找到可自动启动的微信客户端，请先手动启动并登录微信。', 2)
         }
@@ -308,7 +165,7 @@ export class KeyServiceLinux {
         onStatus?.('等待微信进程出现...', 0)
         for (let i = 0; i < 15; i++) { // 最多等 15 秒
           await new Promise(r => setTimeout(r, 1000))
-          pid = await this.findWeChatPid(envWithPath)
+          pid = await findWeChatRootPid(envWithPath)
           if (pid) {
             console.log(`[KeyServiceLinux] 第 ${i + 1} 秒检测到微信 PID=${pid}`)
             break
@@ -511,7 +368,7 @@ export class KeyServiceLinux {
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
       // 2. 找微信 PID（仅匹配已知的精确进程名，避免 shell 注入/误匹配）
-      const pid = await this.findWeChatPid(this.getCommandEnvironment())
+      const pid = await findWeChatRootPid(defaultCommandEnvironment())
       if (!pid) return { success: false, error: '微信未运行，无法扫描内存' }
 
       onProgress?.(`已找到微信进程 PID=${pid}，正在提权扫描进程内存...`);

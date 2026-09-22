@@ -91,6 +91,11 @@ interface ConfigSchema {
   notificationAnimationEnabled: boolean
   notificationFilterMode: 'all' | 'whitelist' | 'blacklist' | 'mentions'
   notificationFilterList: string[]
+  /**
+   * Linux 通知投递方式（其他平台忽略；`WEPORT_LINUX_NOTIFY` 环境变量优先）。
+   * 见 electron/services/linuxNotify.ts。
+   */
+  linuxNotificationMode: 'auto' | 'force-dbus' | 'off'
   messagePushEnabled: boolean
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist' | 'mentions'
   messagePushFilterList: string[]
@@ -299,6 +304,9 @@ export class ConfigService {
       notificationAnimationEnabled: true,
       notificationFilterMode: 'all',
       notificationFilterList: [],
+      // Linux 上有通知守护进程时优先系统通知（Wayland 下应用内弹窗会触发
+      // 屏幕共享 portal），检测不到再回退应用内弹窗。见 linuxNotify.ts。
+      linuxNotificationMode: 'auto',
       httpApiToken: '',
       httpApiEnabled: false,
       httpApiPort: 5031,
