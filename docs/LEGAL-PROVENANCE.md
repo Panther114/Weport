@@ -77,3 +77,30 @@ license, files incorporated, modifications made, and any binary build source.
 - The inherited WeFlow attribution and CC BY-NC-SA treatment above remain.
   This reproduces the adaptation, not the original native compilation; its
   missing source/build records and unsigned provenance limitations remain.
+
+## macOS ARM64 expiry adaptation (2026-10-04)
+
+- Artifact: `resources/wcdb/macos/universal/libwcdb_api.dylib`, a thin ARM64
+  Mach-O dylib (no x86_64 slice). The source blob is byte-identical to the
+  current public WeFlow asset: SHA-256
+  `9917b74e6723efea63ac64927c9f6be1ed53133a62ff2c694c68d647690cead1`.
+- The first expiry check is in `_InitProtection`: file offset `0x6d5c` compares
+  `time()` with `0x6abda27f` (2026-09-30 23:59:59 UTC) and returns `-101` after
+  that instant. The second is in `_wcdb_init`: offset `0x6ec8` compares the
+  clock with `mktime()` of 2026-09-30 23:59:59 local time (`tm_isdst = 0`).
+- The local adaptation changes only those branch instructions to their existing
+  success blocks. The `_wcdb_init` host-name failure branch at `0x6e7c`
+  (`-1006`) and the other native guards remain intact. The patched raw blob SHA-256
+  is `c52cea6e6031273687034aa6fd31cf9ab8b99bfa2387d3b325e4ef837efea9bd`; the
+  patched `__TEXT,__text` SHA-256 is
+  `a675137ecf12b91381b59db3c1940870b907df52b7aaf2ec6c5ed6b5e98fcf63`.
+- `scripts/verify-mac-native.cjs --source <original.dylib>` strictly accepts
+  only the recorded original hash, validates symbols and code, and calculates the
+  patched hashes in memory. Its repair helper never writes files. Packaged
+  verification pins the ARM64 architecture, `__TEXT,__text` layout and digest,
+  both expiry instructions, exported symbol locations, and the host guard. It
+  allows `install_name_tool` and code signing to change load-command and signature
+  bytes outside `__TEXT,__text`.
+- The modification is a Weport adaptation of the upstream wrapper, not an
+  official WeFlow or Tencent binary release. The inherited WeFlow attribution
+  and CC BY-NC-SA treatment above remain.

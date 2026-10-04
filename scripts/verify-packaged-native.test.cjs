@@ -6,7 +6,7 @@ const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 const vm = require('node:vm')
-const { assertArchitecture, elfArchitecture, machOArchitectures, smokeSource } = require('./verify-packaged-native.cjs')
+const { assertArchitecture, createHostExecutable, elfArchitecture, machOArchitectures, smokeSource } = require('./verify-packaged-native.cjs')
 
 function elf64(machine = 62, elfClass = 2, dataEncoding = 1) {
   const buffer = Buffer.alloc(64)
@@ -83,4 +83,44 @@ test('accepts only packaged Windows AMD64 PE assets', () => {
 
 test('generated Electron-as-Node init smoke script parses', () => {
   assert.doesNotThrow(() => new vm.Script(smokeSource()))
+})
+
+test('Linux native smoke places icudtl.dat beside the copied WeFlow host', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'weport-linux-host-icu-'))
+  const electronDir = path.join(directory, 'linux-unpacked')
+  const probeDir = path.join(directory, 'probe')
+  const appExe = path.join(electronDir, 'Weport')
+  const icuData = Buffer.from('fixture ICU payload')
+  try {
+    fs.mkdirSync(electronDir, { recursive: true })
+    fs.mkdirSync(probeDir, { recursive: true })
+    fs.writeFileSync(appExe, 'fixture Electron executable')
+    fs.writeFileSync(path.join(electronDir, 'icudtl.dat'), icuData)
+
+    const host = createHostExecutable({ platform: 'linux', appExe }, probeDir)
+
+    assert.equal(host.hostExe, path.join(probeDir, 'WeFlow'))
+    assert.deepEqual(fs.readFileSync(path.join(probeDir, 'icudtl.dat')), icuData)
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('Linux native smoke rejects a packaged app without adjacent ICU data', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'weport-linux-host-no-icu-'))
+  const electronDir = path.join(directory, 'linux-unpacked')
+  const probeDir = path.join(directory, 'probe')
+  const appExe = path.join(electronDir, 'Weport')
+  try {
+    fs.mkdirSync(electronDir, { recursive: true })
+    fs.mkdirSync(probeDir, { recursive: true })
+    fs.writeFileSync(appExe, 'fixture Electron executable')
+
+    assert.throws(
+      () => createHostExecutable({ platform: 'linux', appExe }, probeDir),
+      /Missing packaged Electron ICU data/
+    )
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
 })

@@ -76,7 +76,7 @@ the host executable is named **`WeFlow.exe`** (Windows) / **`WeFlow`**
 fails, a renamed copy/hardlink passes. The app therefore runs the WCDB
 engine in a **subprocess**:
 
-- `electron/wcdbHostClient.ts` deploys a `WeFlow[.exe]` host for the `-1006`
+- `electron/services/wcdbHostClient.ts` deploys a `WeFlow[.exe]` host for the `-1006`
   filename check, then spawns it with
   **`ELECTRON_RUN_AS_NODE=1`** (v0.9.3+) so the same binary runs as pure
   Node.js — no Chromium browser process, no network utility child

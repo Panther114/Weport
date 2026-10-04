@@ -40,9 +40,11 @@
   `asarUnpack` includes `node_modules/@koromix/**/*`.
 - Read-only install dirs (AppImage squashfs, `/opt`, `/usr/bin`): hardlink
   creation next to the exe fails, so `wcdbHostClient.resolveHostExe()` falls
-  back to COPYING the Electron binary to `{userData}/wcdb-host/WeFlow`
-  (mtime-aligned for reuse detection) and adds both the copy dir and the real
-  Electron dist dir to `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
+  back to copying the Electron binary to `{userData}/wcdb-host/WeFlow` and
+  `icudtl.dat` beside it. Even with `ELECTRON_RUN_AS_NODE=1`,
+  Electron loads ICU data beside the copied executable; without it the process
+  traps before WCDB loads. Both the copy dir and real Electron dist dir are added
+  to `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
 - The `-1006` name check for `libwcdb_api.so` under a host named `WeFlow` is
   unverified on real Linux hardware (upstream ships its own exe as lowercase
   `weflow`, suggesting the check may be looser there); treat first-boot DB

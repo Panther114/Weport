@@ -163,7 +163,8 @@ function resolveLayout(releaseDir) {
   const wcdbDir = path.join(payloadRoot, 'wcdb', platformDataDir)
   const dllName = platform === 'win32' ? 'wcdb_api.dll' : platform === 'darwin' ? 'libwcdb_api.dylib' : 'libwcdb_api.so'
   const wcdbDll = path.join(wcdbDir, dllName)
-  assertArchitecture(wcdbDll, platform, expectedArch)
+  const apiBytes = assertArchitecture(wcdbDll, platform, expectedArch)
+  if (platform === 'darwin') require('./verify-mac-native.cjs').validatePackagedNativeBinary(apiBytes)
 
   const platformAssets = []
   if (platform === 'darwin') {
@@ -237,8 +238,12 @@ function createHostExecutable(layout, tempRoot) {
   }
 
   const hostExe = path.join(tempRoot, hostName)
+  const icuData = assertFile(path.join(path.dirname(layout.appExe), 'icudtl.dat'), 'Electron ICU data')
   fs.copyFileSync(layout.appExe, hostExe)
   fs.chmodSync(hostExe, 0o755)
+  // Linux may require the copied Electron binary to run under userData in the
+  // read-only install fallback. Even ELECTRON_RUN_AS_NODE loads ICU beside argv[0].
+  fs.copyFileSync(icuData, path.join(path.dirname(hostExe), 'icudtl.dat'))
   return { hostExe, cleanup: () => {} }
 }
 
@@ -247,7 +252,8 @@ function smokeSource() {
 const path = require('node:path')
 const koffi = require('koffi')
 const expected = process.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
-if (path.basename(process.execPath).toLowerCase() !== expected.toLowerCase()) {
+const wrongHostProbe = process.env.WEPORT_NATIVE_EXPECT_WRONG_HOST === '1'
+if (!wrongHostProbe && path.basename(process.execPath).toLowerCase() !== expected.toLowerCase()) {
   throw new Error('WCDB host executable name mismatch: ' + process.execPath)
 }
 const dllPath = process.env.WEPORT_NATIVE_SMOKE_DLL
@@ -279,6 +285,11 @@ const init = lib.func('int32 wcdb_init()')
 const shutdown = lib.func('int32 wcdb_shutdown()')
 const initCode = Number(init())
 console.log('wcdb_init=' + initCode)
+if (wrongHostProbe) {
+  if (initCode !== -1006) process.exit(24)
+  console.log('PASS: original application name remains rejected with -1006')
+  process.exit(0)
+}
 if (initCode !== 0) process.exit(22)
 const shutdownCode = Number(shutdown())
 console.log('wcdb_shutdown=' + shutdownCode)
@@ -293,7 +304,7 @@ function prependPath(currentValue, paths, delimiter) {
   return [...new Set(parts)].join(delimiter)
 }
 
-function runSmoke(layout, hostExe, tempRoot) {
+function runSmoke(layout, hostExe, tempRoot, wrongHostProbe = false) {
   const hostLibs = path.join(layout.appResources, 'host', 'libs')
   const testProfile = path.join(tempRoot, 'private-profile')
   fs.mkdirSync(testProfile, { recursive: true })
@@ -320,6 +331,7 @@ function runSmoke(layout, hostExe, tempRoot) {
     WEPORT_RESOURCES_PATH: layout.payloadRoot,
     WCDB_RESOURCES_PATH: layout.payloadRoot,
     WEPORT_NATIVE_SMOKE_DLL: layout.wcdbDll,
+    WEPORT_NATIVE_EXPECT_WRONG_HOST: wrongHostProbe ? '1' : '0',
     NODE_PATH: hostLibs,
     PATH: prependPath(process.env.PATH, libraryPaths, path.delimiter),
     TMPDIR: tempRoot,
@@ -353,6 +365,7 @@ function main(argv = process.argv.slice(2)) {
     console.log(`[packaged-native] platform=${layout.platform} arch=${layout.expectedArch} resources=${layout.appResources}`)
     host = createHostExecutable(layout, tempRoot)
     runSmoke(layout, host.hostExe, tempRoot)
+    if (layout.platform === 'darwin') runSmoke(layout, layout.appExe, tempRoot, true)
   } catch (error) {
     failure = error
   } finally {
@@ -385,6 +398,7 @@ module.exports = {
   assertArchitecture,
   elfArchitecture,
   machOArchitectures,
+  createHostExecutable,
   resolveLayout,
   smokeSource,
 }

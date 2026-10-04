@@ -49,12 +49,14 @@ The custom `wcdb_api` libraries are WeFlow-derived wrappers and are covered by
 the WeFlow attribution above; they should not be represented as Tencent WCDB
 official binaries.
 
-The Windows x64 `wcdb_api.dll` is locally modified on 2026-10-03 to remove
-two built-in expiry-date branches (Weport issues #30 and #31). Its remaining
-code, imports and exports are unchanged. The analysis by xkitme informed this
-adaptation; the fork's 2038-extension binary is not shipped. Exact source and
-modified hashes, offsets and reproduction instructions are recorded in
-`resources/wcdb/win32/x64/native-provenance.json` and `docs/LEGAL-PROVENANCE.md`.
+The Windows x64 `wcdb_api.dll` is locally modified on 2026-10-03, and the
+macOS ARM64 `libwcdb_api.dylib` on 2026-10-04, to redirect two built-in expiry
+branches per artifact to their existing success paths (Weport issues #30 and
+#31). Their remaining code and native guards are preserved. The Windows analysis
+by xkitme informed that adaptation; the fork's 2038-extension binary is not
+shipped. Exact source and modified hashes, offsets and verification instructions
+are recorded in each artifact's `native-provenance.json` and
+`docs/LEGAL-PROVENANCE.md`.
 
 ## SDL2 (zlib license)
 

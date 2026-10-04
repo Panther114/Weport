@@ -3,6 +3,7 @@ const { existsSync, readFileSync, readdirSync, rmSync, statSync } = require('fs'
 const { dirname, join } = require('path')
 const { Arch } = require('electron-builder')
 const { verifyNativeDllAtResourcePath } = require('./verify-native-assets.cjs')
+const { METADATA, validatePatchedBinary, validatePackagedNativeBinary } = require('./verify-mac-native.cjs')
 
 // libwcdb_api.dylib is built against the private WCDB framework name used by
 // WeFlow.  Weport ships the companion libWCDB.dylib next to it instead of the
@@ -164,6 +165,13 @@ module.exports = async function afterPack(context) {
     'Resources',
   )
 
+  const mainDylib = join(resourcesDir, 'resources', 'wcdb', 'macos', 'universal', 'libwcdb_api.dylib')
+  validatePatchedBinary(readFileSync(mainDylib))
+  const provenance = JSON.parse(readFileSync(join(dirname(mainDylib), 'native-provenance.json'), 'utf8'))
+  if (provenance.adaptation?.expectedSha256 !== METADATA.adaptation.expectedSha256) {
+    throw new Error('[afterPack] macOS WCDB provenance mismatch')
+  }
+
   const dylibs = walk(resourcesDir)
   if (dylibs.length === 0) {
     throw new Error(`[afterPack] No libwcdb_api.dylib found under ${resourcesDir}`)
@@ -174,6 +182,8 @@ module.exports = async function afterPack(context) {
       console.log(`[afterPack] Rewired WCDB dependency for ${dylibPath}`)
     }
   }
+
+  validatePackagedNativeBinary(readFileSync(mainDylib))
 
   // Older resource layouts could include a nested framework copy.  Once the
   // dependency points at the sibling dylib it is dead weight and can contain
