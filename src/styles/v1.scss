@@ -850,6 +850,20 @@ textarea,
   border-top: 1px solid var(--line);
 }
 
+// Native title bars reduce the available content height (notably on macOS).
+// Keep every route reachable at the 600 px minimum without scrolling the rail.
+@media (max-height: 640px) {
+  .rail-item {
+    height: 30px;
+    flex-basis: 30px;
+  }
+
+  .rail,
+  .rail-nav {
+    gap: 6px;
+  }
+}
+
 .appearance-swatch {
   width: 26px;
   height: 26px;
