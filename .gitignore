@@ -101,3 +101,4 @@ vite.config.mjs
 commit-msg-*.txt
 release-commit-msg.txt
 /weflow-export-records.json
+/.vitest/

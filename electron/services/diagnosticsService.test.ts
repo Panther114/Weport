@@ -159,10 +159,11 @@ describe('进程与注册表解析', () => {
 
 describe('路径与分组', () => {
   it('配置文件名回落到目录内匹配', () => {
+    const userDataPath = join(tmpdir(), 'weport-diag-user-data')
     const exists = (path: string) => path.endsWith('Weport-config.json')
-    expect(resolveConfigFilePath('C:\\u', exists, () => [])).toBe('C:\\u\\Weport-config.json')
-    const fallback = resolveConfigFilePath('C:\\u', () => false, () => ['other.txt', 'Weport-config.local.json'])
-    expect(fallback).toBe(join('C:\\u', 'Weport-config.local.json'))
+    expect(resolveConfigFilePath(userDataPath, exists, () => [])).toBe(join(userDataPath, 'Weport-config.json'))
+    const fallback = resolveConfigFilePath(userDataPath, () => false, () => ['other.txt', 'Weport-config.local.json'])
+    expect(fallback).toBe(join(userDataPath, 'Weport-config.local.json'))
   })
 
   it('日志名拒绝目录穿越', () => {

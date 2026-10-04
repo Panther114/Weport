@@ -40,7 +40,7 @@ import { sourceMessageIdentityHash } from './sourceMessageIdentity'
 const SESSION = 'wxid_me'
 const OTHER_SESSION = 'wxid_other'
 const MY_WXID = 'wxid_myself'
-const DB0 = 'C:\\wx\\message\\msg_0.db'
+const DB0 = path.join(os.tmpdir(), 'weport-integrity-fixture', 'message', 'msg_0.db')
 
 const noMedia: MediaRequestFlags = { enabled: false, images: false, voices: false, videos: false, emojis: false, files: false }
 const allMedia: MediaRequestFlags = { enabled: true, images: true, voices: true, videos: true, emojis: true, files: true }

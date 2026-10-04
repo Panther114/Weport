@@ -40,7 +40,7 @@ let dir = ''
 let tables: FakeTable[] = []
 
 function dbPath(dbFile: string): string {
-  return `D:\\fake\\db_storage\\message\\${dbFile}`
+  return join(dir, 'fake-db', dbFile)
 }
 
 function createSource(): SearchIndexDocSource {
