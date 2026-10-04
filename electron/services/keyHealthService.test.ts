@@ -531,7 +531,7 @@ describe('rescan 门禁 + 契约映射', () => {
     })
     const report = await service.rescan()
     expect(report.scan?.keys).toBe(0)
-    expect(report.scan?.failed).toContain('免登录逐库扫描')
+    expect(report.scan?.failed).toContain(process.platform === 'win32' ? '免登录逐库扫描' : '当前平台不支持免登录扫描')
     expect(scanCalls).toBe(0)
     expect(persistence.current()).toEqual(store)
     expect(persistence.current().accounts.wxid_demo_0000.dbKeys['message/message_9.db']).toBeDefined()
