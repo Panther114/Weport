@@ -41,10 +41,11 @@
 - Read-only install dirs (AppImage squashfs, `/opt`, `/usr/bin`): hardlink
   creation next to the exe fails, so `wcdbHostClient.resolveHostExe()` falls
   back to copying the Electron binary to `{userData}/wcdb-host/WeFlow` and
-  `icudtl.dat` beside it. Even with `ELECTRON_RUN_AS_NODE=1`,
-  Electron loads ICU data beside the copied executable; without it the process
-  traps before WCDB loads. Both the copy dir and real Electron dist dir are added
-  to `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
+  `icudtl.dat`, `snapshot_blob.bin`, and `v8_context_snapshot.bin` beside it.
+  Even with `ELECTRON_RUN_AS_NODE=1`, Electron loads ICU and V8 snapshot data
+  beside the copied executable; without them the process traps before WCDB
+  loads. Both the copy dir and real Electron dist dir are added to
+  `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
 - The `-1006` name check for `libwcdb_api.so` under a host named `WeFlow` is
   unverified on real Linux hardware (upstream ships its own exe as lowercase
   `weflow`, suggesting the check may be looser there); treat first-boot DB

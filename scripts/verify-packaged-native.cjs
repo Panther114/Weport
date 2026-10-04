@@ -165,6 +165,7 @@ function resolveLayout(releaseDir) {
   const wcdbDll = path.join(wcdbDir, dllName)
   const apiBytes = assertArchitecture(wcdbDll, platform, expectedArch)
   if (platform === 'darwin') require('./verify-mac-native.cjs').validatePackagedNativeBinary(apiBytes)
+  if (platform === 'linux') require('./verify-linux-native.cjs').validatePatchedBinary(apiBytes)
 
   const platformAssets = []
   if (platform === 'darwin') {
@@ -242,8 +243,14 @@ function createHostExecutable(layout, tempRoot) {
   fs.copyFileSync(layout.appExe, hostExe)
   fs.chmodSync(hostExe, 0o755)
   // Linux may require the copied Electron binary to run under userData in the
-  // read-only install fallback. Even ELECTRON_RUN_AS_NODE loads ICU beside argv[0].
+  // read-only install fallback. Electron loads ICU and V8 runtime data beside argv[0].
   fs.copyFileSync(icuData, path.join(path.dirname(hostExe), 'icudtl.dat'))
+  if (layout.platform === 'linux') {
+    for (const fileName of ['snapshot_blob.bin', 'v8_context_snapshot.bin']) {
+      const snapshot = assertFile(path.join(path.dirname(layout.appExe), fileName), `Electron ${fileName}`)
+      fs.copyFileSync(snapshot, path.join(path.dirname(hostExe), fileName))
+    }
+  }
   return { hostExe, cleanup: () => {} }
 }
 
@@ -365,7 +372,7 @@ function main(argv = process.argv.slice(2)) {
     console.log(`[packaged-native] platform=${layout.platform} arch=${layout.expectedArch} resources=${layout.appResources}`)
     host = createHostExecutable(layout, tempRoot)
     runSmoke(layout, host.hostExe, tempRoot)
-    if (layout.platform === 'darwin') runSmoke(layout, layout.appExe, tempRoot, true)
+    if (layout.platform === 'darwin' || layout.platform === 'linux') runSmoke(layout, layout.appExe, tempRoot, true)
   } catch (error) {
     failure = error
   } finally {

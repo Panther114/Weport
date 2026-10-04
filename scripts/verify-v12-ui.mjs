@@ -25,9 +25,16 @@ try {
     await electronApp.whenReady()
     while (!electronApp.listenerCount('activate')) await new Promise(resolve => setTimeout(resolve, 25))
     const proto = BrowserWindow.prototype
-    const inactive = proto.showInactive, position = proto.setPosition
-    proto.show = function () { position.call(this, -4000, 0); return inactive.call(this) }
-    proto.showInactive = function () { position.call(this, -4000, 0); return inactive.call(this) }
+    const inactive = proto.showInactive, position = proto.setPosition, hide = proto.hide
+    // macOS constrains native windows to display bounds. Keep them hidden rather
+    // than relying on offscreen coordinates that the window server can clamp.
+    const present = function () {
+      if (process.platform === 'darwin') return hide.call(this)
+      position.call(this, -4000, 0)
+      return inactive.call(this)
+    }
+    proto.show = present
+    proto.showInactive = present
     proto.maximize = function () { position.call(this, -4000, 0) }
     proto.focus = function () {}
     electronApp.emit('activate')
@@ -393,7 +400,7 @@ try {
     await page.locator('.bg-task').filter({ hasText: label }).waitFor({ state: 'hidden' })
   }
   const windows = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(win => ({ position: win.getPosition(), visible: win.isVisible() })))
-  if (windows.some(win => win.position[0] > -3000)) throw new Error('Probe window left offscreen bounds')
+  if (windows.some(win => win.visible && win.position[0] > -3000)) throw new Error('Visible probe window left offscreen bounds')
   if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`)
   writeFileSync(join(out, 'results.json'), JSON.stringify({ results, packageSmoke, exported, errors, windows }, null, 2))
   console.log(`Verified ${results.length} offscreen UI captures and Search→Reader identity navigation: ${out}`)

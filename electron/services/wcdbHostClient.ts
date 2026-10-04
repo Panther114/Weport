@@ -37,13 +37,17 @@ import { spawn, type ChildProcess } from 'child_process'
 import { join, dirname, delimiter } from 'path'
 import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync, readlinkSync } from 'fs'
 
-/** Electron's pure-Node mode still loads ICU data relative to the executable. */
-export function copyLinuxHostIcuData(sourceExe: string, hostExe: string): void {
-  const sourceIcu = join(dirname(sourceExe), 'icudtl.dat')
-  if (!existsSync(sourceIcu)) {
-    throw new Error(`Electron ICU data is missing beside the source executable: ${sourceIcu}`)
+/** Electron's pure-Node mode still loads ICU and V8 snapshots beside argv[0]. */
+export function copyLinuxHostRuntimeFiles(sourceExe: string, hostExe: string): void {
+  const sourceDir = dirname(sourceExe)
+  const hostDir = dirname(hostExe)
+  for (const fileName of ['icudtl.dat', 'snapshot_blob.bin', 'v8_context_snapshot.bin']) {
+    const sourceFile = join(sourceDir, fileName)
+    if (!existsSync(sourceFile)) {
+      throw new Error(`Electron runtime file is missing beside the source executable: ${sourceFile}`)
+    }
+    copyFileSync(sourceFile, join(hostDir, fileName))
   }
-  copyFileSync(sourceIcu, join(dirname(hostExe), 'icudtl.dat'))
 }
 
 /**
@@ -263,13 +267,13 @@ function resolveHostExe(): string {
       if (fallbackDir) {
         const copiedPath = join(fallbackDir, hostName)
         try {
-          // The copied Linux binary no longer sits beside Electron's ICU data.
-          // Without this file ELECTRON_RUN_AS_NODE traps before wcdbHost.js starts.
-          if (process.platform === 'linux') copyLinuxHostIcuData(target, copiedPath)
+          // The copied Linux binary no longer sits beside Electron's ICU/V8 runtime files.
+          // Without them ELECTRON_RUN_AS_NODE traps before wcdbHost.js starts.
+          if (process.platform === 'linux') copyLinuxHostRuntimeFiles(target, copiedPath)
           // AppImage and other read-only Linux installs take this fallback on
           // every launch. Reuse a same-version copy instead of copying ~225 MB
-          // for each WCDB client reconnect. The ICU sidecar above is always
-          // refreshed because it can be required independently of the exe.
+          // for each WCDB client reconnect. The runtime sidecars above are always
+          // refreshed because they can be required independently of the exe.
           if (process.platform !== 'linux' || !matchesTarget(copiedPath)) {
             copyFileSync(target, copiedPath)
             try {

@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "artifact": "libwcdb_api.so",
+  "platform": "linux-x64",
+  "architecture": "x86_64",
+  "source": {
+    "project": "WeFlow",
+    "repository": "https://github.com/Panther114/WeFlow",
+    "path": "resources/wcdb/linux/x64/libwcdb_api.so",
+    "size": 11831688,
+    "sha256": "7c1a94109513ed71921b32cd305ded1abf0534d602afb198193b5e8c8c5618e2",
+    "gitBlob": "0c0629715e20967fa8de9334509971abfad5b4f3",
+    "commit": "642b0e21c62b5c93a3785bd2c6f2349d3470e47a",
+    "license": "CC BY-NC-SA 4.0 attribution as recorded in docs/LEGAL-PROVENANCE.md"
+  },
+  "elf": {
+    "class": 2,
+    "data": 1,
+    "fileType": 3,
+    "machine": "0x003e"
+  },
+  "adaptation": {
+    "issues": [
+      30,
+      31
+    ],
+    "summary": "Only the two September 2026 expiry branches are redirected to their existing success paths. Linux host-name checks remain intact.",
+    "patches": [
+      {
+        "symbol": "InitProtection",
+        "offset": 977630,
+        "sourceHex": "7f18",
+        "expectedHex": "eb00",
+        "cutoff": "2026-09-30 23:59:59 UTC (0x6abda27f seconds since Unix epoch)",
+        "purpose": "Skip only the expiry failure branch and continue through the existing security-verification success path."
+      },
+      {
+        "symbol": "wcdb_init",
+        "offset": 1113769,
+        "sourceHex": "7c1f",
+        "expectedHex": "eb00",
+        "cutoff": "2026-09-30 23:59:59 local time via mktime; tm_isdst is zero",
+        "purpose": "Skip only the expiry error path and continue through the existing success path."
+      }
+    ],
+    "hostGuard": {
+      "acceptedNamesOffset": "0x7e00f1",
+      "acceptedProcessNames": [
+        "electron",
+        "weflow.exe",
+        "weflow",
+        "ciphertalk.exe",
+        "ciphertalk",
+        "wechatdataanalysis.exe",
+        "wechatdataanalysis"
+      ],
+      "poisonReturn": {
+        "symbol": "wcdb_init",
+        "offset": "0x10fdb0",
+        "expectedHex": "83f8020f94c00fb6c02def030000",
+        "failureCode": -1006,
+        "purpose": "Preserve the existing host-name rejection result for poison level 2."
+      }
+    },
+    "expectedSha256": "c0f4df756114a0d4bde598f3e7a0e179be80278a2e8702d2e1d9a36d7eb51795"
+  },
+  "notice": "WeFlow-derived native WCDB library, locally adapted by Weport. This provenance record does not change the license or other bundled component notices."
+}

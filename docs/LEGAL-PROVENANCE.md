@@ -82,7 +82,9 @@ license, files incorporated, modifications made, and any binary build source.
 
 - Artifact: `resources/wcdb/macos/universal/libwcdb_api.dylib`, a thin ARM64
   Mach-O dylib (no x86_64 slice). The source blob is byte-identical to the
-  current public WeFlow asset: SHA-256
+  public `Panther114/WeFlow` asset at commit
+  `ccbd15466873e05092c8bee20833ca3420292b91` (Git blob
+  `2d457d1ceb9f3fc05ae11936195b4385fd6be151`): SHA-256
   `9917b74e6723efea63ac64927c9f6be1ed53133a62ff2c694c68d647690cead1`.
 - The first expiry check is in `_InitProtection`: file offset `0x6d5c` compares
   `time()` with `0x6abda27f` (2026-09-30 23:59:59 UTC) and returns `-101` after
@@ -100,7 +102,8 @@ license, files incorporated, modifications made, and any binary build source.
   verification pins the ARM64 architecture, `__TEXT,__text` layout and digest,
   both expiry instructions, exported symbol locations, and the host guard. It
   allows `install_name_tool` and code signing to change load-command and signature
-  bytes outside `__TEXT,__text`.
+  bytes outside `__TEXT,__text`. The raw source hash is checked before packaging;
+  the packaged verifier does not authenticate every non-text data byte.
 - The modification is a Weport adaptation of the upstream wrapper, not an
   official WeFlow or Tencent binary release. The inherited WeFlow attribution
   and CC BY-NC-SA treatment above remain.

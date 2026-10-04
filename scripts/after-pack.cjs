@@ -156,6 +156,17 @@ module.exports = async function afterPack(context) {
     pruneWindowsRuntime(context.appOutDir)
     return
   }
+  if (context.electronPlatformName === 'linux') {
+    const nativeRoot = join(context.appOutDir, 'resources', 'resources', 'wcdb', 'linux', 'x64')
+    const { METADATA: linuxMetadata, validatePatchedBinary: validateLinux } = require('./verify-linux-native.cjs')
+    validateLinux(readFileSync(join(nativeRoot, 'libwcdb_api.so')))
+    const provenance = JSON.parse(readFileSync(join(nativeRoot, 'native-provenance.json'), 'utf8'))
+    if (provenance.adaptation?.expectedSha256 !== linuxMetadata.adaptation.expectedSha256) {
+      throw new Error('[afterPack] Linux WCDB provenance mismatch')
+    }
+    console.log('[afterPack] verified packaged Linux WCDB asset')
+    return
+  }
   if (context.electronPlatformName !== 'darwin') return
 
   const resourcesDir = join(
