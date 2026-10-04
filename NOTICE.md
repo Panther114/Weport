@@ -22,7 +22,7 @@ Weport has modified the original material since its initial import on
 and platform support, the WCDB host-process architecture, exports, analytics,
 MCP/HTTP integrations, WeportAI/WeClone features, and subsequent maintenance.
 The Windows x64 native wrapper was adapted on 2026-10-03, and the macOS ARM64
-wrapper on 2026-10-04, to remove two expired date checks in each artifact while
+and Linux x64 wrappers on 2026-10-04, to remove two expired date checks in each artifact while
 retaining the existing host-name and other status checks. These are Weport
 modifications, not official Tencent or WeFlow binary releases.
 

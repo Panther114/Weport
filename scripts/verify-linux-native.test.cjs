@@ -85,6 +85,10 @@ test('repair rejects unknown source mutations and the patched verifier rejects m
   const alteredHostGuard = Buffer.from(patched)
   alteredHostGuard[Number.parseInt(METADATA.adaptation.hostGuard.poisonReturn.offset, 16)] ^= 1
   assert.throws(() => validatePatchedBinary(alteredHostGuard), /host-name failure return mismatch/)
+
+  const alteredAcceptedName = Buffer.from(patched)
+  alteredAcceptedName[Number.parseInt(METADATA.adaptation.hostGuard.acceptedNamesOffset, 16)] ^= 1
+  assert.throws(() => validatePatchedBinary(alteredAcceptedName), /host-name whitelist mismatch/)
 })
 
 test('patched verification rejects non-ELF and non-x86-64 assets', () => {

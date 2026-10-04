@@ -50,7 +50,7 @@ the WeFlow attribution above; they should not be represented as Tencent WCDB
 official binaries.
 
 The Windows x64 `wcdb_api.dll` is locally modified on 2026-10-03, and the
-macOS ARM64 `libwcdb_api.dylib` on 2026-10-04, to redirect two built-in expiry
+macOS ARM64 `libwcdb_api.dylib` and Linux x64 `libwcdb_api.so` on 2026-10-04, to redirect two built-in expiry
 branches per artifact to their existing success paths (Weport issues #30 and
 #31). Their remaining code and native guards are preserved. The Windows analysis
 by xkitme informed that adaptation; the fork's 2038-extension binary is not

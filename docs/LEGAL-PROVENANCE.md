@@ -107,3 +107,29 @@ license, files incorporated, modifications made, and any binary build source.
 - The modification is a Weport adaptation of the upstream wrapper, not an
   official WeFlow or Tencent binary release. The inherited WeFlow attribution
   and CC BY-NC-SA treatment above remain.
+
+## Linux x64 expiry adaptation (2026-10-04)
+
+- Artifact: `resources/wcdb/linux/x64/libwcdb_api.so`, ELF64 x86-64. Its source
+  bytes match the preserved public `Panther114/WeFlow` snapshot at commit
+  `642b0e21c62b5c93a3785bd2c6f2349d3470e47a` (Git blob
+  `0c0629715e20967fa8de9334509971abfad5b4f3`): SHA-256
+  `7c1a94109513ed71921b32cd305ded1abf0534d602afb198193b5e8c8c5618e2`.
+- Static disassembly shows `InitProtection` compares `time()` with
+  `0x6abda27f` (2026-09-30 23:59:59 UTC) at file offset `0xeeade` and returns
+  `-101` after that instant. `wcdb_init` has a second check at `0x10fea9` using
+  `mktime()` on 2026-09-30 23:59:59 local time (`tm_isdst = 0`); expiry reaches
+  its `-1000` error return.
+- The adaptation changes only those two conditional branches (`7f18` and `7c1f`)
+  to short jumps over their expiry error branches (`eb00`). The accepted process
+  names and `wcdb_init`'s `-1006` wrong-host return remain byte-identical. The
+  patched whole-file SHA-256 is
+  `c0f4df756114a0d4bde598f3e7a0e179be80278a2e8702d2e1d9a36d7eb51795`.
+- `scripts/verify-linux-native.cjs --source <original.so>` checks the exact
+  source SHA-256 and Git blob, ELF64 x86-64 header, expiry instructions and host
+  guard, then calculates the patch in memory without writing a file. The default
+  verifier pins the patched whole-file hash, exact expiry bytes and host guard.
+  Runtime behavior remains subject to Linux CI smoke verification.
+- This is a local Weport adaptation of the WeFlow native library, not an official
+  WeFlow or Tencent binary release. The inherited WeFlow attribution and CC
+  BY-NC-SA treatment above remain.

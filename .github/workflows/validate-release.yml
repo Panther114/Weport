@@ -225,7 +225,7 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           for file in \
-            "release/Weport-${version}-x64.AppImage" \
+            "release/Weport-${version}-x86_64.AppImage" \
             "release/Weport-${version}-x64.tar.gz" \
             release-notes-current.md; do
             test -s "$file" || { echo "::error::Missing or empty validation artifact: $file"; exit 1; }
@@ -240,7 +240,7 @@ jobs:
         with:
           name: weport-validation-linux-x64
           path: |
-            release/Weport-*-x64.AppImage
+            release/Weport-*-x86_64.AppImage
             release/Weport-*-x64.tar.gz
             release-notes-current.md
           if-no-files-found: error
