@@ -59,6 +59,8 @@ html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
@@ -997,10 +999,18 @@ button:disabled {
   transition: max-height 0.2s ease;
 }
 
+/* 渐进渲染（"再显示 60 个"）的按钮行：居中 + 一点上边距，别贴着最后一行 */
+.list-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 10px;
+}
+
 .anti-revoke-list .account-item {
   padding: 1px 8px;
   gap: 6px;
   border-radius: 4px;
+  transition: background 0.16s ease, border-color 0.16s ease;
   /* **不能收缩**。`.anti-revoke-list` 是定高（max-height: calc(100vh - 300px)）
    * 的 flex 列容器，而 flex 子项默认 flex-shrink: 1 —— 192 行会被"平摊"进
    * 350px，每行算出来只有 3.3px，头像被裁掉只剩一条边。
@@ -1008,6 +1018,14 @@ button:disabled {
    * 紧凑列表靠的是**每行更矮**（见下面的 padding / 按钮高度），不是靠行被压缩。 */
   flex: 0 0 auto;
   height: auto;
+
+  /* v1.2 §7：离屏行不排版不绘制；`contain-intrinsic-size: auto` 记住真实行高，滚动条不跳。
+   * **实测它不是那 58ms 长任务的解药**：加了之后防撤回 warm 仍是 max=60ms / longTasks=1(58ms)
+   * （同一台机器两次跑出来一模一样），因为长任务是 React 挂载 265 行 DOM，不是布局/绘制。
+   * 真正的解法在 App.tsx：渐进渲染（先 60 行 + "再显示 60 个"）。
+   * 这条 CSS 留着 —— 绘制的开销确实随行数走，只是它不是瓶颈。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 26px;
 }
 
 /* 行内按钮跟着收窄：默认按钮高度会把这一行重新撑回 30px 以上 */
@@ -1064,6 +1082,34 @@ button:disabled {
 .anti-revoke-list .account-item[data-active="true"] .badge.ok {
   color: var(--ok);
   border-color: rgba(159, 232, 168, 0.4);
+}
+
+.anti-revoke-list .account-item[data-revoke-state="unknown"] {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+}
+
+.anti-revoke-list .badge.unknown {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+.anti-revoke-status-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.anti-revoke-status-error > svg {
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+
+.anti-revoke-status-detail {
+  flex-basis: 100%;
+  padding-left: 21px;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
 }
 
 /* 账号横向卡片（面板占满两列时更紧凑） */
@@ -1337,18 +1383,12 @@ button:disabled {
 }
 
 .export-session-popover {
-  position: absolute;
-  top: calc(100% - 6px);
-  left: 0;
-  width: min(680px, calc(100vw - 48px));
-  max-height: min(580px, calc(100vh - 120px));
-  overflow: auto;
+  width: min(680px, calc(100vw - 32px));
   padding: 14px;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
   background: var(--panel);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.16);
-  z-index: 20;
 }
 
 .export-session-picker-head,
@@ -1511,7 +1551,9 @@ button:disabled {
 .export-session-row {
   display: flex;
   align-items: center;
-  width: 100%;
+  width: 0;
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 44px;
   gap: 8px;
   padding: 5px 8px;
@@ -1522,6 +1564,44 @@ button:disabled {
   cursor: pointer;
   text-align: left;
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.export-session-row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 0;
+}
+
+.export-session-favorite {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  min-height: 34px;
+  flex: 0 0 32px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.export-session-favorite:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--elevated);
+  border-color: var(--line);
+  transform: translateY(-1px);
+}
+
+.export-session-favorite[data-favorite="true"] {
+  color: var(--accent);
+}
+
+.export-session-favorite:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .export-session-row:hover {

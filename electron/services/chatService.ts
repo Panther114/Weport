@@ -8,8 +8,13 @@ import * as http from 'http'
 import * as fzstd from 'fzstd'
 import * as crypto from 'crypto'
 import { app } from 'electron'
+import { fileURLToPath } from 'url'
 import { ConfigService } from './config'
+import { KeyHealthService } from './keyHealthService'
+import { isAntiRevokeSessionEligible, mergeAntiRevokeBatchResult } from './antiRevokeResults'
+import { runGuardedAntiRevokeWrite } from './antiRevokeLease'
 import { wcdbService } from './wcdbService'
+import { sourceFingerprint } from './export/sourceFingerprint'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
 import { avatarCacheService, protocolUrlToPath } from './avatarCacheService'
@@ -19,6 +24,7 @@ import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from '
 import { exportCardDiagnosticsService } from './exportCardDiagnosticsService'
 import { ImageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
+import { extractWechatVoiceTranscript, extractWechatVoiceTranscriptFromPackedInfo } from './voiceTranscript'
 import { LRUCache } from '../utils/LRUCache.js'
 
 export interface ChatSession {
@@ -39,9 +45,16 @@ export interface ChatSession {
   isMuted?: boolean   // 是否开启免打扰
 }
 
+export interface AntiRevokeConnectionContext {
+  identity: string
+  generation: number
+}
+
 export interface Message {
   messageKey: string
   localId: number
+  /** Exact native decimal token; numeric localId is retained for legacy APIs only. */
+  localIdRaw?: string
   serverId: number
   serverIdRaw?: string
   localType: number
@@ -53,6 +66,8 @@ export interface Message {
   senderAvatarUrl?: string
   parsedContent: string
   rawContent: string
+  /** Existing WeChat-native transcript parsed from voice XML or packed_info_data. */
+  voiceTranscript?: string
   /** Raw WeChat msgsource metadata (contains <atuserlist> for group @mentions). */
   source?: unknown
   content?: string  // 原始XML内容（与rawContent相同，供前端使用）
@@ -146,6 +161,7 @@ export interface Message {
     chatRecordList?: any[]
   }>
   _db_path?: string // 内部字段：记录消息所属数据库路径
+  _table_name?: string // 内部字段：记录消息所属分片表
 }
 
 type ResourceMessageType = 'image' | 'video' | 'voice' | 'file'
@@ -179,6 +195,71 @@ export interface ContactInfo {
   type: 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other'
   officialAccountKind?: 'subscription' | 'service' | 'enterprise' | 'unknown'
   officialAccountType?: number
+}
+
+const UINT64_LIMIT = 1n << 64n
+const INT64_SIGNED_BOUNDARY = 1n << 63n
+
+/** Parse a message-count hint only when the source explicitly provides a whole, nonnegative count. */
+export function parseExplicitMessageCountHint(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+  if (typeof value === 'bigint') return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : undefined
+  if (typeof value !== 'string') return undefined
+  const token = value.trim()
+  if (!/^\d+$/.test(token)) return undefined
+  const parsed = Number(token)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+type VoiceTranscriptSourceHint = {
+  voiceTranscript?: unknown
+  packedInfoDataPresent?: boolean
+  packedInfoDataHasValue?: boolean
+  dbPath?: unknown
+  tableName?: unknown
+}
+
+/** Build SQL-safe text/integer candidates for a decimal uint64 server ID. */
+function serverIdSqlPredicate(quotedColumn: string, rawId: string): string | null {
+  if (!/^\d+$/.test(rawId)) return null
+  let unsigned: bigint
+  try {
+    unsigned = BigInt(rawId)
+  } catch {
+    return null
+  }
+  if (unsigned <= 0n || unsigned >= UINT64_LIMIT) return null
+  const signed = unsigned >= INT64_SIGNED_BOUNDARY ? unsigned - UINT64_LIMIT : unsigned
+  const unsignedToken = unsigned.toString()
+  const signedToken = signed.toString()
+  const candidates = [...new Set([
+    `${quotedColumn} = '${unsignedToken}'`,
+    `${quotedColumn} = ${signedToken}`,
+    `${quotedColumn} = '${signedToken}'`,
+  ])]
+  return `(${candidates.join(' OR ')})`
+}
+
+function normalizeMessageDbIdentityPath(value: unknown): string {
+  return String(value ?? '').trim().replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase()
+}
+
+/** Match a scanned-mirror DB by its complete path relative to db_storage. */
+function messageDbStorageRelativePath(value: unknown): string {
+  const normalized = normalizeMessageDbIdentityPath(value)
+  if (!normalized) return ''
+  const parts = normalized.split('/').filter((part) => part && part !== '.')
+  const dbStorageIndex = parts.lastIndexOf('db_storage')
+  if (dbStorageIndex >= 0) return parts.slice(dbStorageIndex + 1).join('/')
+
+  const absolute = normalized.startsWith('/') || /^[a-z]:\//.test(normalized)
+  if (absolute || parts.includes('..')) return ''
+  return parts.join('/')
+}
+
+function isBareMessageDbName(value: unknown): boolean {
+  const raw = String(value ?? '').trim()
+  return Boolean(raw) && !/[\\/]/.test(raw) && !/^[a-z]:/i.test(raw)
 }
 
 const BUILTIN_OFFICIAL_HELPER_USERNAMES = new Set([
@@ -442,6 +523,11 @@ class ChatService {
   private configService: ConfigService
   private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
   private connected = false
+  private connectionIdentity = ''
+  private connectionMode: 'legacy' | 'scanned-snapshot' | null = null
+  private scannedSourceFingerprint: string | null = null
+  private connectionGeneration = 0
+  private connectionQueue: Promise<void> = Promise.resolve()
   private readonly dbMonitorListeners = new Set<(type: string, json: string) => void>()
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
   private messageCursorHostGeneration: number | null = null
@@ -462,6 +548,7 @@ class ChatService {
   private voiceTranscriptCache: LRUCache<string, string>
   private voiceTranscriptPending = new Map<string, Promise<{ success: boolean; transcript?: string; error?: string }>>()
   private transcriptCacheLoaded = false
+  private transcriptCacheScopePath = ''
   private transcriptCacheDirty = false
   private transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null
   private mediaDbsCache: string[] | null = null
@@ -535,7 +622,11 @@ class ChatService {
   private readonly visibilityAnomalyLogBurst = 3
   private visibilityAnomalyLogState = new Map<string, { windowStart: number; total: number; suppressed: number }>()
   private readonly contactLabelNameMapCacheTtlMs = 10 * 60 * 1000
-  private connectInFlight: Promise<{ success: boolean; error?: string }> | null = null
+  private connectInFlight: {
+    generation: number
+    identity: string
+    promise: Promise<{ success: boolean; error?: string; readOnlySnapshot?: boolean }>
+  } | null = null
   private sessionsLoadInFlight: Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> | null = null
   private contactsLoadInFlight: { mode: 'lite' | 'full'; promise: Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }> } | null = null
   private contactsMemoryCache = new Map<'lite' | 'full', { scope: string; updatedAt: number; contacts: ContactInfo[] }>()
@@ -558,7 +649,12 @@ class ChatService {
   }
 
   setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }): void {
+    const previousIdentity = this.resolveConnectSnapshot().identity
     this.runtimeConfig = config
+    const nextIdentity = this.resolveConnectSnapshot().identity
+    if (previousIdentity !== nextIdentity && (this.connected || this.connectInFlight)) {
+      this.close()
+    }
   }
 
   /**
@@ -631,57 +727,236 @@ class ChatService {
   /**
    * 连接数据库（并发调用共享同一次连接过程，避免重复 open）
    */
-  async connect(): Promise<{ success: boolean; error?: string }> {
-    if (this.connected && wcdbService.isReady()) {
-      return { success: true }
+  async connect(): Promise<{ success: boolean; error?: string; readOnlySnapshot?: boolean }> {
+    const snapshot = this.resolveConnectSnapshot()
+    const generation = this.connectionGeneration
+    const existing = this.connectInFlight
+    if (existing?.generation === generation && existing.identity === snapshot.identity) {
+      return existing.promise
     }
-    if (this.connectInFlight) {
-      return this.connectInFlight
+
+    const entry = {
+      generation,
+      identity: snapshot.identity,
+      promise: this.enqueueConnection(async () => {
+        const isCurrent = () => this.isConnectSnapshotCurrent(snapshot, generation)
+        if (!isCurrent()) return { success: false, error: '账号配置已变更，旧连接已取消。' }
+
+        if (this.connected && this.connectionIdentity === snapshot.identity) {
+          const nativeConnected = await wcdbService.isConnected().catch(() => false)
+          if (!isCurrent()) {
+            if (nativeConnected) await wcdbService.close().catch(() => undefined)
+            return { success: false, error: '账号配置已变更，旧连接已取消。' }
+          }
+          if (nativeConnected) {
+            if (this.connectionMode !== 'scanned-snapshot') return { success: true }
+            const currentFingerprint = await sourceFingerprint(snapshot.accountDir)
+            if (!isCurrent()) {
+              await wcdbService.close().catch(() => undefined)
+              return { success: false, error: '账号配置已变更，旧连接已取消。' }
+            }
+            if (currentFingerprint && currentFingerprint === this.scannedSourceFingerprint) {
+              return { success: true, readOnlySnapshot: true }
+            }
+          }
+        }
+
+        this.clearConnectionState()
+        const nativeConnected = await wcdbService.isConnected().catch(() => false)
+        if (nativeConnected) await wcdbService.close().catch(() => undefined)
+        if (!isCurrent()) return { success: false, error: '账号配置已变更，旧连接已取消。' }
+        return this.connectInternal(snapshot, generation)
+      }),
     }
-    const promise = this.connectInternal()
-    this.connectInFlight = promise
+    this.connectInFlight = entry
     try {
-      return await promise
+      return await entry.promise
     } finally {
-      if (this.connectInFlight === promise) {
-        this.connectInFlight = null
-      }
+      if (this.connectInFlight === entry) this.connectInFlight = null
     }
   }
 
-  private async connectInternal(): Promise<{ success: boolean; error?: string }> {
+  private resolveConnectSnapshot(): {
+    wxid: string
+    dbPath: string
+    decryptKey: string
+    accountDir: string
+    identity: string
+  } {
+    const wxid = String(this.runtimeConfig?.myWxid || this.configService.get('myWxid') || '').trim()
+    const dbPath = String(this.runtimeConfig?.dbPath || this.configService.get('dbPath') || '').trim()
+    const configuredDecryptKey = this.runtimeConfig?.decryptKey !== undefined
+      ? this.runtimeConfig.decryptKey
+      : this.configService.get('decryptKey')
+    const decryptKey = String(configuredDecryptKey || '').trim()
+    const accountDir = wxid && dbPath ? String(this.configService.getAccountDir(dbPath, wxid) || '') : ''
+    let accountKeys: unknown = null
     try {
-      const wxid = String(this.runtimeConfig?.myWxid || this.configService.get('myWxid') || '').trim()
-      const dbPath = String(this.runtimeConfig?.dbPath || this.configService.get('dbPath') || '').trim()
-      const decryptKey = String(this.runtimeConfig?.decryptKey || this.configService.get('decryptKey') || '').trim()
+      const store = this.configService.get('dbKeyStore') as { accounts?: Record<string, any> } | undefined
+      const account = accountDir ? store?.accounts?.[basename(accountDir)] : undefined
+      const dbKeys = account?.dbKeys && typeof account.dbKeys === 'object' ? account.dbKeys : {}
+      accountKeys = {
+        passphrase: String(account?.passphrase || ''),
+        dbKeys: Object.keys(dbKeys).sort().map((id) => {
+          const entry = dbKeys[id] || {}
+          return [id, String(entry.key || ''), String(entry.salt || ''), entry.verified === true]
+        }),
+      }
+    } catch { /* an unavailable key store is represented by null */ }
+    const identity = crypto.createHash('sha256').update(JSON.stringify({
+      wxid,
+      dbPath,
+      accountDir,
+      decryptKey,
+      accountKeys,
+    })).digest('hex')
+    return { wxid, dbPath, decryptKey, accountDir, identity }
+  }
+
+  private isConnectSnapshotCurrent(
+    snapshot: { identity: string },
+    generation: number
+  ): boolean {
+    return generation === this.connectionGeneration && snapshot.identity === this.resolveConnectSnapshot().identity
+  }
+
+  private enqueueConnection<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.connectionQueue.then(operation, operation)
+    this.connectionQueue = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  captureAntiRevokeContext(): AntiRevokeConnectionContext {
+    return { identity: this.resolveConnectSnapshot().identity, generation: this.connectionGeneration }
+  }
+
+  isAntiRevokeContextCurrent(context: AntiRevokeConnectionContext): boolean {
+    return this.isAntiRevokeContextCurrentInternal(context)
+  }
+
+  private isAntiRevokeContextCurrentInternal(context: AntiRevokeConnectionContext): boolean {
+    return context.generation === this.connectionGeneration &&
+      context.identity === this.resolveConnectSnapshot().identity
+  }
+
+  private isAntiRevokeContextConnected(context: AntiRevokeConnectionContext): boolean {
+    return this.isAntiRevokeContextCurrentInternal(context) &&
+      this.connected && this.connectionIdentity === context.identity && wcdbService.isReady()
+  }
+
+  private enqueueAntiRevokeWrite<T extends { success: boolean; error?: string }>(
+    context: AntiRevokeConnectionContext,
+    shouldContinue: () => boolean,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    return runGuardedAntiRevokeWrite(
+      (write) => this.enqueueConnection(write),
+      () => this.isAntiRevokeContextConnected(context) && shouldContinue(),
+      { success: false, error: '账号配置或自动防撤回设置已变更，操作已取消。' } as T,
+      operation
+    )
+  }
+
+  private clearConnectionState(): void {
+    this.connected = false
+    this.connectionIdentity = ''
+    this.connectionMode = null
+    this.scannedSourceFingerprint = null
+    this.monitorSetup = false
+    if (this.monitorRetryTimer) {
+      clearTimeout(this.monitorRetryTimer)
+      this.monitorRetryTimer = null
+    }
+  }
+
+  isReadOnlySnapshot(): boolean {
+    return this.connected && this.connectionMode === 'scanned-snapshot'
+  }
+
+  private async connectInternal(
+    snapshot: { wxid: string; dbPath: string; decryptKey: string; accountDir: string; identity: string },
+    generation: number
+  ): Promise<{ success: boolean; error?: string; readOnlySnapshot?: boolean }> {
+    try {
+      const { wxid, dbPath, decryptKey, accountDir } = snapshot
+      const isCurrent = () => this.isConnectSnapshotCurrent(snapshot, generation)
       if (!wxid) {
         return { success: false, error: '请先在设置页面配置微信ID' }
       }
       if (!dbPath) {
         return { success: false, error: '请先在设置页面配置数据库路径' }
       }
-      if (!decryptKey) {
-        return { success: false, error: '请先在设置页面配置解密密钥' }
-      }
-
-      if (this.connected && wcdbService.isReady()) {
-        return { success: true }
-      }
-
-      // 使用 ConfigService 统一解析账号目录
-      const accountDir = this.configService.getAccountDir(dbPath, wxid)
       if (!accountDir) {
         return { success: false, error: '未找到账号目录，请检查数据库路径和微信ID配置' }
       }
 
-      const openOk = await wcdbService.open(accountDir, decryptKey)
+      let openOk = false
+      let scannedSource = false
+      let mirrorFingerprint: string | null = null
+      let legacyOpenError = ''
+      let scannedOpenError = ''
+      if (decryptKey) {
+        openOk = await wcdbService.open(accountDir, decryptKey)
+        if (!isCurrent()) {
+          await wcdbService.close().catch(() => undefined)
+          return { success: false, error: '账号配置已变更，旧连接已取消。' }
+        }
+        if (!openOk) {
+          legacyOpenError = await wcdbService.getLastInitError() || '账号级密钥无法打开当前数据库。'
+        }
+      }
+
+      // Windows per-DB scan keys are raw SQLCipher page keys, while
+      // wcdb_open_account accepts one account-level hex key. Rebuild a disposable mirror
+      // and pass that mirror to the standard WCDB account connection. Try this
+      // after a failed legacy key too: an old saved key can be stale even though
+      // a fresh scan has complete, page-1-verified coverage.
+      if (!openOk && process.platform === 'win32') {
+        const scanned = await this.connectScannedAccount(accountDir, isCurrent)
+        openOk = scanned.success
+        scannedOpenError = scanned.error || ''
+        scannedSource = scanned.success
+        mirrorFingerprint = scanned.sourceFingerprint || null
+      } else if (!openOk && !decryptKey) {
+        return {
+          success: false,
+          error: '当前平台没有免登录逐库扫描路径。请使用已有密钥、手动输入密钥或登录捕获模式。',
+        }
+      }
+      if (!isCurrent()) {
+        await wcdbService.close().catch(() => undefined)
+        return { success: false, error: '账号配置已变更，旧连接已取消。' }
+      }
       if (!openOk) {
-        const detailedError = this.describeInitFailure(await wcdbService.getLastInitError())
+        const lastError = scannedOpenError || legacyOpenError || await wcdbService.getLastInitError()
+        const detailedError = this.describeInitFailure(lastError)
         await this.maybeShowInitFailureDialog(detailedError)
-        return { success: false, error: detailedError }
+        const fallbackDetail = legacyOpenError && scannedOpenError
+          ? `账号级密钥连接失败；免登录扫描连接也失败：${detailedError}`
+          : detailedError
+        return { success: false, error: fallbackDetail }
+      }
+
+      if (!isCurrent()) {
+        await wcdbService.close().catch(() => undefined)
+        return { success: false, error: '账号配置已变更，旧连接已取消。' }
+      }
+      if (scannedSource) {
+        const currentFingerprint = await sourceFingerprint(accountDir)
+        if (!currentFingerprint || currentFingerprint !== mirrorFingerprint) {
+          await wcdbService.close().catch(() => undefined)
+          return { success: false, error: '微信数据库在建立只读副本期间发生变化，请重新连接。' }
+        }
+        if (!isCurrent()) {
+          await wcdbService.close().catch(() => undefined)
+          return { success: false, error: '账号配置已变更，旧连接已取消。' }
+        }
       }
 
       this.connected = true
+      this.connectionIdentity = snapshot.identity
+      this.connectionMode = scannedSource ? 'scanned-snapshot' : 'legacy'
+      this.scannedSourceFingerprint = scannedSource ? mirrorFingerprint : null
 
       // 设置数据库监控
       this.setupDbMonitor()
@@ -689,11 +964,56 @@ class ChatService {
       // 预热 listMediaDbs 缓存（后台异步执行，不阻塞连接）
       this.warmupMediaDbsCache()
 
-      return { success: true }
+      return scannedSource ? { success: true, readOnlySnapshot: true } : { success: true }
     } catch (e) {
       console.error('ChatService: 连接数据库失败:', e)
+      if (generation === this.connectionGeneration) this.clearConnectionState()
       return { success: false, error: this.describeInitFailure(String(e), -3998) }
     }
+  }
+
+  /** Open a complete Windows connection using only currently verified per-DB keys. */
+  private async connectScannedAccount(
+    accountDir: string,
+    isCurrent: () => boolean
+  ): Promise<{ success: boolean; sourceFingerprint?: string; error?: string }> {
+    const healthService = new KeyHealthService()
+    const health = await healthService.getHealth(accountDir)
+    if (!isCurrent()) return { success: false, error: '账号配置已变更，旧连接已取消。' }
+    if (!health.connectionReady) {
+      const coverage = health.connectionCoverage
+      const missingCount = (coverage?.missing.length || 0) + (coverage?.invalid.length || 0)
+      return {
+        success: false,
+        error: missingCount > 0
+          ? `扫描密钥还未覆盖完整聊天历史：${missingCount} 个会话/消息数据库尚未校验。请在微信里打开相关会话后重新扫描。`
+          : (health.error || '扫描密钥还未覆盖会话数据库和所有消息分片。'),
+      }
+    }
+
+    const material = healthService.getVerifiedDbKeyMaterial(accountDir)
+    if (!isCurrent()) return { success: false, error: '账号配置已变更，旧连接已取消。' }
+    if (!material.success) {
+      return { success: false, error: material.error || '没有可用的逐库扫描密钥。请重新扫描后再连接。' }
+    }
+    const opened = await wcdbService.openScanned(accountDir, material.keys)
+    if (!opened.success) {
+      return {
+        success: false,
+        error: opened.error || await wcdbService.getLastInitError() || '免登录扫描密钥无法打开当前数据库。',
+      }
+    }
+    const currentFingerprint = await sourceFingerprint(accountDir)
+    if (!isCurrent() || !currentFingerprint || currentFingerprint !== opened.sourceFingerprint) {
+      await wcdbService.close().catch(() => undefined)
+      return {
+        success: false,
+        error: isCurrent()
+          ? '微信数据库在建立只读副本期间发生变化，请重新连接。'
+          : '账号配置已变更，旧连接已取消。',
+      }
+    }
+    return { success: true, sourceFingerprint: opened.sourceFingerprint }
   }
 
   private monitorSetup = false
@@ -708,11 +1028,12 @@ class ChatService {
   }
 
   private scheduleMonitorRetry() {
+    if (this.isReadOnlySnapshot()) return
     if (this.monitorRetryTimer) return
     this.monitorRetryTimer = setTimeout(() => {
       this.monitorRetryTimer = null
       // 只在仍处于连接状态时重试
-      if (this.connected && wcdbService.isReady()) {
+      if (this.connected && !this.isReadOnlySnapshot() && wcdbService.isReady()) {
         this.setupDbMonitor()
       }
     }, this.monitorRetryIntervalMs)
@@ -720,6 +1041,10 @@ class ChatService {
   }
 
   private setupDbMonitor() {
+    if (this.isReadOnlySnapshot()) {
+      this.monitorSetup = false
+      return
+    }
     if (this.monitorSetup) return
     this.monitorSetup = true
 
@@ -800,18 +1125,11 @@ class ChatService {
   }
 
   private async ensureConnected(): Promise<{ success: boolean; error?: string }> {
-    if (this.connected && wcdbService.isReady()) {
-      return { success: true }
-    }
     if (!wcdbService.isReady()) {
       this.monitorSetup = false
     }
     const result = await this.connect()
-    if (!result.success) {
-      this.connected = false
-      return { success: false, error: result.error }
-    }
-    return { success: true }
+    return result.success ? { success: true } : { success: false, error: result.error }
   }
 
   /**
@@ -884,23 +1202,20 @@ class ChatService {
     return { cursors, sessions: 0 }
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    const cancelScanned = this.connectInFlight !== null
+    this.connectionGeneration += 1
+    this.clearConnectionState()
     try {
-      for (const state of this.messageCursors.values()) {
-        wcdbService.closeMessageCursor(state.cursor).catch(() => { /* 关闭中可能无连接 */ })
-      }
+      const cursors = [...this.messageCursors.values()]
       this.messageCursors.clear()
-      // 宿主侧已串行化（见 wcdbHost.ts），close 与后续 open 按到达顺序执行，
-      // 这里 fire-and-forget 不会与重连交错
-      wcdbService.close().catch(() => { /* noop */ })
+      if (cancelScanned) await wcdbService.cancelScannedOpen().catch(() => undefined)
+      await Promise.allSettled(cursors.map((state) => wcdbService.closeMessageCursor(state.cursor)))
+      // Serialize and await close after any active open so mirror cleanup finishes
+      // before the caller tears down the WCDB host.
+      await this.enqueueConnection(() => wcdbService.close())
     } catch (e) {
       console.error('ChatService: 关闭数据库失败:', e)
-    }
-    this.connected = false
-    this.monitorSetup = false
-    if (this.monitorRetryTimer) {
-      clearTimeout(this.monitorRetryTimer)
-      this.monitorRetryTimer = null
     }
   }
 
@@ -930,58 +1245,103 @@ class ChatService {
     }
   }
 
-  async checkAntiRevokeTriggers(sessionIds: string[]): Promise<{
+  async checkAntiRevokeTriggers(sessionIds: string[], expectedContext?: AntiRevokeConnectionContext): Promise<{
     success: boolean
     rows?: Array<{ sessionId: string; success: boolean; installed?: boolean; error?: string }>
     error?: string
   }> {
+    const context = expectedContext || this.captureAntiRevokeContext()
     try {
+      if (!this.isAntiRevokeContextCurrentInternal(context)) {
+        return { success: false, error: '账号配置已变更，防撤回状态检查已取消。' }
+      }
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return { success: false, error: connectResult.error }
-      const { validIds, invalidRows } = await this.filterAntiRevokeSessionIds(sessionIds)
-      const result = validIds.length > 0
-        ? await wcdbService.checkMessageAntiRevokeTriggers(validIds)
+      if (!this.isAntiRevokeContextConnected(context)) {
+        return { success: false, error: '账号配置已变更，防撤回状态检查已取消。' }
+      }
+      const filtered = await this.filterAntiRevokeSessionIds(sessionIds)
+      if (filtered.error) return { success: false, error: filtered.error }
+      if (!this.isAntiRevokeContextConnected(context)) {
+        return { success: false, error: '账号配置已变更，防撤回状态检查已取消。' }
+      }
+      const result = filtered.validIds.length > 0
+        ? await wcdbService.checkMessageAntiRevokeTriggers(filtered.validIds)
         : { success: true, rows: [] }
-      if (!result.success) return result
-      return { success: true, rows: [...(result.rows || []), ...invalidRows] }
+      if (!this.isAntiRevokeContextConnected(context)) {
+        return { success: false, error: '账号配置已变更，防撤回状态检查已取消。' }
+      }
+      return mergeAntiRevokeBatchResult(result, filtered.invalidRows)
     } catch (e) {
       return { success: false, error: String(e) }
     }
   }
 
-  async installAntiRevokeTriggers(sessionIds: string[]): Promise<{
+  async installAntiRevokeTriggers(
+    sessionIds: string[],
+    expectedContext?: AntiRevokeConnectionContext,
+    shouldContinue: () => boolean = () => true
+  ): Promise<{
     success: boolean
     rows?: Array<{ sessionId: string; success: boolean; alreadyInstalled?: boolean; error?: string }>
     error?: string
   }> {
+    const context = expectedContext || this.captureAntiRevokeContext()
     try {
+      if (!this.isAntiRevokeContextCurrentInternal(context) || !shouldContinue()) {
+        return { success: false, error: '账号配置或自动防撤回设置已变更，操作已取消。' }
+      }
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return { success: false, error: connectResult.error }
-      const { validIds, invalidRows } = await this.filterAntiRevokeSessionIds(sessionIds)
-      const result = validIds.length > 0
-        ? await wcdbService.installMessageAntiRevokeTriggers(validIds)
+      if (!this.isAntiRevokeContextConnected(context) || !shouldContinue()) {
+        return { success: false, error: '账号配置或自动防撤回设置已变更，操作已取消。' }
+      }
+      const filtered = await this.filterAntiRevokeSessionIds(sessionIds)
+      if (filtered.error) return { success: false, error: filtered.error }
+      if (!this.isAntiRevokeContextConnected(context) || !shouldContinue()) {
+        return { success: false, error: '账号配置或自动防撤回设置已变更，操作已取消。' }
+      }
+      const result = filtered.validIds.length > 0
+        ? await this.enqueueAntiRevokeWrite(
+          context,
+          shouldContinue,
+          () => wcdbService.installMessageAntiRevokeTriggers(filtered.validIds)
+        )
         : { success: true, rows: [] }
-      if (!result.success) return result
-      return { success: true, rows: [...(result.rows || []), ...invalidRows] }
+      return mergeAntiRevokeBatchResult(result, filtered.invalidRows)
     } catch (e) {
       return { success: false, error: String(e) }
     }
   }
 
-  async uninstallAntiRevokeTriggers(sessionIds: string[]): Promise<{
+  async uninstallAntiRevokeTriggers(sessionIds: string[], expectedContext?: AntiRevokeConnectionContext): Promise<{
     success: boolean
     rows?: Array<{ sessionId: string; success: boolean; error?: string }>
     error?: string
   }> {
+    const context = expectedContext || this.captureAntiRevokeContext()
     try {
+      if (!this.isAntiRevokeContextCurrentInternal(context)) {
+        return { success: false, error: '账号配置已变更，防撤回还原已取消。' }
+      }
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return { success: false, error: connectResult.error }
-      const { validIds, invalidRows } = await this.filterAntiRevokeSessionIds(sessionIds)
-      const result = validIds.length > 0
-        ? await wcdbService.uninstallMessageAntiRevokeTriggers(validIds)
+      if (!this.isAntiRevokeContextConnected(context)) {
+        return { success: false, error: '账号配置已变更，防撤回还原已取消。' }
+      }
+      const filtered = await this.filterAntiRevokeSessionIds(sessionIds)
+      if (filtered.error) return { success: false, error: filtered.error }
+      if (!this.isAntiRevokeContextConnected(context)) {
+        return { success: false, error: '账号配置已变更，防撤回还原已取消。' }
+      }
+      const result = filtered.validIds.length > 0
+        ? await this.enqueueAntiRevokeWrite(
+          context,
+          () => true,
+          () => wcdbService.uninstallMessageAntiRevokeTriggers(filtered.validIds)
+        )
         : { success: true, rows: [] }
-      if (!result.success) return result
-      return { success: true, rows: [...(result.rows || []), ...invalidRows] }
+      return mergeAntiRevokeBatchResult(result, filtered.invalidRows)
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -1091,10 +1451,7 @@ class ChatService {
           row.nMsg ??
           row.message_num ??
           row.messageNum
-        const parsedMessageCountHint = Number(messageCountHintRaw)
-        let messageCountHint = Number.isFinite(parsedMessageCountHint) && parsedMessageCountHint >= 0
-          ? Math.floor(parsedMessageCountHint)
-          : undefined
+        let messageCountHint = parseExplicitMessageCountHint(messageCountHintRaw)
 
         if (messageCountHint === undefined) {
           const cachedStats = this.getSessionStatsCacheEntry(username)
@@ -1160,15 +1517,25 @@ class ChatService {
 
   async getAntiRevokeSessions(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
     try {
-      const result = await this.getSessions()
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) return { success: false, error: connectResult.error || '数据库连接失败' }
+
+      const result = await wcdbService.getSessions()
       if (!result.success || !Array.isArray(result.sessions)) {
         return { success: false, error: result.error || '获取会话失败' }
       }
 
-      return {
-        success: true,
-        sessions: result.sessions.filter((session) => !String(session.username || '').startsWith('gh_'))
+      const rows = result.sessions as Record<string, any>[]
+      if (rows.length > 0 && (rows[0]._error || rows[0]._info)) {
+        const info = rows[0]
+        const detail = info._error || info._info
+        const tableInfo = info.table ? ` table=${info.table}` : ''
+        const tables = info.tables ? ` tables=${info.tables}` : ''
+        const columns = info.columns ? ` columns=${info.columns}` : ''
+        return { success: false, error: `会话表异常: ${detail}${tableInfo}${tables}${columns}` }
       }
+
+      return { success: true, sessions: await this.buildAntiRevokeSessionsFromRows(rows) }
     } catch (e) {
       console.error('ChatService: 获取防撤回会话列表失败:', e)
       return { success: false, error: String(e) }
@@ -1225,36 +1592,32 @@ class ChatService {
     const map = new Map<string, { displayName?: string }>()
     if (targets.length === 0) return map
 
-    try {
-      const contactResult = await wcdbService.getContactsCompact(targets)
-      if (!contactResult.success || !Array.isArray(contactResult.contacts)) return map
+    const contactResult = await wcdbService.getContactsCompact(targets)
+    if (!contactResult.success || !Array.isArray(contactResult.contacts)) {
+      throw new Error(contactResult.error || '读取联系人列表失败，无法确认可安装防撤回的会话')
+    }
 
-      for (const row of contactResult.contacts as Record<string, any>[]) {
-        const username = String(row.username || '').trim()
-        if (!username || !this.isAntiRevokeContactRow(username, row)) continue
-        const displayName = String(row.remark || row.nick_name || row.nickName || row.alias || username)
-        map.set(username, {
-          displayName: displayName.trim() || displayName
-        })
-      }
-    } catch {
-      return map
+    for (const row of contactResult.contacts as Record<string, any>[]) {
+      const username = String(row.username || '').trim()
+      if (!username || !this.isAntiRevokeContactRow(username, row)) continue
+      const displayName = String(row.remark || row.nick_name || row.nickName || row.alias || username)
+      map.set(username, {
+        displayName: displayName.trim() || displayName
+      })
     }
 
     return map
   }
 
   private async hasAntiRevokeMessageTables(sessionId: string): Promise<boolean> {
-    try {
-      const tableStatsResult = await wcdbService.getMessageTableStats(sessionId)
-      if (!tableStatsResult.success || !Array.isArray(tableStatsResult.tables)) return false
-      return tableStatsResult.tables.some((row: Record<string, any>) => {
-        const tableName = String(row.table_name || row.tableName || '').trim()
-        return tableName.length > 0
-      })
-    } catch {
-      return false
+    const tableStatsResult = await wcdbService.getMessageTableStats(sessionId)
+    if (!tableStatsResult.success || !Array.isArray(tableStatsResult.tables)) {
+      throw new Error(tableStatsResult.error || `读取会话「${sessionId}」的消息表失败`)
     }
+    return tableStatsResult.tables.some((row: Record<string, any>) => {
+      const tableName = String(row.table_name || row.tableName || '').trim()
+      return tableName.length > 0
+    })
   }
 
   private async buildAntiRevokeSessionsFromRows(rows: Record<string, any>[]): Promise<ChatSession[]> {
@@ -1289,8 +1652,8 @@ class ChatService {
 
     for (const { username, row } of candidateRows) {
       const isGroup = username.endsWith('@chatroom')
-      if (!isGroup && !contactMap.has(username)) continue
-      if (!await this.hasAntiRevokeMessageTables(username)) continue
+      const hasMessageTables = await this.hasAntiRevokeMessageTables(username)
+      if (!isAntiRevokeSessionEligible(username, { isContact: contactMap.has(username), hasMessageTables })) continue
 
       const sortTs = parseInt(
         row.sort_timestamp ||
@@ -1344,12 +1707,16 @@ class ChatService {
   private async filterAntiRevokeSessionIds(sessionIds: string[]): Promise<{
     validIds: string[]
     invalidRows: Array<{ sessionId: string; success: false; error: string }>
+    error?: string
   }> {
     const normalizedIds = Array.from(new Set((sessionIds || []).map((id) => String(id || '').trim()).filter(Boolean)))
     if (normalizedIds.length === 0) return { validIds: [], invalidRows: [] }
 
     const sessionsResult = await this.getAntiRevokeSessions()
-    const allowedIds = new Set((sessionsResult.sessions || []).map((session) => session.username))
+    if (!sessionsResult.success || !Array.isArray(sessionsResult.sessions)) {
+      return { validIds: [], invalidRows: [], error: sessionsResult.error || '获取防撤回会话列表失败' }
+    }
+    const allowedIds = new Set(sessionsResult.sessions.map((session) => session.username))
     const validIds = normalizedIds.filter((sessionId) => allowedIds.has(sessionId))
     const invalidRows = normalizedIds
       .filter((sessionId) => !allowedIds.has(sessionId))
@@ -2159,11 +2526,17 @@ class ChatService {
     if (!nativeResult.success || !nativeResult.counts) {
       return { success: false, error: nativeResult.error || '获取会话消息总数失败', dbSignature }
     }
-    const counts = normalizedSessionIds.reduce<Record<string, number>>((acc, sid) => {
-      const raw = nativeResult.counts?.[sid]
-      acc[sid] = Number.isFinite(raw) ? Math.max(0, Math.floor(Number(raw))) : 0
-      return acc
-    }, {})
+    const counts: Record<string, number> = {}
+    for (const sid of normalizedSessionIds) {
+      if (!Object.prototype.hasOwnProperty.call(nativeResult.counts, sid)) {
+        return { success: false, error: `获取会话 ${sid} 的消息总数失败: 缺少原生计数`, dbSignature }
+      }
+      const raw = nativeResult.counts[sid]
+      if (!Number.isSafeInteger(raw) || raw < 0) {
+        return { success: false, error: `获取会话 ${sid} 的消息总数失败: 原生计数无效`, dbSignature }
+      }
+      counts[sid] = raw
+    }
 
     this.logExportDiag({
       traceId,
@@ -2270,16 +2643,24 @@ class ChatService {
         if (cachedBatchFresh && cachedBatch.sessionIdsKey === sessionIdsKey) {
           const snapshot = await this.getMessageDbCountSnapshot()
           if (snapshot.success && snapshot.dbSignature === cachedBatch.dbSignature) {
+            const cachedCounts: Record<string, number> = {}
+            let cacheComplete = true
             for (const sessionId of pendingSessionIds) {
               const nextCountRaw = cachedBatch.counts[sessionId]
-              const nextCount = Number.isFinite(nextCountRaw) ? Math.max(0, Math.floor(nextCountRaw)) : 0
-              counts[sessionId] = nextCount
-              this.sessionMessageCountCache.set(sessionId, {
-                count: nextCount,
-                updatedAt: now
-              })
+              if (!Number.isSafeInteger(nextCountRaw) || nextCountRaw < 0) {
+                cacheComplete = false
+                break
+              }
+              cachedCounts[sessionId] = nextCountRaw
             }
-            tableScanSucceeded = true
+            if (cacheComplete) {
+              for (const sessionId of pendingSessionIds) {
+                const count = cachedCounts[sessionId]
+                counts[sessionId] = count
+                this.sessionMessageCountCache.set(sessionId, { count, updatedAt: now })
+              }
+              tableScanSucceeded = true
+            }
           }
         }
 
@@ -2287,24 +2668,30 @@ class ChatService {
           const tableScanResult = await this.countSessionMessageCountsByTableScan(pendingSessionIds, traceId)
           if (tableScanResult.success && tableScanResult.counts) {
             const nowTs = Date.now()
+            let scanComplete = true
             for (const sessionId of pendingSessionIds) {
               const nextCountRaw = tableScanResult.counts[sessionId]
-              const nextCount = Number.isFinite(nextCountRaw) ? Math.max(0, Math.floor(nextCountRaw)) : 0
-              counts[sessionId] = nextCount
-              this.sessionMessageCountCache.set(sessionId, {
-                count: nextCount,
-                updatedAt: nowTs
-              })
-            }
-            if (tableScanResult.dbSignature) {
-              this.sessionMessageCountBatchCache = {
-                dbSignature: tableScanResult.dbSignature,
-                sessionIdsKey,
-                counts: { ...counts },
-                updatedAt: nowTs
+              if (!Object.prototype.hasOwnProperty.call(tableScanResult.counts, sessionId) || !Number.isSafeInteger(nextCountRaw) || nextCountRaw < 0) {
+                scanComplete = false
+                break
               }
             }
-            tableScanSucceeded = true
+            if (scanComplete) {
+              for (const sessionId of pendingSessionIds) {
+                const count = tableScanResult.counts[sessionId]
+                counts[sessionId] = count
+                this.sessionMessageCountCache.set(sessionId, { count, updatedAt: nowTs })
+              }
+              if (tableScanResult.dbSignature) {
+                this.sessionMessageCountBatchCache = {
+                  dbSignature: tableScanResult.dbSignature,
+                  sessionIdsKey,
+                  counts: { ...counts },
+                  updatedAt: nowTs
+                }
+              }
+              tableScanSucceeded = true
+            }
           } else {
             this.logExportDiag({
               traceId,
@@ -2337,20 +2724,27 @@ class ChatService {
                 batchSize: batch.length
               }
             })
-            let batchCounts: Record<string, number> = {}
+            let batchCounts: Record<string, number> | null = null
             try {
               const result = await wcdbService.getMessageCounts(batch)
               if (result.success && result.counts) {
                 batchCounts = result.counts
+              } else {
+                return { success: false, error: result.error || '获取会话消息总数失败' }
               }
-            } catch {
-              // noop
+            } catch (error) {
+              return { success: false, error: String(error) }
             }
 
             const nowTs = Date.now()
             for (const sessionId of batch) {
-              const nextCountRaw = batchCounts[sessionId]
-              const nextCount = Number.isFinite(nextCountRaw) ? Math.max(0, Math.floor(nextCountRaw)) : 0
+              if (!batchCounts || !Object.prototype.hasOwnProperty.call(batchCounts, sessionId)) {
+                return { success: false, error: `获取会话 ${sessionId} 的消息总数失败: 缺少原生计数` }
+              }
+              const nextCount = batchCounts[sessionId]
+              if (!Number.isSafeInteger(nextCount) || nextCount < 0) {
+                return { success: false, error: `获取会话 ${sessionId} 的消息总数失败: 原生计数无效` }
+              }
               counts[sessionId] = nextCount
               this.sessionMessageCountCache.set(sessionId, {
                 count: nextCount,
@@ -3330,13 +3724,25 @@ class ChatService {
   private getMessageSourceInfo(row: Record<string, any>): { dbName?: string; tableName?: string; dbPath?: string } {
     const dbPath = String(row._db_path || row.db_path || '').trim()
     const explicitDbName = String(row.db_name || '').trim()
-    const tableName = String(row.table_name || '').trim()
+    const tableName = String(row._table_name || row.table_name || row.source_table_name || row.sourceTableName || '').trim()
     const dbName = explicitDbName || (dbPath ? basename(dbPath, extname(dbPath)) : '')
     return {
       dbName: dbName || undefined,
       tableName: tableName || undefined,
       dbPath: dbPath || undefined
     }
+  }
+
+  private getVoiceTranscriptFromRow(row: Record<string, any>, content: string, localType: number): string | undefined {
+    if (localType !== 34) return undefined
+    const fromXml = extractWechatVoiceTranscript(content)
+    if (fromXml) return fromXml
+    const packedInfo = this.getRowField(row, [
+      'packed_info_data', 'packedInfoData', 'packed_info_blob', 'packedInfoBlob',
+      'packed_info', 'packedInfo', 'BytesExtra', 'bytes_extra',
+      'WCDB_CT_packed_info', 'reserved0', 'Reserved0', 'WCDB_CT_Reserved0'
+    ])
+    return extractWechatVoiceTranscriptFromPackedInfo(packedInfo) || undefined
   }
 
   /**
@@ -3355,7 +3761,9 @@ class ChatService {
 
   private buildMessageKey(input: {
     localId: number
+    localIdRaw?: string
     serverId: number
+    serverIdRaw?: string
     createTime: number
     sortSeq: number
     senderUsername?: string | null
@@ -3364,8 +3772,9 @@ class ChatService {
     tableName?: string
     dbPath?: string
   }): string {
-    const localId = Number.isFinite(input.localId) ? Math.max(0, Math.floor(input.localId)) : 0
-    const serverId = Number.isFinite(input.serverId) ? Math.max(0, Math.floor(input.serverId)) : 0
+    const localId = this.normalizeUnsignedIntegerToken(input.localIdRaw)
+      ?? (Number.isSafeInteger(input.localId) && input.localId > 0 ? String(input.localId) : '0')
+    const serverId = this.normalizeServerIdToken(input.serverIdRaw ?? input.serverId) ?? '0'
     const createTime = Number.isFinite(input.createTime) ? Math.max(0, Math.floor(input.createTime)) : 0
     const sortSeq = Number.isFinite(input.sortSeq) ? Math.max(0, Math.floor(input.sortSeq)) : 0
     const localType = Number.isFinite(input.localType) ? Math.floor(input.localType) : 0
@@ -3375,16 +3784,16 @@ class ChatService {
     const tableName = String(input.tableName || '').trim()
     const sourceScope = dbPath || dbName
 
-    if (localId > 0 && sourceScope && tableName) {
+    if (localId !== '0' && sourceScope && tableName) {
       return `${this.encodeMessageKeySegment(sourceScope)}:${this.encodeMessageKeySegment(tableName)}:${localId}`
     }
 
-    if (localId > 0 && sourceScope) {
+    if (localId !== '0' && sourceScope) {
       // 当底层未返回 table_name 时，避免使用 db:_:localId（会误并同库不同表的消息）。
       return `local:${this.encodeMessageKeySegment(sourceScope)}:${localId}:${createTime}:${sortSeq}:${senderUsername}:${localType}`
     }
 
-    if (serverId > 0) {
+    if (serverId !== '0') {
       const scopedServer = sourceScope ? `${this.encodeMessageKeySegment(sourceScope)}:${serverId}` : String(serverId)
       return `server:${scopedServer}:${createTime}:${sortSeq}:${localId}:${senderUsername}:${localType}`
     }
@@ -4335,6 +4744,23 @@ class ChatService {
     return parts.join(' ').trim()
   }
 
+  private normalizeServerIdToken(raw: any): string | undefined {
+    if (typeof raw === 'number' && !Number.isSafeInteger(raw)) return undefined
+    if (Buffer.isBuffer(raw) || raw instanceof Uint8Array || Array.isArray(raw)) {
+      return this.normalizeServerIdToken(Buffer.from(raw).toString('utf8').trim())
+    }
+    if (raw && typeof raw === 'object') {
+      if ('value' in raw) return this.normalizeServerIdToken(raw.value)
+      if ('intValue' in raw) return this.normalizeServerIdToken(raw.intValue)
+    }
+    const token = String(raw ?? '').trim()
+    if (/^-\d+$/.test(token)) {
+      const value = BigInt(token)
+      return value >= -INT64_SIGNED_BOUNDARY ? BigInt.asUintN(64, value).toString() : undefined
+    }
+    return this.normalizeUnsignedIntegerToken(raw)
+  }
+
   private normalizeUnsignedIntegerToken(raw: any): string | undefined {
     if (raw === undefined || raw === null || raw === '') return undefined
 
@@ -4343,7 +4769,7 @@ class ChatService {
     }
 
     if (typeof raw === 'number') {
-      if (!Number.isFinite(raw)) return undefined
+      if (!Number.isSafeInteger(raw)) return undefined
       return String(Math.max(0, Math.floor(raw)))
     }
 
@@ -4392,7 +4818,7 @@ class ChatService {
     }
 
     const parsed = Number(text)
-    if (Number.isFinite(parsed)) {
+    if (Number.isSafeInteger(parsed)) {
       return String(Math.max(0, Math.floor(parsed)))
     }
     return undefined
@@ -5813,7 +6239,8 @@ class ChatService {
       const createTime = this.getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
       const sortSeq = this.getRowInt(row, ['sort_seq'], createTime > 0 ? createTime * 1000 : 0)
       const localId = this.getRowInt(row, ['local_id'], 0)
-      const serverIdRaw = this.normalizeUnsignedIntegerToken(row.server_id)
+      const localIdRaw = this.normalizeUnsignedIntegerToken(row.local_id)
+      const serverIdRaw = this.normalizeServerIdToken(row.server_id)
       const serverId = this.getRowInt(row, ['server_id'], 0)
       const content = this.decodeMessageContent(row.message_content, row.compress_content)
 
@@ -5831,7 +6258,9 @@ class ChatService {
       messages.push({
         messageKey: this.buildMessageKey({
           localId,
+          localIdRaw,
           serverId,
+          serverIdRaw,
           createTime,
           sortSeq,
           senderUsername,
@@ -5839,6 +6268,7 @@ class ChatService {
           ...sourceInfo
         }),
         localId,
+        localIdRaw,
         serverId,
         serverIdRaw,
         localType,
@@ -5848,9 +6278,11 @@ class ChatService {
         senderUsername,
         parsedContent: '',
         rawContent: content,
+        voiceTranscript: this.getVoiceTranscriptFromRow(row, content, localType),
         source: this.getMessageSourceFromRow(row),
         content,
-        _db_path: sourceInfo.dbPath
+        _db_path: sourceInfo.dbPath,
+        _table_name: sourceInfo.tableName
       })
     }
     return messages
@@ -5867,6 +6299,7 @@ class ChatService {
 
       const content = this.decodeMessageContent(rawMessageContent, rawCompressContent);
       const localType = this.getRowInt(row, ['local_type'], 1)
+      const voiceTranscript = this.getVoiceTranscriptFromRow(row, content, localType)
       const isSendRaw = row.computed_is_send ?? row.is_send
       const parsedRawIsSend = isSendRaw === null ? null : parseInt(isSendRaw, 10)
       const senderUsername = row.sender_username
@@ -6074,14 +6507,17 @@ class ChatService {
       }
 
       const localId = this.getRowInt(row, ['local_id'], 0)
-      const serverIdRaw = this.normalizeUnsignedIntegerToken(row.server_id)
+      const localIdRaw = this.normalizeUnsignedIntegerToken(row.local_id)
+      const serverIdRaw = this.normalizeServerIdToken(row.server_id)
       const serverId = this.getRowInt(row, ['server_id'], 0)
       const sortSeq = this.getRowInt(row, ['sort_seq'], createTime)
 
       messages.push({
         messageKey: this.buildMessageKey({
           localId,
+          localIdRaw,
           serverId,
+          serverIdRaw,
           createTime,
           sortSeq,
           senderUsername,
@@ -6089,6 +6525,7 @@ class ChatService {
           ...sourceInfo
         }),
         localId,
+        localIdRaw,
         serverId,
         serverIdRaw,
         localType,
@@ -6098,6 +6535,7 @@ class ChatService {
         senderUsername,
         parsedContent: this.parseMessageContent(content, localType),
         rawContent: content,
+        voiceTranscript,
         source: this.getMessageSourceFromRow(row),
         emojiCdnUrl,
         emojiMd5,
@@ -6148,7 +6586,8 @@ class ChatService {
         transferReceiverUsername,
         chatRecordTitle,
         chatRecordList,
-        _db_path: sourceInfo.dbPath
+        _db_path: sourceInfo.dbPath,
+        _table_name: sourceInfo.tableName
       })
       const last = messages[messages.length - 1]
       if ((last.localType === 3 || last.localType === 34) && (last.localId === 0 || last.createTime === 0)) {
@@ -7751,6 +8190,18 @@ class ChatService {
   }
 
   /**
+   * v1.2 §10.2 ②：导出正确性自检用 —— 把某个 `message.db` 里的 `real_sender_id`
+   * 按其**自己所在库**的 `Name2Id` 映射解析成 user_name。
+   *
+   * 必须是"自己的库"：`real_sender_id` 是那张分片表所属 message.db 的 Name2Id rowid，
+   * 换一个库去解析就会解析成另一个人（"归属会反"的根因）。复用上面两个私有实现，
+   * 顺带共用它们的缓存，避免自检把同一批 id 反复查一遍。
+   */
+  async resolveShardSenderUsername(dbPath: string, senderId: unknown): Promise<string | null> {
+    return this.resolveMessageSenderUsernameById(String(dbPath || ''), senderId)
+  }
+
+  /**
    * 判断是否像 wxid
    */
   private looksLikeWxid(text: string): boolean {
@@ -9159,7 +9610,20 @@ class ChatService {
       if (!msgResult.success || !msgResult.message) {
         return { success: false, error: '未找到消息' }
       }
-      const msg = msgResult.message
+      return this.getImageDataForMessage(sessionId, msgResult.message, options)
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getImageDataByIdentity(identity: Parameters<ChatService['getMessageByIdentity']>[0], options?: { excludeThumbnail?: boolean }): Promise<{ success: boolean; data?: string; error?: string }> {
+    const result = await this.getMessageByIdentity(identity)
+    if (!result.success || !result.message) return { success: false, error: result.error || '图片消息不存在' }
+    return this.getImageDataForMessage(identity.sessionId, result.message, options)
+  }
+
+  private async getImageDataForMessage(sessionId: string, msg: Message, options?: { excludeThumbnail?: boolean }): Promise<{ success: boolean; data?: string; error?: string }> {
+    try {
       const rawImageInfo = msg.rawContent ? this.parseImageInfo(msg.rawContent) : {}
       const imageMd5 = msg.imageMd5 || rawImageInfo.md5
       const imageDatName = msg.imageDatName
@@ -9193,7 +9657,7 @@ class ChatService {
 
       // localPath 是 file:// URL，需要转换成文件路径
       const filePath = result.localPath.startsWith('file://')
-        ? result.localPath.replace(/^file:\/\//, '')
+        ? fileURLToPath(result.localPath)
         : result.localPath
 
       const imageData = readFileSync(filePath)
@@ -10067,116 +10531,59 @@ class ChatService {
     sessionId: string,
     msgId: string,
     createTime?: number,
-    onPartial?: (text: string) => void,
-    senderWxid?: string,
-    inputServerId?: string | number
+    _onPartial?: (text: string) => void,
+    _senderWxid?: string,
+    inputServerId?: string | number,
+    rawContent?: string,
+    sourceHint?: VoiceTranscriptSourceHint
   ): Promise<{ success: boolean; transcript?: string; error?: string }> {
-    const startTime = Date.now()
-
-    // 确保磁盘缓存已加载
     this.loadTranscriptCacheIfNeeded()
+    try {
+      let content = rawContent
+      let timestamp = createTime
+      const suppliedTranscript = String(sourceHint?.voiceTranscript || '').trim()
+      const localText = suppliedTranscript || extractWechatVoiceTranscript(content)
+      if (localText) return { success: true, transcript: localText }
 
-      try {
-        let msgCreateTime = createTime
-        let serverId: string | number | undefined = this.normalizeUnsignedIntegerToken(inputServerId) || undefined
-
-      // 如果缺 createTime/serverId/senderWxid，查询一次消息补强定位键，避免同秒语音或 localId 冲突拿错 BLOB。
-      if (!msgCreateTime || !serverId || !senderWxid) {
-        const t1 = Date.now()
-        const msgResult = await this.getMessageById(sessionId, parseInt(msgId, 10))
-        const t2 = Date.now()
-
-
-        if (msgResult.success && msgResult.message) {
-          if (!msgCreateTime) msgCreateTime = msgResult.message.createTime
-          if (!serverId) serverId = msgResult.message.serverIdRaw || msgResult.message.serverId
-          if (!senderWxid) senderWxid = msgResult.message.senderUsername || undefined
-
-        }
+      // Cursor APIs can omit or serialize packed_info_data in a form the strict
+      // parser cannot use. Retry only when the collector retained the physical
+      // source identity; without it, a broader lookup could return another row.
+      const sourceDbPath = String(sourceHint?.dbPath || '').trim()
+      const sourceTableName = String(sourceHint?.tableName || '').trim()
+      const hasPhysicalSourceIdentity = Boolean(sourceDbPath && sourceTableName)
+      const shouldResolveExactRow = Boolean(timestamp) && (
+        content === undefined || sourceHint?.packedInfoDataPresent === false ||
+        (sourceHint?.packedInfoDataHasValue === true && hasPhysicalSourceIdentity)
+      )
+      if (shouldResolveExactRow) {
+        const serverId = this.normalizeUnsignedIntegerToken(inputServerId)
+        const localId = this.normalizeUnsignedIntegerToken(msgId)
+        // A source-scoped export row has an exact local id and physical
+        // provenance. Server ids can collide across real WeChat source rows.
+        const useSourceLocalIdentity = hasPhysicalSourceIdentity && Boolean(localId)
+        const result = await this.getMessageByIdentity({ sessionId,
+          localId: useSourceLocalIdentity && localId ? localId : serverId || msgId,
+          ts: timestamp as number,
+          idKind: useSourceLocalIdentity ? 'local' : serverId ? 'server' : 'local',
+          db: sourceDbPath || undefined,
+          table: sourceTableName || undefined,
+        })
+        if (!result.success || !result.message) return { success: false, error: result.error || '无法唯一定位语音消息' }
+        content = result.message.rawContent
+        timestamp = result.message.createTime
+        const exactText = String(result.message.voiceTranscript || '').trim() || extractWechatVoiceTranscript(content)
+        if (exactText) return { success: true, transcript: exactText }
       }
-
-      if (!msgCreateTime) {
-        console.error(`[Transcribe] 未找到消息时间戳`)
-        return { success: false, error: '未找到消息时间戳' }
-      }
-
-      // 使用正确的 cacheKey（包含 createTime）
-      const cacheKey = this.getVoiceCacheKey(sessionId, msgId, msgCreateTime)
-
-
-      // 检查转写缓存
-      const cached = this.voiceTranscriptCache.get(cacheKey)
-      if (cached) {
-
-        return { success: true, transcript: cached }
-      }
-
-      // 检查是否正在转写
-      const pending = this.voiceTranscriptPending.get(cacheKey)
-      if (pending) {
-
-        return pending
-      }
-
-      const task = (async () => {
-        try {
-          // 检查内存中是否有 WAV 数据
-          let wavData = this.voiceWavCache.get(cacheKey)
-          if (wavData) {
-
-          } else {
-            // 检查文件缓存
-            const voiceCacheDir = this.getVoiceCacheDir()
-            const wavFilePath = join(voiceCacheDir, `${cacheKey}.wav`)
-            if (existsSync(wavFilePath)) {
-              try {
-                wavData = readFileSync(wavFilePath)
-
-                // 同时缓存到内存
-                this.cacheVoiceWav(cacheKey, wavData)
-              } catch (e) {
-                console.error(`[Transcribe] 读取缓存文件失败:`, e)
-              }
-            }
-          }
-
-          if (!wavData) {
-
-            const t3 = Date.now()
-            // 调用 getVoiceData 获取并解码
-            const voiceResult = await this.getVoiceData(sessionId, msgId, msgCreateTime, serverId, senderWxid)
-            const t4 = Date.now()
-
-
-            if (!voiceResult.success || !voiceResult.data) {
-              console.error(`[Transcribe] 语音解码失败: ${voiceResult.error}`)
-              return { success: false, error: voiceResult.error || '语音解码失败' }
-            }
-            wavData = Buffer.from(voiceResult.data, 'base64')
-
-          }
-
-          // 转写
-
-          // 语音转写服务已裁剪（Weport 不提供转写功能）
-          return { success: false, error: '语音转写暂不可用（已裁剪）' }
-        } catch (error) {
-          console.error(`[Transcribe] 异常:`, error)
-          return { success: false, error: String(error) }
-        } finally {
-          this.voiceTranscriptPending.delete(cacheKey)
-        }
-      })()
-
-      this.voiceTranscriptPending.set(cacheKey, task)
-      return task
+      if (!timestamp) return { success: false, error: '缺少语音消息时间，无法读取已转换文字' }
+      const cached = this.voiceTranscriptCache.get(this.getVoiceCacheKey(sessionId, msgId, timestamp))
+      if (cached) return { success: true, transcript: cached }
+      // Playing WAVs does not create transcripts. Do not decode audio or pretend an
+      // absent ASR engine has failed; this option exports existing local text only.
+      return { success: false, error: '本地未找到已转换文字（播放语音不会生成转写；微信转换结果需保存在本地消息中）' }
     } catch (error) {
-      console.error(`[Transcribe] 外层异常:`, error)
       return { success: false, error: String(error) }
     }
   }
-
-
 
   private getVoiceCacheKey(sessionId: string, msgId: string, createTime?: number): string {
     // createTime + msgId 可避免同会话同秒多条语音互相覆盖
@@ -10192,18 +10599,25 @@ class ChatService {
   }
 
   /** 获取持久化转写缓存文件路径 */
-  private getTranscriptCachePath(): string {
+  getTranscriptCachePath(): string {
     const cachePath = this.configService.get('cachePath')
     const base = cachePath || join(app.getPath('documents'), 'WeFlow')
-    return join(base, 'Voices', 'transcripts.json')
+    const account = String(this.configService.getMyWxidCleaned() || '')
+    const scope = crypto.createHash('sha256').update(account).digest('hex').slice(0, 24)
+    return join(base, 'Voices', `transcripts-${scope}.json`)
   }
 
   /** 首次访问时从磁盘加载转写缓存 */
   private loadTranscriptCacheIfNeeded(): void {
-    if (this.transcriptCacheLoaded) return
+    const filePath = this.getTranscriptCachePath()
+    if (this.transcriptCacheLoaded && this.transcriptCacheScopePath === filePath) return
+    if (this.transcriptFlushTimer) clearTimeout(this.transcriptFlushTimer)
+    this.transcriptFlushTimer = null
+    this.voiceTranscriptCache.clear()
+    this.transcriptCacheDirty = false
+    this.transcriptCacheScopePath = filePath
     this.transcriptCacheLoaded = true
     try {
-      const filePath = this.getTranscriptCachePath()
       if (existsSync(filePath)) {
         const raw = readFileSync(filePath, 'utf-8')
         const data = JSON.parse(raw) as Record<string, string>
@@ -10230,7 +10644,8 @@ class ChatService {
   flushTranscriptCache(): void {
     if (!this.transcriptCacheDirty) return
     try {
-      const filePath = this.getTranscriptCachePath()
+      const filePath = this.transcriptCacheScopePath
+      if (!filePath) return
       const dir = dirname(filePath)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
       const obj: Record<string, string> = {}
@@ -11139,6 +11554,61 @@ class ChatService {
       return { success: true, filePath: targetPath }
     } catch (error) {
       console.error('[ChatService] 导出我的足迹失败:', error)
+      return { success: false, error: String(error) }
+    }
+  }
+
+  /** Resolve a search hit using its shard, table and timestamp, not local_id alone. */
+  async getMessageByIdentity(identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: 'local' | 'server' }): Promise<{ success: boolean; message?: Message; error?: string }> {
+    const sessionId = String(identity?.sessionId || '').trim()
+    const id = String(identity?.localId || '').trim()
+    const timestamp = this.normalizeTimestampSeconds(Number(identity?.ts))
+    if (!sessionId || !/^\d+$/.test(id) || !/[1-9]/.test(id) || timestamp <= 0) return { success: false, error: '消息定位参数无效' }
+    try {
+      const sources = await this.getSessionMessageTables(sessionId)
+      const requestedDb = normalizeMessageDbIdentityPath(identity.db)
+      const requestedDbStorageRelativePath = messageDbStorageRelativePath(identity.db)
+      const allowBareBasenameMatch = isBareMessageDbName(identity.db)
+      const matches: Message[] = []
+      for (const source of sources) {
+        const dbPath = String(source.dbPath || '')
+        const tableName = String(source.tableName || '')
+        // Only query sources enumerated for this connected account and session.
+        if (!dbPath || !tableName || (identity.table && identity.table !== tableName)) continue
+        const normalizedDb = normalizeMessageDbIdentityPath(dbPath)
+        const sourceDbStorageRelativePath = messageDbStorageRelativePath(dbPath)
+        const exactPathMatch = requestedDb && requestedDb === normalizedDb
+        const logicalPathMatch = requestedDbStorageRelativePath &&
+          sourceDbStorageRelativePath &&
+          requestedDbStorageRelativePath === sourceDbStorageRelativePath
+        const bareBasenameMatch = allowBareBasenameMatch &&
+          requestedDb === basename(dbPath).toLowerCase()
+        if (requestedDb && !exactPathMatch && !logicalPathMatch && !bareBasenameMatch) continue
+        const columns = await this.getMessageTableColumns(dbPath, tableName)
+        const idColumn = identity.idKind === 'server'
+          ? (columns.has('server_id') ? 'server_id' : 'msg_svr_id')
+          : (columns.has('local_id') ? 'local_id' : 'id')
+        const timeColumn = columns.has('create_time') ? 'create_time' : 'createtime'
+        if (!columns.has(idColumn) || !columns.has(timeColumn)) continue
+        // wcdbCore.execQuery currently forwards raw SQL and does not bind params.
+        // Keep the ID as a quoted decimal token (the input is digits-only above) so
+        // SQLite compares 64-bit integer/text IDs without Number coercion.
+        const quotedIdColumn = this.quoteSqlIdentifier(idColumn)
+        const idPredicate = identity.idKind === 'server'
+          ? serverIdSqlPredicate(quotedIdColumn, id)
+          : `${quotedIdColumn} = '${id}'`
+        if (!idPredicate) return { success: false, error: 'server_id 超出 uint64 范围，无法安全定位消息' }
+        const sql = `SELECT * FROM ${this.quoteSqlIdentifier(tableName)} WHERE ${idPredicate} AND ${this.quoteSqlIdentifier(timeColumn)} = ${timestamp} LIMIT 2`
+        const result = await wcdbService.execQuery('message', dbPath, sql)
+        if (!result.success) return { success: false, error: result.error || '读取定位消息失败' }
+        for (const row of result.rows || []) {
+          matches.push(await this.parseMessage({ ...row, _db_path: dbPath, _table_name: tableName }, { source: 'detail', sessionId }))
+        }
+      }
+      if (matches.length !== 1) return { success: false, error: matches.length ? '消息位置不唯一，请重建搜索索引' : '消息已不存在或索引已过期' }
+      await this.enrichGroupMessageSenderProfiles(matches, sessionId)
+      return { success: true, message: matches[0] }
+    } catch (error) {
       return { success: false, error: String(error) }
     }
   }
@@ -12929,9 +13399,11 @@ class ChatService {
     // 这里复用 parseMessagesBatch 里面的解析逻辑，为了简单我这里先写个基础的
     // 实际项目中建议抽取 parseRawMessage(row) 供多处使用
     const localId = this.getRowInt(row, ['local_id'], 0)
-    const serverIdRaw = this.normalizeUnsignedIntegerToken(row.server_id)
+    const localIdRaw = this.normalizeUnsignedIntegerToken(row.local_id)
+    const serverIdRaw = this.normalizeServerIdToken(row.server_id)
     const serverId = this.getRowInt(row, ['server_id'], 0)
     const localType = this.getRowInt(row, ['local_type'], 0)
+    const voiceTranscript = this.getVoiceTranscriptFromRow(row, rawContent, localType)
     const createTime = this.getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
     const sortSeq = this.getRowInt(row, ['sort_seq'], createTime > 0 ? createTime * 1000 : 0)
     const rawIsSend = row.computed_is_send ?? row.is_send
@@ -12940,7 +13412,9 @@ class ChatService {
     const msg: Message = {
       messageKey: this.buildMessageKey({
         localId,
+        localIdRaw,
         serverId,
+        serverIdRaw,
         createTime,
         sortSeq,
         senderUsername,
@@ -12948,6 +13422,7 @@ class ChatService {
         ...sourceInfo
       }),
       localId,
+      localIdRaw,
       serverId,
       serverIdRaw,
       localType,
@@ -12957,9 +13432,11 @@ class ChatService {
       senderUsername,
       rawContent: rawContent,
       content: rawContent,  // 添加原始内容供视频MD5解析使用
+      voiceTranscript,
       parsedContent: this.parseMessageContent(rawContent, localType),
       source: this.getMessageSourceFromRow(row),
-      _db_path: sourceInfo.dbPath
+      _db_path: sourceInfo.dbPath,
+      _table_name: sourceInfo.tableName
     }
 
     if (msg.localId === 0 || msg.createTime === 0) {

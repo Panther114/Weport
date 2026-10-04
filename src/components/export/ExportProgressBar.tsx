@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import type { JSX } from 'react'
 import { useLiveTask } from '../../hooks/useLiveTask'
 import { LIVE_TASK } from '../../utils/liveTask'
+import { isExportCompletionAuthoritative, normalizeExportProgressPhase } from '../../utils/exportProgress'
 /**
  * 导出进度条（吸顶块里的第二行）。
  *
@@ -18,10 +19,9 @@ import { LIVE_TASK } from '../../utils/liveTask'
  *
  * ## 尺寸必须恒定
  *
- * 光隔离重渲染还不够：`.exp-progress-session` 用 `flex: 0 1 auto`，内容一变
- * 宽度就变，右侧进度轨道会跟着伸缩、「取消导出」按钮左右横跳。这里给会话名
- * 一个**固定基准宽度**（`flex-basis`），让它只负责溢出省略、不再参与宽度争夺；
- * 整行高度也钉死，避免总数为 0 时清空计数文本引起的高度抖动。
+ * `.exp-progress-session` 用固定 flex-basis + 单行省略，文字更新不会改变轨道宽度。
+ * 外层行高固定为 34px，取消按钮固定为 22px；progress event 更新文本时不会改变
+ * 吸顶块或下面页面的几何尺寸。
  *
  * 依赖注入（api / busy / taskId）而不是直接在组件里读全局：这个组件在测试里
  * 可以脱离 Electron 环境单独渲染。
@@ -54,11 +54,23 @@ type ProgressPayload = {
   taskId?: string
 }
 
+function normalizeProgressPayload(payload: ProgressPayload): ProgressPayload {
+  const total = Math.max(0, Number(payload.total) || 0)
+  const current = Math.max(0, Number(payload.current) || 0)
+  return {
+    ...payload,
+    current,
+    total,
+    phase: normalizeExportProgressPhase(payload.phase, current, total),
+  }
+}
+
 const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarProps>(function ExportProgressBar(
   { api, busy }: ExportProgressBarProps,
   ref,
 ): JSX.Element | null {
   const [progress, setProgress] = useState<ProgressPayload | null>(null)
+  const [confirmedComplete, setConfirmedComplete] = useState(false)
   /**
    * 任务 id **在这里**从进度负载里取。
    *
@@ -73,7 +85,8 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
         setProgress(null)
         return
       }
-      setProgress(payload)
+      setConfirmedComplete(false)
+      setProgress(normalizeProgressPayload(payload))
       if (payload.taskId) setTaskId(payload.taskId)
     })
   }, [api])
@@ -101,14 +114,15 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
     // 快照里既没有总数也没有 taskId，说明这一轮根本没开始过 —— 不要凭空造一条进度
     if (!total && !taskIdFromSnapshot) return
     restoredRef.current = true
-    setProgress({
+    setConfirmedComplete(false)
+    setProgress(normalizeProgressPayload({
       current: Number(detail.current) || 0,
       total,
       phase: String(detail.phase || ''),
       phaseLabel: String(detail.phaseLabel || ''),
       currentSession: String(detail.currentSession || ''),
       taskId: taskIdFromSnapshot,
-    })
+    }))
     if (taskIdFromSnapshot) setTaskId(taskIdFromSnapshot)
   }, [live.detail, progress])
 
@@ -123,7 +137,7 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
     if (lastAnnouncedRef.current === phase) return
     lastAnnouncedRef.current = phase
     setAnnouncement(
-      phase === 'complete' ? '导出完成' : phase === 'preparing' ? '正在准备导出' : phase === 'cancelled' ? '导出已取消' : '正在导出会话',
+      phase === 'complete' ? '导出完成' : phase === 'preparing' ? '正在准备导出' : phase === 'verifying' ? '正在校验导出结果' : phase === 'cancelled' ? '导出已取消' : '正在导出会话',
     )
   }, [progress])
 
@@ -139,12 +153,15 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
        * 不带会话），拿它做兜底就会一直显示占位文案。
        */
       complete: () => {
+        // App calls this only after the export IPC result confirms success.
+        setConfirmedComplete(true)
         setProgress((p) => {
           const total = Number(p?.total || 0) || 1
           return { current: total, total, phase: 'complete', currentSession: '' }
         })
       },
       reset: () => {
+        setConfirmedComplete(false)
         setProgress({ current: 0, total: 0, phase: 'preparing' })
         setTaskId(null)
       },
@@ -172,15 +189,28 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
   const total = Number(progress?.total || 0)
   const current = Number(progress?.current || 0)
   const phase = progress?.phase || 'running'
-  // 完成态认两个信号：显式的 phase，以及"计数已满"。后者是兜底 —— 某些格式的
-  // 收尾路径不一定带 phase=complete，但 current 到 total 是**事实**。只看 phase
-  // 会留下一条永远停在 99% 的进度条。
-  const complete = phase === 'complete' || (total > 0 && current >= total)
+  // Session-complete events and 100% counters are not task completion: manifest
+  // writing and integrity verification still follow. Only the IPC result or an
+  // authoritative task snapshot may finish the bar.
+  const complete = isExportCompletionAuthoritative({
+    busy,
+    taskStatus: live.status,
+    confirmedByResult: confirmedComplete,
+  })
+  const failed = live.status === 'failed'
+  const aborted = live.status === 'aborted'
+  const terminal = complete || failed || aborted
   const pct = total > 0 ? Math.max(0, Math.min(100, (current / total) * 100)) : complete ? 100 : 0
   const indeterminate = phase === 'preparing' || (!total && !complete)
   // 完成态不显示会话名：那一步已经没有"正在导出的会话"了，留着只会显示上一条
   // 会话名或占位文案。失败/取消走 phase 分支，同样不留旧文案。
-  const sessionLabel = complete ? '导出完成' : (progress?.currentSession || '准备中…')
+  const sessionLabel = complete
+    ? '导出完成'
+    : failed
+      ? '导出失败'
+      : aborted
+        ? '导出已取消'
+        : progress?.currentSession || (phase === 'verifying' ? '正在校验导出结果…' : '准备中…')
   /**
    * "还在跑"的口径 = App 的 busy **或** 主进程快照里的 running。
    *
@@ -192,7 +222,7 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
 
   return (
     <div
-      className={`exp-progress-bar phase-${complete ? 'complete' : phase}`}
+      className={`exp-progress-bar phase-${complete ? 'complete' : failed ? 'failed' : aborted ? 'cancelled' : phase}`}
       // idle：占位但不可见。`visibility` 而不是 `display` —— 后者高度归零，
       // 吸顶块照样会变高，等于没占位。
       data-idle={idle ? 'true' : undefined}
@@ -215,11 +245,17 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
       </span>
       {/* 计数始终占位：total 未知时留空而不是消失，否则右侧「取消导出」会左右横跳 */}
       <span className="exp-progress-count">{total > 0 ? `${Math.min(current, total).toFixed(0)} / ${total}` : ''}</span>
-      {active && !complete && (
-        <button className="ghost-btn exp-progress-cancel" type="button" disabled={!taskId} onClick={cancel}>
-          取消导出
-        </button>
-      )}
+      <button
+        className="ghost-btn exp-progress-cancel"
+        type="button"
+        data-hidden={active && !terminal ? undefined : 'true'}
+        aria-hidden={active && !terminal ? undefined : true}
+        tabIndex={active && !terminal ? undefined : -1}
+        disabled={!active || terminal || !taskId}
+        onClick={cancel}
+      >
+        取消导出
+      </button>
     </div>
   )
 })

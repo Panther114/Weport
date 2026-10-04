@@ -1,6 +1,22 @@
 ![](docs/media/weport-feature-poster.png)
 
+[V1.2 verification and remaining work](docs/v1.2-verification.md) · [GitHub fix list](docs/v1.2-fix-list.md)
+
 ## 📸 截图
+
+V1.2 保留 Electron，增加本地聊天阅读、跨会话搜索、分享海报与诊断。Windows 扫描密钥需覆盖会话库和全部消息分片；扫描连接只读，媒体是否可读单独检查。
+
+V1.2 尚未公开发布。Windows 原生初始化、导出、阅读定位、语音转写、朋友圈与界面修复的当前证据和限制见[验收状态](docs/v1.2-verification.md)。扫描密钥路径仍缺少 1 个 biz-message 分片（6/7），不可视为连接就绪。
+
+**聊天阅读与搜索** —— 在本机浏览聊天，搜索命中精确定位到原消息；注解按账号保存：
+
+![聊天阅读](docs/screenshots/reader.png)
+![跨会话搜索](docs/screenshots/search.png)
+
+**分享海报与诊断** —— 按内容、样式、隐私检查制作 PNG；在设置中检查数据库、任务和运行状态：
+
+![海报](docs/screenshots/poster.png)
+![诊断](docs/screenshots/diagnostics.png)
 
 **连接微信** —— 三步走：数据目录 → 选择账号 → 解密密钥，每一步都带完成状态：
 
@@ -54,7 +70,7 @@
 
 ![人格克隆](docs/screenshots/weclone.png)
 
-**设置** —— 常规 / 外观 / 数据 / 接口 / 关于五个分类；外观支持自定义背景图、强调色与密度：
+**设置** —— 启动、外观、AI、连接器、数据、接口、诊断与问题反馈；支持调色板、固定紧凑导航和带图片的 GitHub 报告草稿：
 
 ![设置](docs/screenshots/settings.png)
 
@@ -85,7 +101,9 @@
 
 ### 🔑 获取解密密钥（重要）
 
-密钥在**微信登录的瞬间**被捕获，无法从已登录的会话中直接读取：
+Windows 会先只读扫描已登录微信的进程内存，并校验会话库与全部消息分片。请先在微信中打开需要读取的历史；未载入的数据库可能还没有可扫描的密钥。
+
+扫描覆盖不完整或当前平台不支持扫描时，使用登录捕获：
 
 1. 打开微信电脑版，在「设置 → 通用」里**关闭「自动登录」**，然后退出当前登录
 2. 点击 Weport 中的**「提取密钥」**，等待出现「已准备就绪」提示
@@ -156,6 +174,7 @@ npm install                       # 安装依赖（Windows 额外同步运行时
 npm run dev                       # 开发模式（vite + electron）
 npm run typecheck                 # 渲染进程 + 主进程类型检查
 npm run build                     # Windows: 构建 NSIS 安装包（release/ 目录）
+npm run build:flash               # Windows: 构建 WeportFlash 便携导出工具
 npm run build:dir                 # 免安装构建（迭代更快）
 npm run build:mac                 # macOS: 构建 DMG + ZIP（arm64）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # Windows UI 冒烟测试（自动截屏 + 内容断言）
@@ -172,9 +191,9 @@ chmod +x resources/key/macos/universal/xkey_helper \
   resources/welive/macos/arm64/welive
 ```
 
-`capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截取 22 个画面（连接 / 导出 / 防撤回 / 消息通知 / WeportAI / 朋友圈 / 分析入口 / 全局分析 / 群聊分析 / 年度报告 / 设置 ×2 / WeBot / WeBot 编辑器 / WeBot 笔记 / 人格克隆 ×3 / 通知弹窗 / 窄窗口 ×2）并逐一断言非空，另外断言：
+`capture-ui.ps1` 使用私有配置与演示数据，离屏截取全部页面、设置分类及通知弹窗，并逐一断言非空。`node scripts/verify-v12-ui.mjs` 另行验证打包后的 XLSX/WASM、搜索定位、阅读器、海报导出及后台任务提示。检查包括：
 
-- 横向不溢出、左侧栏标签不被媒体查询藏起来（986px 与 1426px 两档视口）；
+- 横向不溢出、左侧栏标签不隐藏（1000/1080/1440 DIP 视口）；
 - WeBot 任务卡片与编辑器的实测宽度/列数（防止「列表被挤成 300px、标题每行一两个字」这类回归）；
 - WeportAI 三栏在窄窗口下中间一栏不低于 300px；
 - **屏幕上不出现 `undefined` / `NaN` / `[object Object]`** —— 页面渲染成功、非空白，却把 `undefined` 写给用户看，是断言抓不到的一类缺陷。

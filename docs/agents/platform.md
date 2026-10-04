@@ -2,6 +2,30 @@
 
 > 从 `AGENTS.md` 拆出：这里是模块与历史说明，不是动手前必读的不变量。
 
+## Windows NSIS reinstall (v1.2)
+
+- Windows packaging uses the checked-in `assets/icons/icon.ico` generated from the canonical PNG. This avoids electron-builder's PNG-to-ICO WASM converter failing under memory pressure; refresh both assets together when changing branding. Linux still uses PNG and macOS ICNS.
+
+- The per-user NSIS installer (`perMachine:false`, `oneClick:false`) targets
+  `%LOCALAPPDATA%\Programs\Weport`. Its uninstall registry key is **derived from
+  `appId`**, so every build of every version writes the same key — a probe
+  install (e.g. one unpacked under `.ui-probe/`) silently becomes "the previous
+  installation", and the next `Setup.exe /S` then installs **into that probe
+  directory** while the real install directory keeps the old files. Exit code is
+  still 0 and the installer prints nothing.
+- Therefore never trust the installer's exit code alone: assert the registered
+  `InstallLocation`/written directory, assert the uninstall inventory has exactly
+  one entry, and compare installed `Weport.exe` / `resources/app.asar` /
+  `resources/host/wcdbHost.js` hashes against `release/win-unpacked`.
+  `.ui-probe/install-repair.ps1` does all of that (backup → silent install →
+  hash/profile verification); `reinstall-repair.cjs` backs up and hashes the
+  protected profile files/directories.
+- Before installing over an existing copy, remove both old copies with their own
+  uninstallers (not `rm -rf`) so the registry key is deregistered, and delete any
+  dangling entry pointing at a directory that no longer exists.
+- `Uninstall Weport.exe` must stay out of the source tree; a stray copy plus the
+  shared key is exactly how the hijack above starts.
+
 ## Linux Packaging (v0.9.10)
 
 - `npm run build:linux` → AppImage + tar.gz x64 (`build.linux` in

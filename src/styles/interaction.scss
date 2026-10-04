@@ -1,0 +1,132 @@
+// Shared feedback for every main-window module, including lazy-loaded pages.
+// Palette values come from appearance/theme; semantic outcomes retain their meaning.
+:root {
+  --motion-spring: cubic-bezier(.22, 1.45, .38, 1);
+  --motion-settle: cubic-bezier(.16, 1, .3, 1);
+  --icon-color: var(--accent-2, var(--accent));
+}
+:root[data-mode='light'] { --icon-color: var(--accent); }
+
+:is(.shell, [data-floating-layer='true']) {
+  caret-color: var(--accent);
+
+  ::selection { background: var(--accent-fill-color); color: var(--accent-fill-text); }
+
+  :where(button, [role='button'], a, input, select, textarea, summary) {
+    transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease,
+      box-shadow 180ms ease, transform 240ms var(--motion-spring);
+  }
+
+  :where(button) > svg { color: var(--icon-color); }
+  :is(.primary-btn, .exp-export-btn, .danger-btn) > svg { color: currentColor; }
+  :is(.sp-head, .sp-filter-bar, .sp-empty, .reader-rail-head, .reader-empty,
+    .reader-actions, .dx-head, .dx-group-head, .dx-code-head, .dx-bundle,
+    .bug-report-head, .weclone-card-head, .v09-panel-head) svg {
+    color: var(--icon-color);
+  }
+
+  :where(button, [role='button'], summary):not(:disabled):not([aria-disabled='true']):hover {
+    transform: translateY(-1px);
+  }
+
+  :where(button, [role='button'], summary):not(:disabled):not([aria-disabled='true']):active {
+    transform: translateY(1px) scale(.96);
+    transition-duration: 90ms;
+  }
+
+  :where(button, [role='button'], a, input, select, textarea, summary):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  // Give wayfinding and actions color without recoloring user content or posters.
+  :is(.rail-item, .settings-nav-item, .setting-label, .panel-head h2,
+    .exp-sec-head, .dx-title, .reader-toolbar, .search-toolbar,
+    .secondary-btn, .ghost-btn, .bg-task-icon, .empty-state) > svg {
+    color: var(--icon-color);
+    transition: color 180ms ease, transform 280ms var(--motion-spring);
+  }
+
+  :is(.rail-item, .settings-nav-item, .secondary-btn, .ghost-btn):not(:disabled):hover > svg {
+    transform: rotate(-7deg) scale(1.14);
+  }
+
+  :is(.panel-head h2, .v09-panel-head h3, .v09-toolbar-title h2,
+    .exp-sec-head, .dx-title, .reader-header h2, .search-header h2,
+    .poster-items-panel-heading h3, .poster-step-card-heading h3, .sp-save-title) {
+    color: color-mix(in srgb, var(--text) 72%, var(--accent) 28%);
+  }
+
+  .topbar-title h2 { color: color-mix(in srgb, var(--text) 78%, var(--accent) 22%); }
+  :is(.primary-btn, .exp-export-btn) {
+    background: var(--accent-fill);
+    background-color: var(--accent-fill-color);
+    color: var(--accent-fill-text);
+    border-color: transparent;
+  }
+
+  :is(.primary-btn, .exp-export-btn):not(:disabled):hover {
+    background: color-mix(in srgb, var(--accent-fill-color) 88%, #000);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  :is(.rail-item, .settings-nav-item)[data-active='true'] {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+
+  :is(.badge.ok, .toast.ok, [data-state='ok']) svg { color: var(--ok); }
+  :is(.danger-btn, .toast.fail, [data-state='fail']) svg { color: var(--danger); }
+  :is(.toast.warn, [data-state='warn']) svg { color: var(--warn); }
+
+  .switch .track::after {
+    transition: transform 280ms var(--motion-spring), background-color 180ms ease;
+  }
+
+  .rail-group-items:not([hidden]) { animation: nav-unfold 280ms var(--motion-spring); }
+
+  // Navigation/state reveals are bounded; progress updates never remount/reanimate a page.
+  .workspace > * { animation: surface-arrive 320ms var(--motion-spring); will-change: auto; }
+  .settings-pane > * { animation: surface-arrive 280ms var(--motion-spring); }
+  :is(.settings-pane, .reader-detail, .search-detail) { animation: surface-arrive 260ms var(--motion-settle); }
+  :is(.modal, .dropdown-menu, .popover) { animation: surface-arrive 280ms var(--motion-spring); }
+}
+
+
+
+.settings-pane .dx-page {
+  height: auto;
+  overflow: visible;
+  min-width: 0;
+}
+
+.bg-task-msg b { flex: 0 0 4ch; text-align: right; }
+
+// At short heights tighten spacing enough to keep both groups visible.
+@media (max-height: 680px) {
+  :root[data-density='compact'] .shell .rail { padding-block: 6px; gap: 5px; }
+  .shell .rail-brand { padding-block: 2px; }
+  .shell .rail-group-label { padding-block: 0; line-height: 18px; }
+  :root[data-density='compact'] .shell .rail-nav { gap: 6px; }
+  .shell .rail-foot { font-size: 10px; padding-top: 4px; }
+}
+
+@keyframes nav-unfold {
+  from { opacity: .65; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes surface-arrive {
+  from { opacity: .75; transform: translateY(5px) scale(.992); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.shell, [data-floating-layer='true']) :is(button, [role='button'], a, input, select, textarea, summary, svg, .track::after) {
+    transition-duration: 100ms;
+    transition-property: color, background-color, border-color;
+  }
+  :is(.shell, [data-floating-layer='true']) :is(button, [role='button'], summary):is(:hover, :active) { transform: none; }
+  :is(.shell, [data-floating-layer='true']) :is(.rail-item, .settings-nav-item, .secondary-btn, .ghost-btn):hover > svg { transform: none; }
+  :is(.shell, [data-floating-layer='true']) :is(.rail-group-items, .settings-pane, .reader-detail, .search-detail, .modal, .dropdown-menu, .popover),
+  .shell .workspace > *, .shell .settings-pane > * { animation: none; }
+}

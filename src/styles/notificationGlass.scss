@@ -15,7 +15,7 @@
 .ng {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +773,33 @@
   > svg {
     flex-shrink: 0;
     margin-top: 2px;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1180px) {
+  .ng-preview-head {
+    padding: 8px var(--space-3);
+  }
+
+  .ng-preview-stage {
+    min-height: 116px;
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .ng-preview-foot {
+    padding: 7px var(--space-3);
+  }
+
+  .ng-groups {
+    gap: var(--space-2);
+  }
+
+  .ng-group {
+    padding: 10px 12px 5px;
+  }
+
+  .ng-row {
+    padding: 5px 0;
   }
 }
 

@@ -16,6 +16,12 @@ beforeEach(() => {
 })
 
 describe('运行中的快照总是被采纳', () => {
+  it('rehydrates index and database maintenance jobs after the renderer is rebuilt', () => {
+    for (const key of [LIVE_TASK.searchIndex, LIVE_TASK.databaseMaintenance]) {
+      hydrateFromSnapshots({ [key]: { status: 'running', stage: 'work', progress: 25, message: '后台任务', startedAt: 1000 } })
+      expect(liveTask(key).getState()).toMatchObject({ status: 'running', message: '后台任务', startedAt: 1000 })
+    }
+  })
   it('空 store 会被填成运行中（这正是窗口重建的场景）', () => {
     hydrateFromSnapshots({
       [LIVE_TASK.wecloneGenerate]: {

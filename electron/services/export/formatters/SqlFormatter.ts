@@ -80,10 +80,6 @@ export class SqlFormatter {
         ? sortedMessages.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const { mediaRootDir, mediaRelativePrefix } = this.exportService.getMediaLayout(outputPath, options)
       const mediaMessages = this.exportService.collectMediaMessagesForExport(sortedMessages, options)
       const mediaCache = new Map<string, MediaExportItem | null>()
@@ -153,7 +149,7 @@ export class SqlFormatter {
 
       const voiceTranscriptMap = new Map<string, string>()
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 45,
@@ -170,7 +166,7 @@ export class SqlFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -264,9 +260,9 @@ export class SqlFormatter {
           rawMyWxid: this.exportService.getConfiguredMyWxid(),
           myDisplayName: cleanedMyWxid
         })
-        if (quotedReplyDisplay) {
+        if (quotedReplyDisplay && !shouldUseTranscript) {
           contentValue = this.exportService.buildQuotedReplyText(quotedReplyDisplay)
-        } else {
+        } else if (!shouldUseTranscript) {
           const appendedLinkContent = this.exportService.formatLinkCardExportText(msg.content, msg.localType, 'append-url')
           if (appendedLinkContent) contentValue = appendedLinkContent
         }

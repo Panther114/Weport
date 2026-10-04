@@ -21,6 +21,9 @@ Weport has modified the original material since its initial import on
 2026-08-02. Modifications include the Weport name and user interface, packaging
 and platform support, the WCDB host-process architecture, exports, analytics,
 MCP/HTTP integrations, WeportAI/WeClone features, and subsequent maintenance.
+The Windows x64 native wrapper was adapted on 2026-10-03 to remove two
+expired date checks, retaining the existing host-name and other status checks.
+This is a Weport modification, not an official Tencent or WeFlow binary release.
 
 Original work: Copyright (c) 2026 cc / hicccc77 and WeFlow contributors.
 

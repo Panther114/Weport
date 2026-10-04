@@ -5,18 +5,15 @@ import Store from 'electron-store'
 import { expandHomePath } from '../utils/pathUtils'
 import { CacheMapStore } from './cacheMapStore'
 
-// 条件导入 electron（Worker 环境中不可用）
+// Electron safeStorage is unavailable in the pure Node WCDB host.
 let app: any = null
 let safeStorage: any = null
-const isWorkerThread = process.env.WEFLOW_WORKER === '1'
-if (!isWorkerThread) {
-  try {
-    const electron = require('electron')
-    app = electron.app
-    safeStorage = electron.safeStorage
-  } catch {
-    // Worker 环境中 electron 不可用
-  }
+try {
+  const electron = require('electron')
+  app = electron.app
+  safeStorage = electron.safeStorage
+} catch {
+  // 纯 Node 环境（没有 electron 模块）：app / safeStorage 保持 null，调用方按不可用处理
 }
 
 // 加密前缀标记
@@ -30,6 +27,42 @@ const isSafeStorageAvailable = (): boolean => {
 }
 const LOCK_PREFIX = 'lock:'  // 密码派生密钥加密（锁定模式）
 
+/**
+ * 与 {@link ConfigService} 内部同一套的 `safe:` 加解密，导出给**密钥健康面板**
+ * （`keyHealthService.ts`）复用。
+ *
+ * 为什么必须共用一处：per-DB 密钥也要落盘，如果面板自己再写一套加密，就会出现
+ * "两种加密、两种解密、两种失败表现"，而密钥这种东西最怕的就是"有的能解开、
+ * 有的解不开"。这里的实现与 private `safeEncrypt` / `safeDecrypt` 逐字相同。
+ *
+ * ⚠️ `encryptSecret` 在系统密钥库不可用时**返回明文**（历史行为，很多调用点依赖）。
+ * 需要"宁可写不进去也不要明文落盘"的场景，请用 `keyHealthService` 的
+ * `createElectronCodec()` —— 它会检查 `safe:` 前缀并在拿不到密钥库时抛错。
+ */
+export function isSecretEncryptionAvailable(): boolean {
+  return isSafeStorageAvailable()
+}
+
+export function encryptSecret(plaintext: string): string {
+  if (!plaintext) return ''
+  if (plaintext.startsWith(SAFE_PREFIX)) return plaintext
+  if (!isSafeStorageAvailable()) return plaintext
+  const encrypted = safeStorage.encryptString(plaintext)
+  return SAFE_PREFIX + encrypted.toString('base64')
+}
+
+export function decryptSecret(stored: string): string {
+  if (!stored) return ''
+  if (!stored.startsWith(SAFE_PREFIX)) return stored
+  if (!isSafeStorageAvailable()) return ''
+  try {
+    const buf = Buffer.from(stored.slice(SAFE_PREFIX.length), 'base64')
+    return safeStorage.decryptString(buf)
+  } catch {
+    return ''
+  }
+}
+
 interface ConfigSchema {
   // 数据库相关
   dbPath: string
@@ -39,6 +72,15 @@ interface ConfigSchema {
   imageXorKey: number
   imageAesKey: string
   wxidConfigs: Record<string, { decryptKey?: string; imageXorKey?: number; imageAesKey?: string; updatedAt?: number }>
+  /**
+   * per-DB 密钥库（V12 §1.7 / §10.4）。
+   *
+   * 结构见 `keyHealthService.ts` 的 `DbKeyStoreFile`：`accounts[账号].dbKeys[库 id]`。
+   * 里面的 `key` 一律是 `safe:` 加密形态 —— 这里不做二次加密（外层键没有参与
+   * `ENCRYPTED_STRING_KEYS` / `wxidConfigs` 的加密流程，值由调用方预先加密）。
+   * 类型写成 `unknown` 是刻意的：它不该被当成普通配置项随手读改。
+   */
+  dbKeyStore?: unknown
   exportPath?: string;
   /** Weport 导出格式（TXT / JSON） */
   exportFormat?: 'txt' | 'json';
@@ -69,6 +111,7 @@ interface ConfigSchema {
   exportDefaultConcurrency: number
   exportDefaultPathStyle: 'auto' | 'posix' | 'windows'
   exportDefaultDisplayNamePreference: 'group-nickname' | 'remark' | 'nickname'
+  /** Session favorites are scoped by WeChat wxid so separate accounts stay independent. */
   analyticsExcludedUsernames: string[]
   /** Automatically install anti-revoke triggers for groups discovered after activation. */
   antiRevokeAutoApplyNewGroups: boolean
@@ -620,23 +663,11 @@ export class ConfigService {
   }
 
   private safeEncrypt(plaintext: string): string {
-    if (!plaintext) return ''
-    if (plaintext.startsWith(SAFE_PREFIX)) return plaintext
-    if (!isSafeStorageAvailable()) return plaintext
-    const encrypted = safeStorage.encryptString(plaintext)
-    return SAFE_PREFIX + encrypted.toString('base64')
+    return encryptSecret(plaintext)
   }
 
   private safeDecrypt(stored: string): string {
-    if (!stored) return ''
-    if (!stored.startsWith(SAFE_PREFIX)) return stored
-    if (!isSafeStorageAvailable()) return ''
-    try {
-      const buf = Buffer.from(stored.slice(SAFE_PREFIX.length), 'base64')
-      return safeStorage.decryptString(buf)
-    } catch {
-      return ''
-    }
+    return decryptSecret(stored)
   }
 
   private lockEncrypt(plaintext: string, password: string): string {

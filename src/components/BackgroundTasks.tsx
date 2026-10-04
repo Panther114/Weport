@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowRight, Clock, DatabaseBackup, Download, Fingerprint, Loader2, PlugZap, X } from 'lucide-react'
+import { ArrowRight, Clock, DatabaseBackup, Download, Fingerprint, Loader2, PlugZap, Search, X } from 'lucide-react'
 import { useLiveTask } from '../hooks/useLiveTask'
 import { LIVE_TASK, type LiveTaskState } from '../utils/liveTask'
 
@@ -38,7 +38,7 @@ interface TaskRow {
   label: string
   icon: typeof Download
   /** 点一下跳过去的标签页 id（与 App 的 Tab 类型一致） */
-  tab: 'connect' | 'export' | 'weclone' | 'settings'
+  tab: 'connect' | 'export' | 'weclone' | 'settings' | 'search' | 'diagnostics'
   cancellable: boolean
   /**
    * 这个任务没有百分比可报（备份接口只有成功/失败）。
@@ -52,6 +52,8 @@ const ROWS: TaskRow[] = [
   { key: LIVE_TASK.export, label: '导出聊天记录', icon: Download, tab: 'export', cancellable: true },
   { key: LIVE_TASK.wecloneGenerate, label: '生成 WeClone', icon: Fingerprint, tab: 'weclone', cancellable: true },
   { key: LIVE_TASK.backup, label: '数据备份', icon: DatabaseBackup, tab: 'settings', cancellable: false, indeterminate: true },
+  { key: LIVE_TASK.searchIndex, label: '建立搜索索引', icon: Search, tab: 'search', cancellable: false },
+  { key: LIVE_TASK.databaseMaintenance, label: '数据库维护', icon: DatabaseBackup, tab: 'diagnostics', cancellable: false, indeterminate: true },
 ]
 
 function formatElapsed(ms: number): string {
@@ -64,7 +66,7 @@ function formatElapsed(ms: number): string {
 
 interface Props {
   /** 跳到某个标签页 */
-  onOpen: (tab: 'connect' | 'export' | 'weclone' | 'settings') => void
+  onOpen: (tab: TaskRow['tab']) => void
   /** 取消一个可取消的任务 */
   onCancel: (key: string) => void
 }
@@ -74,11 +76,15 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const exportTask = useLiveTask(LIVE_TASK.export)
   const clone = useLiveTask(LIVE_TASK.wecloneGenerate)
   const backup = useLiveTask(LIVE_TASK.backup)
+  const searchIndex = useLiveTask(LIVE_TASK.searchIndex)
+  const databaseMaintenance = useLiveTask(LIVE_TASK.databaseMaintenance)
   const states: Record<string, LiveTaskState> = {
     [LIVE_TASK.connect]: connect,
     [LIVE_TASK.export]: exportTask,
     [LIVE_TASK.wecloneGenerate]: clone,
     [LIVE_TASK.backup]: backup,
+    [LIVE_TASK.searchIndex]: searchIndex,
+    [LIVE_TASK.databaseMaintenance]: databaseMaintenance,
   }
 
   const running = ROWS.filter((row) => states[row.key]?.status === 'running')
@@ -99,7 +105,8 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   if (running.length === 0) return null
 
   return (
-    <div className="bg-tasks" role="status" aria-live="polite">
+    <div className="bg-tasks" role="region" aria-label="后台任务">
+      <span className="sr-only" role="status">{running.map(row => row.label).join('、')}正在运行</span>
       {running.map((row) => {
         const state = states[row.key]
         const Icon = row.icon
@@ -118,10 +125,10 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
                   {elapsed}
                 </span>
               </div>
-              <div className="bg-task-msg" title={state.message}>
+              <div className="bg-task-msg">
                 <Loader2 size={10} className="spin" />
                 <span>{state.message || '进行中…'}</span>
-                {!row.indeterminate && pct > 0 && <b>{Math.round(pct)}%</b>}
+                {!row.indeterminate && <b>{Math.round(pct)}%</b>}
               </div>
               <div className="bg-task-track">
                 <div

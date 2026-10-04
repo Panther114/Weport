@@ -182,7 +182,12 @@ function anchorPopupBounds(options: {
   if (horizontal && options.slideFrom === "left") x -= travel;
   if (vertical) y -= travel;
 
-  return { x: Math.floor(x), y: Math.floor(y), width: Math.round(width), height: Math.round(height) };
+  return {
+    x: process.env.WEPORT_PROBE_OFFSCREEN === "1" ? -4000 : Math.floor(x),
+    y: process.env.WEPORT_PROBE_OFFSCREEN === "1" ? 0 : Math.floor(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
 }
 /** 滑动轴上的卡片尺寸（水平滑动看宽度，垂直滑动看高度）。 */
 function cardAxis(cardWidth: number, cardHeight: number, horizontal: boolean): number {
@@ -221,20 +226,23 @@ let lastCardMetrics: { width: number; height: number; slideFrom?: string; room: 
  * 放开约束 → 一次 setBounds 定死 → 再锁上，中间不会出现第二个几何状态。
  */
 function applyPopupBounds(win: BrowserWindow, bounds: { x: number; y: number; width: number; height: number }): boolean {
+  const target = process.env.WEPORT_PROBE_OFFSCREEN === "1"
+    ? { ...bounds, x: -4000, y: 0 }
+    : bounds;
   const current = win.getBounds();
   if (
-    Math.round(current.width) === bounds.width &&
-    Math.round(current.height) === bounds.height &&
-    Math.round(current.x) === bounds.x &&
-    Math.round(current.y) === bounds.y
+    Math.round(current.width) === target.width &&
+    Math.round(current.height) === target.height &&
+    Math.round(current.x) === target.x &&
+    Math.round(current.y) === target.y
   ) {
     return false;
   }
   win.setMinimumSize(1, 1);
   win.setMaximumSize(100_000, 100_000);
-  win.setBounds(bounds);
-  win.setMinimumSize(bounds.width, bounds.height);
-  win.setMaximumSize(bounds.width, bounds.height);
+  win.setBounds(target);
+  win.setMinimumSize(target.width, target.height);
+  win.setMaximumSize(target.width, target.height);
   return true;
 }
 
@@ -409,7 +417,7 @@ async function refreshDesktopSourceId(): Promise<string | null> {
 /** 启动时预热采集源，让首条通知不必等采集管线初始化 */
 export function prewarmDesktopSourceId(): void {
   // Linux 默认走系统通知，应用内弹窗只是无采集的兜底，没有可预热的东西
-  if (process.platform === "linux") return;
+  if (process.platform === "linux" || process.env.WEPORT_PROBE_OFFSCREEN === "1") return;
   if (nativeGlass) return;
   void refreshDesktopSourceId();
 }
@@ -500,6 +508,53 @@ function grabFastBackdropFrame(): { data: string; pixels: number; rect: { x: num
   return { data: captured.pixels.toString("base64"), pixels: captured.pixels.length, rect };
 }
 
+/**
+ * Off-screen performance probes must exercise the renderer's glass path without reading the
+ * user's desktop. This deterministic BGRA tile has the same card-plus-blur-margin geometry as
+ * the GDI capture and still measures base64 transfer, renderer decode, and glass composition.
+ * Its pixels are synthetic; it deliberately does not call GDI, desktopCapturer, or WGC.
+ */
+let probeBackdropBuffer: Buffer | null = null;
+let probeBackdropRect: { x: number; y: number; width: number; height: number } | null = null;
+function grabProbeBackdropFrame(): { data: string; pixels: number; rect: { x: number; y: number; width: number; height: number } } | null {
+  if (!notificationWindow || notificationWindow.isDestroyed()) return null;
+  const [winX, winY] = notificationWindow.getPosition();
+  const [winW, winH] = notificationWindow.getSize();
+  const rect = {
+    x: winX - FAST_CAPTURE_MARGIN,
+    y: winY - FAST_CAPTURE_MARGIN,
+    width: Math.max(8, Math.round(winW + FAST_CAPTURE_MARGIN * 2)),
+    height: Math.max(8, Math.round(winH + FAST_CAPTURE_MARGIN * 2)),
+  };
+  const byteLength = rect.width * rect.height * 4;
+  if (!probeBackdropBuffer || probeBackdropBuffer.length !== byteLength) {
+    probeBackdropBuffer = Buffer.allocUnsafe(byteLength);
+    for (let y = 0; y < rect.height; y += 1) {
+      for (let x = 0; x < rect.width; x += 1) {
+        const offset = (y * rect.width + x) * 4;
+        probeBackdropBuffer[offset] = (x * 3 + y) & 0xff;
+        probeBackdropBuffer[offset + 1] = (y * 5 + x) & 0xff;
+        probeBackdropBuffer[offset + 2] = (x + y * 2) & 0xff;
+        probeBackdropBuffer[offset + 3] = 0xff;
+      }
+    }
+    probeBackdropRect = rect;
+  } else if (
+    !probeBackdropRect ||
+    probeBackdropRect.width !== rect.width ||
+    probeBackdropRect.height !== rect.height ||
+    probeBackdropRect.x !== rect.x ||
+    probeBackdropRect.y !== rect.y
+  ) {
+    probeBackdropRect = rect;
+  }
+  return {
+    data: probeBackdropBuffer.toString("base64"),
+    pixels: probeBackdropBuffer.length,
+    rect: probeBackdropRect ?? rect,
+  };
+}
+
 async function grabDesktopFrame(): Promise<string | null> {
   const startedAt = Date.now();
   try {
@@ -544,7 +599,9 @@ async function runBackdropStream() {
   if (backdropRunning || nativeGlass) return;
   if (!notificationWindow || notificationWindow.isDestroyed()) return;
   backdropRunning = true;
-  setLiveGlassProtection(true);
+  const probeOffscreen = process.env.WEPORT_PROBE_OFFSCREEN === "1";
+  const fastCadence = probeOffscreen || fastBackdropEnabled();
+  if (!probeOffscreen) setLiveGlassProtection(true);
   let invisibleStreak = 0;
   let frameIndex = 0;
   while (backdropRunning && notificationWindow && !notificationWindow.isDestroyed()) {
@@ -576,10 +633,17 @@ async function runBackdropStream() {
        *
        * 两条路都只在弹窗可见期间跑，隐藏即停。
        */
-      const fastEnabled = fastBackdropEnabled();
+      const fastEnabled = !probeOffscreen && fastCadence;
       const frameStartedAt = Date.now();
-      const fastFrame = fastEnabled ? grabFastBackdropFrame() : null;
-      if (fastFrame) lastFrameCostMs = Math.max(1, Date.now() - frameStartedAt);
+      const fastFrame = probeOffscreen
+        ? grabProbeBackdropFrame()
+        : fastEnabled
+          ? grabFastBackdropFrame()
+          : null;
+      if (fastFrame) {
+        // Match the measured v1.1 GDI sampling cadence without touching the real desktop.
+        lastFrameCostMs = probeOffscreen ? 11 : Math.max(1, Date.now() - frameStartedAt);
+      }
       const dataUrl = fastFrame ? null : await grabDesktopFrame();
       if (!backdropRunning) break;
       if (fastFrame && notificationWindow && !notificationWindow.isDestroyed()) {
@@ -626,7 +690,7 @@ async function runBackdropStream() {
     }
     // 帧间隔：快速路径 5~22ms/帧，间隔按 3× 成本取 33~66ms（约 15~30fps）；
     // 兜底路径仍是 3× 成本、200~1000ms（约 0.7~5fps）
-    const interval = fastBackdropEnabled()
+    const interval = fastCadence
       ? Math.max(33, Math.min(100, Math.round(lastFrameCostMs * 3) || 50))
       : Math.max(200, Math.min(1000, Math.round(lastFrameCostMs * 3) || 300));
     await new Promise<void>((resolve) => {
@@ -661,7 +725,15 @@ export function getBackdropSeq(): number {
 }
 
 function setLiveGlassProtection(on: boolean) {
-  if (nativeGlass || liveGlassProtectionSuppressed) return;
+  // `WEPORT_QA_NOPROTECT=1`：截图 QA 专用 —— 不上 WDA_EXCLUDEFROMCAPTURE，
+  // 否则 PrintWindow/BitBlt 都把弹窗排除掉（win.capture 一律纯黑），根本拍不到卡片。
+  // 生产路径绝不能带这个环境变量：保护一撤，抓帧就会把弹窗自己拍进玻璃/窗外景。
+  if (
+    nativeGlass ||
+    liveGlassProtectionSuppressed ||
+    process.env.WEPORT_QA_NOPROTECT === "1" ||
+    process.env.WEPORT_PROBE_OFFSCREEN === "1"
+  ) return;
   if (!notificationWindow || notificationWindow.isDestroyed()) return;
   if (liveGlassProtection === on) return;
   try {
@@ -725,6 +797,7 @@ export function createNotificationWindow() {
   notificationWindow = new BrowserWindow({
     width: width,
     height: height,
+    ...(process.env.WEPORT_PROBE_OFFSCREEN === "1" ? { x: -4000, y: 0 } : {}),
     type: "toolbar", // 辅助置顶（仅 Windows 走此窗口）
     frame: false,
     // 无边框透明窗口：不会出现 DWM 材质窗口的系统描边，
@@ -747,6 +820,9 @@ export function createNotificationWindow() {
       // devTools: true // Enable DevTools
     },
   });
+  if (process.env.WEPORT_PROBE_OFFSCREEN === "1") {
+    notificationWindow.webContents.setBackgroundThrottling(false);
+  }
 
   // 内容保护（WDA_EXCLUDEFROMCAPTURE）与"玻璃能不能实时"是同一个取舍的两端：
   //   - 关着它：系统截图/录屏能看到弹窗，但桌面视频流会把弹窗自己拍进去，
@@ -1016,8 +1092,8 @@ async function showAndSend(win: BrowserWindow, data: any) {
     cardHeight: winHeight,
     settled: true,
   });
-  const winX = initialBounds.x;
-  const winY = initialBounds.y;
+  const winX = process.env.WEPORT_PROBE_OFFSCREEN === "1" ? -4000 : initialBounds.x;
+  const winY = process.env.WEPORT_PROBE_OFFSCREEN === "1" ? 0 : initialBounds.y;
   // 窗口的**当前实际**尺寸（DIP）：主题采样要靠它把取样点挪出窗口，见下面的 winW/winH
   const [currentWinW, currentWinH] = win.getSize();
 
@@ -1071,8 +1147,8 @@ async function showAndSend(win: BrowserWindow, data: any) {
           // 自动落到主进程的定帧循环（runBackdropStream）。
           // `streamUnavailable`：这台机器上 WGC 已经被证明起不来（见上面的说明），
           // 渲染层据此**跳过**那次注定失败的 getUserMedia（省掉每条约 150ms）。
-          sourceId: nativeGlass ? null : cachedSourceId,
-          streamUnavailable: desktopStreamUnavailable,
+          sourceId: nativeGlass || process.env.WEPORT_PROBE_OFFSCREEN === "1" ? null : cachedSourceId,
+          streamUnavailable: process.env.WEPORT_PROBE_OFFSCREEN === "1" || desktopStreamUnavailable,
           ...backdropGeometry,
         },
   };
@@ -1088,7 +1164,10 @@ async function showAndSend(win: BrowserWindow, data: any) {
    * （多留的那一段永远在卡片背后那一侧）。
    */
   if (!win.isVisible()) {
-    win.setPosition(winX, winY);
+    win.setPosition(
+      process.env.WEPORT_PROBE_OFFSCREEN === "1" ? -4000 : winX,
+      process.env.WEPORT_PROBE_OFFSCREEN === "1" ? 0 : winY,
+    );
     // 窗口高度始终沿用渲染层的实测校准值（notification:resize），
     // 这里只同步宽度；反复重置高度会造成 114→实测高度的弹跳闪烁
     const [, currentHeight] = win.getSize();
@@ -1273,7 +1352,8 @@ export async function registerNotificationHandlers() {
   }, 3000);
 
   // Handle resize request from renderer
-  ipcMain.on("notification:resize", (event, payload) => {    const cardWidth = Math.round(Number(payload?.width) || 0);
+  ipcMain.on("notification:resize", (event, payload) => {
+    const cardWidth = Math.round(Number(payload?.width) || 0);
     const cardHeight = Math.round(Number(payload?.height) || 0);
     if (cardWidth < 1 || cardHeight < 1) return;
     /**

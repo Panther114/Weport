@@ -6,6 +6,8 @@ import * as path from 'path'
 import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
+import { sourceFingerprint } from '../sourceFingerprint'
+import { sourceMessageIdentityHash } from '../sourceMessageIdentity'
 import { fileURLToPath } from 'url'
 // 只用类型（ExcelJS.Cell 出现在下面两个公开方法的签名里）；运行时按需动态加载，
 // 避免所有导出（哪怕是 TXT）都背上 exceljs 的 ~18MB 常驻。见 ExcelFormatter.ts 说明。
@@ -15,6 +17,7 @@ import { ConfigService } from '../../config'
 import { wcdbService } from '../../wcdbService'
 import { imageDecryptService } from '../../imageDecryptService'
 import { chatService } from '../../chatService'
+import { extractWechatVoiceTranscript, extractWechatVoiceTranscriptFromPackedInfo } from '../../voiceTranscript'
 import { exportRecordService } from '../../exportRecordService'
 import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
@@ -34,6 +37,29 @@ import { resolveGroupNicknameByCandidates, buildGroupNicknameIdCandidates, norma
 import { getAvatarFallback } from '../../export/contacts/avatarHelper';
 import { pathExists, ensureExportDir, copyFileOptimized, hardlinkOrCopyFile } from '../../export/media/fileCopy';
 import { getMediaFileStat } from '../../export/media/attachmentResolver';
+import {
+    MediaDedupeCache,
+    MediaHashIndex,
+    hashFileContent,
+    fingerprintKey,
+    normalizeRelPath,
+    verifyMediaAgainstLedger,
+} from '../../export/mediaDedupeCache';
+import type { LedgerMediaEntry } from '../../export/ledger';
+import { atomicWriteFile, atomicWriteWith, createAtomicWriteTarget } from '../../export/atomicWrite';
+import { CONFIRMED_EMPTY_SESSION_SKIP, hasConfirmedEmptyMessageInventory } from './emptySession'
+
+function hasNonEmptyPackedInfoData(value: unknown): boolean {
+    if (value === undefined || value === null) return false
+    if (typeof value === 'string') return value.trim().length > 0
+    if (ArrayBuffer.isView(value as ArrayBufferView)) return (value as ArrayBufferView).byteLength > 0
+    if (value instanceof ArrayBuffer) return value.byteLength > 0
+    if (Array.isArray(value)) return value.length > 0
+    if (typeof value === 'object' && Array.isArray((value as { data?: unknown }).data)) {
+        return ((value as { data: unknown[] }).data).length > 0
+    }
+    return true
+}
 
 // Weport 裁剪：视频/语音转写服务已移除（文本导出不涉及），保留等价兜底。
 // 若未来恢复媒体导出，把以下两个 stub 换回真实服务即可。
@@ -51,12 +77,13 @@ const videoServiceStub = {
     thumbUrl: '',
   }),
 }
-const voiceTranscribeServiceStub = {
-  getModelStatus: async (): Promise<any> => ({ success: false, exists: false }),
-  downloadModel: async (..._args: unknown[]): Promise<any> => ({ success: false }),
-}
 
 export class ExportContext {
+  /** Inject a fixture database for integration checks; production uses WCDB by default. */
+  public integrityDbAccess?: import('../integrityChecker').IntegrityDbAccess
+  public getSourceFingerprint(includeMedia = false): Promise<string | null> {
+    return sourceFingerprint(this.getConfiguredAccountDir(), includeMedia)
+  }
     private configService: ConfigService;
     private runtimeConfig: { dbPath?: string; decryptKey?: string; myWxid?: string; accountDir?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean } | null = null;
     private contactCache: LRUCache<string, { displayName: string; avatarUrl?: string }>;
@@ -74,6 +101,17 @@ export class ExportContext {
     private mediaExportTelemetry: MediaExportTelemetry | null = null;
     private mediaRunSourceDedupMap = new Map<string, string>();
     private mediaRunMissingImageKeys = new Set<string>();
+    // ---- v1.2 §10.1 ①：账本 / 媒体去重 / 原子写 ---------------------------------
+    /** 账本说"已完成且磁盘校验通过"而跳过的会话数（只读遥测）。 */
+    private ledgerSkipCount = 0;
+    /** 账本记录与磁盘不符而必须重导的次数（按原因计数）。 */
+    private ledgerMismatchCounts = new Map<string, number>();
+    /** 本次运行的账本媒体索引（相对路径 → {sha256,bytes}）。 */
+    private ledgerMediaIndex = new MediaHashIndex();
+    /** 内容哈希 → 本次运行里已写出的产物路径（跨会话去重复制）。 */
+    private contentAddressedMedia = new Map<string, string>();
+    /** 解密结果缓存（键含密钥**指纹**，绝不含密钥原文），惰性创建。 */
+    private mediaDedupeCache: MediaDedupeCache | null = null;
     private activeChatImagePipelineCount = 0;
     private chatImagePipelineWaiters: Array<() => void> = [];
     // A single limiter is shared by all session formatters in one export run.
@@ -156,11 +194,10 @@ export class ExportContext {
         if (this.contactMetadataOpenPromise) return this.contactMetadataOpenPromise
         this.contactMetadataOpenPromise = (async () => {
           try {
-            const accountDir = this.getConfiguredAccountDir()
-            const decryptKey = String(this.runtimeConfig?.decryptKey || this.configService.get('decryptKey') || '').trim()
-            if (!accountDir || !decryptKey) return false
             if (await wcdbService.isConnected().catch(() => false)) return true
-            return await wcdbService.open(accountDir, decryptKey)
+            const accountDir = this.getConfiguredAccountDir()
+            if (!accountDir) return false
+            return (await chatService.connect()).success
           } catch {
             return false
           }
@@ -312,36 +349,248 @@ export class ExportContext {
      * - 写中途失败：旧导出文件保持原样（不再被截断/写残），临时文件被清理；
      * - 流错误立即捕获（不再等到 end() 才挂 error 监听导致崩溃/挂死）。
      * 同目录临时文件保证 rename 在同一卷内原子完成。
+     * v1.2 §10.1：实现搬到 `export/atomicWrite.ts`（tmp-<pid> → fsync → os.replace），
+     * 这里保留原签名，五个流式格式化器无需改动。
      */
     public createAtomicWriteTarget(outputPath: string): { stream: fs.WriteStream; commit: () => Promise<void>; abort: () => void } {
-        const tmpPath = `${outputPath}.${process.pid}.tmp`
-        const stream = fs.createWriteStream(tmpPath, { encoding: 'utf-8' })
-        let writeError: Error | null = null
-        stream.on('error', (err) => {
-          writeError = err
+        const target = createAtomicWriteTarget(outputPath)
+        return { stream: target.stream, commit: target.commit, abort: target.abort }
+    }
+
+    /**
+     * v1.2 §10.1：格式化器整体写产物（JSON/JSONL/头像等）的原子写入口。
+     * ChatLab / Json / Excel 以前直接 `fs.writeFile(outputPath)` —— 中断会留下半截文件。
+     */
+    public async writeArtifactFile(
+        outputPath: string,
+        data: string | Buffer,
+        encoding?: BufferEncoding,
+    ): Promise<{ bytes: number }> {
+        return atomicWriteFile(outputPath, data, encoding)
+    }
+
+    /** v1.2 §10.1：把"写临时文件"的库调用（exceljs）包成原子写。 */
+    public async writeArtifactWith(
+        outputPath: string,
+        writeTmp: (tmpPath: string) => Promise<void>,
+    ): Promise<{ bytes: number }> {
+        return atomicWriteWith(outputPath, writeTmp)
+    }
+
+
+    // ---------------------------------------------------------------------
+    // v1.2 §10.1 ①：账本 / 媒体去重 / 原子写辅助
+    // ---------------------------------------------------------------------
+
+    /** 账本说已完成且磁盘校验通过，本次跳过。 */
+    public noteLedgerSkip(): void {
+        this.ledgerSkipCount += 1
+    }
+
+    /** 账本记录与磁盘不符（missing / size-mismatch / sha-mismatch），本次重导。 */
+    public noteLedgerMismatch(reason: string): void {
+        const key = String(reason || 'unknown')
+        this.ledgerMismatchCounts.set(key, (this.ledgerMismatchCounts.get(key) || 0) + 1)
+    }
+
+    /** 本次运行的账本命中统计（诊断/测试用）。 */
+    public getLedgerRunStats(): { skips: number; mismatches: Record<string, number> } {
+        const mismatches: Record<string, number> = {}
+        for (const [reason, count] of this.ledgerMismatchCounts) mismatches[reason] = count
+        return { skips: this.ledgerSkipCount, mismatches }
+    }
+
+    /**
+     * 载入账本的媒体清单，供"续跑不重复复制/转码"使用。
+     * `outputRoot` 是账本所在的导出根目录：账本里存的是**相对**路径，
+     * 必须带上根目录才能在 shared / per-session 两种布局下都还原成正确的绝对路径。
+     */
+    public loadLedgerMediaIndex(entries: LedgerMediaEntry[] | undefined, outputRoot = ''): void {
+        this.ledgerMediaIndex = new MediaHashIndex(Array.isArray(entries) ? entries : [], outputRoot)
+    }
+
+    public getLedgerMediaIndex(): MediaHashIndex {
+        return this.ledgerMediaIndex
+    }
+
+    /**
+     * 解密缓存目录：放 userData 下的 `media-dedupe-cache`（绝不写微信目录）。
+     * 拿不到 userData（纯 Node 测试）时退化为不缓存。
+     */
+    private getMediaDedupeCacheDir(): string | null {
+        const runtime = this.runtimeConfig as { appPath?: string; userDataPath?: string } | null
+        const userData = String(runtime?.userDataPath || '').trim()
+        if (userData) return path.join(userData, 'media-dedupe-cache')
+        const appPath = String(runtime?.appPath || '').trim()
+        if (appPath) return path.join(path.dirname(appPath), 'media-dedupe-cache')
+        return null
+    }
+
+    public getMediaDedupeCache(): MediaDedupeCache | null {
+        if (this.mediaDedupeCache) return this.mediaDedupeCache
+        const dir = this.getMediaDedupeCacheDir()
+        if (!dir) return null
+        this.mediaDedupeCache = new MediaDedupeCache(dir)
+        return this.mediaDedupeCache
+    }
+
+    /** 当前密钥指纹（单向、定长，可安全进缓存键与日志；**从不是密钥本身**）。 */
+    public getMediaKeyFingerprint(): string {
+        const raw = String(this.runtimeConfig?.decryptKey || this.configService.get('decryptKey') || '')
+        const imageAesKey = String(this.runtimeConfig?.imageAesKey || '')
+      const accountRef = path.basename(this.getConfiguredAccountDir())
+      const keyStore = this.configService.get('dbKeyStore') as any
+      const accountKeys = keyStore?.accounts?.[accountRef]?.dbKeys
+      const scannedKeySet = accountKeys && typeof accountKeys === 'object'
+        ? Object.entries(accountKeys)
+            .map(([id, entry]: [string, any]) => `${id}:${String(entry?.fingerprint || '')}:${String(entry?.salt || '')}`)
+            .sort()
+            .join('|')
+        : ''
+      return fingerprintKey(`${raw}\u001f${imageAesKey}\u001f${scannedKeySet}`)
+    }
+
+    /**
+     * 解密结果缓存查询：键 = `(源路径, mtime, size, 密钥指纹)`。
+     * 库没变 + 密钥没变 → 同一张图不必再解一次。命中返回产物路径。
+     */
+    public async resolveDecryptCacheHit(sourcePath: string): Promise<string | null> {
+        const cache = this.getMediaDedupeCache()
+        if (!cache) return null
+        const stat = await getMediaFileStat(sourcePath)
+        if (!stat) return null
+        const entry = await cache.get({
+            sourcePath,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            keyFingerprint: this.getMediaKeyFingerprint(),
         })
-        const commit = (): Promise<void> =>
-          new Promise<void>((resolve, reject) => {
-            stream.end(() => {
-              if (writeError) {
-                fs.promises.unlink(tmpPath).catch(() => { /* noop */ })
-                reject(writeError)
-                return
-              }
-              try {
-                fs.renameSync(tmpPath, outputPath)
-                resolve()
-              } catch (e) {
-                fs.promises.unlink(tmpPath).catch(() => { /* noop */ })
-                reject(e)
-              }
-            })
-          })
-        const abort = (): void => {
-          try { stream.destroy() } catch { /* noop */ }
-          fs.promises.unlink(tmpPath).catch(() => { /* noop */ })
+        return entry?.cachedPath || null
+    }
+
+    /** 记一条解密结果（产物路径 + 内容哈希）。 */
+    public async rememberDecryptResult(sourcePath: string, cachedPath: string): Promise<void> {
+        const cache = this.getMediaDedupeCache()
+        if (!cache) return
+        const stat = await getMediaFileStat(sourcePath)
+        if (!stat) return
+        const hash = await hashFileContent(cachedPath)
+        if (!hash) return
+        await cache.put({
+            sourcePath,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            keyFingerprint: this.getMediaKeyFingerprint(),
+            cachedPath,
+            sha256: hash.sha256,
+        })
+    }
+
+    /** 账本媒体清单里，相对路径 → 记录的条目。 */
+    public lookupLedgerMedia(relativePath: string): LedgerMediaEntry | undefined {
+        return this.ledgerMediaIndex.get(relativePath)
+    }
+
+    /** 账本媒体清单里的全部内容哈希（供"跨布局认领"：同一份媒体只导一份）。 */
+    public listLedgerMediaHashes(): Array<{ sha256: string; bytes: number; path: string }> {
+        return this.ledgerMediaIndex.listAll().map((entry) => ({
+            sha256: entry.sha256,
+            bytes: entry.bytes,
+            path: entry.path,
+        }))
+    }
+
+    /**
+     * 对**绝对路径**上的产物做"账本校验"：账本里同一个会话目录下有没有一份
+     * 同内容、且磁盘上仍然一致的文件。
+     *
+     * 为什么按键值对认领、而不是直接还原账本里的路径：导出布局（shared /
+     * per-session）与文件名（冲突改名 `_2`）都会让"这次的路径"与"上次记录的路径"
+     * 不同，但内容是同一份。只要哈希对得上，直接认领（复用）比重新复制更快，
+     * 而且不会产出两份一模一样的媒体。
+     */
+    public async findLedgerMediaForAbsolutePath(
+        absolutePath: string,
+    ): Promise<{ reusePath: string; bytes: number } | null> {
+        if (this.ledgerMediaIndex.size === 0) return null
+        const fileName = path.basename(absolutePath)
+        const dirName = path.basename(path.dirname(absolutePath))
+        const candidates = this.ledgerMediaIndex.find((entry) => {
+            if (path.basename(entry.path) !== fileName) return false
+            if (dirName && !entry.path.includes(`/${dirName}/`)) return false
+            return true
+        })
+        for (const candidate of candidates) {
+            const absolute = this.ledgerMediaIndex.resolveAbsolute(candidate.path)
+            if (!absolute) continue
+            if (path.resolve(absolute) === path.resolve(absolutePath)) continue
+            const decision = await verifyMediaAgainstLedger(absolute, candidate)
+            if (decision.skip) {
+                this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+                return { reusePath: absolute, bytes: candidate.bytes }
+            }
         }
-        return { stream, commit, abort }
+        return null
+    }
+
+    /**
+     * 一条媒体能否因为"账本已记录 + 磁盘一致"直接跳过。
+     * 只有**内容哈希也对得上**才算跳过：文件存在但被截断/被改过一律重做。
+     */
+    public async tryReuseLedgerMedia(relativePath: string, destPath: string): Promise<{ reused: boolean; reason?: string }> {
+        const relPath = normalizeRelPath(relativePath)
+        if (!relPath) return { reused: false, reason: 'empty-path' }
+        const entry = this.ledgerMediaIndex.get(relPath)
+        if (!entry) return { reused: false, reason: 'no-record' }
+        const absolute = this.ledgerMediaIndex.resolveAbsolute(relPath) || destPath
+        if (path.resolve(absolute) !== path.resolve(destPath)) {
+            // 布局变了：账本记录的位置不是这次的落点，交给调用方按内容哈希另做一次核对
+            return { reused: false, reason: 'path-mismatch' }
+        }
+        const decision = await verifyMediaAgainstLedger(destPath, entry)
+        if (decision.skip) {
+            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+            return { reused: true }
+        }
+        return { reused: false, reason: decision.reason }
+    }
+
+    /**
+     * 内容寻址复用：同一份内容（sha256）在本次运行里已经写过一份 → 用 hardlink 复用，
+     * 不重复复制/转码。`destPath` 与已写路径相同则什么都不用做。
+     */
+    public async reuseByContentHash(sha256: string, destPath: string, control?: ExportTaskControl): Promise<boolean> {
+        if (!sha256) return false
+        const existing = this.contentAddressedMedia.get(sha256)
+        if (!existing) return false
+        if (path.resolve(existing) === path.resolve(destPath)) return true
+        if (!await pathExists(existing)) {
+            this.contentAddressedMedia.delete(sha256)
+            return false
+        }
+        const existedBefore = await pathExists(destPath)
+        const linked = await hardlinkOrCopyFile(existing, destPath)
+        if (!linked.success) return false
+        this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+        if (!existedBefore) control?.recordCreatedFile?.(destPath)
+        return true
+    }
+
+    /** 记住"这份内容已经写在这个路径"，供同一运行内的后续媒体复用。 */
+    public rememberContentAddress(sha256: string, destPath: string): void {
+        if (!sha256) return
+        this.contentAddressedMedia.set(sha256, path.resolve(destPath))
+    }
+
+    public getContentAddressedCount(): number {
+        return this.contentAddressedMedia.size
+    }
+
+    /** 清掉本次运行的账本遥测与内容寻址表（媒体清单由 loadLedgerMediaIndex 单独装载）。 */
+    public resetLedgerRuntimeState(): void {
+        this.ledgerSkipCount = 0
+        this.ledgerMismatchCounts.clear()
+        this.contentAddressedMedia.clear()
     }
 
     public async createWeliveRawOutputPlaceholder(outputPath: string, control?: ExportTaskControl): Promise<void> {
@@ -639,14 +888,39 @@ export class ExportContext {
         return code === 'EXDEV' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL' || code === 'ENOSYS' || code === 'ENOTSUP'
     }
 
-    private async copyMediaWithCacheAndDedup(kind: 'image' | 'video' | 'emoji', sourcePath: string, destPath: string, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<{ success: boolean; code?: string }> {
+    private async copyMediaWithCacheAndDedup(kind: 'image' | 'video' | 'emoji', sourcePath: string, destPath: string, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>, relativePath?: string): Promise<{ success: boolean; code?: string }> {
         const existedBeforeCopy = await pathExists(destPath);
         if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
-          this.noteMediaTelemetry({
-            doneFiles: 1,
-            dedupReuseFiles: 1
-          })
-          return { success: true }
+          // v1.2 §10.1：账本里有这一条时，必须按内容核对（大小 + sha256）才允许复用；
+          // 账本说"这一份"、磁盘上却是半截/被改过 → 重做，不能因为"文件在"就跳过。
+          const ledgerEntry = relativePath ? this.ledgerMediaIndex.get(relativePath) : undefined
+          if (!ledgerEntry) {
+            this.noteMediaTelemetry({
+              doneFiles: 1,
+              dedupReuseFiles: 1
+            })
+            return { success: true }
+          }
+          const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
+          if (verified.skip) {
+            this.noteMediaTelemetry({
+              doneFiles: 1,
+              dedupReuseFiles: 1
+            })
+            return { success: true }
+          }
+          this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
+        }
+        // v1.2 §10.1：账本命中（相对路径 + 内容哈希都对得上）→ 真跳过
+        if (relativePath) {
+          const reuse = await this.tryReuseLedgerMedia(relativePath, destPath)
+          if (reuse.reused) return { success: true }
+        }
+        // v1.2 §10.1：同一份内容本次已经写过一份 → hardlink 复用，不重复复制/转码
+        const sourceHash = await hashFileContent(sourcePath)
+        if (sourceHash && sourceHash.sha256) {
+          const reusedByContent = await this.reuseByContentHash(sourceHash.sha256, destPath, control)
+          if (reusedByContent) return { success: true }
         }
         const resolved = await this.resolvePreferredMediaSource(kind, sourcePath);
         if (resolved.cacheHit) {
@@ -680,6 +954,10 @@ export class ExportContext {
         if (dedupeKey) {
           this.mediaRunSourceDedupMap.set(dedupeKey, destPath)
         }
+        // v1.2 §10.1：把"这份内容已经落在这个路径"记下来，供同一运行内后续媒体复用。
+        // 源文件内容哈希比"源路径 + mtime"更可靠（清理缓存/换导出目录后仍能命中）。
+        const copyHash = await hashFileContent(destPath)
+        if (copyHash) this.rememberContentAddress(copyHash.sha256, destPath)
 
         this.noteMediaTelemetry({
           doneFiles: 1,
@@ -1005,14 +1283,17 @@ export class ExportContext {
             }
             senderSet.add(actualSender)
 
-            const localIdRaw = Number(item?.localId || 0)
-            const localId = Number.isFinite(localIdRaw) ? Math.floor(localIdRaw) : 0
+            const localIdValue = Number(item?.localId || 0)
+            const localId = Number.isFinite(localIdValue) ? Math.floor(localIdValue) : 0
             const serverIdRawToken = this.normalizeUnsignedIntToken(item?.serverId)
             const serverIdValue = Number.parseInt(serverIdRawToken, 10)
 
             const imageMd5 = String(item?.imageMd5 || '').trim().toLowerCase()
             const imageDatName = String(item?.imageDatName || '').trim().toLowerCase()
             const videoMd5 = String(item?.videoMd5 || '').trim().toLowerCase()
+            const content = String(item?.content || '')
+            const voiceTranscriptRowData = this.getVoiceTranscriptRowData(item || {}, content, localType)
+            const sourceIdentity = this.getMessageSourceIdentity(item || {})
 
             rows.push({
               localId,
@@ -1020,9 +1301,13 @@ export class ExportContext {
               serverIdRaw: serverIdRawToken !== '0' ? serverIdRawToken : undefined,
               createTime,
               localType,
-              content: String(item?.content || ''),
+              content,
               senderUsername: actualSender,
               isSend,
+              ...sourceIdentity,
+              ...(localType === 34 ? { packedInfoDataPresent: voiceTranscriptRowData.packedInfoDataPresent } : {}),
+              ...(localType === 34 ? { packedInfoDataHasValue: voiceTranscriptRowData.packedInfoDataHasValue } : {}),
+              ...(voiceTranscriptRowData.voiceTranscript ? { voiceTranscript: voiceTranscriptRowData.voiceTranscript } : {}),
               imageMd5: imageMd5 || undefined,
               imageDatName: imageDatName || undefined,
               videoMd5: videoMd5 || undefined
@@ -1074,7 +1359,9 @@ export class ExportContext {
     }
 
     private shouldDecodeMessageContentInFastMode(localType: number): boolean {
-        if (localType === 3 || localType === 34 || localType === 42 || localType === 43) {
+        // Voice XML can contain existing WeChat transcripts; it is part of text,
+        // even when WAV/media export is disabled.
+        if (localType === 3 || localType === 42 || localType === 43) {
           return false
         }
 
@@ -1139,16 +1426,70 @@ export class ExportContext {
         return String(Math.floor(num))
     }
 
-    public getStableMessageKey(msg: { localId?: unknown; createTime?: unknown; serverId?: unknown; serverIdRaw?: unknown }): string {
-        const localId = this.normalizeUnsignedIntToken(msg?.localId);
+    public getStableMessageKey(msg: { localId?: unknown; localIdRaw?: unknown; createTime?: unknown; serverId?: unknown; serverIdRaw?: unknown; _db_path?: unknown; _table_name?: unknown; sourceDbPath?: unknown; sourceTableName?: unknown }): string {
+        const localId = this.normalizeUnsignedIntToken(msg?.localIdRaw ?? msg?.localId);
         const createTime = this.normalizeUnsignedIntToken(msg?.createTime);
         const serverId = this.normalizeUnsignedIntToken(msg?.serverIdRaw ?? msg?.serverId);
-        return `${localId}:${createTime}:${serverId}`
+        const sourceDb = String(msg?._db_path ?? msg?.sourceDbPath ?? '').trim().replace(/\\/g, '/').toLowerCase()
+        const sourceTable = String(msg?._table_name ?? msg?.sourceTableName ?? '').trim().toLowerCase()
+        const sourceScope = sourceDb || sourceTable
+          ? crypto.createHash('sha256').update(`${sourceDb}\0${sourceTable}`).digest('hex').slice(0, 12)
+          : ''
+        return `${sourceScope ? `${sourceScope}:` : ''}${localId}:${createTime}:${serverId}`
     }
 
-    public getMediaCacheKey(msg: { localType?: unknown; localId?: unknown; createTime?: unknown; serverId?: unknown; serverIdRaw?: unknown }): string {
+    public getSourceMessageIdentityHash(msg: { localId?: unknown; localIdRaw?: unknown; _db_path?: unknown; _table_name?: unknown; sourceDbPath?: unknown; sourceTableName?: unknown }): string | undefined {
+        return sourceMessageIdentityHash({
+          localId: msg?.localIdRaw ?? msg?.localId,
+          dbPath: msg?._db_path ?? msg?.sourceDbPath,
+          tableName: msg?._table_name ?? msg?.sourceTableName,
+        })
+    }
+
+    public getMediaCacheKey(msg: { localType?: unknown; localId?: unknown; createTime?: unknown; serverId?: unknown; serverIdRaw?: unknown; _db_path?: unknown; _table_name?: unknown; sourceDbPath?: unknown; sourceTableName?: unknown }): string {
         const localType = this.normalizeUnsignedIntToken(msg?.localType);
         return `${localType}_${this.getStableMessageKey(msg)}`
+    }
+
+    private getMessageSourceIdentity(row: Record<string, any>): { _db_path?: string; _table_name?: string } {
+        const dbPath = String(this.getRowField(row, [
+          '_db_path', 'db_path', 'dbPath', 'source_db_path', 'sourceDbPath'
+        ]) ?? '').trim()
+        const tableName = String(this.getRowField(row, [
+          '_table_name', 'table_name', 'tableName', 'source_table_name', 'sourceTableName'
+        ]) ?? '').trim()
+        return {
+          ...(dbPath ? { _db_path: dbPath } : {}),
+          ...(tableName ? { _table_name: tableName } : {})
+        }
+    }
+
+    private getExactLocalIdToken(value: unknown): string | undefined {
+        if (typeof value === 'number' && !Number.isSafeInteger(value)) return undefined
+        const token = this.normalizeUnsignedIntToken(value)
+        return token && token !== '0' ? token : undefined
+    }
+
+    private getVoiceTranscriptRowData(row: Record<string, any>, content: string, localType: number): {
+        voiceTranscript?: string
+        packedInfoDataPresent: boolean
+        packedInfoDataHasValue: boolean
+    } {
+        if (localType !== 34) return { packedInfoDataPresent: false, packedInfoDataHasValue: false }
+        const packedKeys = new Set([
+          'packed_info_data', 'packedinfodata', 'packed_info_blob', 'packedinfoblob',
+          'packed_info', 'packedinfo', 'bytesextra', 'bytes_extra',
+          'wcdb_ct_packed_info', 'reserved0', 'wcdb_ct_reserved0'
+        ])
+        const packedKey = Object.keys(row).find((key) => packedKeys.has(key.toLowerCase()))
+        const packedInfoData = packedKey ? row[packedKey] : undefined
+        const voiceTranscript = extractWechatVoiceTranscript(content)
+          || extractWechatVoiceTranscriptFromPackedInfo(packedInfoData)
+        return {
+          ...(voiceTranscript ? { voiceTranscript } : {}),
+          packedInfoDataPresent: Boolean(packedKey),
+          packedInfoDataHasValue: hasNonEmptyPackedInfoData(packedInfoData),
+        }
     }
 
     private getImageMissingRunCacheKey(sessionId: string, imageMd5?: unknown, imageDatName?: unknown, localId?: unknown): string | null {
@@ -1444,19 +1785,16 @@ export class ExportContext {
           return { success: true, cleanedWxid: this.cleanAccountDirName(wxid) }
         }
         const dbPath = this.getConfiguredDbPath();
-        const decryptKey = String(this.runtimeConfig?.decryptKey || this.configService.get('decryptKey') || '').trim();
         if (!wxid) return { success: false, error: '请先在设置页面配置微信ID' }
 
         if (!dbPath) return { success: false, error: '请先在设置页面配置数据库路径' }
-
-        if (!decryptKey) return { success: false, error: '请先在设置页面配置解密密钥' }
 
         const cleanedWxid = this.cleanAccountDirName(wxid);
         const accountDir = this.configService.getAccountDir(dbPath, wxid);
         if (!accountDir) return { success: false, error: '无法找到账号目录' }
 
-        const ok = await wcdbService.open(accountDir, decryptKey);
-        if (!ok) return { success: false, error: 'WCDB 打开失败' }
+        const connected = await chatService.connect()
+        if (!connected.success) return { success: false, error: connected.error || 'WCDB 打开失败' }
 
         return { success: true, cleanedWxid }
     }
@@ -1922,6 +2260,9 @@ export class ExportContext {
 
     public formatPlainExportContent(content: string, localType: number, options: { exportVoiceAsText?: boolean }, voiceTranscript?: string, myWxid?: string, senderWxid?: string, isSend?: boolean, emojiCaption?: string): string {
         const safeContent = content || '';
+        if (localType === 34 && options.exportVoiceAsText) {
+          return voiceTranscript || '[语音消息 - 转文字失败]'
+        }
         const readableSystemText = extractReadableSystemMessageText(safeContent);
         if (readableSystemText && this.isReadableSystemMessage(localType, safeContent)) {
           return readableSystemText
@@ -1930,9 +2271,6 @@ export class ExportContext {
         if (localType === 3) return '[图片]'
         if (localType === 1) return stripSenderPrefix(safeContent)
         if (localType === 34) {
-          if (options.exportVoiceAsText) {
-            return voiceTranscript || '[语音消息 - 转文字失败]'
-          }
           return '[其他消息]'
         }
 
@@ -3047,13 +3385,26 @@ export class ExportContext {
             destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
             destFileName = path.basename(destPath)
           }
+          const relativeMediaPath = path.posix.join(mediaRelativePrefix, dirName, destFileName)
           if (path.resolve(sourcePath) !== path.resolve(destPath)) {
             if (kind === 'image' || kind === 'emoji' || kind === 'video') {
-              const copied = await this.copyMediaWithCacheAndDedup(kind, sourcePath, destPath, options.control, options)
+              const copied = await this.copyMediaWithCacheAndDedup(kind, sourcePath, destPath, options.control, options, relativeMediaPath)
               if (!copied.success) return null
             } else {
               const existedBeforeCopy = await pathExists(destPath)
               if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
+                // 与图片同一条规矩：有账本记录就必须按内容核对过才复用
+                const ledgerEntry = this.ledgerMediaIndex.get(relativeMediaPath)
+                if (ledgerEntry) {
+                  const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
+                  if (!verified.skip) {
+                    this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
+                    const recopied = await copyFileOptimized(sourcePath, destPath)
+                    if (!recopied.success) return null
+                    this.noteMediaTelemetry({ doneFiles: 1, bytesWritten: stat.size })
+                    return { relativePath: relativeMediaPath, kind }
+                  }
+                }
                 this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
               } else {
                 const copied = await copyFileOptimized(sourcePath, destPath)
@@ -3065,7 +3416,7 @@ export class ExportContext {
           }
 
           return {
-            relativePath: path.posix.join(mediaRelativePrefix, dirName, destFileName),
+            relativePath: relativeMediaPath,
             kind
           }
         } catch {
@@ -3422,14 +3773,41 @@ export class ExportContext {
     /**
      * 转写语音为文字
      */
-    public async transcribeVoice(sessionId: string, msgId: string, createTime: number, senderWxid: string | null, serverId?: string | number): Promise<string> {
+    public async transcribeVoice(
+        sessionId: string,
+        msgId: string,
+        createTime: number,
+        senderWxid: string | null,
+        serverId?: string | number,
+        rawContent?: string,
+        source?: { localIdRaw?: unknown; voiceTranscript?: unknown; packedInfoDataPresent?: boolean; packedInfoDataHasValue?: boolean; _db_path?: unknown; _table_name?: unknown; sourceDbPath?: unknown; sourceTableName?: unknown }
+    ): Promise<string> {
         try {
-          const transcript = await chatService.getVoiceTranscript(sessionId, msgId, createTime, undefined, senderWxid || undefined, serverId)
+          const cachedText = String(source?.voiceTranscript || '').trim() || extractWechatVoiceTranscript(rawContent)
+          if (cachedText) return `[语音转文字] ${cachedText}`
+          const sourceLocalId = String(source?.localIdRaw ?? '').trim()
+          const exactLocalId = /^[1-9]\d*$/.test(sourceLocalId) ? sourceLocalId : msgId
+          const transcript = await chatService.getVoiceTranscript(
+            sessionId,
+            exactLocalId,
+            createTime,
+            undefined,
+            senderWxid || undefined,
+            serverId,
+            rawContent,
+            source ? {
+              voiceTranscript: source.voiceTranscript,
+              packedInfoDataPresent: source.packedInfoDataPresent,
+              packedInfoDataHasValue: source.packedInfoDataHasValue,
+              dbPath: source._db_path ?? source.sourceDbPath,
+              tableName: source._table_name ?? source.sourceTableName,
+            } : undefined,
+          )
           if (transcript.success) {
             const text = String(transcript.transcript || '').trim()
             return text ? `[语音转文字] ${text}` : '[语音消息 - 未识别到文字]'
           }
-          return `[语音消息 - 转文字失败: ${transcript.error || '未知错误'}]`
+          return `[语音消息 - ${transcript.error || '本地未找到已转换文字'}]`
         } catch (e) {
           return `[语音消息 - 转文字失败: ${String(e)}]`
         }
@@ -3968,6 +4346,16 @@ export class ExportContext {
         this.noteMediaTelemetry({ cacheMissFiles: 1 })
     }
 
+    async resolveLocalFileAttachment(msg: any): Promise<{ success: boolean; localPath?: string; fileName?: string; error?: string }> {
+      const name = String(msg?.fileName || '').trim()
+      if (!name || path.basename(name) !== name || /[\\/]/.test(name)) return { success: false, error: '附件文件名无效' }
+      const candidates = await this.resolveFileAttachmentCandidates(msg)
+      const verified = candidates.filter(candidate => candidate.matchedBy === 'md5')
+      const picked = verified[0] || (!msg?.fileMd5 && candidates.length === 1 ? candidates[0] : undefined)
+      if (!picked) return { success: false, error: '附件尚未下载，或无法唯一验证文件归属' }
+      return { success: true, localPath: picked.sourcePath, fileName: name }
+    }
+
     private async resolveFileAttachmentCandidates(msg: any): Promise<FileExportCandidate[]> {
         const fileName = String(msg?.fileName || '').trim();
         if (!fileName) return []
@@ -4392,6 +4780,8 @@ export class ExportContext {
             const content = this.getRowField(row, [
               'message_content', 'messageContent', 'msg_content', 'msgContent', 'strContent', 'content', 'WCDB_CT_message_content'
             ]) ?? ''
+            const voiceTranscriptRowData = this.getVoiceTranscriptRowData(row, String(content), localType)
+            const sourceIdentity = this.getMessageSourceIdentity(row)
             const rowFileHints = this.getFileAppMessageHints(row)
             const allowFileProbe = fileOnlyMediaFilter && this.hasFileAppMessageHints(row)
             if (mediaTypeFilter && !mediaTypeFilter.has(localType) && !allowFileProbe) continue
@@ -4481,6 +4871,7 @@ export class ExportContext {
               sessionId,
               session_id: sessionId,
               localId: this.getIntFromRow(row, ['local_id', 'localId', 'LocalId', 'msg_local_id', 'msgLocalId', 'MsgLocalId', 'msg_id', 'msgId', 'MsgId', 'id', 'WCDB_CT_local_id'], 0),
+              localIdRaw: this.getExactLocalIdToken(this.getRowField(row, ['local_id', 'localId', 'LocalId', 'msg_local_id', 'msgLocalId', 'MsgLocalId', 'msg_id', 'msgId', 'MsgId', 'id', 'WCDB_CT_local_id'])),
               serverId: this.getIntFromRow(row, ['server_id', 'serverId', 'ServerId', 'msg_server_id', 'msgServerId', 'MsgServerId', 'svr_id', 'svrId', 'msg_svr_id', 'msgSvrId', 'MsgSvrId', 'WCDB_CT_server_id'], 0),
               serverIdRaw: this.normalizeUnsignedIntToken(this.getRowField(row, ['server_id', 'serverId', 'ServerId', 'msg_server_id', 'msgServerId', 'MsgServerId', 'svr_id', 'svrId', 'msg_svr_id', 'msgSvrId', 'MsgSvrId', 'WCDB_CT_server_id'])) || undefined,
               createTime,
@@ -4498,6 +4889,10 @@ export class ExportContext {
               fileSize,
               fileExt,
               fileMd5,
+              ...sourceIdentity,
+              ...(localType === 34 ? { packedInfoDataPresent: voiceTranscriptRowData.packedInfoDataPresent } : {}),
+              ...(localType === 34 ? { packedInfoDataHasValue: voiceTranscriptRowData.packedInfoDataHasValue } : {}),
+              ...(voiceTranscriptRowData.voiceTranscript ? { voiceTranscript: voiceTranscriptRowData.voiceTranscript } : {}),
               mediaPath: this.resolveWeliveMediaPath(row) || undefined,
               mediaType: String(row.media_type || row.mediaType || '').trim() || undefined,
               mediaError: String(row.media_error || row.mediaError || '').trim() || undefined,
@@ -4545,6 +4940,30 @@ export class ExportContext {
         }
 
         return { rows, memberSet, firstTime, lastTime }
+    }
+
+    private async hasConfirmedEmptyMessageInventory(sessionId: string): Promise<boolean> {
+        try {
+          const [tableStats, sessionCounts] = await Promise.all([
+            wcdbService.getMessageTableStats(sessionId),
+            wcdbService.getSessionMessageCounts([sessionId]),
+          ])
+          if (hasConfirmedEmptyMessageInventory(sessionId, tableStats, sessionCounts)) return true
+
+          const counts = sessionCounts?.counts
+          if (sessionCounts?.success === true && counts && typeof counts === 'object' && !Array.isArray(counts) &&
+              Object.prototype.hasOwnProperty.call(counts, sessionId)) {
+            return false
+          }
+
+          const sessionsResult = await chatService.getSessions()
+          const session = sessionsResult.success && Array.isArray(sessionsResult.sessions)
+            ? sessionsResult.sessions.find((item) => String(item?.username || '') === sessionId)
+            : undefined
+          return hasConfirmedEmptyMessageInventory(sessionId, tableStats, sessionCounts, session?.messageCountHint)
+        } catch {
+          return false
+        }
     }
 
     public async collectMessages(sessionId: string, cleanedMyWxid: string, dateRange?: { start: number; end: number } | null, senderUsernameFilter?: string, collectMode: MessageCollectMode = 'full', targetMediaTypes?: Set<number>, control?: ExportTaskControl, onCollectProgress?: (payload: { fetched: number; done?: boolean }) => void, _legacyCursorFallbackFlag = true, allowRangeFallback = true, useCursorTimeRange = true, allowModeFallback = true): Promise<{ rows: any[]; memberSet: Map<string, { member: ChatLabMember; avatarUrl?: string }>; firstTime: number | null; lastTime: number | null; error?: string }> {
@@ -4617,6 +5036,15 @@ export class ExportContext {
             endTime
           )
           if (!cursor.success || !cursor.cursor) {
+            if (await this.hasConfirmedEmptyMessageInventory(sessionId)) {
+              return {
+                rows,
+                memberSet,
+                firstTime,
+                lastTime,
+                error: CONFIRMED_EMPTY_SESSION_SKIP,
+              }
+            }
             console.error(`[Export] 打开游标失败: ${cursor.error || '未知错误'}`)
             return {
               rows,
@@ -4676,6 +5104,8 @@ export class ExportContext {
               const content = shouldDecodeContent
                 ? decodeMessageContent(row.message_content, row.compress_content)
                 : ''
+              const voiceTranscriptRowData = this.getVoiceTranscriptRowData(row, content, localType)
+              const sourceIdentity = this.getMessageSourceIdentity(row)
               const senderUsername = row.sender_username || ''
               const isSendRaw = row.computed_is_send ?? row.is_send ?? '0'
               const isSend = parseInt(isSendRaw, 10) === 1
@@ -4685,6 +5115,12 @@ export class ExportContext {
                 'msg_id', 'msgId', 'MsgId', 'id',
                 'WCDB_CT_local_id'
               ], 0)
+              const localIdRaw = this.getExactLocalIdToken(this.getRowField(row, [
+                'local_id', 'localId', 'LocalId',
+                'msg_local_id', 'msgLocalId', 'MsgLocalId',
+                'msg_id', 'msgId', 'MsgId', 'id',
+                'WCDB_CT_local_id'
+              ]))
               const rawServerIdValue = this.getRowField(row, [
                 'server_id', 'serverId', 'ServerId',
                 'msg_server_id', 'msgServerId', 'MsgServerId',
@@ -4732,13 +5168,18 @@ export class ExportContext {
               if (collectMode === 'text-fast') {
                 rows.push({
                   localId,
+                  localIdRaw,
                   serverId,
                   serverIdRaw: serverIdRaw !== '0' ? serverIdRaw : undefined,
                   createTime,
                   localType,
                   content,
                   senderUsername: actualSender,
-                  isSend
+                  isSend,
+                  ...sourceIdentity,
+                  ...(localType === 34 ? { packedInfoDataPresent: voiceTranscriptRowData.packedInfoDataPresent } : {}),
+                  ...(localType === 34 ? { packedInfoDataHasValue: voiceTranscriptRowData.packedInfoDataHasValue } : {}),
+                  ...(voiceTranscriptRowData.voiceTranscript ? { voiceTranscript: voiceTranscriptRowData.voiceTranscript } : {})
                 })
                 if (firstTime === null || createTime < firstTime) firstTime = createTime
                 if (lastTime === null || createTime > lastTime) lastTime = createTime
@@ -4832,6 +5273,7 @@ export class ExportContext {
 
               rows.push({
                 localId,
+                localIdRaw,
                 serverId,
                 serverIdRaw: serverIdRaw !== '0' ? serverIdRaw : undefined,
                 createTime,
@@ -4839,6 +5281,10 @@ export class ExportContext {
                 content,
                 senderUsername: actualSender,
                 isSend,
+                ...sourceIdentity,
+                ...(localType === 34 ? { packedInfoDataPresent: voiceTranscriptRowData.packedInfoDataPresent } : {}),
+                ...(localType === 34 ? { packedInfoDataHasValue: voiceTranscriptRowData.packedInfoDataHasValue } : {}),
+                ...(voiceTranscriptRowData.voiceTranscript ? { voiceTranscript: voiceTranscriptRowData.voiceTranscript } : {}),
                 imageMd5,
                 imageDatName,
                 emojiCdnUrl,
@@ -4910,6 +5356,10 @@ export class ExportContext {
             false,
             allowModeFallback
           )
+        }
+
+        if (rows.length === 0 && await this.hasConfirmedEmptyMessageInventory(sessionId)) {
+          return { rows, memberSet, firstTime, lastTime, error: CONFIRMED_EMPTY_SESSION_SKIP }
         }
 
         this.throwIfStopRequested(control)
@@ -5626,7 +6076,7 @@ export class ExportContext {
                 ))
 
             let enrichedContentValue = contentValue
-            if (isTransferExportContent(contentValue) && msg.content) {
+            if (!shouldUseTranscript && isTransferExportContent(contentValue) && msg.content) {
               const transferDesc = await resolveTransferDesc(
                 msg.content,
                 cleanedMyWxid,
@@ -5654,7 +6104,7 @@ export class ExportContext {
               rawMyWxid,
               myDisplayName: myInfo.displayName || cleanedMyWxid
             })
-            if (quotedReplyDisplay) {
+            if (quotedReplyDisplay && !shouldUseTranscript) {
               enrichedContentValue = this.buildQuotedReplyText(quotedReplyDisplay)
             }
 
@@ -5688,7 +6138,7 @@ export class ExportContext {
                   this.getMessageTypeName(msg.localType, msg.content),
                   enrichedContentValue
                 ])
-            if (!quotedReplyDisplay) {
+            if (!quotedReplyDisplay && !shouldUseTranscript) {
               const contentCell = row.getCell(useCompactColumns ? 5 : (includeGroupNicknameColumn ? 9 : 8))
               const appliedMediaLink = mediaPathValue && enrichedContentValue === mediaPathValue
                 ? this.applyExcelMediaLinkCell(contentCell, mediaItem, options)
@@ -5744,41 +6194,6 @@ export class ExportContext {
             }
           }
           return { success: false, error: String(e) }
-        }
-    }
-
-    /**
-     * 确保语音转写模型已下载
-     */
-    public async ensureVoiceModel(onProgress?: (progress: ExportProgress) => void): Promise<boolean> {
-        try {
-          const status = await voiceTranscribeServiceStub.getModelStatus()
-          if (status.success && status.exists) {
-            return true
-          }
-
-          onProgress?.({
-            current: 0,
-            total: 100,
-            currentSession: '正在下载 AI 模型',
-            phase: 'preparing'
-          })
-
-          const downloadResult = await voiceTranscribeServiceStub.downloadModel((progress: any) => {
-            if (progress.percent !== undefined) {
-              onProgress?.({
-                current: progress.percent,
-                total: 100,
-                currentSession: `正在下载 AI 模型 (${progress.percent.toFixed(0)}%)`,
-                phase: 'preparing'
-              })
-            }
-          })
-
-          return downloadResult.success
-        } catch (e) {
-          console.error('Auto download model failed:', e)
-          return false
         }
     }
 

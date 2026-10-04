@@ -16,15 +16,24 @@ import {
   nativeImage,
   ipcMain,
   dialog,
+  clipboard,
   shell,
   session,
   protocol,
   net,
 } from 'electron'
 import { pathToFileURL } from 'url'
+import { fileURLToPath } from 'url'
+import * as os from 'os'
+import { videoService } from './services/videoService'
+import { registerBugReportHandlers } from './services/bugReportService'
+import { toLocalMediaUrl } from './services/localMediaUrl'
 import { autoUpdater } from 'electron-updater'
-import { dirname, join } from 'path'
+import { dirname, join, resolve, sep } from 'path'
+import { compareVersions, compatibilityError, currentUpdateRestriction, loadUpdatePolicy } from './services/updatePolicy'
 import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'fs'
+import { atomicWriteFile } from './services/export/atomicWrite'
+import { readIntegrityReport, runIntegrityCheckForExportRoot } from './services/export/integrityChecker'
 import { readdir, copyFile, mkdir as mkdirAsync, rm as rmAsync, writeFile as writeFileAsync } from 'fs/promises'
 import { Worker } from 'worker_threads'
 import { ConfigService } from './services/config'
@@ -38,6 +47,8 @@ import { annualReportService } from './services/annualReportService'
 import { chatService } from './services/chatService'
 import { wcdbService } from './services/wcdbService'
 import { exportService } from './services/export'
+// v1.2 §10.3 ③：写操作的"自动快照 → 写入 → 可一键回滚"链路
+import { applyRetention, createSnapshot, listSnapshots, resolveAccountDatabasePaths, restoreSnapshot, verifySnapshot } from './services/snapshotService'
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { backupService } from './services/backupService'
 import { httpService } from './services/httpService'
@@ -46,6 +57,9 @@ import { dbPathService } from './services/dbPathService'
 import { KeyService } from './services/keyService'
 import { KeyServiceMac } from './services/keyServiceMac'
 import { KeyServiceLinux } from './services/keyServiceLinux'
+import { acquireDbKeyViaOrchestrator, createHookOnlyDriver, createWindowsKeyDriver, toPrerequisiteObservations } from './services/keyAcquisition'
+import { buildPrerequisiteReport } from './services/keyPrerequisite'
+import { KeyHealthService, hasDbStorageFiles, toKeyHealthReport, validateAccountKeyAgainstDbs } from './services/keyHealthService'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 
@@ -55,10 +69,13 @@ import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } fro
 import { setWeBotService } from './services/weBotRegistry'
 import { weCloneService } from './services/weCloneService'
 import { TASK_KEY, taskStatusService } from './services/taskStatusService'
+import { AnnotationsService } from './services/annotationsService'
+import { SearchIndexService, createExportContextDecoder } from './services/searchIndexService'
 import { connectorsService } from './services/connectors/connectorsService'
 import { registerCliCommands } from './services/cliCommands'
 import { runCommand } from './services/weportCommands'
 import { collectMacDiagnostics } from './services/macDiagnosticsService'
+import { diagnosticsService, type DiagnosticsContext } from './services/diagnosticsService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -122,7 +139,7 @@ const isScreenshotMode = process.env.WEPORT_SCREENSHOT_POPUP === '1'
 /** README 截图模式：读取隔离的用户配置/数据库副本，并在渲染层统一模糊隐私字段。 */
 const isRealScreenshotMode = isScreenshotMode && process.env.WEPORT_REAL_SCREENSHOT === '1'
 /** 普通截图 QA 使用虚构数据；真实 README 截图只复用截图流程。 */
-const isDemoScreenshotMode = isScreenshotMode && !isRealScreenshotMode
+const isDemoScreenshotMode = (isScreenshotMode && !isRealScreenshotMode) || process.env.WEPORT_UI_DEMO === '1'
 /** 任一 QA/自测模式（截图 / v0.9 转储 / 真实数据转储 / UI 转储 / 自测 / AI 自测）：
  *  这些模式下不执行隐藏窗口内存回收等会影响断言稳定性的行为 */
 const isAnyQaMode =
@@ -135,6 +152,16 @@ const isAnyQaMode =
   process.env.WEPORT_AI_PROBE === '1' ||
   process.env.WEPORT_AI_SETUP === '1' ||
   isCliMode
+
+let modelRegistryRefreshStarted = false
+function refreshModelRegistryAfterForeground(): void {
+  if (modelRegistryRefreshStarted || isAnyQaMode || process.env.WEPORT_PROBE_OFFSCREEN === '1') return
+  modelRegistryRefreshStarted = true
+  // Let first paint and renderer startup settle before opening a network request. A --background
+  // launch has no model picker, so it defers this refresh until the user opens the main window.
+  const timer = setTimeout(() => void refreshModelRegistry(), 4_000)
+  timer.unref?.()
+}
 
 // ---------------------------------------------------------------------------
 // 资源路径（wcdb / key / runtime DLL）
@@ -157,6 +184,9 @@ function migrateLegacySettings() {
   // 通道」，任何新加的、没写 override 的通道（例如新的自检对话框）都会把真实
   // 会话 id 截进 README 截图里。实测过一次，就是这么漏的。
   if (isScreenshotMode) return
+  // An explicit/private profile must never import credentials from the default profile.
+  const defaultProfile = join(app.getPath('appData'), 'Weport')
+  if (resolve(app.getPath('userData')).toLowerCase() !== resolve(defaultProfile).toLowerCase()) return
 
   const store = configService!
   const fresh = !store.get('dbPath') && !store.get('myWxid') && !store.get('decryptKey') && !store.get('onboardingDone')
@@ -300,6 +330,7 @@ const isLinuxAutostartCurrent = (): boolean => {
 }
 
 const getLaunchAtStartupUnsupportedReason = (): string | null => {
+  if (isAnyQaMode || process.env.WEPORT_PROBE_OFFSCREEN === '1' || process.env.WEPORT_UI_DEMO === '1' || app.commandLine.hasSwitch('user-data-dir')) return '隔离配置与验证模式不修改系统启动项'
   if (!app.isPackaged) return '仅安装后的版本支持开机自启动'
   return null
 }
@@ -506,6 +537,7 @@ const syncLaunchAtStartupPreference = () => {
  *   拉起无关的 WeFlow 应用。
  */
 const cleanupLegacyAutostartEntries = () => {
+  if (getLaunchAtStartupUnsupportedReason()) return
   if (!isWindowsHost) return
   const { execFileSync } = require('child_process') as typeof import('child_process')
   const cmd = process.env.ComSpec || 'cmd.exe'
@@ -565,47 +597,65 @@ const applyUpdaterChannel = (): boolean => {
 // 1.0.0-beta.1 视为比 1.0.0 旧；1.0.0-beta.2 > 1.0.0-beta.1。
 // 此前只比数字段：1.0.0 与 1.0.0-beta.2 判等 → 用户永远收不到正式版更新。
 function isNewerVersion(a: string, b: string): boolean {
-  const parse = (v: string) => {
-    const [core = '', pre = ''] = String(v || '').trim().split('-', 2)
-    return {
-      nums: core.split('.').map((x) => parseInt(x, 10) || 0),
-      pre: pre.trim(),
-    }
-  }
-  const pa = parse(a)
-  const pb = parse(b)
-  const len = Math.max(pa.nums.length, pb.nums.length)
-  for (let i = 0; i < len; i += 1) {
-    const va = pa.nums[i] || 0
-    const vb = pb.nums[i] || 0
-    if (va > vb) return true
-    if (va < vb) return false
-  }
-  // 数字部分相等时比较预发布后缀：有 pre 的版本更旧；都无 pre 则相等
-  if (pa.pre && !pb.pre) return false
-  if (!pa.pre && pb.pre) return true
-  if (pa.pre === pb.pre) return false
-  return pa.pre > pb.pre
+  try { return compareVersions(a, b) > 0 } catch { return false }
 }
 
-async function checkForUpdatesManual(): Promise<{
+/** 更新检查的完整结果（含 §10.5 强制更新判定）。 */
+interface UpdateCheckOutcome {
   hasUpdate: boolean
   version?: string
   releaseNotes?: string
   error?: string
-}> {
+  forced?: boolean
+  blocked?: boolean
+  reason?: string | null
+  url?: string | null
+  allowReadOnly?: boolean
+  minimumSupportedVersion?: string | null
+  currentVersion?: string
+}
+
+let initialPolicyLoad: Promise<unknown> | null = null
+async function ensureInitialUpdatePolicy(): Promise<void> {
+  if (!app.isPackaged || isDemoScreenshotMode || process.env.WEPORT_PROBE_OFFSCREEN === '1') return
+  initialPolicyLoad ??= loadUpdatePolicy(process.env.WEPORT_UPDATE_POLICY_URL || `${getUpdaterFeedUrl().replace(/\/$/, '')}/force-update.json`, net.fetch as typeof fetch)
+  await initialPolicyLoad
+}
+
+async function checkForUpdatesManual(): Promise<UpdateCheckOutcome> {
   if (!app.isPackaged) return { hasUpdate: false, error: '开发模式不检查更新' }
   if (!isUpdaterSupported) return { hasUpdate: false, error: updaterUnsupportedReason }
   applyUpdaterChannel()
+  await loadUpdatePolicy(process.env.WEPORT_UPDATE_POLICY_URL || `${getUpdaterFeedUrl().replace(/\/$/, '')}/force-update.json`, net.fetch as typeof fetch)
+  const restriction = currentUpdateRestriction(APP_VERSION)
   try {
-    const result = await autoUpdater.checkForUpdates()
+    const result = (await autoUpdater.checkForUpdates()) as
+      | (Awaited<ReturnType<typeof autoUpdater.checkForUpdates>> & Partial<UpdateCheckOutcome>)
+      | undefined
+    // §10.5 的强制更新判定跟着检查结果一起回来（Electron 原生路径没有这些字段，就是 undefined）。
+    const forced: Partial<UpdateCheckOutcome> = {
+      ...(result?.forced !== undefined ? { forced: result.forced } : {}),
+      ...(result?.blocked !== undefined ? { blocked: result.blocked } : {}),
+      ...(result?.reason !== undefined ? { reason: result.reason } : {}),
+      ...(result?.url !== undefined ? { url: result.url } : {}),
+      ...(result?.allowReadOnly !== undefined ? { allowReadOnly: result.allowReadOnly } : {}),
+      ...(result?.minimumSupportedVersion !== undefined ? { minimumSupportedVersion: result.minimumSupportedVersion } : {}),
+      ...(result?.currentVersion !== undefined ? { currentVersion: result.currentVersion } : {}),
+      ...restriction,
+    }
     const info = result?.updateInfo
-    if (!info || !isNewerVersion(String(info.version || ''), APP_VERSION)) return { hasUpdate: false }
+    if (!info || !isNewerVersion(String(info.version || ''), APP_VERSION)) return { hasUpdate: false, ...forced }
     const ignored = configService?.get('ignoredUpdateVersion')
-    if (ignored && ignored === info.version) return { hasUpdate: false }
-    return { hasUpdate: true, version: info.version, releaseNotes: normalizeReleaseNotes(info.releaseNotes) }
+    if (!restriction.forced && ignored && ignored === info.version) return { hasUpdate: false, ...forced }
+    return {
+      hasUpdate: true,
+      version: info.version,
+      releaseNotes: normalizeReleaseNotes(info.releaseNotes),
+      ...forced,
+    }
   } catch (e) {
-    return { hasUpdate: false, error: String((e as Error)?.message || e) }
+    // 检查失败必须带原因回去：界面上要能说"没查到更新（附原因）"，而不是"你已经是最新"。
+    return { hasUpdate: false, error: String((e as Error)?.message || e), ...restriction }
   }
 }
 
@@ -622,19 +672,15 @@ let updateCheckScheduled = false
 function checkForUpdatesOnStartup() {
   if (!isUpdaterSupported || !app.isPackaged || updateCheckScheduled) return
   updateCheckScheduled = true
-  const ignored = configService?.get('ignoredUpdateVersion')
   updateCheckTimer = setTimeout(async () => {
-    try {
-      const result = await autoUpdater.checkForUpdates()
-      const info = result?.updateInfo
-      if (!info || !isNewerVersion(String(info.version || ''), APP_VERSION)) return
-      if (ignored && ignored === info.version) return
+    const result = await checkForUpdatesManual()
+    if (result.hasUpdate || result.forced) {
       mainWindow?.webContents.send('app:updateAvailable', {
-        version: info.version,
-        releaseNotes: normalizeReleaseNotes(info.releaseNotes),
+        ...result, version: result.version || result.minimumSupportedVersion || APP_VERSION,
+        releaseNotes: result.releaseNotes || '',
       })
-    } catch (e) {
-      console.warn('[Weport] 启动更新检查失败:', e)
+    } else if (result.error) {
+      console.warn('[Weport] Startup update check failed:', result.error)
     }
   }, 3000)
   updateCheckTimer.unref?.()
@@ -751,6 +797,75 @@ function boundProgressSessionLabel(value: unknown): string {
   const name = String(value ?? '').replace(/\s+/g, ' ').trim()
   if (!name) return ''
   return name.length > PROGRESS_SESSION_LABEL_MAX ? `${name.slice(0, PROGRESS_SESSION_LABEL_MAX)}…` : name
+}
+
+/**
+ * v1.2 §10.3 ③：写操作的统一包装 —— **先自动快照，再执行写入**。
+ *
+ * 快照落在 `<userData>/snapshots/<时间戳>-<原因>/`，包含该账号下所有 `.db` 及其
+ * `-wal`/`-shm`（WAL 里可能有未合并的已提交数据）与 `manifest.json`。
+ *
+ * 关键顺序约束：快照失败 → **不执行写入**。宁可这次写操作失败（用户可以重试），
+ * 也不能在没有回滚点的情况下动用户的库。保留策略（最近 10 份）由 snapshotService
+ * 在快照成功后自行应用。
+ */
+let databaseWritesInFlight = 0
+taskStatusService.onTransition(() => {
+  try { mainWindow?.webContents.send('task:statusChanged', taskStatusService.all()) } catch { /* Window may have been destroyed. */ }
+})
+async function withWriteSnapshot<T>(reason: string, run: () => Promise<T>): Promise<T | { success: false; error: string }> {
+  if (wcdbService.isMaintenanceActive()) return { success: false, error: '数据库正在恢复快照，请稍后重试' }
+  if (databaseWritesInFlight) return { success: false, error: '已有数据库维护任务正在运行，请稍后重试' }
+  if (exportTaskControlService.hasActiveTasks() || taskStatusService.get(TASK_KEY.searchIndex).status === 'running') return { success: false, error: '请等待导出或搜索索引任务结束后再修改数据库' }
+  databaseWritesInFlight++
+  taskStatusService.begin(TASK_KEY.databaseMaintenance, '正在备份数据库', '备份快照')
+  try {
+    const result = await withWriteSnapshotBody(reason, run)
+    const failure = result && typeof result === 'object' && 'success' in result && result.success === false
+    taskStatusService.end(TASK_KEY.databaseMaintenance, failure ? 'failed' : 'done', { message: failure ? '数据库维护失败' : '数据库维护完成', error: failure && 'error' in result ? String(result.error || '') : undefined })
+    return result
+  }
+  finally { databaseWritesInFlight-- }
+}
+
+async function withWriteSnapshotBody<T>(reason: string, run: () => Promise<T>): Promise<T | { success: false; error: string }> {
+  await ensureInitialUpdatePolicy()
+  const updateError = compatibilityError(APP_VERSION, false)
+  if (updateError) return { success: false, error: updateError }
+  try {
+    const accountDir = configService?.getAccountDir() ?? null
+    if (!accountDir) {
+      return { success: false, error: '无法解析账号目录，已中止写操作（未改动任何库文件）' }
+    }
+    const observer = process.platform === 'win32' ? new KeyService() : process.platform === 'darwin' ? new KeyServiceMac() : new KeyServiceLinux()
+    if ((await observer.observePlatform()).wechatPids.length) return { success: false, error: '请先退出微信，再备份并修改数据库，避免快照期间数据仍在写入' }
+    const releaseCapture = wcdbService.acquireMaintenance()
+    if (!releaseCapture) return { success: false, error: '已有数据库维护任务正在运行' }
+    try {
+      await chatService.close()
+      if (configService?.getAccountDir() !== accountDir) return { success: false, error: '当前账号已改变，已中止快照' }
+      const layout = await resolveAccountDatabasePaths(accountDir)
+      if (layout.truncated) return { success: false, error: '数据库列表超过快照上限，已中止写操作，避免不完整备份' }
+      if (layout.databasePaths.length === 0) {
+        return { success: false, error: '账号目录下没有找到任何 .db 库文件，已中止写操作（未改动任何库文件）' }
+      }
+      const snapshot = await createSnapshot({
+        rootDir: join(app.getPath('userData'), 'snapshots'),
+        reason,
+        databasePaths: layout.databasePaths,
+      })
+      if (!snapshot.ok) {
+        return { success: false, error: `写前快照失败，已中止写操作（未改动任何库文件）：${snapshot.error || '未知错误'}` }
+      }
+      await applyRetention(join(app.getPath('userData'), 'snapshots'))
+      if (configService?.getAccountDir() !== accountDir) return { success: false, error: '当前账号已改变，已中止数据库写入' }
+      if ((await observer.observePlatform()).wechatPids.length) return { success: false, error: '微信已启动，已中止数据库写入' }
+    } finally { releaseCapture() }
+    taskStatusService.progress(TASK_KEY.databaseMaintenance, { stage: '执行写入', message: '快照完成，正在修改数据库' })
+    return await run()
+  } catch (e) {
+    return { success: false, error: `数据库维护异常：${String((e as Error)?.message || e)}` }
+  }
 }
 
 function parseExportLog(path: string): { txt?: string; json?: string } {
@@ -1012,6 +1127,7 @@ function createWindow(autoShow: boolean): BrowserWindow {
     height: 720,
     minWidth: 920,
     minHeight: 600,
+    ...(process.env.WEPORT_PROBE_OFFSCREEN === '1' ? { x: -4000, y: 0 } : {}),
     icon: nativeImage.createFromPath(resolveAppIconPath()),
     // 渲染层加载前窗口底色（否则首帧闪白）
     backgroundColor: '#000000',
@@ -1025,13 +1141,16 @@ function createWindow(autoShow: boolean): BrowserWindow {
       spellcheck: false,
     },
   })
+  if (process.env.WEPORT_PROBE_OFFSCREEN === '1') win.webContents.setBackgroundThrottling(false)
 
   win.once('ready-to-show', () => {
     mainWindowReady = true
     if (autoShow) {
-      win.show()
+      if (process.env.WEPORT_PROBE_OFFSCREEN === '1') win.showInactive()
+      else win.show()
+      refreshModelRegistryAfterForeground()
       // 必须在 show 之后再 maximize，Windows 上 show 前的 maximize 会被忽略导致启动时不是全屏
-      if (!isAnyQaMode && !win.isMaximized()) {
+      if (process.env.WEPORT_PROBE_OFFSCREEN !== '1' && !isAnyQaMode && !win.isMaximized()) {
         try { win.maximize() } catch { /* noop */ }
       }
     }
@@ -1120,10 +1239,7 @@ function createWindow(autoShow: boolean): BrowserWindow {
   })
 
   loadMainWindowPage(win)
-  // 默认最大化启动（QA 模式保持固定窗口尺寸，保证截图/断言稳定）
-  if (!isAnyQaMode && autoShow) {
-    win.maximize()
-  }
+  // Maximize only after ready-to-show; on Windows it can reveal a hidden window.
   // 主窗口创建即注册微信 CDN 请求头拦截（幂等；首窗口/弹窗两条路径共用）。
   // 静默启动不建窗口时不注册，避免开机即初始化网络栈拉起网络服务子进程
   ensureWeChatRequestHeaderInterceptor()
@@ -1266,11 +1382,12 @@ function restoreDiscardedMainWindow(): void {
     if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null }
     if (!mainWindow || mainWindow.isDestroyed()) return
     mainWindowReady = true
-    mainWindow.show()
+    if (process.env.WEPORT_PROBE_OFFSCREEN === '1') mainWindow.showInactive()
+    else mainWindow.show()
     try {
       mainWindow.setSkipTaskbar(false)
     } catch { /* noop */ }
-    mainWindow.focus()
+    if (process.env.WEPORT_PROBE_OFFSCREEN !== '1') mainWindow.focus()
     discardDiag('restore: window shown')
   }
   mainWindow.once('ready-to-show', showRestored)
@@ -1314,12 +1431,13 @@ function showMainWindow() {
     return
   }
   if (!mainWindow.isVisible()) {
-    mainWindow.show()
+    if (process.env.WEPORT_PROBE_OFFSCREEN === '1') mainWindow.showInactive()
+    else mainWindow.show()
     try {
       mainWindow.setSkipTaskbar(false)
     } catch { /* noop */ }
   }
-  mainWindow.focus()
+  if (process.env.WEPORT_PROBE_OFFSCREEN !== '1') mainWindow.focus()
 }
 
 // ---------------------------------------------------------------------------
@@ -2036,6 +2154,7 @@ async function runRealDataDump() {
  * 一条绕过用户可见配置的「特权」通道。
  */
 let weBotService: WeBotService | null = null
+let weBotSchedulerStarted = false
 
 async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSignal): Promise<WeBotDispatchResult> {
   if (signal.aborted) throw new Error('已中止')
@@ -2118,6 +2237,20 @@ function ensureWeBotService(): WeBotService {
   return weBotService
 }
 
+/** Keep catch-up scheduling active only while at least one schedule is enabled. */
+function syncWeBotScheduler(): void {
+  const service = ensureWeBotService()
+  if (service.hasEnabledTasks()) {
+    if (!weBotSchedulerStarted) {
+      service.start() // start() performs the required missed-job catch-up tick
+      weBotSchedulerStarted = true
+    }
+  } else if (weBotSchedulerStarted) {
+    service.stopScheduler()
+    weBotSchedulerStarted = false
+  }
+}
+
 /**
  * MCP stdio 桥接脚本的绝对路径。
  *
@@ -2130,7 +2263,99 @@ function resolveMcpBridgePath(): string {
   return join(app.getAppPath(), 'scripts', 'mcp-stdio-bridge.mjs')
 }
 
-function registerIpcHandlers() {
+// ---------------------------------------------------------------------------
+// v1.2 §6：全局搜索索引 + 标注存储（引擎侧接线）
+// ---------------------------------------------------------------------------
+
+let searchIndexServiceRef: SearchIndexService | null = null
+let annotationsServiceRef: AnnotationsService | null = null
+
+/**
+ * 语音转写缓存（只读）。
+ *
+ * 路径与 `chatService.getTranscriptCachePath()` 必须一致 —— 转写是搜索值得
+ * 索引的正文之一（D15 的语音转写是现成资产），读第二个位置就等于读不到。
+ * 完全只读：文件不存在/坏掉都只是"没有转写"，绝不创建或修改它。
+ */
+function readVoiceTranscriptCache(): Record<string, string> {
+  try {
+    const filePath = chatService.getTranscriptCachePath()
+    if (!existsSync(filePath)) return {}
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>
+    const out: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (typeof value === 'string') out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** 懒建单例：IPC 处理时才需要配置与导出服务，模块加载期不碰 */
+function getSearchIndexService(): SearchIndexService {
+  if (searchIndexServiceRef) return searchIndexServiceRef
+  const config = configService
+  if (!config) throw new Error('配置尚未初始化，无法建立索引')
+  const context = exportService.context
+  searchIndexServiceRef = new SearchIndexService({
+    rootDir: join(app.getPath('userData'), 'search-index'),
+    source: {
+      listMessageDbs: async () => {
+        const result = await wcdbService.listMessageDbs()
+        if (!result.success) throw new Error(result.error || '获取消息库列表失败')
+        return (result.data || []).map(String)
+      },
+      listTables: async (kind, path) => {
+        const result = await wcdbService.listTables(kind, path)
+        if (!result.success) throw new Error(result.error || '列出消息表失败')
+        return (result.tables || []).map(String)
+      },
+      execQuery: async (path, sql) => {
+        const result = await wcdbService.execQuery('message', path, sql)
+        if (!result.success) throw new Error(result.error || '查询失败')
+        return (result.rows || []) as Array<Record<string, unknown>>
+      },
+      getSessions: async () => {
+        const result = await chatService.getSessions()
+        if (!result.success) throw new Error(result.error || '获取会话失败')
+        return (result.sessions || []).map((session) => ({
+          username: String(session?.username || ''),
+          displayName: String(session?.displayName || ''),
+        }))
+      },
+      getDisplayNames: async (usernames) => {
+        const result = await wcdbService.getDisplayNames(usernames)
+        return result.success ? (result.map || {}) : {}
+      },
+    },
+    // 复用导出侧解码器：blob 解压 + XML/引用/链接标题 → 正文（不另写一份）
+    decodeText: createExportContextDecoder(
+      (content, localType, sessionId, createTime, myWxid, senderWxid, isSend) =>
+        context.parseMessageContent(content, localType, sessionId, createTime, myWxid, senderWxid, isSend),
+      String(config.get('myWxid') || '')
+    ),
+    resolveWxid: () => String(config.get('myWxid') || ''),
+    resolveDbPath: () => String(config.get('dbPath') || ''),
+    loadVoiceTranscripts: readVoiceTranscriptCache,
+  })
+  return searchIndexServiceRef
+}
+
+function getAnnotationsService(): AnnotationsService {
+  if (!annotationsServiceRef) {
+    annotationsServiceRef = new AnnotationsService({
+      userDataDir: app.getPath('userData'),
+      resolveAccountId: () => isDemoScreenshotMode ? DEMO_WXID : configService?.getMyWxidCleaned() || 'default',
+    })
+  }
+  return annotationsServiceRef
+}
+
+export function registerIpcHandlers() {
+  registerBugReportHandlers({ ipcMain, dialog, clipboard, nativeImage, shell,
+    appVersion: app.getVersion(), platform: process.platform,
+    platformRelease: os.release(), arch: process.arch })
   void registerNotificationHandlers()
 
   ipcMain.on('notification-clicked', (_event, _payload) => {
@@ -2193,6 +2418,9 @@ function registerIpcHandlers() {
     return (configService as any)?.get(key)
   })
   ipcMain.handle('config:set', async (_e, key: string, value: unknown) => {
+    if (wcdbService.isMaintenanceActive() && ['dbPath', 'myWxid', 'decryptKey', 'wxidConfigs'].includes(key)) {
+      return { success: false, error: '数据库正在恢复快照，暂时无法切换账号' }
+    }
     (configService as any)?.set(key, value)
     if (key === 'launchAtStartup') {
       applyLaunchAtStartupPreference(value === true)
@@ -2214,11 +2442,13 @@ function registerIpcHandlers() {
     return { success: true }
   })
   ipcMain.handle('config:clear', () => {
+    if (wcdbService.isMaintenanceActive()) return { success: false, error: '数据库正在恢复快照，暂时无法清除配置' }
     configService?.clear()
     messagePushService?.handleConfigCleared()
     return { success: true }
   })
   ipcMain.handle('config:updateWxidEntry', async (_e, wxid: string, patch: Record<string, unknown>) => {
+    if (wcdbService.isMaintenanceActive()) return { success: false, error: '数据库正在恢复快照，请稍后重试' }
     const id = String(wxid || '').trim()
     if (!id) return { success: false, error: 'wxid 为空' }
     const p = (patch && typeof patch === 'object' ? patch : {}) as Record<string, unknown>
@@ -2257,6 +2487,7 @@ function registerIpcHandlers() {
   ipcMain.handle('app:checkForUpdates', () => checkForUpdatesManual())
   ipcMain.handle('app:downloadAndInstall', () => downloadAndInstall())
   ipcMain.handle('app:ignoreUpdate', (_e, version: string) => {
+    if (currentUpdateRestriction(APP_VERSION).forced) return { success: false, error: '兼容性更新提示不可忽略' }
     configService?.set('ignoredUpdateVersion', String(version || ''))
     return { success: true }
   })
@@ -2325,6 +2556,36 @@ function registerIpcHandlers() {
   // 非 darwin 平台返回 supported:false，界面据此隐藏入口。
   ipcMain.handle('diagnostics:collectMac', () =>
     collectMacDiagnostics({ appVersion: APP_VERSION, resourcesPath: process.resourcesPath }))
+
+  // 跨平台诊断（v1.2 §5 / D17）：只读、不联网、只往本地落一个脱敏 zip。
+  // 上下文每次现取：导出目录与数据目录都能在设置页里改，缓存住会给出过期的诊断。
+  const diagnosticsContext = (): DiagnosticsContext => {
+    const userDataPath = app.getPath('userData')
+    const logDirs = Array.from(new Set([join(userDataPath, 'logs'), app.getPath('logs')])).filter(Boolean)
+    return {
+      appVersion: APP_VERSION,
+      resourcesPath: process.resourcesPath,
+      userDataPath,
+      logDirs,
+      isPackaged: app.isPackaged,
+      shellVersion: process.versions.electron,
+      chromeVersion: process.versions.chrome,
+      nodeVersion: process.versions.node,
+      exportPath: String(configService?.get('exportPath') || '') || null,
+      dbPath: String(configService?.get('dbPath') || '') || null,
+    }
+  }
+  const withDiagnostics = () => {
+    diagnosticsService.setContext(diagnosticsContext())
+    return diagnosticsService
+  }
+  ipcMain.handle('diagnostics:collect', (_e, payload?: { full?: boolean }) => withDiagnostics().collect(payload || {}))
+  ipcMain.handle('diagnostics:exportBundle', (_e, payload?: { path?: string; includeLogs?: boolean; includeConfig?: boolean }) =>
+    withDiagnostics().exportBundle(payload || {}))
+  ipcMain.handle('diagnostics:listLogs', () => withDiagnostics().listLogs())
+  ipcMain.handle('diagnostics:monitorSnapshot', () => withDiagnostics().monitorSnapshot())
+  ipcMain.handle('diagnostics:readLog', (_e, payload?: { name?: string; tailLines?: number }) =>
+    withDiagnostics().readLog(payload || {}))
   ipcMain.handle('auth:verifyHello', (_e, message: string) => {
     // Windows Hello（mac 为 Touch ID 路径）：Linux 无对应生物认证后端，直接给出明确错误
     if (process.platform !== 'win32' && process.platform !== 'darwin') {
@@ -2338,18 +2599,193 @@ function registerIpcHandlers() {
   ipcMain.handle('dbpath:scanWxids', (_e, rootPath: string) => dbPathService.scanWxids(String(rootPath || '')))
   ipcMain.handle('dbpath:getDefault', () => dbPathService.getDefaultPath())
 
-  // 密钥（Linux：keyServiceLinux 自 v0.7.5 起随仓库携带，v0.9.10 接线）
-  ipcMain.handle('key:autoGetDbKey', async () => {
-    const keyService =
-      process.platform === 'darwin'
-        ? new KeyServiceMac()
-        : process.platform === 'linux'
-          ? new KeyServiceLinux()
-          : new KeyService()
-    const result = await keyService.autoGetDbKey(180_000, (message, level) => {
-      mainWindow?.webContents.send('key:dbKeyStatus', { message, level })
+  // 密钥（v1.2 §1：Windows 免登录只读扫描 → 未命中自动回落 Hook；macOS/Linux 仅 Hook）
+  //
+  // 返回形状在旧契约（`success/key/error/logs`）之上**只做扩展**：
+  // `keys`（每库 page key）、`mode`（实际走了哪条：existing/scan/hook）、
+  // `prerequisites`（逐项自检）、`reasons`（另一条路为什么没成）。老渲染侧读
+  // `success`/`key` 的行为不变。
+  let activeKeyAcquireCancel: { cancelled: boolean } | null = null
+
+  /** 正在跑的取密钥流程（见 key:autoGetDbKey 处理器里的说明）。 */
+  let keyAcquireInFlight: Promise<unknown> | null = null
+
+  /** 前置条件自检的 30 秒记忆（见 createKeyHealthService 里的 prereqFailures）。 */
+  let prereqCache: { at: number; value: Array<{ id: string; message: string; actionable: string }> } | null = null
+
+  /** 密钥健康面板的服务实例（V12 §10.4）。 */
+  const createKeyHealthService = (): KeyHealthService =>
+    new KeyHealthService({
+      deps: {
+        resolveAccountDir: () => configService?.getAccountDir() ?? null,
+        rescanKeys:
+          process.platform === 'win32'
+            ? async (dir: string) => {
+              const scan = await new KeyService().scanDbKeys({ accountDir: dir })
+              return { success: scan.success, keys: scan.keys, error: scan.error }
+            }
+            : undefined,
+        /**
+         * 前置条件自检（§10.4 要"报前置条件 + 下一步"）。只做**观察**，不扫描、不挂钩：
+         * 面板每次打开/刷新都要走这条路径，不能顺手把内存扫一遍。
+         * 拿不到观察结果时给"未知"而不是"没装微信"—— 猜错了会让用户去修一个不存在的问题。
+         */
+        prereqFailures: async () => {
+          // 只有 Windows 有跨平台的观察器（进程/内存可读性）。别的平台上这里返回空：
+          // 编一个"未安装微信"出来会让用户去修一个不存在的问题。
+          if (process.platform !== 'win32') return []
+          // 自检要枚举进程/读 DLL，面板每次打开+刷新都会调 —— 30 秒内的重复请求直接复用上一次
+          // 结果（自检回答的是"现在能不能扫"，半分钟的滞后用户察觉不到；点「重新扫描」那条
+          // 通道会先清掉这个记忆，所以"刚把微信开起来"的情况照样立刻反映）。
+          const now = Date.now()
+          if (prereqCache && now - prereqCache.at < 30_000) return prereqCache.value
+          const accountDir = configService?.getAccountDir() ?? null
+          const report = buildPrerequisiteReport(
+            toPrerequisiteObservations({
+              plan: { steps: ['existing', 'scan', 'hook'], scanSupported: true, notes: [] },
+              platform: process.platform,
+              observation: await createWindowsKeyDriver(new KeyService()).observe(),
+              dataDir: accountDir,
+              dbFilesPresent: !!accountDir,
+              storedKeyValid: null,
+            })
+          )
+          const value = report.items
+            .filter((item) => item.status === 'fail' || item.status === 'warn')
+            .map((item) => ({ id: item.id, message: item.message, actionable: item.action || '' }))
+          prereqCache = { at: now, value }
+          return value
+        },
+      },
     })
-    return result
+
+  ipcMain.handle('key:autoGetDbKey', async () => {
+    // 同一时间只跑一个取密钥流程。并发跑的后果不是报错：两次各自 read→write 同一个
+    // `dbKeyStore`，**后写的把先写进去的已验证密钥冲掉**，面板上表现为"刚扫到的库又变成没密钥"；
+    // `activeKeyAcquireCancel` 也会被覆盖，于是"取消"停不下来真正在跑的那个。
+    if (keyAcquireInFlight) return keyAcquireInFlight
+    keyAcquireInFlight = runDbKeyAcquisition().finally(() => {
+      keyAcquireInFlight = null
+    })
+    return keyAcquireInFlight
+  })
+
+  async function runDbKeyAcquisition() {
+    await ensureInitialUpdatePolicy()
+    const updateError = compatibilityError(APP_VERSION, false)
+    if (updateError) return { success: false, error: updateError, logs: [] }
+    const platform = process.platform
+    const accountDir = configService?.getAccountDir() ?? null
+    const storedKey = String(configService?.get('decryptKey') || '').trim()
+    const cancel = { cancelled: false }
+    activeKeyAcquireCancel = cancel
+
+    const sendStatus = (message: string, level: number) => {
+      try { mainWindow?.webContents.send('key:dbKeyStatus', { message, level }) } catch { /* noop */ }
+    }
+
+    const driver =
+      platform === 'win32'
+        ? createWindowsKeyDriver(new KeyService())
+        : platform === 'darwin'
+          ? (() => {
+            const service = new KeyServiceMac()
+            return createHookOnlyDriver({
+              platform: 'darwin',
+              observe: () => service.observePlatform(),
+              hookAcquire: (options) => service.autoGetDbKey(options.timeoutMs, options.onStatus),
+            })
+          })()
+          : (() => {
+            const service = new KeyServiceLinux()
+            return createHookOnlyDriver({
+              platform: 'linux',
+              observe: () => service.observePlatform(),
+              hookAcquire: (options) => service.autoGetDbKey(options.timeoutMs, options.onStatus),
+            })
+          })()
+
+    const health = createKeyHealthService()
+    try {
+      const result = await acquireDbKeyViaOrchestrator({
+        driver,
+        accountDir,
+        storedKey: storedKey
+          ? { hexKey: /^[0-9a-f]{64}$/i.test(storedKey) ? storedKey : null, source: 'config' }
+          : undefined,
+        validateStoredKey: async (hexKey, dir) => validateAccountKeyAgainstDbs(dir, hexKey),
+        hasDbFiles: async (dir) => hasDbStorageFiles(dir),
+        persistKeys: async (dir, keys) => {
+          health.mergeScannedKeys(dir, keys.map((k) => ({ id: k.id, keyHex: k.keyHex, saltHex: k.saltHex, source: k.source })))
+        },
+        onStatus: sendStatus,
+        onScanProgress: (message) => sendStatus(message, 0),
+        cancel,
+      }, 'auto')
+
+      // Hook 成功时把账号口令也记进密钥库：健康面板据此显示"这把口令覆盖了哪些库"
+      if (result.success && result.mode === 'hook' && result.key && accountDir) {
+        try { health.setAccountPassphrase(accountDir, result.key, 'hook') } catch { /* noop */ }
+      }
+      return result
+    } catch (e) {
+      // 兜底：编排层自身异常也必须带可读文案返回，不能把 Electron 的泛化错误抛给渲染侧
+      return { success: false, error: `密钥获取失败：${e instanceof Error ? e.message : String(e)}`, logs: [] }
+    } finally {
+      if (activeKeyAcquireCancel === cancel) activeKeyAcquireCancel = null
+    }
+  }
+
+  ipcMain.handle('key:cancelDbKeyAcquire', () => {
+    if (activeKeyAcquireCancel) activeKeyAcquireCancel.cancelled = true
+    return { success: true }
+  })
+
+  // 密钥健康面板（V12 §10.4）：逐库状态 / 一键重扫 / 手动粘贴 / 清除
+  //
+  // 返回形状遵循共享契约 `KeyHealthReport`（`src/vite-env.d.ts`）：`databases[]` +
+  // `mode` + `blockers` + `error`。引擎内部还有 `summary/reason/action` 等更细的字段，
+  // 由 `toKeyHealthReport` 映射过去，渲染层只需要认一个形状。
+  ipcMain.handle('keyHealth:get', async (_e, accountDir?: string) => {
+    const dir = accountDir ? String(accountDir).trim() : ''
+    if (dir && dir.startsWith('\\\\')) return { success: false, mode: 'none', blockers: [], databases: [], error: '不支持网络路径' }
+    return toKeyHealthReport(await createKeyHealthService().getHealth(dir || undefined))
+  })
+  ipcMain.handle('keyHealth:rescan', async (_e, payload?: { kinds?: string[]; accountDir?: string }) => {
+    // 重新扫描是一次用户显式动作：自检的记忆要作废，否则"刚把微信开起来/提权"这种
+    // 刚刚发生的条件变化会被 30 秒的记忆挡住，界面还写着"不能扫"。
+    prereqCache = null
+    const report = await createKeyHealthService().rescan(payload?.accountDir ? String(payload.accountDir) : undefined)
+    const mapped = toKeyHealthReport(report, payload?.kinds)
+    // 扫描本身失败（不支持的平台 / 没有数据目录 / 一把都没扫到）时，映射会把 `scan` 丢掉，
+    // 于是界面看到的是"成功，0/22 个库通过" —— 扫不到和扫过了没结果是两回事。
+    // 把失败原因提到顶层 error，面板才有话说。
+    if (!report.scan?.failed) return mapped
+    return { ...mapped, success: false, error: report.scan.failed }
+  })
+  ipcMain.handle('keyHealth:paste', async (_e, payload?: { kind?: string; text?: string; accountDir?: string }) => {
+    // `accountDir` 是渲染层给的字符串。没校验就等于让界面把面板指到盘上任意目录，
+    // 而粘贴会**照着那个目录写密钥**。和图像密钥那几路一样先挡掉网络路径。
+    const dir = payload?.accountDir ? String(payload.accountDir).trim() : ''
+    if (dir && dir.startsWith('\\\\')) return { success: false, error: '不支持网络路径' }
+    const result = await createKeyHealthService().paste({
+      accountDir: dir || undefined,
+      dbKeyId: payload?.kind ? String(payload.kind) : undefined,
+      text: String(payload?.text ?? ''),
+    })
+    // 契约里 paste 只回 { success, fingerprint?, error? }：指纹是唯一允许回渲染层的形态
+    return { success: result.success, fingerprint: result.fingerprint, error: result.error }
+  })
+  ipcMain.handle('keyHealth:clear', async (_e, payload?: { kind?: string; accountDir?: string }) => {
+    const dir = payload?.accountDir ? String(payload.accountDir).trim() : ''
+    if (dir && dir.startsWith('\\\\')) return { success: false, removed: [], error: '不支持网络路径' }
+    const result = await createKeyHealthService().clear({
+      accountDir: dir || undefined,
+      dbKeyId: payload?.kind ? String(payload.kind) : undefined,
+    })
+    if (result.success && result.removed.length > 0) chatService.close()
+    // 把"删了哪些"带回去：以前这里只回 success，面板和用户都不知道清掉的是一行还是全部
+    return { success: result.success, removed: result.removed, error: result.error }
   })
 
   // 图片密钥（issue #9a：kvcomm 缓存读取 + 内存扫描兜底，WeFlow 同名通道）
@@ -2415,6 +2851,7 @@ function registerIpcHandlers() {
       const result = await chatService.connect()
       if (result?.success) taskStatusService.end(TASK_KEY.connect, 'done', { message: '已连接' })
       else taskStatusService.end(TASK_KEY.connect, 'failed', { error: String(result?.error || '连接失败'), message: '连接失败' })
+      try { mainWindow?.webContents.send('chat:connectionChanged', { readOnlySnapshot: chatService.isReadOnlySnapshot() }) } catch { /* window reclaimed */ }
       return result
     } catch (e) {
       const message = String((e as Error)?.message || e)
@@ -2426,8 +2863,14 @@ function registerIpcHandlers() {
     chatService.close()
     return { success: true }
   })
-  ipcMain.handle('chat:getSessions', () => chatService.getSessions())
-  ipcMain.handle('chat:markAllSessionsRead', () => chatService.markAllSessionsRead())
+  ipcMain.handle('chat:getSessions', async () => {
+    const result = await chatService.getSessions()
+    try { mainWindow?.webContents.send('chat:connectionChanged', { readOnlySnapshot: chatService.isReadOnlySnapshot() }) } catch { /* window reclaimed */ }
+    return result
+  })
+  // v1.2 §10.3 ③：一键已读是**写**操作（改会话的未读数），先快照再写
+  ipcMain.handle('chat:markAllSessionsRead', () =>
+    withWriteSnapshot('session-read-status', () => chatService.markAllSessionsRead()))
   ipcMain.handle('chat:getContactAvatar', (_e, username: string, chatroomId?: string) =>
     chatService.getContactAvatar(String(username || ''), chatroomId ? String(chatroomId) : undefined))
   ipcMain.handle('chat:enrichSessionsContactInfo', (_e, usernames: string[], options?: any) =>
@@ -2437,17 +2880,74 @@ function registerIpcHandlers() {
   ipcMain.handle('chat:getNewMessages', (_e, sessionId: string, minTime: number, limit?: number) =>
     chatService.getNewMessages(String(sessionId || ''), Number(minTime || 0), limit || 50))
 
+  // v1.2 §3 阅读器：分页取消息与按需取媒体。
+  //
+  // 这些方法本来就在 chatService 里（导出管线一直在用），只是从没暴露给渲染层 ——
+  // 阅读器按真实分页读，而不是拿 `chat:getNewMessages`（它返回的是"某时间点之后最早的
+  // 一批"，当成"最新消息"渲染就是在骗人）。
+  ipcMain.handle(
+    'chat:getMessages',
+    (_e, sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+      chatService.getMessages(
+        String(sessionId || ''),
+        Number(offset || 0),
+        Number(limit || 50),
+        Number(startTime || 0),
+        Number(endTime || 0),
+        ascending === true
+      )
+  )
+  ipcMain.handle('chat:getSessionMessageCounts', (_e, sessionIds: string[], options?: { preferHintCache?: boolean }) =>
+    chatService.getSessionMessageCounts((sessionIds || []).map(String), options)
+  )
+  ipcMain.handle('chat:getMessageDates', (_e, sessionId: string) => chatService.getMessageDates(String(sessionId || '')))
+  ipcMain.handle('chat:getMessageByIdentity', (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0]) =>
+    chatService.getMessageByIdentity(identity))
+  ipcMain.handle('chat:getImageDataByIdentity', (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0], options?: { excludeThumbnail?: boolean }) =>
+    chatService.getImageDataByIdentity(identity, options))
+  ipcMain.handle('chat:getVideoData', async (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0]) => {
+    const resolved = await chatService.getMessageByIdentity(identity)
+    if (!resolved.success || !resolved.message?.videoMd5) return { success: false, error: resolved.error || '没有可定位的视频文件' }
+    const info = await videoService.getVideoInfo(resolved.message.videoMd5, { includePoster: false })
+    if (!info.exists || !info.videoUrl) return { success: false, error: '视频尚未下载到本机' }
+    const localPath = info.videoUrl.startsWith('file:') ? fileURLToPath(info.videoUrl) : info.videoUrl
+    return { success: true, localPath, url: toLocalMediaUrl(localPath), mime: 'video/mp4' }
+  })
+  ipcMain.handle('chat:getFileData', async (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0]) => {
+    const resolved = await chatService.getMessageByIdentity(identity)
+    if (!resolved.success || !resolved.message) return { success: false, error: resolved.error || '附件消息不存在' }
+    return exportService.context.resolveLocalFileAttachment(resolved.message)
+  })
+  ipcMain.handle('chat:searchMessages', (_e, keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number) =>
+    chatService.searchMessages(String(keyword || ''), sessionId ? String(sessionId) : undefined, limit, offset, beginTimestamp, endTimestamp)
+  )
+  ipcMain.handle('chat:getImageData', (_e, sessionId: string, msgId: string, options?: { excludeThumbnail?: boolean }) =>
+    chatService.getImageData(String(sessionId || ''), String(msgId || ''), options)
+  )
+  ipcMain.handle(
+    'chat:getVoiceData',
+    (_e, sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) =>
+      chatService.getVoiceData(String(sessionId || ''), String(msgId || ''), createTime, serverId, senderWxid)
+  )
+
   // 防撤回（WeFlow 式：会话级 WCDB 触发器）
   ipcMain.handle('chat:getAntiRevokeSessions', () => chatService.getAntiRevokeSessions())
   ipcMain.handle('chat:checkAntiRevokeTriggers', (_e, sessionIds: string[]) =>
     chatService.checkAntiRevokeTriggers((sessionIds || []).map(String)))
+  // v1.2 §10.3 ③：触发器安装/卸载是**写**操作（会在消息库上建/删 TRIGGER），
+  // 一律先做自动快照（含 `-wal`/`-shm`），快照成功之后才允许写入。
   ipcMain.handle('chat:installAntiRevokeTriggers', (_e, sessionIds: string[]) =>
-    chatService.installAntiRevokeTriggers((sessionIds || []).map(String)))
+    withWriteSnapshot('anti-revoke-install', () =>
+      chatService.installAntiRevokeTriggers((sessionIds || []).map(String))))
   ipcMain.handle('chat:uninstallAntiRevokeTriggers', (_e, sessionIds: string[]) =>
-    chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String)))
+    withWriteSnapshot('anti-revoke-uninstall', () =>
+      chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String))))
 
   // 导出
   ipcMain.handle('export:exportSessions', async (_e, outputRoot: string, formatOrOptions?: any, legacyOptions?: any) => {
+    await ensureInitialUpdatePolicy()
+    const updateError = compatibilityError(APP_VERSION, true)
+    if (updateError) return { success: false, successCount: 0, failCount: 1, error: updateError }
     const root = String(outputRoot || '').trim()
     if (!root) return { success: false, successCount: 0, failCount: 1, error: '未指定输出目录' }
 
@@ -2522,6 +3022,19 @@ function registerIpcHandlers() {
     const control = exportTaskControlService.createControl(taskId, outDir)
     taskStatusService.begin(TASK_KEY.export, '准备中…', 'prepare')
     const progressEmitter = (progress: any) => {
+      const total = Math.max(0, Number(progress?.total) || 0)
+      const current = Math.max(0, Number(progress?.current) || 0)
+      const rawPhase = String(progress?.phase || '')
+      // `complete` is emitted after each session and again at 100% before the
+      // integrity self-check. Only taskStatusService.end is terminal.
+      const aggregateComplete = total > 0 && current >= total
+      const phase = rawPhase === 'complete'
+        ? aggregateComplete ? 'verifying' : 'exporting'
+        : rawPhase
+      const phaseLabel = rawPhase === 'complete'
+        ? aggregateComplete ? '正在校验导出结果…' : String(progress?.currentSession || '导出中…')
+        : String(progress?.phaseLabel || progress?.currentSession || '导出中…')
+      const normalizedProgress = { ...progress, current, total, phase, phaseLabel }
       // 进度事件携带 taskId：渲染层靠它执行 export:cancelTask
       //
       // 会话名在这里**截断**（见 boundProgressSessionLabel）：进度事件全程 189 条、
@@ -2529,23 +3042,23 @@ function registerIpcHandlers() {
       // 要把一行超长文本交给文本整形 + 省略号计算，观感就是"名字在抖"。三个消费方
       // （进度条 / CLI 日志 / TUI）都从这里取数，所以在最上游收敛一次即可。
       taskStatusService.progress(TASK_KEY.export, {
-        stage: String(progress?.phase || ''),
-        progress: Number(progress?.total) > 0 ? (Number(progress?.current) / Number(progress.total)) * 100 : undefined,
-        message: String(progress?.phaseLabel || progress?.currentSession || '导出中…'),
+        stage: phase,
+        progress: total > 0 ? (current / total) * 100 : undefined,
+        message: phaseLabel,
         // 导出每 400ms 一条事件，全部记进日志会把 200 行的环形缓冲冲干净，
         // 也读不出东西 —— 只记进度、不记日志，日志面板本来也只显示阶段行。
         log: false,
         detail: {
           taskId,
-          current: Number(progress?.current) || 0,
-          total: Number(progress?.total) || 0,
-          phase: String(progress?.phase || ''),
-          phaseLabel: String(progress?.phaseLabel || ''),
+          current,
+          total,
+          phase,
+          phaseLabel,
           currentSession: boundProgressSessionLabel(progress?.currentSession),
         },
       })
       mainWindow?.webContents.send('export:progress', {
-        ...progress,
+        ...normalizedProgress,
         currentSession: boundProgressSessionLabel(progress?.currentSession),
         taskId,
       })
@@ -2595,13 +3108,14 @@ function registerIpcHandlers() {
       // 终态显式落下：取消 / 失败 / 完成三种收尾在界面上完全不一样，
       // 靠"进度到 100"推断会把一次取消显示成成功。
       const cancelled = exportTaskControlService.getState(taskId) === 'cancel_requested'
+      const emptySkippedCount = result.emptySkippedSessionIds?.length || 0
       taskStatusService.end(
         TASK_KEY.export,
         cancelled ? 'aborted' : result.success && result.failCount === 0 ? 'done' : 'failed',
         {
-          message: cancelled ? '已取消导出' : `导出完成（成功 ${result.successCount || 0}，失败 ${result.failCount || 0}）`,
+          message: cancelled ? '已取消导出' : `导出完成（成功 ${result.successCount || 0}${emptySkippedCount ? `，空会话已跳过 ${emptySkippedCount}` : ''}，失败 ${result.failCount || 0}）`,
           error: result.failCount ? `${result.failCount} 个会话导出失败` : undefined,
-          detail: { taskId, successCount: result.successCount || 0, failCount: result.failCount || 0 },
+          detail: { taskId, successCount: result.successCount || 0, emptySkippedCount, failCount: result.failCount || 0 },
         }
       )
       return {
@@ -2622,7 +3136,81 @@ function registerIpcHandlers() {
     const ok = exportTaskControlService.cancelTask(String(taskId || ''))
     return { success: ok }
   })
+  // v1.2 §10.3 ③：写操作的快照列表 / 一键回滚。
+  // 渲染层要展示"这次写操作之前的库长什么样"并允许回滚；preload 由集成方补线。
+  ipcMain.handle('snapshot:list', async () => {
+    const snapshots = await listSnapshots(join(app.getPath('userData'), 'snapshots'))
+    return { snapshots: snapshots.map(snapshot => ({ id: snapshot.id, reason: snapshot.reason, createdAt: snapshot.createdAtMs, files: snapshot.files, bytes: snapshot.totalBytes })) }
+  })
+  ipcMain.handle('snapshot:restore', async (_e, payload?: { id?: string; verifyOnly?: boolean; confirm?: boolean }) => {
+    let taskStarted = false
+    const fail = (error: string) => {
+      if (taskStarted) taskStatusService.end(TASK_KEY.databaseMaintenance, 'failed', { message: '快照操作失败', error })
+      return { success: false, restored: [], error }
+    }
+    if (!payload?.id || typeof payload.id !== 'string') return fail('未指定快照 ID')
+    if (!payload.verifyOnly && payload.confirm !== true) return fail('恢复会覆盖数据库，请先确认')
+    if (databaseWritesInFlight || wcdbService.isMaintenanceActive() || (!payload.verifyOnly && exportTaskControlService.hasActiveTasks())) return fail('请等待当前数据库维护或导出任务结束')
+    const release = payload.verifyOnly ? () => {} : wcdbService.acquireMaintenance()
+    if (!release) return fail('已有数据库维护任务正在运行')
+    databaseWritesInFlight++
+    taskStarted = true
+    taskStatusService.begin(TASK_KEY.databaseMaintenance, payload.verifyOnly ? '正在校验快照' : '正在恢复快照', payload.verifyOnly ? '校验快照' : '恢复快照')
+    try {
+      if (!payload.verifyOnly) await ensureInitialUpdatePolicy()
+      const updateError = compatibilityError(APP_VERSION, false)
+      if (!payload.verifyOnly && updateError) return fail(updateError)
+      const snapshots = await listSnapshots(join(app.getPath('userData'), 'snapshots'))
+      const matches = snapshots.filter(snapshot => snapshot.id === payload.id)
+      if (matches.length !== 1) return fail('快照不存在或 ID 不唯一')
+      const snapshotRoot = resolve(join(app.getPath('userData'), 'snapshots'))
+      if (!resolve(matches[0].dir).startsWith(`${snapshotRoot}${sep}`)) return fail('快照路径不在本地快照目录内')
+      if (payload.verifyOnly) {
+        const verification = await verifySnapshot(matches[0].dir)
+        taskStatusService.end(TASK_KEY.databaseMaintenance, verification.ok ? 'done' : 'failed', { message: verification.ok ? '快照校验完成' : '快照校验失败', error: verification.error })
+        return { ...verification, success: verification.ok, restored: [] }
+      }
+      const accountDir = configService?.getAccountDir()
+      if (!accountDir) return fail('请先选择需要恢复的账号')
+      const observer = process.platform === 'win32' ? new KeyService() : process.platform === 'darwin' ? new KeyServiceMac() : new KeyServiceLinux()
+      const observation = await observer.observePlatform()
+      if (observation.wechatPids.length) return fail('请先退出微信，避免恢复期间数据库仍在写入')
+      await chatService.close()
+      if (configService?.getAccountDir() !== accountDir) return fail('当前账号已改变，请重新选择快照')
+      if ((await observer.observePlatform()).wechatPids.length) return fail('微信已启动，已中止恢复')
+      const result = await restoreSnapshot(matches[0].dir, { allowedAccountDir: accountDir })
+      taskStatusService.end(TASK_KEY.databaseMaintenance, result.ok ? 'done' : 'failed', { message: result.ok ? '快照恢复完成' : '快照恢复失败', error: result.error })
+      return { ...result, success: result.ok }
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : String(error))
+    } finally { databaseWritesInFlight--; release() }
+  })
+  // v1.2 §4：海报导出落盘。渲染层只拿到**真实写入路径**，拿不到就说明没写成（不许假报成功）。
+  // 目录优先用调用方给的（用户在选择器里选的），其次配置里的导出目录，最后回落到图片目录。
+  ipcMain.handle('poster:saveImage', async (_e, payload: { dataUrl?: string; fileName?: string; directory?: string }) => {
+    try {
+      const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(String(payload?.dataUrl || ''))
+      if (!match) return { success: false, error: '不是 PNG data URL（只接受 image/png）' }
+      const rawName = String(payload?.fileName || `Weport-海报-${Date.now()}.png`)
+      const safeName = rawName.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || `Weport-海报-${Date.now()}.png`
+      const fileName = safeName.toLowerCase().endsWith('.png') ? safeName : `${safeName}.png`
+      const configured = String(payload?.directory || '').trim() || String(configService?.get('exportPath') || '') || app.getPath('pictures')
+      const dir = resolve(configured)
+      mkdirSync(dir, { recursive: true })
+      const target = join(dir, fileName)
+      await atomicWriteFile(target, Buffer.from(match[1], 'base64'))
+      return { success: true, path: target }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
   ipcMain.handle('export:getExportLog', (_e, outputRoot: string) => readExportLog(String(outputRoot || '')))
+  // v1.2 §10.2 ②：读回导出正确性自检报告。传导出根目录（自动找里面有报告的那个格式子目录、
+  // 取最新一份）或直接传格式子目录都行；报告不存在时返回 `{ success:false, error }`，不抛。
+  ipcMain.handle('export:integrityReport', (_e, outputRoot: string) => readIntegrityReport(String(outputRoot || '')))
+  // 对已存在的导出目录重跑一次自检（不重新导出）：清单来自 export-manifest.json，
+  // 产物指纹来自账本。用途：用户怀疑导出目录被改动过，或想在几天后再验一次。
+  ipcMain.handle('export:runIntegrityCheck', (_e, outputRoot: string) => runIntegrityCheckForExportRoot(String(outputRoot || '')))
   ipcMain.handle('export:clearLibrary', (_e, outputRoot: string) => clearExportLibrary(String(outputRoot || '')))
 
   // -------------------------------------------------------------------------
@@ -2696,10 +3284,14 @@ function registerIpcHandlers() {
     if (result.canceled || !result.filePaths?.[0]) return { canceled: true }
     return { canceled: false, filePath: result.filePaths[0] }
   })
-  ipcMain.handle('sns:installBlockDeleteTrigger', () => snsService.installSnsBlockDeleteTrigger())
-  ipcMain.handle('sns:uninstallBlockDeleteTrigger', () => snsService.uninstallSnsBlockDeleteTrigger())
+  ipcMain.handle('sns:installBlockDeleteTrigger', () =>
+    withWriteSnapshot('sns-block-delete-install', () => snsService.installSnsBlockDeleteTrigger()))
+  ipcMain.handle('sns:uninstallBlockDeleteTrigger', () =>
+    withWriteSnapshot('sns-block-delete-uninstall', () => snsService.uninstallSnsBlockDeleteTrigger()))
   ipcMain.handle('sns:checkBlockDeleteTrigger', () => snsService.checkSnsBlockDeleteTrigger())
-  ipcMain.handle('sns:deleteSnsPost', (_e, postId: string) => snsService.deleteSnsPost(String(postId || '')))
+  // v1.2 §10.3 ③：删朋友圈是写操作（删记录），先快照再删
+  ipcMain.handle('sns:deleteSnsPost', (_e, postId: string) =>
+    withWriteSnapshot('sns-delete-post', () => snsService.deleteSnsPost(String(postId || ''))))
   ipcMain.handle('sns:downloadEmoji', (_e, params: { url: string; encryptUrl?: string; aesKey?: string }) =>
     snsService.downloadSnsEmoji(params?.url, params?.encryptUrl, params?.aesKey))
   ipcMain.handle('sns:getCacheMigrationStatus', async () => {
@@ -3160,9 +3752,21 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // "No handler registered"。渲染层的 demo 覆盖掩盖了缺失的真实实现。
   // -------------------------------------------------------------------------
   ipcMain.handle('webot:listTasks', () => ensureWeBotService().listTasks())
-  ipcMain.handle('webot:createTask', (_e, input: any) => ensureWeBotService().createTask(input || {}))
-  ipcMain.handle('webot:updateTask', (_e, id: string, patch: any) => ensureWeBotService().updateTask(String(id || ''), patch || {}))
-  ipcMain.handle('webot:deleteTask', (_e, id: string) => ensureWeBotService().deleteTask(String(id || '')))
+  ipcMain.handle('webot:createTask', (_e, input: any) => {
+    const task = ensureWeBotService().createTask(input || {})
+    syncWeBotScheduler()
+    return task
+  })
+  ipcMain.handle('webot:updateTask', (_e, id: string, patch: any) => {
+    const task = ensureWeBotService().updateTask(String(id || ''), patch || {})
+    if (task) syncWeBotScheduler()
+    return task
+  })
+  ipcMain.handle('webot:deleteTask', (_e, id: string) => {
+    const deleted = ensureWeBotService().deleteTask(String(id || ''))
+    if (deleted) syncWeBotScheduler()
+    return deleted
+  })
   ipcMain.handle('webot:runNow', (_e, id: string) => ensureWeBotService().runNow(String(id || '')))
   ipcMain.handle('webot:listRuns', (_e, taskId?: string) => ensureWeBotService().listRuns(taskId ? String(taskId) : undefined))
   ipcMain.handle('webot:listNotes', (_e, options?: any) => ensureWeBotService().listNotes(options || {}))
@@ -3277,6 +3881,110 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
    * 时间都能原样恢复 —— 任务本身一直活在主进程里，从来没停过。
    */
   ipcMain.handle('task:status', () => taskStatusService.all())
+
+  // ---------------------------------------------------------------------------
+  // v1.2 §6：跨页搜索 + 标签 / 收藏 / 标记 / 保存搜索
+  //
+  // 索引活在主进程（`searchIndexService`）而不是页面里：托盘隐藏会销毁窗口，
+  // 一次 10 万条消息的索引构建不该因为用户切走页面就丢进度（AGENTS 铁律 3）。
+  // 进度两条腿：taskStatusService 存快照（窗口重建后还能拿回来），
+  // `search:indexProgress` 推增量事件（界面实时刷新）。
+  // ---------------------------------------------------------------------------
+  ipcMain.handle('search:indexStatus', () => getSearchIndexService().status())
+  ipcMain.handle('search:buildIndex', (_event, payload?: { force?: boolean; wxid?: string }) => {
+    const service = getSearchIndexService()
+    // 重复点击不产生第二个构建：返回同一个 taskId，界面继续跟原来那条进度
+    if (service.isBuilding) return { taskId: service.taskId || '' }
+    const taskId = `search-index-${Date.now()}`
+    const push = (progress: {
+      stage: string
+      progress: number
+      message: string
+      docs: number
+      detail?: Record<string, unknown>
+    }): void => {
+      taskStatusService.progress(TASK_KEY.searchIndex, {
+        stage: progress.stage,
+        // taskStatusService 用 0-100；服务自己用 0..1
+        progress: progress.progress * 100,
+        message: progress.message,
+        log: false,
+        detail: { taskId, docs: progress.docs, ...(progress.detail || {}) },
+      })
+      mainWindow?.webContents.send('search:indexProgress', { taskId, ...progress })
+    }
+    taskStatusService.begin(TASK_KEY.searchIndex, '准备建立索引…', 'scan')
+    void service
+      .build({
+        force: payload?.force === true,
+        wxid: payload?.wxid,
+        taskId,
+        onProgress: push,
+      })
+      .then((result) => {
+        if (result.cancelled) {
+          taskStatusService.end(TASK_KEY.searchIndex, 'aborted', { message: '索引构建已取消' })
+          return
+        }
+        taskStatusService.end(TASK_KEY.searchIndex, 'done', {
+          message: `索引完成：${result.docs} 条消息（新增 ${result.indexed}）`,
+          detail: {
+            taskId,
+            docs: result.docs,
+            indexed: result.indexed,
+            scanned: result.scanned,
+            elapsedMs: result.elapsedMs,
+            bytes: result.bytes,
+            truncated: result.truncated,
+          },
+        })
+      })
+      .catch((error) => {
+        const message = String((error as Error)?.message || error)
+        console.error('[search-index] 构建失败:', message)
+        taskStatusService.end(TASK_KEY.searchIndex, 'failed', { error: message, message: '索引构建失败' })
+      })
+    return { taskId }
+  })
+  /**
+   * 取消索引构建（**契约之外的扩展通道**）。
+   *
+   * 契约里只有 start，没有 stop；而任务要求"可取消"。取消的语义是"丢弃本次构建"：
+   * 已写的分片不会被新 manifest 引用，磁盘上仍是上一次提交的完整索引。
+   */
+  ipcMain.handle('search:cancelIndex', () => {
+    getSearchIndexService().requestCancel()
+    return { success: true }
+  })
+  /** 长任务快照（与 `task:status` 同形，单独一条便于轮询这个 key） */
+  ipcMain.handle('search:indexProgress', () => taskStatusService.get(TASK_KEY.searchIndex))
+  ipcMain.handle('search:query', (_event, request: Parameters<SearchIndexService['query']>[0]) =>
+    getSearchIndexService().query(request || { text: '' })
+  )
+  ipcMain.handle('search:suggest', async (_event, payload?: { prefix?: string; limit?: number }) => ({
+    // 契约是 `{ suggestions: string[] }`（不是裸数组）
+    suggestions: await getSearchIndexService().suggest(String(payload?.prefix || ''), Number(payload?.limit) || 8),
+  }))
+  const assertAnnotationsAccount = (options?: { accountId: string }) => {
+    const selected = isDemoScreenshotMode ? DEMO_WXID : String(configService?.get('myWxid') || '').trim()
+    if (options && String(options.accountId || '').trim() !== selected) {
+      throw new Error('账号已切换，请重新读取收藏')
+    }
+  }
+  ipcMain.handle('annotations:list', (_event, options?: { accountId: string }) => {
+    assertAnnotationsAccount(options)
+    return getAnnotationsService().list()
+  })
+  ipcMain.handle(
+    'annotations:mutate',
+    (_event, mutation: { op: string; payload?: Record<string, unknown> }, options?: { accountId: string }) => {
+      assertAnnotationsAccount(options)
+      return getAnnotationsService().mutate(mutation as Parameters<AnnotationsService['mutate']>[0])
+    }
+  )
+  ipcMain.handle('annotations:export', (_event, payload: { format: 'json' | 'csv' | 'md'; path: string }) =>
+    getAnnotationsService().export(payload?.format || 'json', String(payload?.path || ''))
+  )
   // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
   // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
   ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))
@@ -3547,6 +4255,21 @@ function demoSessions() {
 }
 
 function installScreenshotDemoHandlers() {
+  if (process.env.WEPORT_UI_DEMO === '1' && process.env.WEPORT_PROBE_OFFSCREEN === '1') {
+    // Private packaged dependency smoke; no renderer API, files or network writes.
+    ;(globalThis as any).__weportPackageSmoke = async () => {
+      const Excel = await import('exceljs')
+      const workbook = new Excel.default.Workbook()
+      workbook.addWorksheet('Fixture').addRow(['Weport', 12])
+      const buffer = await workbook.xlsx.writeBuffer()
+      const mcp = await getMcpService()
+      const { WasmService } = await import('./services/wasmService')
+      const keystream = await WasmService.getInstance().getRawKeystream('123456', 256)
+      const { verifyPackagedMomentsImage } = await import('./services/packagedMediaFixture')
+      const momentsImage = await verifyPackagedMomentsImage(app.getPath('userData'))
+      return { xlsxBytes: buffer.byteLength, wasmBytes: keystream.byteLength, momentsImage, mcpReady: typeof mcp.getStatus().running === 'boolean', version: APP_VERSION }
+    }
+  }
   // WEPORT_TRACE_AI=1 时把渲染进程实际发出的 ai:* 调用打到 stdout：截图模式里
   // "AI 页面只渲染出空态"这类问题，只有看清调用了哪些通道、拿到了什么才能定位。
   const traceAi = process.env.WEPORT_TRACE_AI === '1'
@@ -3563,8 +4286,9 @@ function installScreenshotDemoHandlers() {
   override('config:set', async () => { /* 截图模式不落盘：演示数据绝不写进真实配置 */ })
   override('dbpath:scanWxids', () => [{ wxid: DEMO_WXID, nickname: '演示账号', modifiedTime: 0, avatarUrl: '' }])
   override('chat:connect', () => ({ success: true }))
-  override('chat:getAntiRevokeSessions', () => ({ sessions: demoAntiRevokeSessions() }))
+  override('chat:getAntiRevokeSessions', () => ({ success: true, sessions: demoAntiRevokeSessions() }))
   override('chat:checkAntiRevokeTriggers', () => ({
+    success: true,
     rows: ['family@chatroom', 'parents@chatroom'].map((sessionId) => ({
       sessionId,
       installed: true,
@@ -3572,14 +4296,41 @@ function installScreenshotDemoHandlers() {
     })),
   }))
   override('chat:installAntiRevokeTriggers', (e, sessionIds: string[]) => ({
+    success: true,
     rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
   }))
   override('chat:uninstallAntiRevokeTriggers', (e, sessionIds: string[]) => ({
+    success: true,
     rows: (sessionIds || []).map((sessionId) => ({ sessionId, success: true })),
   }))
   // 会话列表 + 免打扰状态：通知设置的「屏蔽 n 个会话」与 `@` 选择器都读它们，
   // 不覆盖就会读到真实微信数据（见 demoSessions 的说明）。
   override('chat:getSessions', () => ({ success: true, sessions: demoSessions() }))
+  const demoMessages = (sessionId: string) => Array.from({ length: 18 }, (_, index) => ({
+    localId: index + 1, serverId: String(index + 1000), localType: 1,
+    createTime: 1788220800 + index * 300, sortSeq: index + 1,
+    isSend: index % 3 === 0 ? 1 : 0, senderUsername: index % 3 === 0 ? DEMO_WXID : sessionId,
+    senderDisplayName: index % 3 === 0 ? '我' : '演示联系人',
+    parsedContent: ['周末一起去公园散步吧。', '可以，下午三点在门口见。', '我会带相机，天气很好。'][index % 3],
+    rawContent: ['周末一起去公园散步吧。', '可以，下午三点在门口见。', '我会带相机，天气很好。'][index % 3],
+    _db_path: 'message_0.db', _table_name: 'Msg_demo',
+  }))
+  override('chat:getMessages', (_e, sessionId: string, offset = 0, limit = 50) => ({ success: true, messages: demoMessages(sessionId).slice(offset, offset + limit), hasMore: false }))
+  override('chat:getMessageByIdentity', (_e, identity: { sessionId: string; localId: string | number }) => ({ success: true, message: demoMessages(identity.sessionId).find(m => m.localId === Number(identity.localId)) }))
+  override('chat:getMessageCount', () => ({ success: true, count: 18 }))
+  override('chat:getMessageDates', () => ({ success: true, dates: ['2026-09-01'] }))
+  override('chat:searchMessages', (_e, keyword: string, sessionId: string) => ({ success: true, messages: demoMessages(sessionId).filter(m => m.parsedContent.includes(keyword)), total: 18 }))
+  override('keyHealth:get', () => ({ success: true, mode: 'scan', connectionReady: true, blockers: [], databases: [] }))
+  override('search:indexStatus', () => ({ ready: true, building: false, progress: 1, stage: 'complete', docs: 18, lastBuiltAt: Date.now(), accounts: [] }))
+  override('search:query', (_e, request: { text?: string }) => {
+    const text = request?.text || ''
+    const hits = demoMessages('family@chatroom').filter(message => !text || message.parsedContent.includes(text)).map(message => ({
+      sessionId: 'family@chatroom', sessionName: '一家人', localId: String(message.localId), localIdNumber: message.localId,
+      idKind: 'local', ts: message.createTime * 1000, senderUsername: message.senderUsername, senderName: message.senderDisplayName,
+      kind: 'text', snippet: message.parsedContent, highlights: [], score: 1, db: 'message_0.db', table: 'Msg_demo',
+    }))
+    return { hits, total: hits.length, cursor: null, elapsedMs: 1, truncated: false }
+  })
   override('chat:getSessionStatuses', (_e, usernames: string[]) => {
     const muted = new Set(demoSessions().filter((session) => session.isMuted).map((session) => session.username))
     const map: Record<string, { isMuted: boolean; isFolded: boolean }> = {}
@@ -4491,6 +5242,10 @@ async function runV09DumpMode() {
 
   const results: Record<string, unknown> = { consoleErrors: [] }
   const clickTab = async (label: string) => {
+    if (label === '诊断') {
+      await clickTab('设置')
+      return wc.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.settings-nav-item')).find(x => (x.textContent || '').startsWith('诊断')); b?.click(); return { ok: !!b } })()`)
+    }
     const r = await wc.executeJavaScript(`
       (() => {
         const buttons = Array.from(document.querySelectorAll('.tab, .rail-item'));
@@ -5010,6 +5765,8 @@ const groupDetailDom = results.groupDetail as Record<string, any>
 // QA 截图模式（capture-ui.ps1 驱动）
 // ---------------------------------------------------------------------------
 async function runScreenshotMode() {
+  const offscreen = process.env.WEPORT_PROBE_OFFSCREEN === '1'
+  if (offscreen && mainWindow) mainWindow.setPosition(-4000, 0)
   const outDir = process.env.WEPORT_SCREENSHOT_OUT || join(app.getPath('temp'), 'weport-screenshots')
   try {
     mkdirSync(outDir, { recursive: true })
@@ -5255,14 +6012,20 @@ async function runScreenshotMode() {
     return false
   }
 
-  const clickTab = (label: string) =>
-    (mainWindow?.webContents
+  const clickTab = async (label: string): Promise<boolean> => {
+    if (label === '诊断') {
+      await clickTab('设置')
+      await sleep(100)
+      return mainWindow?.webContents.executeJavaScript(`(() => { const b = Array.from(document.querySelectorAll('.settings-nav-item')).find(x => (x.textContent || '').startsWith('诊断')); b?.click(); return !!b })()`, true).catch(() => false) ?? false
+    }
+    return (mainWindow?.webContents
       .executeJavaScript(
         // 精确优先（同 runScreenshotMode 的说明）：「设置」不能被「消息通知设置」抢走
-        `(() => { const items = Array.from(document.querySelectorAll('.tab, .rail-item')); const want = ${JSON.stringify(label)}; const b = items.find((el) => (el.textContent || '').trim() === want) || items.find((el) => (el.textContent || '').includes(want)); if (b) { b.click(); return true } return false })()`,
+        `(() => { const items = Array.from(document.querySelectorAll('.tab, .rail-item')); const want = ${JSON.stringify(label)}; const b = items.find((el) => el.dataset.navLabel === want) || items.find((el) => (el.textContent || '').trim() === want) || items.find((el) => (el.textContent || '').includes(want)); if (b) { b.click(); return true } return false })()`,
         true,
       )
       .catch(() => false) ?? Promise.resolve(false))
+  }
 
   // 输出关键 UI 元素的精确几何（CSS px），供视频演示对齐覆盖层
   const dumpRects = async (file: string, selectors: string[]) => {
@@ -5603,16 +6366,16 @@ async function runScreenshotMode() {
         log(`[screenshot] popup glass pipeline = ${popupGlassState}`)
       } catch { /* noop */ }
 
-      const glassIsLive = popupGlassState === 'stream' || popupGlassState === 'frames' || popupGlassState === 'native'
+      const glassIsLive = !offscreen && (popupGlassState === 'stream' || popupGlassState === 'frames' || popupGlassState === 'native')
       // 实时玻璃会把**弹窗背后的真实画面**折射进这张图里。README 用的是这张
       // popup.png，所以先把主窗口铺成一块中性底色再截，玻璃里就只有纯色 —— 既不
       // 泄露桌面，也和文档里其它深色截图一致。截完立刻撤掉，后面的行为断言
       // （闪一块亮色、看两帧差异）用的还是真实桌面。
       if (glassIsLive) {
         // 把 QA 主窗口提到最前：玻璃折射的是**屏幕上弹窗背后**的内容，如果有别的"app 盖在 QA 窗口上面，注入的中性底色根本到不了玻璃，截出来的 popup.png 里就是真实桌面的模糊残影（README 不能出现这种东西）。
-        mainWindow?.show()
-        mainWindow?.moveTop()
-        mainWindow?.focus()
+        mainWindow?.showInactive()
+        if (!offscreen) mainWindow?.moveTop()
+        if (!offscreen) mainWindow?.focus()
         await sleep(700)
         await mainWindow?.webContents
           .executeJavaScript(
@@ -5634,9 +6397,9 @@ async function runScreenshotMode() {
       else await saveStable(popup, 'popup.png', 12, 40)
       if (glassIsLive) {
         // 把 QA 主窗口提到最前：玻璃折射的是**屏幕上弹窗背后**的内容，如果有别的"app 盖在 QA 窗口上面，注入的中性底色根本到不了玻璃，截出来的 popup.png 里就是真实桌面的模糊残影（README 不能出现这种东西）。
-        mainWindow?.show()
-        mainWindow?.moveTop()
-        mainWindow?.focus()
+        mainWindow?.showInactive()
+        if (!offscreen) mainWindow?.moveTop()
+        if (!offscreen) mainWindow?.focus()
         await sleep(700)
         await mainWindow?.webContents
           .executeJavaScript(`(() => { document.getElementById('qa-neutral-backdrop')?.remove(); return true })()`, true)
@@ -5721,8 +6484,8 @@ async function runScreenshotMode() {
           }
 
           // 行为断言的前提同样是"QA 窗口在弹窗正下方"：否则注入的亮/暗底色压根不在玻璃采样区里，两次截图自然只差一点点。
-          mainWindow?.show()
-          mainWindow?.moveTop()
+          mainWindow?.showInactive()
+          if (!offscreen) mainWindow?.moveTop()
           await sleep(500)
           await setOverlay('#ffd60a')
           await sleep(1700)
@@ -5989,6 +6752,15 @@ async function runScreenshotMode() {
       captureFailures.push(`${label} (capture threw: ${String(e)})`)
       console.warn(`[screenshot] ${label} capture failed:`, e)
     }
+  }
+
+  for (const [label, fileName, selector] of [
+    ['聊天阅读', 'reader.png', '.reader-main'],
+    ['搜索', 'search.png', '.sp-page'],
+    ['海报', 'poster.png', '.poster-grid'],
+    ['诊断', 'diagnostics.png', '.dx-page'],
+  ]) {
+    await captureV09(label, fileName, [selector], async () => { await clickTab(label) })
   }
 
   // 7.1) 朋友圈
@@ -6432,6 +7204,9 @@ async function runScreenshotMode() {
       const sweepPages: Array<[string, string]> = [
         ['connect', '连接微信'],
         ['export', '导出数据'],
+        ['reader', '聊天阅读'],
+        ['search', '搜索'],
+        ['poster', '海报'],
         ['sns', '朋友圈'],
         ['analytics', '分析'],
         ['antirecall', '防撤回'],
@@ -6440,6 +7215,7 @@ async function runScreenshotMode() {
         ['webot', 'WeBot'],
         ['webot-notes', 'WeBot 笔记'],
         ['weclone', 'WeClone'],
+        ['diagnostics', '诊断'],
       ]
 
       let sweepIndex = 0
@@ -7620,6 +8396,109 @@ async function runAiProbe() {
   app.exit(ok ? 0 : 1)
 }
 
+/** Initialize the shared Electron engine. coreOnly omits IPC, network and schedules. */
+export async function startEngineServices(
+  options: { coreOnly?: boolean } = {}
+): Promise<void> {
+  process.env.WEPORT_DEV_MODE = app.isPackaged ? '' : '1'
+  process.env.WEPORT_RESOURCES_PATH = resolveResourcesPath()
+  process.env.WEPORT_USER_DATA_PATH = app.getPath('userData')
+
+  configService = ConfigService.getInstance()
+
+  // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
+  avatarCacheService.init(configService.getCacheBasePath())
+
+  // 视频背景的降采样缓存：把 4K 壁纸转成显示尺寸那一版，省下大部分解码。
+  backgroundVideoService = new BackgroundVideoService(configService.getCacheBasePath())
+
+  // One-time key bootstrap is needed by both the normal UI and the isolated
+  // AI harness. It stays local and never writes the secret to diagnostics.
+  const bootstrapKey = String(process.env.WEPORT_AI_BOOTSTRAP_KEY || '').trim()
+  if (bootstrapKey && !String(configService?.get('weportAiApiKey') || '').trim()) {
+    try {
+      configService?.set('weportAiApiKey', bootstrapKey)
+      console.log('[WeportAI] API 密钥已通过引导环境变量写入本地配置')
+    } catch (e) {
+      console.warn('[WeportAI] API 密钥引导写入失败:', e)
+    }
+  }
+
+  const resourcesPath = resolveResourcesPath()
+  const userDataPath = app.getPath('userData')
+  wcdbService.setPaths(resourcesPath, userDataPath)
+  wcdbService.setLogEnabled(configService.get('logEnabled') === true)
+
+  // weport-media://local/<encodeURIComponent(绝对路径)>：本地媒体只读协议
+  // （仅允许文件存在时返回；用于朋友圈视频/图片预览 + 头像磁盘缓存）
+  //
+  try {
+    protocol.handle('weport-media', async (request) => {
+      try {
+        const url = new URL(request.url)
+        const rawPath = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+        if (!rawPath || !existsSync(rawPath)) {
+          return new Response('Not Found', { status: 404 })
+        }
+        const fileUrl = pathToFileURL(rawPath).toString()
+        return await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true })
+      } catch {
+        return new Response('Not Found', { status: 404 })
+      }
+    })
+  } catch (e) {
+    console.warn('[Weport] 注册本地媒体协议失败:', e)
+  }
+
+  if (options.coreOnly) return
+
+  migrateLegacySettings()
+  // 本地 HTTP API：配置开启时随应用启动（只读接口，默认仅 127.0.0.1）
+  if (configService.get('httpApiEnabled') === true) {
+    const port = Number(configService.get('httpApiPort') || 5031)
+    const host = String(configService.get('httpApiHost') || '127.0.0.1')
+    void httpService.start(port, host)
+  }
+  // 本地 MCP 服务（v0.9.5）：只读工具，Bearer token 认证，默认仅 127.0.0.1
+  if (configService.get('mcpEnabled') !== false) {
+    const port = Number(configService.get('mcpPort') || 5032)
+    const host = String(configService.get('mcpHost') || '127.0.0.1')
+    void getMcpService().then((svc) => svc.start(port, host)).catch(() => { /* noop */ })
+  }
+
+  registerIpcHandlers()
+  setupNotificationPipeline()
+
+  // 注册到只读 registry，供 HTTP API 与 MCP 对外暴露笔记/任务（单向依赖）。
+  setWeBotService(ensureWeBotService())
+  // No timer is needed when the task file has no enabled schedules. Existing enabled tasks
+  // still start immediately so their missed-job catch-up semantics remain unchanged.
+  syncWeBotScheduler()
+
+  // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
+  weportAiService.setEventEmitter((event) => {
+    try {
+      mainWindow?.webContents.send('ai:event', event)
+    } catch { /* noop */ }
+  })
+
+  // 后台预热联系人显示名/头像（不阻塞窗口显示；仅虚构演示截图跳过）。
+  // 仅当需要常驻数据库连接（消息推送开启）或用户主动启动（非静默）时执行；
+  // 静默启动时跳过可避免开机即拉起 WCDB 宿主进程与全部微信库连接（约 900MB），
+  // 改为窗口打开时由 showMainWindow 按需预热
+  const hasOriginalKey = /^[a-f0-9]{64}$/i.test(String(configService.get('decryptKey') || '').trim())
+  if (!isDemoScreenshotMode && ((configService.get('messagePushEnabled') === true && hasOriginalKey) || !startHidden)) {
+    void warmupContactNames()
+  } else if (!isDemoScreenshotMode && startHidden) {
+    contactWarmupDeferred = true
+  }
+
+  // 通知服务：推送开关开启时启动（连接数据库并开启监控管道）
+  if (configService.get('messagePushEnabled') || configService.get('antiRevokeAutoApplyNewGroups')) {
+    messagePushService?.start()
+  }
+}
+
 function startApp() {
   installMainProcessErrorHandlers()
   const aiSelfTest = process.env.WEPORT_AI_SELFTEST === '1'
@@ -7692,7 +8571,7 @@ function startApp() {
     // 把后台窗口带出来，否则用户的启动看起来毫无反应。
     const newInstanceIsBackground = Array.isArray(argv) && argv.includes('--background')
     if (startHidden && newInstanceIsBackground) {
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      if (process.env.WEPORT_PROBE_OFFSCREEN !== '1' && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
         mainWindow.focus()
       }
       return
@@ -7706,55 +8585,8 @@ function startApp() {
   } catch { /* noop */ }
 
   app.whenReady().then(async () => {
-    // 环境标记：WCDB 宿主进程的 dev 模式判定
-    process.env.WEPORT_DEV_MODE = app.isPackaged ? '' : '1'
-    process.env.WEPORT_RESOURCES_PATH = resolveResourcesPath()
-    process.env.WEPORT_USER_DATA_PATH = app.getPath('userData')
-
-    configService = ConfigService.getInstance()
-
-    // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
-    avatarCacheService.init(configService.getCacheBasePath())
-
-    // 视频背景的降采样缓存：把 4K 壁纸转成显示尺寸那一版，省下大部分解码。
-    backgroundVideoService = new BackgroundVideoService(configService.getCacheBasePath())
-
-    // weport-media://local/<encodeURIComponent(绝对路径)>：本地媒体只读协议
-    // （仅允许文件存在时返回；用于朋友圈视频/图片预览 + 头像磁盘缓存）
-    try {
-      protocol.handle('weport-media', async (request) => {
-        try {
-          const url = new URL(request.url)
-          const rawPath = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
-          if (!rawPath || !existsSync(rawPath)) {
-            return new Response('Not Found', { status: 404 })
-          }
-          const fileUrl = pathToFileURL(rawPath).toString()
-          return await net.fetch(fileUrl, { bypassCustomProtocolHandlers: true })
-        } catch {
-          return new Response('Not Found', { status: 404 })
-        }
-      })
-    } catch (e) {
-      console.warn('[Weport] 注册本地媒体协议失败:', e)
-    }
-
-    // One-time key bootstrap is needed by both the normal UI and the isolated
-    // AI harness. It stays local and never writes the secret to diagnostics.
-    const bootstrapKey = String(process.env.WEPORT_AI_BOOTSTRAP_KEY || '').trim()
-    if (bootstrapKey && !String(configService?.get('weportAiApiKey') || '').trim()) {
-      try {
-        configService?.set('weportAiApiKey', bootstrapKey)
-        console.log('[WeportAI] API 密钥已通过引导环境变量写入本地配置')
-      } catch (e) {
-        console.warn('[WeportAI] API 密钥引导写入失败:', e)
-      }
-    }
-
-    const resourcesPath = resolveResourcesPath()
-    const userDataPath = app.getPath('userData')
-    wcdbService.setPaths(resourcesPath, userDataPath)
-    wcdbService.setLogEnabled(configService.get('logEnabled') === true)
+    // 引擎侧启动（配置/服务/IPC/调度器/预热）
+    await startEngineServices({ coreOnly: aiSelfTest || aiProbe })
 
     // True headless path: no BrowserWindow, tray, notification monitor, updater,
     // registry synchronization, or visible renderer. Windows Electron can quit
@@ -7774,25 +8606,12 @@ function startApp() {
       return
     }
 
-    migrateLegacySettings()
+    // 壳侧（仅 Electron 主进程）：开机自启 Run 键同步（值里是 process.execPath，
+    // 主窗口、托盘和协议注册由桌面入口负责。
+    // 遗留自启项清理与更新器初始化。
     syncLaunchAtStartupPreference()
     cleanupLegacyAutostartEntries()
     applyUpdaterChannel()
-    // 本地 HTTP API：配置开启时随应用启动（只读接口，默认仅 127.0.0.1）
-    if (configService.get('httpApiEnabled') === true) {
-      const port = Number(configService.get('httpApiPort') || 5031)
-      const host = String(configService.get('httpApiHost') || '127.0.0.1')
-      void httpService.start(port, host)
-    }
-    // 本地 MCP 服务（v0.9.5）：只读工具，Bearer token 认证，默认仅 127.0.0.1
-    if (configService.get('mcpEnabled') !== false) {
-      const port = Number(configService.get('mcpPort') || 5032)
-      const host = String(configService.get('mcpHost') || '127.0.0.1')
-      void getMcpService().then((svc) => svc.start(port, host)).catch(() => { /* noop */ })
-    }
-
-    registerIpcHandlers()
-    setupNotificationPipeline()
 
     // TUI 引擎：不建窗口、不建托盘，`weport` 在终端里通过 stdio 驱动服务层。
     if (isCliMode) {
@@ -7806,32 +8625,8 @@ function startApp() {
       return
     }
 
-    // 模型元数据（models.dev）后台刷新：只在 TTL 过期时发一次条件 GET，304
-    // 是 0 字节；失败只降级到磁盘缓存 + 内置快照，不影响任何 UI 路径。
-    void refreshModelRegistry()
-
-    // WeBot 调度器：启动时立刻 tick 一次，把应用未运行期间错过的任务按各自
-    // 的补偿策略补上（见 services/weBotSchedule.ts）。
-    ensureWeBotService().start()
-    // 注册到只读 registry，供 HTTP API 与 MCP 对外暴露笔记/任务（单向依赖）。
-    setWeBotService(ensureWeBotService())
-
-    // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
-    weportAiService.setEventEmitter((event) => {
-      try {
-        mainWindow?.webContents.send('ai:event', event)
-      } catch { /* noop */ }
-    })
-
-    // 后台预热联系人显示名/头像（不阻塞窗口显示；仅虚构演示截图跳过）。
-    // 仅当需要常驻数据库连接（消息推送开启）或用户主动启动（非静默）时执行；
-    // 静默启动时跳过可避免开机即拉起 WCDB 宿主进程与全部微信库连接（约 900MB），
-    // 改为窗口打开时由 showMainWindow 按需预热
-    if (!isDemoScreenshotMode && (configService.get('messagePushEnabled') === true || !startHidden)) {
-      void warmupContactNames()
-    } else if (!isDemoScreenshotMode && startHidden) {
-      contactWarmupDeferred = true
-    }
+    // 模型元数据、WeBot 调度器、WeportAI 事件桥、联系人预热与通知监控
+    // 都在 startEngineServices() 里。
 
     // 微信 CDN 头像/图片请求头（否则弹窗头像 403 → 占位）。
     // 延迟到首次创建窗口 / 弹窗时注册（幂等，见 createWindow / onPush），
@@ -7846,10 +8641,7 @@ function startApp() {
 
     createTray()
 
-    // 通知服务：推送开关开启时启动（连接数据库并开启监控管道）
-    if (configService.get('messagePushEnabled') || configService.get('antiRevokeAutoApplyNewGroups')) {
-      messagePushService?.start()
-    }
+    // 通知服务已在 startEngineServices() 里按配置启动（连接数据库并开启监控管道）
 
     // QA 模式统一跳过更新检查：演示/转储必须离线且不能让 updater 的
     // 网络错误污染渲染断言或用户的桌面。

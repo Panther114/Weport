@@ -1,3 +1,4 @@
+import { normalizeLocalMediaUrl } from '../../utils/mediaUrl'
 import { memo, useEffect, useRef, useState } from 'react'
 import { Download, ImageOff, Loader2, Play, RefreshCw } from 'lucide-react'
 import type { SnsMedia } from '../../types/sns'
@@ -399,7 +400,7 @@ const MediaItem = memo(
         ) : showVideoTag ? (
           <video
             key={thumbSrc}
-            src={`${thumbSrc}#t=0.1`}
+            src={`${normalizeLocalMediaUrl(thumbSrc)}#t=0.1`}
             className="media-image"
             preload="auto"
             muted
@@ -412,7 +413,7 @@ const MediaItem = memo(
           />
         ) : thumbSrc ? (
           <img
-            src={thumbSrc}
+            src={normalizeLocalMediaUrl(thumbSrc)}
             className="media-image"
             loading="lazy"
             // 异步解码：缩略图是 720px 的原图缩到网格尺寸，解码放在渲染关键路径上

@@ -44,6 +44,18 @@ function idle(): TaskSnapshot {
 
 export class TaskStatusService {
   private tasks = new Map<string, TaskSnapshot>()
+  private transitions = new Set<() => void>()
+
+  onTransition(listener: () => void): () => void {
+    this.transitions.add(listener)
+    return () => { this.transitions.delete(listener) }
+  }
+
+  private notifyTransition(): void {
+    for (const listener of this.transitions) {
+      try { listener() } catch { /* A destroyed renderer must not fail a task. */ }
+    }
+  }
 
   private snapshot(key: string): TaskSnapshot {
     let task = this.tasks.get(key)
@@ -78,6 +90,7 @@ export class TaskStatusService {
       error: undefined,
       detail: undefined,
     })
+    this.notifyTransition()
   }
 
   progress(
@@ -122,6 +135,7 @@ export class TaskStatusService {
       task.logs = [...task.logs, options.message]
       if (task.logs.length > MAX_LOGS) task.logs = task.logs.slice(task.logs.length - MAX_LOGS)
     }
+    this.notifyTransition()
   }
 
   reset(key: string): void {
@@ -134,6 +148,9 @@ export const TASK_KEY = {
   wecloneGenerate: 'weclone.generate',
   export: 'export',
   connect: 'chat.connect',
+  /** v1.2 §6 全局搜索索引构建 */
+  searchIndex: 'search.index',
+  databaseMaintenance: 'db.maintenance',
 } as const
 
 export const taskStatusService = new TaskStatusService()

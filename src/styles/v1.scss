@@ -177,6 +177,8 @@ input[type='range'] {
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr);
   height: 100vh;
+  overflow: clip;
+  min-height: 0;
 }
 
 .rail {
@@ -184,12 +186,13 @@ input[type='range'] {
   grid-row: 1 / -1;
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-3);
+  gap: 8px;
+  padding: 12px var(--space-3);
   background: var(--bg-raised);
   border-right: 1px solid var(--line);
-  overflow-y: auto;
-  scrollbar-width: thin;
+  overflow: hidden;
+  min-height: 0;
+  overscroll-behavior: none;
   user-select: none;
 }
 
@@ -207,6 +210,7 @@ input[type='range'] {
   grid-column: 2;
   grid-row: 3;
   min-height: 0;
+  min-width: 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -256,8 +260,10 @@ input[type='range'] {
 .rail-nav {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: 8px;
   flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .rail-group {
@@ -274,6 +280,13 @@ input[type='range'] {
   color: var(--text-faint);
 }
 
+.rail-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
 .rail-item {
   position: relative;
   display: flex;
@@ -281,6 +294,7 @@ input[type='range'] {
   gap: var(--space-3);
   width: 100%;
   height: var(--control-h);
+  flex: 0 0 var(--control-h);
   padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-sm);
@@ -346,7 +360,8 @@ input[type='range'] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-3);
-  padding: var(--space-3) var(--space-2) var(--space-1);
+  flex: 0 0 auto;
+  padding: 6px var(--space-2) 0;
   border-top: 1px solid var(--line);
 }
 
@@ -394,6 +409,7 @@ input[type='range'] {
 
 .topbar-title {
   min-width: 0;
+  flex: 1 1 auto;
 
   h2 {
     font-size: var(--fs-page-title);
@@ -411,11 +427,27 @@ input[type='range'] {
   }
 }
 
+.top-actions {
+  // Reserve a fixed right-hand slot even while idle. The status label changes
+  // on every export update; its text must never resize or move the header.
+  flex: 0 0 min(360px, 40vw);
+  width: min(360px, 40vw);
+  min-width: 0;
+  justify-content: flex-end;
+}
+
 .status-busy {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 26px;
+  width: 100%;
+  max-width: 100%;
+  flex: 0 0 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 0 var(--space-3);
   border: 1px solid var(--line-strong);
   border-radius: 999px;
@@ -429,6 +461,23 @@ input[type='range'] {
     border-radius: 50%;
     background: var(--accent);
     animation: weport-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+.status-busy-label {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Keep the labelled rail readable while returning a little horizontal room to
+// dense work surfaces on laptop-sized windows.
+@media (min-width: 901px) and (max-width: 1180px) {
+  :root {
+    --rail-w: 196px;
   }
 }
 
@@ -792,6 +841,13 @@ textarea,
   display: flex;
   gap: var(--space-2);
   flex-shrink: 0;
+}
+
+// Navigation uses one compact layout with a fixed Settings section.
+.rail-settings-group {
+  flex: 0 0 auto;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
 }
 
 .appearance-swatch {
@@ -1367,11 +1423,13 @@ textarea,
   align-items: center;
   gap: var(--space-3);
   margin-inline: calc(var(--space-4) * -1);
-  padding: var(--space-2) var(--space-4);
+  padding: 5px var(--space-4);
   background: var(--panel);
   border-bottom: 1px solid var(--line);
-  // 固定行高：内容（会话名/计数/取消按钮）怎么变都不改这一行的高度
+  // 外框几何固定：会话名、计数和取消按钮变化都不能推动吸顶块或下方页面。
+  height: 34px;
   min-height: 34px;
+  max-height: 34px;
   box-sizing: border-box;
 
   // 无进度时：占位但看不见。
@@ -1387,16 +1445,18 @@ textarea,
 }
 
 .exp-progress-bar .progress-track {
-  flex: 1;
-  min-width: 120px;
+  flex: 1 1 0%;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 // 会话名占固定基准宽度，再靠 flex-shrink 让出空间。
 // 不用 `flex: 0 1 auto`：那样宽度跟着文字走，右侧轨道与「取消导出」会随每条
 // 进度事件左右横跳 —— 这正是用户报的抖动之一。
 .exp-progress-session {
-  flex: 0 1 260px;
-  min-width: 0;
+  flex: 0 0 260px;
+  width: 260px;
+  min-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1406,7 +1466,8 @@ textarea,
 
 // 计数列固定宽度 + 等宽数字：`9 / 189` → `189 / 189` 不会改变自己的宽度
 .exp-progress-count {
-  flex: 0 0 auto;
+  flex: 0 0 72px;
+  width: 72px;
   min-width: 66px;
   text-align: right;
   font-size: 12px;
@@ -1414,8 +1475,30 @@ textarea,
   color: var(--text-dim);
 }
 
-.exp-progress-cancel {
-  flex: 0 0 auto;
+.exp-progress-bar .exp-progress-cancel {
+  flex: 0 0 86px;
+  width: 86px;
+  min-width: 86px;
+  height: 22px;
+  min-height: 22px;
+  max-height: 22px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 16px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.exp-progress-cancel[data-hidden='true'] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.exp-progress-bar .progress-fill {
+  // Progress width updates are already frequent; easing a layout property
+  // makes the indicator trail behind the exported count.
+  transition: none;
 }
 
 // 页头里的操作排成一行，主操作在最右
@@ -1492,6 +1575,22 @@ textarea,
   border: var(--hairline) solid var(--stroke-l1);
   border-radius: var(--radius);
   background: var(--layer-2);
+}
+
+// Export history is a single-line value. Long filenames or counts ellipsize
+// inside the row instead of increasing the sidebar and pushing later cards.
+.export-meta .row {
+  min-width: 0;
+}
+
+.export-meta .row > strong {
+  display: block;
+  flex: 0 1 60%;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .exp-side-card .exp-sec-head {
@@ -1983,6 +2082,31 @@ textarea,
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--text-dim);
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1180px) {
+  .settings-page {
+    grid-template-columns: 172px minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+
+  .settings-nav-item {
+    padding: 7px 10px;
+  }
+
+  .settings-pane {
+    gap: var(--space-3);
+  }
+
+  .setting-block {
+    gap: var(--space-2);
+    padding: 8px 6px;
+  }
+
+  .settings-pane .setting-row {
+    gap: var(--space-3);
+    padding: 8px 6px;
   }
 }
 
@@ -2969,7 +3093,9 @@ textarea,
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 340px;
+  width: min(340px, calc(100vw - 28px));
+  max-width: calc(100vw - 28px);
+  box-sizing: border-box;
   pointer-events: none;
 }
 

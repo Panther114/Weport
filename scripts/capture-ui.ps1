@@ -73,6 +73,7 @@ function Assert-ImageHasContent([string]$Path, [string]$Label) {
 }
 
 $env:WEPORT_SCREENSHOT_POPUP = '1'
+$env:WEPORT_PROBE_OFFSCREEN = '1'
 $env:WEPORT_SCREENSHOT_OUT = $OutputDir
 if ($LightMode) { $env:WEPORT_THEME_MODE = 'light' } else { Remove-Item Env:WEPORT_THEME_MODE -ErrorAction SilentlyContinue }
 if ($Accent) { $env:WEPORT_THEME_ACCENT = $Accent } else { Remove-Item Env:WEPORT_THEME_ACCENT -ErrorAction SilentlyContinue }
@@ -89,7 +90,7 @@ if ($ProjectRootArg) {
 } else {
   $processArgs = @("--user-data-dir=$UserDataDir")
 }
-$p = Start-Process -FilePath $Executable -ArgumentList $processArgs -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
+$p = Start-Process -FilePath $Executable -ArgumentList $processArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $appOut -RedirectStandardError $appErr
 $waited = $p.WaitForExit($TimeoutSeconds * 1000)
 if (-not $waited) {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
@@ -158,6 +159,10 @@ function Assert-Captured([string]$Path, [string]$Label) {
   }
 }
 Assert-Captured $mainPng 'main.png'
+foreach ($pageName in @('reader', 'search', 'poster', 'diagnostics')) {
+  Assert-Captured (Join-Path $OutputDir "$pageName.png") "$pageName.png"
+  Assert-ImageHasContent (Join-Path $OutputDir "$pageName.png") "$pageName page"
+}
 Assert-Captured $popupPng 'popup.png'
 Assert-Captured $exportPng 'export.png'
 Assert-Captured (Join-Path $OutputDir 'export-scope-rects.json') 'export-scope-rects.json'
@@ -373,5 +378,8 @@ if ($PublishToDocs) {
   Copy-Item $webotPng (Join-Path $docsDir "webot.png") -Force
   Copy-Item $webotNotesPng (Join-Path $docsDir "webot-notes.png") -Force
   Copy-Item $weclonePng (Join-Path $docsDir "weclone.png") -Force
+  foreach ($pageName in @('reader', 'search', 'poster', 'diagnostics')) {
+    Copy-Item (Join-Path $OutputDir "$pageName.png") (Join-Path $docsDir "$pageName.png") -Force
+  }
   Write-Output "Published screenshots to $docsDir"
 }

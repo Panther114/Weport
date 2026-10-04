@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "artifact": "wcdb_api.dll",
+  "platform": "win32-x64",
+  "size": 1387008,
+  "source": {
+    "project": "WeFlow",
+    "repository": "https://github.com/Panther114/WeFlow",
+    "path": "resources/wcdb/win32/x64/wcdb_api.dll",
+    "sha256": "6397760da70de8062829fbe6a2ec01cf0616d6f2b334e6fe54873898f38f7ad7",
+    "license": "CC BY-NC-SA 4.0 attribution as recorded in docs/LEGAL-PROVENANCE.md"
+  },
+  "adaptation": {
+    "issues": [30, 31],
+    "summary": "The built-in expiry-date branches in InitProtection and wcdb_init now take their existing valid-date paths. Earlier host-name and security-status checks and their error returns remain intact.",
+    "inspiration": {
+      "project": "xkitme fork",
+      "commit": "cfd3962d5036e009d01315bea0239dce0f83fd26",
+      "url": "https://github.com/xkitme/Weport/commit/cfd3962d5036e009d01315bea0239dce0f83fd26",
+      "relationship": "Behavioral reference only. This is a separate two-branch local adaptation, not the fork's nine-byte DLL patch."
+    },
+    "patches": [
+      {
+        "offset": 527813,
+        "sourceHex": "7e0a",
+        "expectedHex": "eb0a",
+        "purpose": "Take the existing valid-date path at the first expiry-date branch."
+      },
+      {
+        "offset": 951767,
+        "sourceHex": "0f8e30010000",
+        "expectedHex": "e93101000090",
+        "purpose": "Take the existing valid-date path at the second expiry-date branch."
+      }
+    ],
+    "expectedSha256": "1536606b1b1b2a0dc9de631a7f45504f5d466de0979e50b3f94548ae124993d0"
+  },
+  "knownRejectedSha256": {
+    "expiredWeFlowAsset": "6397760da70de8062829fbe6a2ec01cf0616d6f2b334e6fe54873898f38f7ad7",
+    "community2038Extension": "34fe7643397b417a18cf8375b2e36b84bfbae2aff5f7b43b512e64d3b195d50e"
+  },
+  "exportContract": {
+    "count": 112,
+    "namesSha256": "bbd5b781cd9716d8cd8b371b66ae4509de531796320227977dd04a2406ee0a85",
+    "encoding": "Export names sorted by JavaScript code-unit order, UTF-8 encoded and joined with LF."
+  },
+  "importContract": {
+    "count": 417,
+    "namesSha256": "0f19bcbffaeebf6ee48831571861fdd07cd95ed657340d4835bdd355bf2b495c",
+    "encoding": "Imported module!symbol names sorted by JavaScript code-unit order, UTF-8 encoded and joined with LF."
+  },
+  "notice": "Retain WeFlow attribution and CC BY-NC-SA 4.0 treatment described in docs/LEGAL-PROVENANCE.md. This provenance record does not change the license or other bundled component notices."
+}

@@ -285,10 +285,15 @@ export class WeBotService {
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer)
-    this.timer = null
+    this.stopScheduler()
     for (const controller of this.running.values()) controller.abort()
     this.running.clear()
+  }
+
+  /** Stop future schedule checks without cancelling a job already in progress. */
+  stopScheduler(): void {
+    if (this.timer) clearInterval(this.timer)
+    this.timer = null
   }
 
   /**

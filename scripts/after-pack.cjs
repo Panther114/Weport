@@ -1,6 +1,8 @@
 const { execFileSync } = require('child_process')
-const { existsSync, readdirSync, rmSync, statSync } = require('fs')
+const { existsSync, readFileSync, readdirSync, rmSync, statSync } = require('fs')
 const { dirname, join } = require('path')
+const { Arch } = require('electron-builder')
+const { verifyNativeDllAtResourcePath } = require('./verify-native-assets.cjs')
 
 // libwcdb_api.dylib is built against the private WCDB framework name used by
 // WeFlow.  Weport ships the companion libWCDB.dylib next to it instead of the
@@ -135,6 +137,21 @@ function pruneWindowsRuntime(appOutDir) {
 
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName === 'win32') {
+    if (context.arch === Arch.x64) {
+      // Verify the copy electron-builder placed in the actual app resources.
+      // This catches direct electron-builder/Flash packaging paths that skip
+      // the package.json build-script preflight.
+      const verified = verifyNativeDllAtResourcePath(context.appOutDir)
+      const provenancePath = join(dirname(verified.dllPath), 'native-provenance.json')
+      if (!existsSync(provenancePath)) {
+        throw new Error(`[afterPack] Missing WCDB provenance record ${provenancePath}`)
+      }
+      const packagedProvenance = JSON.parse(readFileSync(provenancePath, 'utf8'))
+      if (packagedProvenance.adaptation?.expectedSha256 !== verified.sha256) {
+        throw new Error(`[afterPack] WCDB provenance hash does not match ${verified.dllPath}`)
+      }
+      console.log(`[afterPack] verified packaged WCDB asset ${verified.dllPath}`)
+    }
     pruneWindowsRuntime(context.appOutDir)
     return
   }

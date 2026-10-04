@@ -20,11 +20,15 @@
 | WeportAI 对话内核（历史、压缩、工具、计费） | [`docs/agents/weport-ai.md`](docs/agents/weport-ai.md) |
 | 打包 / 平台差异 / TUI / 连接器 / 视频背景 / 托盘 | [`docs/agents/platform.md`](docs/agents/platform.md) |
 | 朋友圈、分析、防撤回、导出、MCP | [`docs/agents/modules.md`](docs/agents/modules.md) |
+| V1.2、免登录连接、阅读器、搜索、便携导出与验收 | [`docs/agents/v12.md`](docs/agents/v12.md) |
 
 **这个文件只放"动手前必须知道、违反了会做出静默坏掉的东西"的条款。**
 上面那些文档是同一份约束的正文 —— 需要细节时打开它们，不要把内容再抄回来。
 
 ## 四条跨模块铁律（展开见上面的文档）
+
+- 新模块与新状态必须使用用户所选调色板为标题、图标、选中态着色；成功/警告/失败保留语义色。
+- 所有交互补齐弹性悬停、按压、切换与过渡反馈；遵守 reduced-motion，禁止持续装饰动画及进度触发布局抖动。
 
 1. **浮层一律渲染到 `<body>` 下**（`components/ui/FloatingLayer`）。写 `position: absolute`
    的内联下拉 = 把"会不会被祖先的 overflow 裁掉"交给运气。浮层改到 body 之后，
@@ -206,15 +210,13 @@ the entire changelog). Therefore:
   (`appMain.ts` `getUpdaterFeedUrl`), and `/releases/latest/` **skips
   pre-releases**. If a version ships as a pre-release (or without `latest.yml`),
   every installed copy silently stays where it is — the user sees no error and
-  no update. `release.yml` uploads `latest.yml`, but
-  `fail_on_unmatched_files: false` means a missing one does not fail the build,
-  so check the release page rather than trusting a green CI run.
+  no update. `release.yml` requires `latest.yml` before its single publisher;
+  still verify the published release page and assets.
 
 When releasing a new version on GitHub, write the release body as
 **concise, natural Chinese bullet points** — short plain bullets, no English
-fluff, no boilerplate. Create the release with `gh release create` BEFORE the
-CI publish step finishes (pre-created release wins on assets timing; the
-extraction step now also guards the body if CI creates it first). Tag name
+fluff, no boilerplate. The single CI publisher waits for all three platform
+builds and acceptance gates; do not create a public release ahead of them. Tag name
 must match `package.json` version (`v0.9.9` ↔ `0.9.9`) — the workflow fails
 otherwise.
 

@@ -12,7 +12,7 @@ Mission-control dual rail: locate & unlock left, export right. Dense layout,
 larger type, rounded controls.
 
 ## Visual world
-- Black ground / white signal (SpaceX monochrome)
+- User-selected dark/light surfaces with palette-derived icons, titles, active states and actions; semantic success/warning/error colors stay distinct
 - Rounded corners (~10px) on panels and buttons
 - Custom face `src/assets/fonts/weport.ttf`
 - App icon sole source: `assets/branding/weport-icon.jpg` →
@@ -39,3 +39,7 @@ path, reset-to-defaults button in the panel head.
   friends, monochrome 7×24 heatmap (white→black ramp), section capture export.
 - Density: stat cards, ranking rows and member rows put numbers first with
   thin progress bars — more information per panel than WeFlow equivalents.
+
+## V1.2 interaction contract
+
+One compact navigation layout; 微信 and 智能 remain visible with no collapse/density controls. The rail and its ancestors stay fixed under wheel input; only the workspace scrolls. Diagnostics belong in Settings. New modules use palette tokens and responsive spring hover/press/state transitions, with reduced-motion alternatives; high-frequency task updates must never change layout geometry.

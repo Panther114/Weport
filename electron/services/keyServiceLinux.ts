@@ -136,6 +136,38 @@ export class KeyServiceLinux {
     throw new Error('找不到 xkey_helper_linux，请检查路径')
   }
 
+  /**
+   * 平台观测（v1.2 双模式编排的自检输入）。
+   *
+   * Linux **没有**免登录扫描路径：读密钥要 ptrace 断点并提权（会弹一次 sudo 提示），
+   * 只能在微信启动瞬间捕获（V12 §1.3 / D2 / K8）。这里只报告"微信在不在 /
+   * helper 在不在 / 有没有执行权限"。
+   */
+  async observePlatform(): Promise<{
+    wechatInstalled: boolean
+    wechatPids: number[]
+    hookHelperAvailable: boolean | null
+    wechatVersion: string | null
+  }> {
+    let pid: number | null = null
+    try {
+      pid = await findWeChatRootPid(defaultCommandEnvironment())
+    } catch { /* noop */ }
+    let helper: boolean | null = null
+    try {
+      const helperPath = this.getHelperPath()
+      helper = existsSync(helperPath)
+      if (helper) {
+        const mode = statSync(helperPath).mode
+        // 没有执行位时 helper 存在也跑不起来 —— 报出来比"神秘失败"强
+        if ((mode & 0o111) === 0) helper = false
+      }
+    } catch {
+      helper = false
+    }
+    return { wechatInstalled: true, wechatPids: pid ? [pid] : [], hookHelperAvailable: helper, wechatVersion: null }
+  }
+
   public async autoGetDbKey(
       timeoutMs = 60_000,
       onStatus?: (message: string, level: number) => void

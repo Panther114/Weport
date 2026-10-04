@@ -259,4 +259,14 @@ export const LIVE_TASK = {
    * 「设置 → 数据备份」里，用户切走之后原来是什么都看不到的。
    */
   backup: 'backup',
+  /**
+   * 全局搜索索引的建立 / 重建（v1.2 §6）。
+   *
+   * 进度**不许**存在搜索页的 useState 里：建索引是长任务，用户切走页面
+   * 就会卸载组件（且托盘隐藏会销毁窗口），而主进程还在跑 —— 那是 AGENTS.md
+   * 铁律 3 点名要避免的那种"看起来什么都没发生"。所以走同一个 store，
+   * 页面用 `useLiveTask` 订阅。
+   */
+  searchIndex: 'search.index',
+  databaseMaintenance: 'db.maintenance',
 } as const

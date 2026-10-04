@@ -26,6 +26,20 @@ export class WcdbService {
   private hostGeneration = 0
   private lastSpawnAt = 0
   private consecutiveFastFailures = 0
+  private maintenance = false
+
+  acquireMaintenance(): (() => void) | null {
+    if (this.maintenance) return null
+    this.maintenance = true
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.maintenance = false
+    }
+  }
+
+  isMaintenanceActive(): boolean { return this.maintenance }
 
   constructor() {}
 
@@ -127,6 +141,14 @@ export class WcdbService {
    * 发送消息到 WCDB 宿主进程并等待响应
    */
   private callWorker<T>(type: string, payload: any = {}, opts?: { timeoutMs?: number }): Promise<T> {
+    if (this.maintenance) {
+      if (!['close', 'cancelScannedOpen', 'closeMessageCursor'].includes(type)) {
+        return Promise.reject(new Error('数据库正在恢复快照，请稍后重试'))
+      }
+      // Cleanup requests are safe to treat as complete when no host exists.
+      // Do not start a WCDB process just to close a cursor during maintenance.
+      if (!this.worker) return Promise.resolve({ success: true } as T)
+    }
     if (!this.worker) this.initWorker()
     if (!this.worker) return Promise.reject(new Error('WCDB 宿主进程不可用'))
 
@@ -230,7 +252,24 @@ export class WcdbService {
     return this.callWorker('open', { accountDir, hexKey })
   }
 
+  /** Connect through the disposable per-database key mirror (Windows scan path). */
+  async openScanned(accountDir: string, keys: Array<{ id: string; keyHex: string }>): Promise<{
+    success: boolean
+    sourceFingerprint?: string
+    error?: string
+  }> {
+    // Rekeying large message shards is disk-bound and may take longer than an ordinary
+    // WCDB call. The work is performed in the isolated WCDB host process.
+    return this.callWorker('openScanned', { accountDir, keys }, { timeoutMs: 30 * 60 * 1000 })
+  }
+
+  async cancelScannedOpen(): Promise<{ success: boolean }> {
+    if (!this.worker) return { success: true }
+    return this.callWorker('cancelScannedOpen')
+  }
+
   async getLastInitError(): Promise<string | null> {
+    if (!this.worker) return null
     return this.callWorker('getLastInitError')
   }
 
@@ -238,6 +277,7 @@ export class WcdbService {
    * 关闭数据库连接
    */
   async close(): Promise<void> {
+    if (!this.worker) return
     return this.callWorker('close')
   }
 
@@ -255,6 +295,11 @@ export class WcdbService {
    * 关闭服务
    */
   async shutdown(): Promise<void> {
+    // This request bypasses the host's operation queue so a long mirror build
+    // can observe cancellation before close is queued behind it.
+    if (this.worker) {
+      try { await this.cancelScannedOpen() } catch { /* host may already be unavailable */ }
+    }
     try { await this.close() } catch {}
     if (this.worker) {
       try { await this.worker.terminate() } catch {}
@@ -262,6 +307,7 @@ export class WcdbService {
     }
   }
   async isConnected(): Promise<boolean> {
+    if (!this.worker) return false
     return this.callWorker('isConnected')
   }
 

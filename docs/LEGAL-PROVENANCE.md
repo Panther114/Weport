@@ -53,3 +53,27 @@ The comparison establishes provenance, not ownership of every embedded binary.
 
 Future imports must record the upstream URL, exact commit or released version,
 license, files incorporated, modifications made, and any binary build source.
+
+## Windows x64 expiry adaptation (2026-10-03)
+
+- Artifact: `resources/wcdb/win32/x64/wcdb_api.dll`, inherited from WeFlow;
+  original SHA-256 `6397760da70de8062829fbe6a2ec01cf0616d6f2b334e6fe54873898f38f7ad7`.
+  The original is recorded in Weport commit `3b9e2afd341f0eef56d4be9dafca25c8fe8be533`.
+- [Issues #30](https://github.com/Panther114/Weport/issues/30) and
+  [#31](https://github.com/Panther114/Weport/issues/31) identify the October 1 expiry.
+  Analysis by xkitme and [fork commit cfd3962](https://github.com/xkitme/Weport/commit/cfd3962d5036e009d01315bea0239dce0f83fd26)
+  informed the local adaptation. That fork's binary is not shipped: it extends
+  one cutoff to 2038 and replaces a later failure return with success.
+- The local modification changes six bytes at file offsets 527813 and
+  951767–951772. Only the two date-dependent branches in `InitProtection` and
+  `wcdb_init` take their existing valid-date paths unconditionally. Remaining
+  code, PE layout, 417 imports and 112 exports are byte-for-byte unchanged.
+  Modified SHA-256: `1536606b1b1b2a0dc9de631a7f45504f5d466de0979e50b3f94548ae124993d0`.
+- `scripts/repair-native-assets.cjs --input <original.dll> --output <fixed.dll>`
+  reproduces this binary adaptation offline from the exact original hash.
+  It is never invoked at app startup. `verify-native-assets.cjs` rejects the
+  expired original, the 2038 extension and unreviewed mutations before packaging
+  and checks the copied Windows package in `afterPack`.
+- The inherited WeFlow attribution and CC BY-NC-SA treatment above remain.
+  This reproduces the adaptation, not the original native compilation; its
+  missing source/build records and unsigned provenance limitations remain.

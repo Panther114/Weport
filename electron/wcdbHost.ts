@@ -21,6 +21,7 @@
  * 自动跳过（Electron 模式仍兼容，可手动以 --wcdb-host 拉起）。
  */
 import { WcdbCore } from './services/wcdbCore'
+import { sendToHost } from './services/hostChannel'
 
 // 宿主进程不创建任何窗口：阻止 Electron 默认的"所有窗口关闭即退出"。
 // （IPC 通道本身保持事件循环存活，零窗口时只需注册 window-all-closed 监听；
@@ -49,7 +50,7 @@ const core = new WcdbCore()
 
 let shutdownRequested = false
 
-async function dispatch(type: string, payload: any): Promise<{ result?: any; error?: string }> {
+export async function dispatch(type: string, payload: any): Promise<{ result?: any; error?: string }> {
   let result: any
   try {
     switch (type) {
@@ -82,7 +83,7 @@ async function dispatch(type: string, payload: any): Promise<{ result?: any; err
           const monitorOk = core.setMonitor((monType, json) => {
             if (!shutdownRequested) {
               try {
-                process.send!({ id: -1, type: 'monitor', payload: { type: monType, json } })
+                sendToHost({ id: -1, type: 'monitor', payload: { type: monType, json } })
               } catch { /* 父进程已断开 */ }
             }
           })
@@ -95,11 +96,18 @@ async function dispatch(type: string, payload: any): Promise<{ result?: any; err
       case 'open':
         result = await core.open(payload.accountDir, payload.hexKey)
         break
+      case 'openScanned':
+        result = await core.openScanned(payload.accountDir, payload.keys)
+        break
+      case 'cancelScannedOpen':
+        core.cancelScannedOpen()
+        result = { success: true }
+        break
       case 'getLastInitError':
         result = core.getLastInitError()
         break
       case 'close':
-        core.close()
+        await core.close()
         result = { success: true }
         break
       case 'isConnected':
@@ -367,9 +375,9 @@ function reply(msg: { id: number }, resp: { result?: any; error?: string }) {
   if (shutdownRequested) return
   try {
     if (resp.error) {
-      process.send!({ id: msg.id, error: resp.error })
+      sendToHost({ id: msg.id, error: resp.error })
     } else {
-      process.send!({ id: msg.id, result: resp.result })
+      sendToHost({ id: msg.id, result: resp.result })
     }
   } catch { /* 父进程已断开 */ }
 }
@@ -378,7 +386,7 @@ function reply(msg: { id: number }, resp: { result?: any; error?: string }) {
 // 切换或重建全局句柄，若与其他在途请求交错执行（例如批量导出期间恰好有人
 // 触发 testConnection），会打到空句柄或已失效的会话上。所有消息排队串行执行。
 let dispatchChain: Promise<void> = Promise.resolve()
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+export function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   const run = dispatchChain.then(fn)
   dispatchChain = run.then(
     () => undefined,
@@ -392,11 +400,18 @@ process.on('message', (msg: { id?: number; type?: string; payload?: any }) => {
   const type = String(msg.type || '')
   const payload = msg.payload || {}
 
+  // Mirror conversion yields between pages; cancellation must bypass its queue.
+  if (type === 'cancelScannedOpen') {
+    core.cancelScannedOpen()
+    reply(msg as { id: number }, { result: { success: true } })
+    return
+  }
+
   if (type === 'shutdown') {
     void enqueue(async () => {
       shutdownRequested = true
-      try { core.close() } catch { /* noop */ }
-      try { process.send!({ id: msg.id, result: { success: true } }) } catch { /* noop */ }
+      try { await core.close() } catch { /* noop */ }
+      try { sendToHost({ id: msg.id, result: { success: true } }) } catch { /* noop */ }
       // 等待响应送达后退出
       setTimeout(() => process.exit(0), 50)
     })
@@ -408,8 +423,12 @@ process.on('message', (msg: { id?: number; type?: string; payload?: any }) => {
 
 // 父进程断开（退出/崩溃）后立即收尾，避免残留
 process.on('disconnect', () => {
-  try { core.close() } catch { /* noop */ }
-  process.exit(0)
+  shutdownRequested = true
+  core.cancelScannedOpen()
+  void dispatchChain.then(async () => {
+    try { await core.close() } catch { /* noop */ }
+    process.exit(0)
+  })
 })
 
 void electronGuard

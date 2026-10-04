@@ -434,4 +434,27 @@ describe('WeBotService — 状态文件', () => {
     expect(aborted).toBe(true)
     expect(service.listRuns(task.id)[0].status).toBe('skipped')
   })
+
+  it('stopScheduler() 停止后续轮询，但让正在运行的任务完成', async () => {
+    const captured: { signal?: AbortSignal } = {}
+    let release!: (result: WeBotDispatchResult) => void
+    const gate = new Promise<WeBotDispatchResult>((resolve) => { release = resolve })
+    const { service } = makeService({
+      dispatch: async (currentSignal) => {
+        captured.signal = currentSignal
+        return await gate
+      },
+    })
+    const task = service.createTask({ title: 'A', schedule: daily(8, 30) })
+    const running = service.runNow(task.id)
+    await Promise.resolve()
+
+    expect(captured.signal).toBeDefined()
+    service.stopScheduler()
+    expect(captured.signal?.aborted).toBe(false)
+
+    release({ summary: 'done' })
+    await running
+    expect(captured.signal?.aborted).toBe(false)
+  })
 })

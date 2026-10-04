@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -15,21 +15,23 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "postinstall": "electron-builder install-app-deps && node scripts/prepare-electron-runtime.cjs",
-    "dev": "node scripts/prepare-electron-runtime.cjs && vite",
+    "dev": "node scripts/prepare-electron-runtime.cjs && vite --config vite.config.mts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "build:tui": "npm --prefix packages/weport-tui run build",
     "qa:tui": "npm run build:tui && node scripts/qa-tui.mjs",
-    "test:unit": "vitest run",
+    "test:unit": "node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs && vitest run",
+    "test:native-assets": "node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs",
     "test:unit:watch": "vitest",
-    "bench": "node .ui-probe/bench-perf.mjs",
-    "bench:installed": "node .ui-probe/bench-perf.mjs --installed",
-    "bench:update": "node .ui-probe/bench-perf.mjs --update",
-    "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vitest run && vite build && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
-    "build": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
-    "build:dir": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --dir --publish never",
-    "build:mac": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
-    "build:linux": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/prepare-native-modes.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
-    "package": "node scripts/clean-dist-electron.cjs && vite build && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never"
+    "bench": "node scripts/bench-perf.mjs",
+    "bench:installed": "node scripts/bench-perf.mjs --installed",
+    "bench:update": "node scripts/bench-perf.mjs --update",
+    "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs && vitest run && vite build --config vite.config.mts && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
+    "build": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && node scripts/prepare-flash-ui.cjs && electron-builder --publish never",
+    "build:dir": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && node scripts/prepare-flash-ui.cjs && electron-builder --dir --publish never",
+    "build:mac": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/prepare-native-modes.cjs && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
+    "build:linux": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/prepare-native-modes.cjs && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --linux appimage tar.gz --x64 --publish never",
+    "package": "node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
+    "build:flash": "npm run build:dir && electron-builder --config electron-builder.flash.cjs --win portable --publish never"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
@@ -88,6 +90,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "!dist-electron/*proof*",
       "assets/icons/**/*",
       "electron/assets/wasm/**/*",
       "LICENSE",
@@ -102,7 +105,7 @@
       "!node_modules/**/*.d.cts",
       "!node_modules/**/*.md",
       "!node_modules/**/*.markdown",
-      "!node_modules/**/{test,tests,__tests__,spec,specs,example,examples,docs,doc,benchmark,benchmarks}/**",
+      "!node_modules/**/{test,tests,__tests__,spec,specs,example,examples,docs,benchmark,benchmarks}/**",
       "!node_modules/echarts/**",
       "!node_modules/zrender/**",
       "!node_modules/echarts-for-react/**",
@@ -112,7 +115,12 @@
       "!node_modules/scheduler/**",
       "!node_modules/html2canvas/**",
       "!node_modules/marked/**",
-      "!node_modules/react-virtuoso/**"
+      "!node_modules/react-virtuoso/**",
+      "!node_modules/@modelcontextprotocol/sdk/**",
+      "!node_modules/zod/**",
+      "!node_modules/@cfworker/json-schema/**",
+      "!node_modules/fzstd/**",
+      "!node_modules/exceljs/dist/**"
     ],
     "mac": {
       "target": [
@@ -159,7 +167,7 @@
         "nsis"
       ],
       "artifactName": "Weport-${version}-Setup.${ext}",
-      "icon": "assets/icons/icon.png",
+      "icon": "assets/icons/icon.ico",
       "extraFiles": [
         {
           "from": "resources/runtime/win32/msvcp140.dll",

@@ -1,3 +1,4 @@
+import { isLocalMediaUrl, toLocalMediaUrl } from './localMediaUrl'
 import * as fs from 'fs'
 import * as path from 'path'
 // 只在"导出成员消息/群成员为 XLSX"时用得到，运行时动态加载（见 ExcelFormatter.ts）。
@@ -1210,7 +1211,7 @@ class GroupAnalyticsService {
           contact?.avatarUrl ||
           (fallbackAvatars && fallbackAvatars.success && fallbackAvatars.map ? fallbackAvatars.map[groupId] : undefined)
         )
-        if (avatarUrl && !avatarUrl.startsWith('weport-media://')) {
+        if (avatarUrl && !isLocalMediaUrl(avatarUrl)) {
           void avatarCacheService.ensure(avatarUrl)
         }
 
@@ -1590,7 +1591,7 @@ class GroupAnalyticsService {
         if (cachedName) rank.member.displayName = cachedName
         if (avatars.success && avatars.map && avatars.map[rank.member.username]) {
           rank.member.avatarUrl = avatarCacheService.localUrlOrOriginal(avatars.map[rank.member.username])
-          if (rank.member.avatarUrl && !rank.member.avatarUrl.startsWith('weport-media://')) {
+          if (rank.member.avatarUrl && !isLocalMediaUrl(rank.member.avatarUrl)) {
             void avatarCacheService.ensure(rank.member.avatarUrl)
           }
         }

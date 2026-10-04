@@ -312,7 +312,11 @@ export function NotificationGlassPanel() {
     }, [])
 
     const extra = Math.max(0, Math.round(measured.width - glass.width))
-    const polarity = glassTextPolarity(glass)
+    // Match automatic text contrast to the stage currently shown. The shared helper defaults
+    // to mid-gray for a real popup before its first backdrop sample; a preview already knows
+    // whether its synthetic wallpaper is dark or light.
+    const previewBackdropLuma = wallpaper === 'dark' ? 0.08 : 0.92
+    const polarity = glassTextPolarity(glass, previewBackdropLuma)
 
     return (
         <div className="ng">
@@ -365,7 +369,7 @@ export function NotificationGlassPanel() {
                     是**必须**的 —— 弹窗要同时在亮壁纸和暗壁纸上成立，只给一套预览
                     等于让用户凭运气调。 */}
                 <div className="ng-preview-stage" data-wallpaper={wallpaper}>
-                    <div className="ng-preview-stage-inner" style={notificationGlassTextVars(glass)}>
+                    <div className="ng-preview-stage-inner" style={notificationGlassTextVars(glass, previewBackdropLuma)}>
                         {loaded ? (
                             <NotificationToast
                                 data={sampleData}

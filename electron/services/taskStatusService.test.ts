@@ -144,4 +144,16 @@ describe('all() 是窗口重建时的唯一来源', () => {
     expect(svc.get('t').status).toBe('idle')
     expect(svc.get('t').logs).toEqual([])
   })
+
+  it('notifies task transitions while leaving high-frequency progress to active polling', () => {
+    const svc = new TaskStatusService()
+    const states: string[] = []
+    const unsubscribe = svc.onTransition(() => states.push(svc.get(TASK_KEY.databaseMaintenance).status))
+    svc.begin(TASK_KEY.databaseMaintenance)
+    svc.progress(TASK_KEY.databaseMaintenance, { progress: 50 })
+    svc.end(TASK_KEY.databaseMaintenance, 'done')
+    unsubscribe()
+    svc.begin(TASK_KEY.databaseMaintenance)
+    expect(states).toEqual(['running', 'done'])
+  })
 })

@@ -1,0 +1,1152 @@
+// 全局搜索页（v1.2 §6）。
+//
+// 约定与其它页面样式表一致：
+//   - 只用既有令牌（--space-* / --radius* / --line / --text-* / --accent*），不写魔数；
+//   - 类名统一 `sp-` 前缀，避免与 styles.css / v09 / v1 的既有类名抢名字；
+//   - 「减少动效」由 styles.css 的全局媒体查询关掉动画，这里只补骨架屏的呼吸光。
+
+.sp-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  height: 100%;
+  min-height: 0;
+}
+
+.sp-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  // 联想下拉绝不能被裁掉（AGENTS.md 铁律 1 的判据：任何祖先的 overflow 都会裁浮层）
+  overflow: visible;
+  /**
+   * 头部必须自成一个**高于结果区**的层叠上下文。
+   *
+   * 下拉是头部里的绝对定位元素，而结果区（.sp-body）在 DOM 里排在它后面：
+   * 不给头部叠放层级的话，下拉会被结果列表盖住 —— 表现是"联想词看得见、点不到"
+   * （Playwright 的点击判定会直接报 "intercepts pointer events"）。而 z-index
+   * 只在定位元素上生效，所以这里还要 position: relative。
+   */
+  position: relative;
+  z-index: var(--z-popover);
+}
+
+.sp-head-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.sp-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.sp-sort button {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+// ---------- 搜索框 ----------
+
+.sp-search {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.sp-search-box {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  height: 38px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+
+  &:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+}
+
+.sp-search-icon {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.sp-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13.5px;
+
+  &::placeholder {
+    color: var(--text-faint);
+  }
+}
+
+.sp-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--elevated);
+    color: var(--text);
+  }
+}
+
+.sp-search-meta {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.sp-suggest {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: var(--space-1);
+  list-style: none;
+  background: var(--elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.sp-suggest-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 6px var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+
+  &.is-active,
+  &:hover {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+.sp-suggest-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ---------- 条件 chips ----------
+
+.sp-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-height: 26px;
+}
+
+.sp-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--line-strong);
+    color: var(--text);
+  }
+
+  &.is-on {
+    border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+.sp-chip-list {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.sp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--elevated);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  max-width: 260px;
+}
+
+.sp-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--line);
+    color: var(--text);
+  }
+}
+
+.sp-clear-all {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  text-decoration: underline;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
+.sp-filters-hint,
+.sp-filters-trailing {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.sp-filters-trailing {
+  margin-left: auto;
+}
+
+.sp-truncated {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warn);
+}
+
+// ---------- 索引状态条 ----------
+
+.sp-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  font-size: 12px;
+  color: var(--text-dim);
+  position: relative;
+  overflow: hidden;
+}
+
+.sp-status-icon {
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+.sp-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+
+  &.is-warn {
+    color: var(--warn);
+  }
+}
+
+.sp-status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.sp-status-btn {
+  padding: 3px 9px;
+  font-size: 11.5px;
+}
+
+.sp-status-err {
+  color: var(--danger);
+  font-size: 11.5px;
+}
+
+.sp-status-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--line);
+}
+
+.sp-status-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+// ---------- 主体：结果 + 右侧栏 ----------
+
+.sp-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
+}
+
+@media (min-width: 981px) and (max-width: 1180px) {
+  .sp-page {
+    gap: var(--space-2);
+  }
+
+  .sp-head {
+    gap: 6px;
+  }
+
+  .sp-head-row {
+    gap: var(--space-2);
+  }
+
+  .sp-search-box {
+    height: 36px;
+  }
+
+  .sp-status {
+    padding: 4px 10px;
+    font-size: 11.5px;
+  }
+
+  .sp-body {
+    grid-template-columns: minmax(0, 1fr) 240px;
+    gap: var(--space-2);
+  }
+
+  .sp-row {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .sp-rail-sec > .sp-rail-head {
+    padding: var(--space-2);
+  }
+}
+
+@media (max-width: 980px) {
+  .sp-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .sp-rail {
+    max-height: 220px;
+  }
+}
+
+.sp-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.sp-list {
+  flex: 1;
+  min-height: 0;
+}
+
+.sp-list-scroll {
+  height: 100%;
+}
+
+.sp-row {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--accent-softer);
+  }
+
+  &.is-selected {
+    background: var(--accent-soft);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+}
+
+.sp-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 4px;
+}
+
+.sp-row-session {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-row-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--elevated);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+
+.sp-row-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.sp-row-star {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+
+  &.is-on {
+    color: var(--warn);
+  }
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
+.sp-row-snippet {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sp-hit {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.sp-row-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: 5px;
+  flex-wrap: wrap;
+}
+
+.sp-row-sender {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-row-tags {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.sp-tag {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--elevated);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  padding: 1px 7px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  &[data-tone='1'] { border-color: var(--accent); }
+  &[data-tone='2'] { border-color: var(--accent-2); }
+  &[data-tone='3'] { border-color: var(--accent-3); }
+  &[data-tone='4'] { border-color: var(--accent-4); }
+  &[data-tone='5'] { border-color: var(--accent-5); }
+  &[data-tone='6'] { border-color: var(--accent-6); }
+}
+
+.sp-more-loading,
+.sp-more-hint,
+.sp-more-end {
+  padding: var(--space-3);
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+// ---------- 骨架屏（不是转圈） ----------
+
+.sp-skeleton {
+  padding: var(--space-2) 0;
+}
+
+.sp-skeleton-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.sp-skeleton-line {
+  height: 11px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--elevated) 25%, var(--line) 37%, var(--elevated) 63%);
+  background-size: 400% 100%;
+  animation: sp-shimmer 1.4s ease-in-out infinite;
+
+  &.is-thin {
+    height: 9px;
+    opacity: 0.8;
+  }
+}
+
+@keyframes sp-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+// ---------- 建索引 ----------
+
+.sp-build {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-4);
+
+  // 空状态在结果面板里：标题与提示是两行，别挤成一行（.wp-empty 的 24px 在
+  // 这个高度充足的面板里显得局促，而且 title/hint 之间需要明确的换行间距）
+  .empty-state {
+    gap: var(--space-2);
+    padding: var(--space-5) var(--space-4);
+  }
+
+  .empty-state-title {
+    font-size: 14px;
+  }
+
+  .empty-state-hint {
+    max-width: 360px;
+    line-height: 1.6;
+  }
+}
+
+.sp-build-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sp-build-track {
+  width: min(420px, 100%);
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.sp-build-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+.sp-build-note {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.sp-build-cta {
+  display: flex;
+  justify-content: center;
+}
+
+// ---------- 右侧注解栏 ----------
+
+.sp-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.sp-rail-sec {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.sp-rail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+    background: var(--accent-softer);
+  }
+
+  &.is-static {
+    cursor: default;
+  }
+}
+
+.sp-rail-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.sp-rail-body {
+  padding: 0 var(--space-2) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sp-rail-empty,
+.sp-rail-ok,
+.sp-rail-error {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  padding: 2px 4px;
+}
+
+.sp-rail-ok {
+  color: var(--ok);
+}
+
+.sp-rail-error {
+  color: var(--danger);
+}
+
+.sp-rail-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px;
+}
+
+.sp-tag-list,
+.sp-fav-list,
+.sp-search-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-tag-list li,
+.sp-fav,
+.sp-saved {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sp-tag-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--elevated);
+    color: var(--text);
+  }
+
+  &.is-on {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+.sp-tag-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--accent);
+
+  &[data-tone='1'] { background: var(--accent); }
+  &[data-tone='2'] { background: var(--accent-2); }
+  &[data-tone='3'] { background: var(--accent-3); }
+  &[data-tone='4'] { background: var(--accent-4); }
+  &[data-tone='5'] { background: var(--accent-5); }
+  &[data-tone='6'] { background: var(--accent-6); }
+}
+
+.sp-tag-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-tag-count {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.sp-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+
+  &:hover:not(:disabled) {
+    background: var(--elevated);
+    color: var(--text);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+.sp-rail-add,
+.sp-fav-note-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.sp-rail-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-2);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+
+  &:focus {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+}
+
+.sp-fav {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.sp-fav-main {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sp-fav-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 3px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--elevated);
+    color: var(--text);
+  }
+}
+
+.sp-fav-title {
+  font-size: 12px;
+}
+
+.sp-fav-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.sp-fav-time {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.sp-fav-note {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding: 2px 6px 4px;
+  line-height: 1.45;
+}
+
+.sp-saved-run {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--elevated);
+    color: var(--text);
+  }
+}
+
+.sp-saved-name {
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-saved-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.sp-export-row {
+  display: flex;
+  gap: 4px;
+}
+
+.sp-export-btn {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 11.5px;
+}
+
+.sp-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+// ---------- 筛选面板（FloatingLayer 里） ----------
+
+.sp-scope-layer {
+  // 定位由 FloatingLayer 负责，这里只管观感
+  > div {
+    background: var(--elevated);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-pop);
+  }
+}
+
+.sp-scope {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.sp-scope-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sp-scope-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.sp-scope-count {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.sp-scope-note {
+  font-size: 11.5px;
+  color: var(--text-faint);
+
+  &.is-warn {
+    color: var(--warn);
+  }
+}
+
+.sp-scope-input {
+  height: 28px;
+  padding: 0 var(--space-2);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+
+  &:focus {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  }
+}
+
+.sp-scope-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 132px;
+  overflow: auto;
+}
+
+.sp-scope-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--line-strong);
+    color: var(--text);
+  }
+
+  &.is-on {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+}
+
+.sp-scope-dates {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.sp-scope-date {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  flex: 1;
+
+  input {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    padding: 0 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 12px;
+    color-scheme: dark light;
+  }
+}
+
+.sp-scope-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
+.sp-scope-actions-right {
+  display: flex;
+  gap: var(--space-2);
+}
+
+// ---------- 保存搜索弹窗 ----------
+
+.sp-save-mask {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.sp-save {
+  width: min(420px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-modal);
+}
+
+.sp-save-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+}
+
+.sp-save-sub {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.sp-save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

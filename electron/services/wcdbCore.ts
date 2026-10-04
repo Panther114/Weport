@@ -5,9 +5,18 @@ import { createHash } from 'crypto'
 import { tmpdir, userInfo } from 'os'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
+import { wcdbReadOnlyGuard } from './export/readOnlyGuard'
+import { createScannedDbMirror, removeScannedDbMirror, type ScannedDbKeyMaterial } from './scannedDbMirror'
+import { makeAntiRevokeBatchResult, verifyAntiRevokeTransition } from './antiRevokeResults'
+
+// v1.2 §10.3 ③：所有库访问（只读查询 / 游标 / 写操作）都必须经过这一个收口。
+// 默认模式是 read-only；写语句出现在只读上下文里会被**直接拒绝**，不发给引擎。
+// 拒绝原因与判定见 export/readOnlyGuard.ts 的文件头（含"-wal 为什么不改"的决策）。
+export { wcdbReadOnlyGuard }
 
 //数据服务初始化错误信息，用于帮助用户诊断问题
 let lastDllInitError: string | null = null
+const INIT_FAILURE_RETRY_COOLDOWN_MS = 30_000
 
 export function getLastDllInitError(): string | null {
   return lastDllInitError
@@ -55,6 +64,10 @@ export class WcdbCore {
   private currentKey: string | null = null
   private currentWxid: string | null = null
   private currentDbStoragePath: string | null = null
+  /** Disposable rekeyed snapshot used only for a per-DB scanned connection. */
+  private scannedMirrorDir: string | null = null
+  private scannedMirrorSourceFingerprint: string | null = null
+  private scannedMirrorCancel: { cancelled: boolean } | null = null
   private readonly asciiJunctionCache = new Map<string, string>()
 
   // 函数引用
@@ -184,11 +197,24 @@ export class WcdbCore {
   private readonly maxPendingLogLines = 1200
   private readonly logFlushDelayMs = 200
   private readonly cursorForceReopenCooldownMs = 15000
+  private nextInitializationRetryAt = 0
+  private initializationFailureDetail: string | null = null
 
   setPaths(resourcesPath: string, userDataPath: string): void {
+    if (this.resourcesPath !== resourcesPath) {
+      this.nextInitializationRetryAt = 0
+      this.initializationFailureDetail = null
+      lastDllInitError = null
+    }
     this.resourcesPath = resourcesPath
     this.userDataPath = userDataPath
     this.writeLog(`[bootstrap] setPaths resourcesPath=${resourcesPath} userDataPath=${userDataPath}`, true)
+  }
+
+  private markInitializationFailure(): false {
+    this.initializationFailureDetail = lastDllInitError
+    this.nextInitializationRetryAt = Date.now() + INIT_FAILURE_RETRY_COOLDOWN_MS
+    return false
   }
 
   getLastInitError(): string | null {
@@ -396,6 +422,7 @@ export class WcdbCore {
     const logPath = this.getLogFileCandidates()[0] || '%APPDATA%\\Weport\\logs\\wcdb.log'
     const sentinelNextStep = `；下一步：确认数据目录选的是 xwechat_files 根目录、账号与 64 位密钥属于同一账号后重试，并把日志 ${logPath} 一起反馈`
     const messages: Record<number, string> = {
+      '-101': `原生数据引擎保护初始化失败，尚未访问聊天数据库；请确认使用完整安装包，并将日志 ${logPath} 随诊断包反馈。重新获取聊天密钥不能解决此初始化错误`,
       '-3001': '未找到数据库目录 (db_storage)，请确认已选择正确的微信数据目录（应包含以 wxid_ 开头的子文件夹）',
       '-3002': '未找到 session.db 文件，请确认微信已登录并且数据目录完整',
       '-3003': '数据库句柄无效，请重试',
@@ -788,6 +815,13 @@ export class WcdbCore {
    */
   async initialize(): Promise<boolean> {
     if (this.initialized) return true
+    // Protection initialization can fail repeatedly on an incompatible host.
+    // Keep the native detail available to getLastInitError(), but avoid loading
+    // the DLL and retrying every queued DB request during the cooldown window.
+    if (Date.now() < this.nextInitializationRetryAt) {
+      lastDllInitError = this.initializationFailureDetail
+      return false
+    }
 
     try {
       this.koffi = require('koffi')
@@ -804,7 +838,7 @@ export class WcdbCore {
         this.writeLog(`[bootstrap] dll search candidates (${searchedCandidates.length}): ${searchedCandidates.join(' | ')}`, true)
         this.writeLog(`[bootstrap] dll search env: WCDB_DLL_PATH=${process.env.WCDB_DLL_PATH || ''} WCDB_RESOURCES_PATH=${process.env.WCDB_RESOURCES_PATH || ''} setPaths.resourcesPath=${this.resourcesPath || ''}`, true)
         lastDllInitError = `动态库加载失败，请检查安装是否完整：${dllPath} (错误码: -2301)`
-        return false
+        return this.markInitializationFailure()
       }
 
       const dllDir = dirname(dllPath)
@@ -895,12 +929,12 @@ export class WcdbCore {
           const finalCode = bestFailCode ?? protectionCode
           lastDllInitError = this.formatInitProtectionError(finalCode)
           this.writeLog(`[bootstrap] InitProtection failed finalCode=${finalCode}`, true)
-          return false
+          return this.markInitializationFailure()
         }
       } catch (e) {
         lastDllInitError = this.formatInitProtectionError(-2301)
         this.writeLog(`[bootstrap] InitProtection symbol load failed: ${String(e)}`, true)
-        return false
+        return this.markInitializationFailure()
       }
 
       // 定义类型
@@ -1388,10 +1422,12 @@ export class WcdbCore {
       if (initResult !== 0) {
         console.error('WCDB 初始化失败:', initResult)
         lastDllInitError = this.formatInitProtectionError(initResult)
-        return false
+        return this.markInitializationFailure()
       }
 
       this.initialized = true
+      this.nextInitializationRetryAt = 0
+      this.initializationFailureDetail = null
       lastDllInitError = null
       return true
     } catch (e) {
@@ -1399,7 +1435,7 @@ export class WcdbCore {
       console.error('WCDB 初始化异常:', errorMsg)
       this.writeLog(`WCDB 初始化异常: ${errorMsg}`, true)
       lastDllInitError = this.formatInitProtectionError(-2302)
-      return false
+      return this.markInitializationFailure()
     }
   }
 
@@ -1604,12 +1640,12 @@ export class WcdbCore {
     const raw = String(jsonStr || '')
     if (!raw) return []
     // 热路径优化：仅在检测到 16+ 位整数字段时才进行字符串包裹，避免每批次多轮全量 replace。
-    const needsInt64Normalize = /"server_id"\s*:\s*-?\d{16,}/.test(raw)
+    const needsInt64Normalize = /"(?:server_id|local_id|msg_svr_id|id)"\s*:\s*-?\d{16,}/.test(raw)
     if (!needsInt64Normalize) {
       return JSON.parse(raw)
     }
     const normalized = raw.replace(
-      /("server_id"\s*:\s*)(-?\d{16,})/g,
+      /("(?:server_id|local_id|msg_svr_id|id)"\s*:\s*)(-?\d{16,})/g,
       '$1"$2"'
     )
     return JSON.parse(normalized)
@@ -2011,7 +2047,7 @@ export class WcdbCore {
 
       // 如果参数不同，则先关闭原来的连接
       if (this.handle !== null) {
-        this.close()
+        await this.close()
         // 重新初始化，因为 close 呼叫了 shutdown
         const initOk = await this.initialize()
         if (!initOk) return false
@@ -2106,6 +2142,63 @@ export class WcdbCore {
   }
 
   /**
+   * Open a Windows scan-only account by rekeying a private snapshot to one
+   * transient raw key. The scan returns separate page keys, while
+   * `wcdb_open_account` accepts one hex key for the whole account. The mirror
+   * keeps all native readers and exporters unchanged.
+   */
+  async openScanned(accountDir: string, keys: ScannedDbKeyMaterial[]): Promise<{
+    success: boolean
+    sourceFingerprint?: string
+    error?: string
+  }> {
+    lastDllInitError = null
+    if (!this.initialized) {
+      const initOk = await this.initialize()
+      if (!initOk) {
+        return { success: false, error: this.getLastInitError() || 'WCDB 初始化失败，未开始转换扫描副本。' }
+      }
+    }
+    const cancel = { cancelled: false }
+    this.scannedMirrorCancel = cancel
+    const prepared = await createScannedDbMirror({
+      accountDir,
+      keys,
+      cancel,
+      onProgress: (progress) => {
+        // Do not include paths or key material in host logs.
+        if (progress.pagesDone === 0 || progress.pagesDone % 4096 === 0) {
+          this.writeLog(`[scan-mirror] ${progress.pagesDone}/${progress.pagesTotal} pages`, true)
+        }
+      },
+    })
+    if (this.scannedMirrorCancel === cancel) this.scannedMirrorCancel = null
+    if (!prepared.ok || !prepared.mirrorDir || !prepared.mirrorKey || !prepared.sourceFingerprint) {
+      const message = prepared.error || '扫描密钥未覆盖 session 数据库和所有消息分片。'
+      lastDllInitError = message
+      this.writeLog(`[scan-mirror] preparation failed: ${message}`, true)
+      return { success: false, error: message }
+    }
+
+    const opened = await this.open(prepared.mirrorDir, prepared.mirrorKey)
+    if (!opened) {
+      await removeScannedDbMirror(prepared.mirrorDir).catch(() => undefined)
+      return { success: false, error: await this.getLastInitError() || 'WCDB 无法打开临时只读副本。' }
+    }
+    this.scannedMirrorDir = prepared.mirrorDir
+    this.scannedMirrorSourceFingerprint = prepared.sourceFingerprint
+    this.writeLog(
+      `[scan-mirror] opened databases=${prepared.convertedDbCount} pages=${prepared.convertedPageCount} wal_frames=${prepared.walFrameCount}`,
+      true
+    )
+    return { success: true, sourceFingerprint: prepared.sourceFingerprint }
+  }
+
+  cancelScannedOpen(): void {
+    if (this.scannedMirrorCancel) this.scannedMirrorCancel.cancelled = true
+  }
+
+  /**
    * 关闭数据库
    * 注意：wcdb_close_account 可能导致崩溃，使用 shutdown 代替
    */
@@ -2133,7 +2226,8 @@ export class WcdbCore {
     }
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    this.cancelScannedOpen()
     if (this.handle !== null || this.initialized) {
       // 先停止监控与云控回调，避免 shutdown 后仍有 native 回调访问已释放资源。
       try { this.stopMonitor() } catch {}
@@ -2158,13 +2252,21 @@ export class WcdbCore {
       this.clearMediaStreamPageCache()
       this.stopLogPolling()
     }
+    const mirrorDir = this.scannedMirrorDir
+    this.scannedMirrorDir = null
+    this.scannedMirrorSourceFingerprint = null
+    if (mirrorDir) {
+      await removeScannedDbMirror(mirrorDir).catch((error) => {
+        this.writeLog(`[scan-mirror] cleanup failed: ${String(error)}`, true)
+      })
+    }
   }
 
   /**
    * 关闭服务（与 close 相同）
    */
-  shutdown(): void {
-    this.close()
+  async shutdown(): Promise<void> {
+    await this.close()
   }
 
   /**
@@ -2172,6 +2274,10 @@ export class WcdbCore {
    */
   isConnected(): boolean {
     return this.initialized && this.handle !== null
+  }
+
+  isReadOnlySnapshot(): boolean {
+    return this.isConnected() && this.scannedMirrorDir !== null
   }
 
   async getSessions(): Promise<{ success: boolean; sessions?: any[]; error?: string }> {
@@ -2205,6 +2311,7 @@ export class WcdbCore {
   }
 
   async markAllSessionsRead(): Promise<{ success: boolean; error?: string }> {
+    return this.runWriteOperation('mark-all-sessions-read', 'markAllSessionsRead', async () => {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
@@ -2236,6 +2343,7 @@ export class WcdbCore {
       this.writeLog(`markAllSessionsRead exception: ${String(e)}`)
       return { success: false, error: String(e) }
     }
+    })
   }
 
   async getMessages(sessionId: string, limit: number, offset: number): Promise<{ success: boolean; messages?: any[]; error?: string }> {
@@ -2351,12 +2459,20 @@ export class WcdbCore {
       const counts: Record<string, number> = {}
       for (let i = 0; i < normalizedSessionIds.length; i += 1) {
         const sessionId = normalizedSessionIds[i]
-        const outCount = [0]
+        // A nonzero native status or untouched out parameter is unknown, not 0.
+        // Returning zero here made failed cursor/count checks look like empty chats.
+        const outCount = [-1]
         const result = this.wcdbGetMessageCount(this.handle, sessionId, outCount)
-        if (result === -7) {
-          return { success: false, error: `message schema mismatch：会话 ${sessionId} 的消息表结构不匹配` }
+        if (result !== 0) {
+          const error = result === -7
+            ? `message schema mismatch：会话 ${sessionId} 的消息表结构不匹配`
+            : `获取会话 ${sessionId} 的消息总数失败: ${result}`
+          return { success: false, error }
         }
-        counts[sessionId] = result === 0 && Number.isFinite(outCount[0]) ? Math.max(0, Math.floor(outCount[0])) : 0
+        if (!Number.isSafeInteger(outCount[0]) || outCount[0] < 0) {
+          return { success: false, error: `获取会话 ${sessionId} 的消息总数失败: 原生接口未返回有效计数` }
+        }
+        counts[sessionId] = outCount[0]
 
         if (i > 0 && i % 160 === 0) {
           await new Promise(resolve => setImmediate(resolve))
@@ -2370,10 +2486,12 @@ export class WcdbCore {
 
   async getSessionMessageCounts(sessionIds: string[]): Promise<{ success: boolean; counts?: Record<string, number>; error?: string }> {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
-    if (!this.wcdbGetSessionMessageCounts) return this.getMessageCounts(sessionIds)
+    const normalizedSessionIds = Array.from(new Set((sessionIds || []).map((id) => String(id || '').trim()).filter(Boolean)))
+    if (normalizedSessionIds.length === 0) return { success: true, counts: {} }
+    if (!this.wcdbGetSessionMessageCounts) return this.getMessageCounts(normalizedSessionIds)
     try {
       const outPtr = [null as any]
-      const result = this.wcdbGetSessionMessageCounts(this.handle, JSON.stringify(sessionIds || []), outPtr)
+      const result = this.wcdbGetSessionMessageCounts(this.handle, JSON.stringify(normalizedSessionIds), outPtr)
       if (result !== 0 || !outPtr[0]) {
         if (result === -7) {
           return { success: false, error: 'message schema mismatch：当前账号消息表结构与程序要求不一致' }
@@ -2383,10 +2501,22 @@ export class WcdbCore {
       const jsonStr = this.decodeJsonPtr(outPtr[0])
       if (!jsonStr) return { success: false, error: '解析会话消息总数失败' }
       const raw = JSON.parse(jsonStr) || {}
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return { success: false, error: '解析会话消息总数失败: 返回形状无效' }
+      }
       const counts: Record<string, number> = {}
-      for (const sid of sessionIds || []) {
-        const value = Number(raw?.[sid] ?? 0)
-        counts[sid] = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+      for (const sid of normalizedSessionIds) {
+        if (!Object.prototype.hasOwnProperty.call(raw, sid)) {
+          return { success: false, error: `解析会话消息总数失败: 缺少会话 ${sid} 的计数` }
+        }
+        const rawValue = raw[sid]
+        const value = typeof rawValue === 'number' ? rawValue : typeof rawValue === 'string' && /^\d+$/.test(rawValue.trim())
+          ? Number(rawValue.trim())
+          : Number.NaN
+        if (!Number.isSafeInteger(value) || value < 0) {
+          return { success: false, error: `解析会话消息总数失败: 会话 ${sid} 的计数无效` }
+        }
+        counts[sid] = value
       }
       return { success: true, counts }
     } catch (e) {
@@ -2555,7 +2685,7 @@ export class WcdbCore {
       if (result !== 0 || !outPtr[0]) return { success: false, error: `按类型读取消息失败: ${result}` }
       const jsonStr = this.decodeJsonPtr(outPtr[0])
       if (!jsonStr) return { success: false, error: '解析按类型消息失败' }
-      const rows = JSON.parse(jsonStr)
+      const rows = this.parseMessageJson(jsonStr)
       return { success: true, rows: Array.isArray(rows) ? rows : [] }
     } catch (e) {
       return { success: false, error: String(e) }
@@ -4132,6 +4262,8 @@ export class WcdbCore {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      // v1.2 §10.3 ③：游标只做读取，走只读闸门留痕（写语句不可能从这里发出）
+      wcdbReadOnlyGuard.assertReadOnlyOperation('openMessageCursor', { sessionId })
       const normalizedBegin = this.normalizeTimestamp(beginTimestamp)
       const normalizedEnd = this.normalizeTimestamp(endTimestamp)
       const outCursor = [0]
@@ -4195,6 +4327,7 @@ export class WcdbCore {
     try {
       const outPtr = [null as any]
       const outHasMore = [0]
+      wcdbReadOnlyGuard.assertReadOnlyOperation('fetchMessageBatch', { cursor })
       const result = this.wcdbFetchMessageBatch(this.handle, cursor, outPtr, outHasMore)
       if (result !== 0 || !outPtr[0]) {
         return { success: false, error: `获取批次失败: ${result}` }
@@ -4244,6 +4377,18 @@ export class WcdbCore {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
+    // v1.2 §10.3 ③：只读上下文里拒绝写语句（唯一收口，见 export/readOnlyGuard.ts）。
+    // 这一层挡的是"应用自己的代码路径不会去写用户的库"：
+    // 阅读 / 导出 / 分析全程默认 read-only，写语句到不了引擎。
+    const guardDecision = wcdbReadOnlyGuard.assertSqlAllowed(sql, {
+      operation: 'execQuery',
+      table: kind,
+      path: path || null,
+    })
+    if (!guardDecision.allowed) {
+      this.writeLog(`[readonly-guard] refused kind=${kind} path=${path || ''} sql_len=${String(sql || '').length} reason=${guardDecision.reason || guardDecision.kind}`)
+      return { success: false, error: `只读上下文拒绝写语句：${guardDecision.reason || guardDecision.kind}` }
+    }
     const startedAt = Date.now()
     try {
       if (!this.wcdbExecQuery) return { success: false, error: '接口未就绪' }
@@ -4282,7 +4427,7 @@ export class WcdbCore {
       }
       const jsonStr = this.decodeJsonPtr(outPtr[0])
       if (!jsonStr) return { success: false, error: '解析查询结果失败' }
-      const rows = JSON.parse(jsonStr)
+      const rows = this.parseMessageJson(jsonStr)
       this.writeLog(`[audit:execQuery] done kind=${kind} cost_ms=${Date.now() - startedAt} rows=${Array.isArray(rows) ? rows.length : -1}`)
       if (isContactQuery) {
         const count = Array.isArray(rows) ? rows.length : -1
@@ -4954,13 +5099,12 @@ export class WcdbCore {
         try { msg = this.koffi.decode(outPtr[0], 'char', -1) } catch { }
         try { this.wcdbFreeString(outPtr[0]) } catch { }
       }
-      if (status === 1) {
-        return { success: true, alreadyInstalled: true }
-      }
-      if (status !== 0) {
+      if (status !== 0 && status !== 1) {
         return { success: false, error: msg || `DLL error ${status}` }
       }
-      return { success: true, alreadyInstalled: false }
+      const operation = { success: true, alreadyInstalled: status === 1 }
+      const verification = await this.checkMessageAntiRevokeTrigger(normalizedSessionId)
+      return verifyAntiRevokeTransition('install', operation, verification)
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -4982,7 +5126,8 @@ export class WcdbCore {
       if (status !== 0) {
         return { success: false, error: msg || `DLL error ${status}` }
       }
-      return { success: true }
+      const verification = await this.checkMessageAntiRevokeTrigger(normalizedSessionId)
+      return verifyAntiRevokeTransition('uninstall', { success: true }, verification)
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -5019,7 +5164,7 @@ export class WcdbCore {
       const result = await this.checkMessageAntiRevokeTrigger(sessionId)
       rows.push({ sessionId, success: result.success, installed: result.installed, error: result.error })
     }
-    return { success: true, rows }
+    return makeAntiRevokeBatchResult(rows)
   }
 
   async installMessageAntiRevokeTriggers(sessionIds: string[]): Promise<{
@@ -5027,6 +5172,7 @@ export class WcdbCore {
     rows?: Array<{ sessionId: string; success: boolean; alreadyInstalled?: boolean; error?: string }>
     error?: string
   }> {
+    return this.runWriteOperation('anti-revoke-trigger-install', 'installMessageAntiRevokeTriggers', async () => {
     if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
       return { success: true, rows: [] }
     }
@@ -5036,7 +5182,8 @@ export class WcdbCore {
       const result = await this.installMessageAntiRevokeTrigger(sessionId)
       rows.push({ sessionId, success: result.success, alreadyInstalled: result.alreadyInstalled, error: result.error })
     }
-    return { success: true, rows }
+    return makeAntiRevokeBatchResult(rows)
+    })
   }
 
   async uninstallMessageAntiRevokeTriggers(sessionIds: string[]): Promise<{
@@ -5044,6 +5191,7 @@ export class WcdbCore {
     rows?: Array<{ sessionId: string; success: boolean; error?: string }>
     error?: string
   }> {
+    return this.runWriteOperation('anti-revoke-trigger-uninstall', 'uninstallMessageAntiRevokeTriggers', async () => {
     if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
       return { success: true, rows: [] }
     }
@@ -5053,13 +5201,15 @@ export class WcdbCore {
       const result = await this.uninstallMessageAntiRevokeTrigger(sessionId)
       rows.push({ sessionId, success: result.success, error: result.error })
     }
-    return { success: true, rows }
+    return makeAntiRevokeBatchResult(rows)
+    })
   }
 
   /**
    * 为朋友圈安装删除
    */
   async installSnsBlockDeleteTrigger(): Promise<{ success: boolean; alreadyInstalled?: boolean; error?: string }> {
+    return this.runWriteOperation('sns-block-delete-install', 'installSnsBlockDeleteTrigger', async () => {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     if (!this.wcdbInstallSnsBlockDeleteTrigger) return { success: false, error: '当前数据服务版本不支持此功能' }
     try {
@@ -5081,12 +5231,14 @@ export class WcdbCore {
     } catch (e) {
       return { success: false, error: String(e) }
     }
+    })
   }
 
   /**
    * 关闭朋友圈删除拦截
    */
   async uninstallSnsBlockDeleteTrigger(): Promise<{ success: boolean; error?: string }> {
+    return this.runWriteOperation('sns-block-delete-uninstall', 'uninstallSnsBlockDeleteTrigger', async () => {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     if (!this.wcdbUninstallSnsBlockDeleteTrigger) return { success: false, error: '当前数据服务版本不支持此功能' }
     try {
@@ -5104,6 +5256,7 @@ export class WcdbCore {
     } catch (e) {
       return { success: false, error: String(e) }
     }
+    })
   }
 
   /**
@@ -5125,6 +5278,7 @@ export class WcdbCore {
   }
 
   async deleteSnsPost(postId: string): Promise<{ success: boolean; error?: string }> {
+    return this.runWriteOperation('sns-delete-post', 'deleteSnsPost', async () => {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     if (!this.wcdbDeleteSnsPost) return { success: false, error: '当前数据服务版本不支持此功能' }
     try {
@@ -5142,6 +5296,7 @@ export class WcdbCore {
     } catch (e) {
       return { success: false, error: String(e) }
     }
+    })
   }
 
   async getDualReportStats(sessionId: string, beginTimestamp: number = 0, endTimestamp: number = 0): Promise<{ success: boolean; data?: any; error?: string }> {
@@ -5170,10 +5325,11 @@ export class WcdbCore {
    * 修改消息内容
    */
   async updateMessage(sessionId: string, localId: number, createTime: number, newContent: string): Promise<{ success: boolean; error?: string }> {
+    return this.runWriteOperation('edit-message', 'updateMessage', async () => {
     if (!this.initialized || !this.wcdbUpdateMessage) return { success: false, error: 'WCDB Not Initialized or Method Missing' }
     if (!this.handle) return { success: false, error: 'Not Connected' }
 
-    return new Promise((resolve) => {
+    return new Promise<{ success: boolean; error?: string }>((resolve) => {
       try {
         const outError = [null as any]
         const result = this.wcdbUpdateMessage(this.handle, sessionId, localId, createTime, newContent, outError)
@@ -5192,16 +5348,18 @@ export class WcdbCore {
         resolve({ success: false, error: String(e) })
       }
     })
+    })
   }
 
   /**
    * 删除消息
    */
   async deleteMessage(sessionId: string, localId: number, createTime: number, dbPathHint?: string): Promise<{ success: boolean; error?: string }> {
+    return this.runWriteOperation('delete-message', 'deleteMessage', async () => {
     if (!this.initialized || !this.wcdbDeleteMessage) return { success: false, error: 'WCDB Not Initialized or Method Missing' }
     if (!this.handle) return { success: false, error: 'Not Connected' }
 
-    return new Promise((resolve) => {
+    return new Promise<{ success: boolean; error?: string }>((resolve) => {
       try {
         const outError = [null as any]
         const result = this.wcdbDeleteMessage(this.handle, sessionId, localId, createTime || 0, dbPathHint || '', outError)
@@ -5222,5 +5380,23 @@ export class WcdbCore {
         resolve({ success: false, error: String(e) })
       }
     })
+    })
+  }
+
+  /**
+   * v1.2 §10.3 ③：写操作的统一入口。
+   *
+   * 只有经过这里的调用才会把只读闸门切到写模式（`runWrite`），用完立刻切回 ——
+   * 写模式绝不能"漏"给后面的只读路径。调用方（IPC 层）负责在进来之前先落一份快照
+   * （见 `snapshotService.withAutoSnapshot`：自动快照 → 写入 → 可一键回滚）。
+   */
+  private async runWriteOperation<T>(reason: string, operation: string, fn: () => Promise<T>): Promise<T> {
+    if (this.scannedMirrorDir) {
+      return {
+        success: false,
+        error: '免登录扫描连接是临时只读副本，不支持修改消息、已读状态或防撤回触发器。请用原有账号密钥连接后执行此操作。',
+      } as T
+    }
+    return wcdbReadOnlyGuard.runWrite(reason, operation, fn)
   }
 }

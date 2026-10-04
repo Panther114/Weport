@@ -13,6 +13,7 @@ import {
     notificationCardWidth,
     notificationGlassRenderParams,
     notificationGlassVars,
+    notificationGlassTextVars,
     notificationShadowCss,
     notificationShadowLayers,
     notificationShadowMargin
@@ -143,6 +144,14 @@ describe('配置整形：新键（模糊 / 宽度 / 行数）也要夹在合法�
         expect(normalizeNotificationGlass({ textColor: '#ff00aa' }).textColor).toBe('#ff00aa')
         // 脏值当作"没指定"处理：退回自动，而不是把 16 进制垃圾写进 CSS
         expect(normalizeNotificationGlass({ textColor: 'zzz' }).textColor).toBe('')
+    })
+})
+
+describe('预览自动文字颜色跟随当前桌面明暗', () => {
+    it('透明卡片在深色桌面用浅字，在浅色桌面用深字', () => {
+        const transparentGlass = { ...NOTIFICATION_GLASS_DEFAULT, fill: false, textColor: '' }
+        expect(notificationGlassTextVars(transparentGlass, 0.08)['--noti-body-color']).toBe('rgb(255, 255, 255)')
+        expect(notificationGlassTextVars(transparentGlass, 0.92)['--noti-body-color']).toBe('rgb(10, 10, 10)')
     })
 })
 

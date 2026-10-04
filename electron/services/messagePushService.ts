@@ -1,11 +1,12 @@
 import { ConfigService } from './config'
-import { chatService, type ChatSession, type Message } from './chatService'
+import { chatService, type AntiRevokeConnectionContext, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { avatarCacheService } from './avatarCacheService'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
 import { pathToFileURL } from 'url'
+import { classifyAntiRevokeCheckRows } from './antiRevokeResults'
 
 interface SessionBaseline {
   lastTimestamp: number
@@ -91,6 +92,8 @@ export class MessagePushService {
   private readonly pendingMessageTableNames = new Set<string>()
   private readonly pendingAntiRevokeNewGroupsSessionIds = new Set<string>()
   private readonly antiRevokeNewGroupsAttempts = new Map<string, number>()
+  /** Invalidates in-flight auto-install work when the opt-in or account changes. */
+  private antiRevokeQueueGeneration = 0
   /** 兜底轮询：数据库监控管道失效时仍能发现新消息（30 秒一次，开销极低） */
   private fallbackPollTimer: ReturnType<typeof setInterval> | null = null
   private readonly fallbackPollIntervalMs = 30_000
@@ -105,7 +108,6 @@ export class MessagePushService {
   start(): void {
     if (this.started) return
     this.started = true
-    this.startFallbackPolling()
     void this.refreshConfiguration('startup')
   }
 
@@ -198,6 +200,7 @@ export class MessagePushService {
 
   async handleConfigChanged(key: string): Promise<void> {
     if (!PUSH_CONFIG_KEYS.has(String(key || '').trim())) return
+    if (key === 'antiRevokeAutoApplyNewGroups') this.antiRevokeQueueGeneration += 1
     if (key === 'messagePushRespectWechatMute') {
       this.sessionStatusesRefreshRequested = true
     }
@@ -306,6 +309,7 @@ export class MessagePushService {
   }
 
   private resetRuntimeState(): void {
+    this.antiRevokeQueueGeneration += 1
     this.sessionBaseline.clear()
     this.recentMessageKeys.clear()
     this.seenMessageKeys.clear()
@@ -339,12 +343,25 @@ export class MessagePushService {
       this.resetRuntimeState()
       return
     }
+    if (!/^[a-f0-9]{64}$/i.test(String(this.configService.get('decryptKey') || '').trim())) {
+      this.stopFallbackPolling()
+      this.resetRuntimeState()
+      return
+    }
 
     const connectResult = await chatService.connect()
+    if (chatService.isReadOnlySnapshot()) {
+      this.stopFallbackPolling()
+      this.resetRuntimeState()
+      console.warn('[MessagePushService] 只读历史快照不支持实时通知，请使用原有密钥连接')
+      return
+    }
     if (!connectResult.success) {
       console.warn(`[MessagePushService] Bootstrap connect failed (${reason}):`, connectResult.error)
       return
     }
+
+    this.startFallbackPolling()
 
     await this.bootstrapBaseline()
   }
@@ -404,6 +421,7 @@ export class MessagePushService {
     this.processing = true
     try {
       if (!this.isMonitoringEnabled()) return
+      if (chatService.isReadOnlySnapshot()) return
       const scanMessageBackedSessions = this.messageTableScanRequested
       this.messageTableScanRequested = false
       const pendingMessageTableNames = Array.from(this.pendingMessageTableNames)
@@ -626,23 +644,60 @@ export class MessagePushService {
 
     this.antiRevokeNewGroupsProcessing = true
     let nextRetryDelay: number | null = null
+    const queueGeneration = this.antiRevokeQueueGeneration
+    let connectionContext: AntiRevokeConnectionContext | null = null
+    const isQueueGenerationCurrent = () =>
+      this.started &&
+      this.isAntiRevokeNewGroupsEnabled() &&
+      queueGeneration === this.antiRevokeQueueGeneration
+    const isQueueContextCurrent = () => Boolean(
+      connectionContext &&
+      isQueueGenerationCurrent() &&
+      chatService.isAntiRevokeContextCurrent(connectionContext)
+    )
     try {
-      const check = await chatService.checkAntiRevokeTriggers(sessionIds)
-      if (!check.success) throw new Error(check.error || '检查防撤回触发器失败')
-      const checkedRows = new Map((check.rows || []).map((row) => [String(row.sessionId || '').trim(), row]))
-      const missingSessionIds = sessionIds.filter((sessionId) => checkedRows.get(sessionId)?.installed !== true)
-      for (const sessionId of sessionIds) {
-        if (!missingSessionIds.includes(sessionId)) this.antiRevokeNewGroupsAttempts.delete(sessionId)
+      const lease = chatService.captureAntiRevokeContext()
+      connectionContext = lease
+      if (!isQueueContextCurrent()) return
+      const check = await chatService.checkAntiRevokeTriggers(sessionIds, lease)
+      if (!isQueueContextCurrent()) return
+      const checked = classifyAntiRevokeCheckRows(sessionIds, check.rows)
+      for (const sessionId of checked.installedIds) this.antiRevokeNewGroupsAttempts.delete(sessionId)
+
+      const retryIds: string[] = []
+      for (const sessionId of checked.unknownIds) {
+        const attempt = this.antiRevokeNewGroupsAttempts.get(sessionId) || 1
+        if (attempt < this.antiRevokeNewGroupsRetryDelaysMs.length && this.started && this.isAntiRevokeNewGroupsEnabled()) {
+          this.pendingAntiRevokeNewGroupsSessionIds.add(sessionId)
+          retryIds.push(sessionId)
+        } else {
+          this.antiRevokeNewGroupsAttempts.delete(sessionId)
+          const row = (check.rows || []).find((item) => String(item.sessionId || '').trim() === sessionId)
+          console.warn(`[MessagePushService] Auto anti-revoke status check failed for ${sessionId}:`, row?.error || check.error || 'no status row')
+        }
       }
+      if (retryIds.length > 0) {
+        const attempt = this.antiRevokeNewGroupsAttempts.get(retryIds[0]) || 1
+        nextRetryDelay = this.antiRevokeNewGroupsRetryDelaysMs[Math.min(attempt, this.antiRevokeNewGroupsRetryDelaysMs.length - 1)]
+      }
+      const missingSessionIds = checked.missingIds
       if (missingSessionIds.length === 0) return
 
-      const result = await chatService.installAntiRevokeTriggers(missingSessionIds)
+      // The service checks this lease again after connect/list filtering and
+      // inside the connection queue immediately before the native write.
+      if (!isQueueContextCurrent()) return
+      const result = await chatService.installAntiRevokeTriggers(
+        missingSessionIds,
+        lease,
+        isQueueContextCurrent
+      )
+      if (!isQueueContextCurrent()) return
       const rowsBySessionId = new Map((result.rows || []).map((row) => [String(row.sessionId || '').trim(), row]))
-      const retryIds: string[] = []
+      const installRetryIds: string[] = []
 
       for (const sessionId of missingSessionIds) {
         const row = rowsBySessionId.get(sessionId)
-        if (result.success && row?.success === true) {
+        if (row?.success === true) {
           this.antiRevokeNewGroupsAttempts.delete(sessionId)
           continue
         }
@@ -650,18 +705,20 @@ export class MessagePushService {
         const attempt = this.antiRevokeNewGroupsAttempts.get(sessionId) || 1
         if (attempt < this.antiRevokeNewGroupsRetryDelaysMs.length && this.started && this.isAntiRevokeNewGroupsEnabled()) {
           this.pendingAntiRevokeNewGroupsSessionIds.add(sessionId)
-          retryIds.push(sessionId)
+          installRetryIds.push(sessionId)
         } else {
           this.antiRevokeNewGroupsAttempts.delete(sessionId)
           console.warn(`[MessagePushService] Auto anti-revoke apply failed for ${sessionId}:`, row?.error || result.error || 'unknown error')
         }
       }
 
-      if (retryIds.length > 0) {
-        const attempt = this.antiRevokeNewGroupsAttempts.get(retryIds[0]) || 1
-        nextRetryDelay = this.antiRevokeNewGroupsRetryDelaysMs[Math.min(attempt, this.antiRevokeNewGroupsRetryDelaysMs.length - 1)]
+      if (installRetryIds.length > 0) {
+        const attempt = this.antiRevokeNewGroupsAttempts.get(installRetryIds[0]) || 1
+        const installRetryDelay = this.antiRevokeNewGroupsRetryDelaysMs[Math.min(attempt, this.antiRevokeNewGroupsRetryDelaysMs.length - 1)]
+        nextRetryDelay = nextRetryDelay === null ? installRetryDelay : Math.min(nextRetryDelay, installRetryDelay)
       }
     } catch (error) {
+      if (!isQueueGenerationCurrent() || (connectionContext && !chatService.isAntiRevokeContextCurrent(connectionContext))) return
       console.warn('[MessagePushService] Auto anti-revoke apply queue failed:', error)
       let retryAttempt = 0
       for (const sessionId of sessionIds) {

@@ -19,6 +19,18 @@ function subscribe(channel: string, callback: (...args: any[]) => void): () => v
 
 // 暴露给渲染进程的 API（Weport 精简版，模式与 WeFlow preload 一致）
 contextBridge.exposeInMainWorld('electronAPI', {
+  // Bug reports are drafted locally. Images cross IPC only as opaque picker tokens.
+  bugReport: {
+    chooseImages: () => ipcRenderer.invoke('bug-report:choose-images'),
+    removeImage: (imageId: string) => ipcRenderer.invoke('bug-report:remove-image', imageId),
+    clearImages: () => ipcRenderer.invoke('bug-report:clear-images'),
+    copyImage: (imageId: string) => ipcRenderer.invoke('bug-report:copy-image', imageId),
+    copyDraftText: (payload: { body: string; includeEnvironment: boolean }) =>
+      ipcRenderer.invoke('bug-report:copy-draft-text', payload),
+    openIssue: (payload: { title: string; body: string; includeEnvironment: boolean }) =>
+      ipcRenderer.invoke('bug-report:open-issue', payload),
+  },
+
   // 配置
   config: {
     get: (key: string) => ipcRenderer.invoke('config:get', key),
@@ -64,7 +76,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** 窗口真正显示出来了（主进程在 showInactive 之后发）：入场动画的起跑信号。 */
     onShown: (callback: (event: any, data: any) => void) => subscribe('notification:shown', callback),
     /** 窗口收回后主进程下发的**新窗口几何**（主题采样按它把取样点挪出窗口）。 */
-    onGeometry: (callback: (event: any, data: any) => void) => subscribe('notification:geometry', callback)
+    onGeometry: (callback: (event: any, data: any) => void) => subscribe('notification:geometry', callback),
+
   },
 
   // 对话框
@@ -92,7 +105,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
     onDownloadProgress: (callback: (progress: any) => void) => subscribe('app:downloadProgress', callback),
     onUpdateDownloaded: (callback: () => void) => subscribe('app:updateDownloaded', callback),
-    onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string }) => void) => subscribe('app:updateAvailable', callback)
+    onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string; forced?: boolean; reason?: string | null; url?: string | null; hasUpdate?: boolean; allowReadOnly?: boolean }) => void) => subscribe('app:updateAvailable', callback)
   },
 
   // 数据备份（v0.9.4）
@@ -131,6 +144,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 密钥
   key: {
     autoGetDbKey: () => ipcRenderer.invoke('key:autoGetDbKey'),
+    /** 取消正在跑的密钥获取（扫描是分块+可中断的，取消后已取到的密钥仍会返回）。 */
+    cancelDbKeyAcquire: () => ipcRenderer.invoke('key:cancelDbKeyAcquire'),
     onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => subscribe('key:dbKeyStatus', callback),
     autoGetImageKey: (manualDir?: string, wxid?: string) => ipcRenderer.invoke('key:autoGetImageKey', manualDir, wxid),
     scanImageKeyFromMemory: (userDir: string) => ipcRenderer.invoke('key:scanImageKeyFromMemory', userDir),
@@ -145,6 +160,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 聊天
   chat: {
+    onConnectionChanged: (callback: (event: any, data: { readOnlySnapshot: boolean }) => void) => subscribe('chat:connectionChanged', callback),
     connect: () => ipcRenderer.invoke('chat:connect'),
     close: () => ipcRenderer.invoke('chat:close'),
     getSessions: () => ipcRenderer.invoke('chat:getSessions'),
@@ -156,6 +172,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSessionStatuses: (usernames: string[]) => ipcRenderer.invoke('chat:getSessionStatuses', usernames),
     getNewMessages: (sessionId: string, minTime: number, limit?: number) =>
       ipcRenderer.invoke('chat:getNewMessages', sessionId, minTime, limit),
+    /**
+     * v1.2 §3 阅读器用的真实分页：`offset` 是**原始行偏移**（不是消息条数），
+     * `offset = 0` 是最近的一窗，页内按时间升序。返回值同时带 `nextOffset`。
+     */
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit, startTime, endTime, ascending),
+    getSessionMessageCounts: (sessionIds: string[], options?: { preferHintCache?: boolean }) =>
+      ipcRenderer.invoke('chat:getSessionMessageCounts', sessionIds, options),
+    getMessageDates: (sessionId: string) => ipcRenderer.invoke('chat:getMessageDates', sessionId),
+    getMessageByIdentity: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: 'local' | 'server' }) =>
+      ipcRenderer.invoke('chat:getMessageByIdentity', identity),
+    // 单行签名：桥接生成器从上到下扫描 `ipcRenderer.invoke(`，参数表跨太多行会超出它的前瞻窗口
+    searchMessages: (keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number) =>
+      ipcRenderer.invoke('chat:searchMessages', keyword, sessionId, limit, offset, beginTimestamp, endTimestamp),
+    getVideoData: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }) => ipcRenderer.invoke('chat:getVideoData', identity),
+    getImageDataByIdentity: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }, options?: { excludeThumbnail?: boolean }) => ipcRenderer.invoke('chat:getImageDataByIdentity', identity, options),
+    getFileData: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }) => ipcRenderer.invoke('chat:getFileData', identity),
+    getImageData: (sessionId: string, msgId: string, options?: { excludeThumbnail?: boolean }) =>
+      ipcRenderer.invoke('chat:getImageData', sessionId, msgId, options),
+    getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxid?: string) =>
+      ipcRenderer.invoke('chat:getVoiceData', sessionId, msgId, createTime, serverId, senderWxid),
     getAntiRevokeSessions: () => ipcRenderer.invoke('chat:getAntiRevokeSessions'),
     checkAntiRevokeTriggers: (sessionIds: string[]) => ipcRenderer.invoke('chat:checkAntiRevokeTriggers', sessionIds),
     installAntiRevokeTriggers: (sessionIds: string[]) => ipcRenderer.invoke('chat:installAntiRevokeTriggers', sessionIds),
@@ -168,6 +205,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('export:exportSessions', outputRoot, options),
     cancelTask: (taskId: string) => ipcRenderer.invoke('export:cancelTask', taskId),
     getExportLog: (outputRoot: string) => ipcRenderer.invoke('export:getExportLog', outputRoot),
+    // v1.2 §10.2 ②：导出正确性自检报告（`<格式目录>/integrity-report.json`）。
+    integrityReport: (outputRoot: string) => ipcRenderer.invoke('export:integrityReport', outputRoot),
+    runIntegrityCheck: (outputRoot: string) => ipcRenderer.invoke('export:runIntegrityCheck', outputRoot),
     clearLibrary: (outputRoot: string) => ipcRenderer.invoke('export:clearLibrary', outputRoot),
     onProgress: (callback: (payload: any) => void) => subscribe('export:progress', callback)
   },
@@ -319,7 +359,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // macOS 能力诊断（v1.0）：仅在 darwin 上返回真实结果
   diagnostics: {
-    collectMac: () => ipcRenderer.invoke('diagnostics:collectMac')
+    monitorSnapshot: () => ipcRenderer.invoke('diagnostics:monitorSnapshot'),
+    collectMac: () => ipcRenderer.invoke('diagnostics:collectMac'),
+    /** 跨平台诊断（v1.2 §5）：一组检查记录 + 本地诊断包导出 */
+    collect: (options?: { full?: boolean }) => ipcRenderer.invoke('diagnostics:collect', options),
+    exportBundle: (options?: { path?: string; includeLogs?: boolean; includeConfig?: boolean }) =>
+      ipcRenderer.invoke('diagnostics:exportBundle', options),
+    listLogs: () => ipcRenderer.invoke('diagnostics:listLogs'),
+    readLog: (payload: { name: string; tailLines?: number }) => ipcRenderer.invoke('diagnostics:readLog', payload)
   },
 
   // 连接器（第三方工具，v1.0）。`connect` 收明文令牌，其余接口只出掩码。
@@ -364,6 +411,60 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('weclone:setSettings', cloneId, patch)
   },
 
+  /** 海报导出落盘（v1.2 §4）：PNG data URL → 真实文件；返回**真实写入路径** */
+  poster: {
+    saveImage: (payload: { dataUrl: string; fileName?: string; directory?: string }) =>
+      ipcRenderer.invoke('poster:saveImage', payload)
+  },
+
+  /**
+   * 全局搜索（v1.2 §6）：索引、查询、建议。
+   *
+   * 索引进度不在这里推 —— 它是长任务，走 `task:status` / liveTask 那套
+   * （AGENTS.md 第三条铁律：进度不许存在页面 state 里）。
+   */
+  search: {
+    indexStatus: () => ipcRenderer.invoke('search:indexStatus'),
+    buildIndex: (options?: { force?: boolean; wxid?: string }) => ipcRenderer.invoke('search:buildIndex', options),
+    query: (request: {
+      text: string;
+      scope?: { sessionIds?: string[]; senders?: string[]; from?: number; to?: number; kinds?: string[] };
+      limit?: number;
+      cursor?: number
+    }) => ipcRenderer.invoke('search:query', request),
+    suggest: (request: { prefix: string; limit?: number }) => ipcRenderer.invoke('search:suggest', request)
+  },
+
+  /**
+   * 本地标注（v1.2 §6/§3）：标签、收藏、消息标记、保存的搜索。
+   *
+   * 按账号存在 `{userData}/annotations/accounts/`，与微信数据库无关；导出与阅读器共享会话收藏。
+   */
+  annotations: {
+    list: (options?: { accountId: string }) => ipcRenderer.invoke('annotations:list', options),
+    mutate: (payload: { op: string; payload?: any }, options?: { accountId: string }) => ipcRenderer.invoke('annotations:mutate', payload, options),
+    export: (payload: { format: 'json' | 'csv' | 'md'; path: string }) => ipcRenderer.invoke('annotations:export', payload)
+  },
+
+  /**
+   * 密钥健康面板（v1.2 §10.4）。
+   *
+   * 只出指纹（首 4…末 4），完整密钥永不回到渲染层；写入走合并语义，
+   * 一个库保存失败不会覆盖其它库的好密钥。
+   */
+  keyHealth: {
+    get: () => ipcRenderer.invoke('keyHealth:get'),
+    rescan: (options?: { kinds?: string[] }) => ipcRenderer.invoke('keyHealth:rescan', options),
+    paste: (payload: { kind: string; text: string }) => ipcRenderer.invoke('keyHealth:paste', payload),
+    clear: (payload: { kind: string }) => ipcRenderer.invoke('keyHealth:clear', payload)
+  },
+
+  /** 写操作前的自动快照（v1.2 §10.3）：安装触发器 / 删除朋友圈前先备份，可一键回滚。 */
+  snapshot: {
+    list: () => ipcRenderer.invoke('snapshot:list'),
+    restore: (payload: { id: string; verifyOnly?: boolean; confirm?: boolean }) => ipcRenderer.invoke('snapshot:restore', payload)
+  },
+
   /**
    * 长任务状态快照（v1.0.1）。
    *
@@ -372,7 +473,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * 日志、开始时间原样拿回来 —— 否则重建后的界面看起来像什么都没发生过。
    */
   task: {
-    status: () => ipcRenderer.invoke('task:status')
+    status: () => ipcRenderer.invoke('task:status'),
+    onStatusChanged: (callback: (snapshots: any) => void) => {
+      const listener = (_event: unknown, snapshots: any) => callback(snapshots)
+      ipcRenderer.on('task:statusChanged', listener)
+      return () => ipcRenderer.removeListener('task:statusChanged', listener)
+    },
   },
 
   process: {

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WeportFlash</title>
+<style>
+  /* WeportFlash has one window and one job. The whole stylesheet is here on
+     purpose — no bundler, no framework, no dist/ (spec §9.3: 零配置). */
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --line: #e3e6ec;
+    --text: #1c2028;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-press: #1d4ed8;
+    --ok: #0f9d58;
+    --err: #d93025;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    padding: 12px 14px;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.45 "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    /* The window is a fixed 560×260. The layout below is tuned to fit that box in
+       all three states, and this is the safety net: a long engine error message
+       scrolls instead of silently losing its last lines. */
+    overflow-y: auto;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* Once a panel is on screen, the footer (which repeats the output directory)
+     is the first thing to go — measured: keeping it clipped the results panel. */
+  body.done .foot { display: none; }
+  .head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .head h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .head .sub { font-size: 11px; color: var(--muted); }
+  .head .ver { margin-left: auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .actions { display: flex; align-items: center; gap: 12px; }
+  button.primary {
+    flex: 1;
+    height: 42px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: .5px;
+    cursor: pointer;
+    transition: background .12s ease, transform .06s ease;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-press); }
+  button.primary:active:not(:disabled) { transform: translateY(1px); }
+  button.primary:disabled { background: #a9bce6; cursor: default; }
+
+  .skip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #333; white-space: nowrap; cursor: pointer; }
+  .skip input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+
+  .status { margin-top: 10px; font-size: 12px; color: var(--muted); min-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status.err { color: var(--err); }
+  .status.ok { color: var(--ok); }
+
+  .bar { margin-top: 7px; height: 6px; border-radius: 3px; background: #e6e9ef; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width .25s ease; }
+  .bar.idle > i { background: #c3c9d4; }
+
+  .panel {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    font-size: 12px;
+  }
+  .panel[hidden] { display: none; }
+  .panel .row { display: flex; gap: 6px; align-items: baseline; }
+  .panel .k { color: var(--muted); flex: 0 0 auto; }
+  .panel .v { word-break: break-all; }
+  .panel .path { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; color: #333; word-break: break-all; }
+  .panel.err { border-color: #f3c9c4; background: #fff7f6; }
+  .panel.err .title { color: var(--err); font-weight: 600; margin-bottom: 3px; }
+  .panel.err .next { color: #7a3b33; margin-top: 4px; }
+  .panel .title.ok { color: var(--ok); font-weight: 600; margin-bottom: 3px; }
+  .panel .title.pending { color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+
+  button.link {
+    margin-top: 6px;
+    height: 26px;
+    padding: 0 11px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fbfbfd;
+    color: #26303c;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button.link:hover { background: #f1f3f7; }
+  button.link:active { transform: translateY(1px); }
+
+  .foot { margin-top: 8px; font-size: 10.5px; color: #98a0ad; line-height: 1.5; }
+  .foot b { font-weight: 600; color: #7e8794; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>WeportFlash</h1>
+    <span class="sub">一键提取密钥 · 导出全部聊天记录</span>
+    <span class="ver" id="version"></span>
+  </div>
+
+  <label for="account">微信账号</label>
+  <select id="account" style="width:100%;padding:6px;margin:4px 0 10px" aria-label="选择要导出的微信账号"></select>
+  <button class="link" id="chooseDirectory" style="margin:0 0 10px">选择微信数据目录</button>
+  <div class="actions">
+    <button class="primary" id="run">一键提取并导出</button>
+    <label class="skip" title="勾选后只导出文字与清单，不复制图片 / 视频 / 语音 / 文件">
+      <input type="checkbox" id="skipMedia" checked />
+      跳过媒体
+    </label>
+  </div>
+
+  <div class="status" id="status">准备就绪 · 点击按钮开始</div>
+  <div class="bar idle" id="barWrap"><i id="bar"></i></div>
+
+  <div class="panel" id="result" hidden>
+    <div class="title ok" id="resultTitle"></div>
+    <div class="row"><span class="k">输出目录</span></div>
+    <div class="path" id="resultDir"></div>
+    <div class="row"><span class="k">耗时</span><span class="v" id="resultTime"></span></div>
+    <button class="link" id="openFolder">打开文件夹</button>
+  </div>
+
+  <div class="panel err" id="failure" hidden>
+    <div class="title" id="failureTitle">未能完成导出</div>
+    <div class="v" id="failureMessage"></div>
+    <div class="next" id="failureNext"></div>
+  </div>
+
+  <div class="foot">
+    <div>输出：<b id="footExport">—</b></div>
+    <div>数据（便携目录，不写 %APPDATA%）：<b id="footData">—</b></div>
+  </div>
+
+<script src="ui.js"></script>
+</body>
+</html>

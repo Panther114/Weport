@@ -1,0 +1,247 @@
+name: Validate Release Candidate
+
+on:
+  push:
+    branches:
+      - codex/electron-v12
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Windows x64 — package, native init, UI
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Verify release notes
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          node scripts/extract-release-notes.mjs $version
+
+      - name: Build Windows installer
+        run: npm run build
+
+      - name: Verify packaged native host
+        run: node scripts/verify-packaged-native.cjs release
+
+      - name: Verify packaged V1.2 UI
+        run: node scripts/verify-v12-ui.mjs
+
+      - name: Verify settings feedback UI
+        run: node scripts/verify-bug-report-ui.mjs
+
+      - name: Verify Windows artifact names
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          foreach ($file in @("release/Weport-$version-Setup.exe", "release/Weport-$version-Setup.exe.blockmap", 'release/latest.yml')) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -le 0) {
+              throw "Missing or empty validation artifact: $file"
+            }
+          }
+          $required = @('release-notes-current.md', 'resources/update/force-update.json')
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -le 0) {
+              throw "Missing or empty validation payload: $file"
+            }
+          }
+          $latest = Get-Content 'release/latest.yml' -Raw
+          if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($version))\s*$") { throw 'latest.yml does not declare the package version' }
+          $notes = Get-Content 'release-notes-current.md' -Raw
+          if ($notes -notmatch "(?m)^# Weport v$([regex]::Escape($version))$") { throw 'Release notes do not contain this package version' }
+          if ([regex]::Matches($notes, '(?m)^# Weport v').Count -ne 1) { throw 'Release notes contain multiple version sections' }
+          $policy = Get-Content 'resources/update/force-update.json' -Raw | ConvertFrom-Json
+          if (-not $policy.minimumSupportedVersion) { throw 'force-update.json is missing minimumSupportedVersion' }
+
+      - name: Upload Windows validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weport-validation-windows-x64
+          path: |
+            release/Weport-*-Setup.exe
+            release/Weport-*-Setup.exe.blockmap
+            release/latest.yml
+            resources/update/force-update.json
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-arm64:
+    name: macOS arm64 — package, seal, native init, UI
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Restore macOS helper execute bits
+        run: |
+          chmod +x resources/key/macos/universal/xkey_helper \
+            resources/key/macos/universal/xkey_helper_macos \
+            resources/key/macos/universal/image_scan_helper \
+            resources/key/macos/universal/libwx_key.dylib \
+            resources/welive/macos/arm64/welive
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Verify release notes
+        run: |
+          version=$(node -p "require('./package.json').version")
+          node scripts/extract-release-notes.mjs "$version"
+
+      - name: Build macOS arm64 packages
+        run: npm run build:mac
+
+      - name: Verify macOS package seal and WCDB linkage
+        run: bash scripts/verify-mac-pack.sh release
+
+      - name: Verify packaged native host
+        run: node scripts/verify-packaged-native.cjs release
+
+      - name: Verify packaged V1.2 UI
+        run: node scripts/verify-v12-ui.mjs
+
+      - name: Verify macOS artifact names
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          for file in \
+            "release/Weport-${version}-arm64.dmg" \
+            "release/Weport-${version}-arm64.zip" \
+            release/latest-mac.yml \
+            release-notes-current.md; do
+            test -s "$file" || { echo "::error::Missing or empty validation artifact: $file"; exit 1; }
+          done
+          grep -Eq "^version:[[:space:]]*['\"]?${version}['\"]?[[:space:]]*$" release/latest-mac.yml \
+            || { echo '::error::latest-mac.yml does not declare the package version'; exit 1; }
+          grep -Fxq "# Weport v${version}" release-notes-current.md \
+            || { echo '::error::Release notes do not contain this package version'; exit 1; }
+          test "$(grep -c '^# Weport v' release-notes-current.md)" -eq 1 \
+            || { echo '::error::Release notes contain multiple version sections'; exit 1; }
+
+      - name: Upload macOS validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weport-validation-macos-arm64
+          path: |
+            release/Weport-*-arm64.dmg
+            release/Weport-*-arm64.zip
+            release/latest-mac.yml
+            release-notes-current.md
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-x64:
+    name: Linux x64 — package, native init, UI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Electron headless runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            xvfb xauth \
+            libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0 \
+            libcups2t64 libdrm2 libgtk-3-0t64 libnss3 libx11-xcb1 \
+            libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 \
+            libxss1 libgbm1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Restore Linux helper execute bit
+        run: chmod +x resources/key/linux/x64/xkey_helper_linux
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Verify release notes
+        run: |
+          version=$(node -p "require('./package.json').version")
+          node scripts/extract-release-notes.mjs "$version"
+
+      - name: Build Linux x64 packages
+        run: npm run build:linux
+
+      - name: Verify packaged native host
+        run: node scripts/verify-packaged-native.cjs release
+
+      - name: Verify packaged V1.2 UI
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" node scripts/verify-v12-ui.mjs
+
+      - name: Verify Linux artifact names
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          for file in \
+            "release/Weport-${version}-x64.AppImage" \
+            "release/Weport-${version}-x64.tar.gz" \
+            release-notes-current.md; do
+            test -s "$file" || { echo "::error::Missing or empty validation artifact: $file"; exit 1; }
+          done
+          grep -Fxq "# Weport v${version}" release-notes-current.md \
+            || { echo '::error::Release notes do not contain this package version'; exit 1; }
+          test "$(grep -c '^# Weport v' release-notes-current.md)" -eq 1 \
+            || { echo '::error::Release notes contain multiple version sections'; exit 1; }
+
+      - name: Upload Linux validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weport-validation-linux-x64
+          path: |
+            release/Weport-*-x64.AppImage
+            release/Weport-*-x64.tar.gz
+            release-notes-current.md
+          if-no-files-found: error
+          retention-days: 7

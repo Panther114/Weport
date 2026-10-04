@@ -7,32 +7,53 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag (e.g. v0.7.0)'
+        description: 'Version tag (e.g. v1.2.0)'
         required: true
-        default: 'v0.7.0'
+        default: 'v1.2.0'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
+      prerelease: ${{ steps.release-tag.outputs.prerelease }}
     steps:
+      - name: Resolve release tag
+        id: release-tag
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          $releaseTag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          if ($releaseTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') { throw "Invalid release tag '$releaseTag'" }
+          $prerelease = if ($releaseTag -match '^v[0-9]+\.[0-9]+\.[0-9]+-') { 'true' } else { 'false' }
+          "tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release-tag.outputs.tag }}
+          persist-credentials: false
 
       - name: Verify tag matches package version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          $refName = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ inputs.tag }}' }
-          $tagVersion = $refName.TrimStart('v')
+          $releaseTag = $env:RELEASE_TAG
+          if (-not $releaseTag.StartsWith('v')) { throw "Expected a v-prefixed release tag, got '$releaseTag'" }
+          $tagVersion = $releaseTag.Substring(1)
           if ($pkg.version -ne $tagVersion) { throw "Tag $tagVersion does not match package version $($pkg.version)" }
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Extract this version's release notes
@@ -41,27 +62,59 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Unit tests
+        run: npm run test:unit
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Build installer
         run: npm run build
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Verify packaged native host
+        run: node scripts/verify-packaged-native.cjs
+
+      - name: Verify packaged UI and settings feedback
+        run: |
+          node scripts/verify-v12-ui.mjs
+          node scripts/verify-bug-report-ui.mjs
+
+      - name: Verify required Windows release payload
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $required = @(
+            "release/Weport-$version-Setup.exe",
+            "release/Weport-$version-Setup.exe.blockmap",
+            'release/latest.yml',
+            'release-notes-current.md',
+            'resources/update/force-update.json'
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing required Windows release file: $file" }
+            if ((Get-Item -LiteralPath $file).Length -le 0) { throw "Required Windows release file is empty: $file" }
+          }
+          $latest = Get-Content 'release/latest.yml' -Raw
+          if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($version))\s*$") { throw 'latest.yml does not declare the package version' }
+          $notes = Get-Content 'release-notes-current.md' -Raw
+          if ($notes -notmatch "(?m)^# Weport v$([regex]::Escape($version))$") { throw 'Release notes do not start with this package version' }
+          if ([regex]::Matches($notes, '(?m)^# Weport v').Count -ne 1) { throw 'Release notes contain more than one version section' }
+          $policy = Get-Content 'resources/update/force-update.json' -Raw | ConvertFrom-Json
+          if (-not $policy.minimumSupportedVersion) { throw 'force-update.json is missing minimumSupportedVersion' }
+
+      - name: Upload Windows release payload
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: weport-release-windows
+          path: |
             release/Weport-*.exe
             release/Weport-*.exe.blockmap
             release/latest.yml
-          body_path: release-notes-current.md
-          fail_on_unmatched_files: false
-
-      - name: Smoke test (capture harness)
-        if: always()
-        continue-on-error: true
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1
+            release-notes-current.md
+            resources/update/force-update.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   build-mac:
     runs-on: macos-14
@@ -79,16 +132,15 @@ jobs:
     # arrived with. An arm64 bundle whose seal no longer matches is what Gatekeeper
     # reports to the user as “Weport 已损坏 / is damaged” — issue #18, verbatim.
     #
-    # Two modes, chosen from the repository secrets:
-    #   * developer-id — a real Developer ID certificate, notarized and stapled. Used
-    #     automatically once the secrets below exist. This is the ONLY mode that can
-    #     satisfy `spctl --assess` (issue #18's second symptom), i.e. the only one a
-    #     normal user can open without the unidentified-developer dance.
+    # Signing modes, chosen from repository secrets:
+    #   * developer-id — signs with a real Developer ID certificate. With all three
+    #     Apple notarization secrets, the bundle is notarized/stapled and Gatekeeper is
+    #     a hard gate. Without them, ordinary Gatekeeper acceptance is unsupported;
+    #     even a successful runner-local spctl result is not counted as acceptance.
     #   * adhoc — no Apple account. `build.mac.identity: "-"` is electron-builder's
     #     documented ad-hoc opt-in (app-builder-lib/out/mac/MacTargetHelper.js:37-44)
     #     and is what makes the bundle SEALED, so `codesign --verify --deep --strict`
-    #     passes and macOS stops calling it damaged. spctl rejects an ad-hoc signature
-    #     by design — expected, not a regression.
+    #     passes. Gatekeeper acceptance is unsupported for this mode.
     #
     # Secrets for developer-id:
     #   MAC_CSC_LINK              base64 of the “Developer ID Application” .p12
@@ -102,21 +154,39 @@ jobs:
     #                             or none: a partial set makes electron-builder throw
     #                             InvalidConfigurationError (MacTargetHelper.js:219-241).
     #
-    # REQUIRE_DEVELOPER_ID=true turns a missing Developer ID on a non-prerelease tag
-    # into a build failure. It is 'false' only because this repository has no
-    # certificate yet — flip it to 'true' the moment the secrets above are added.
+    # REQUIRE_DEVELOPER_ID=true turns a missing Developer ID on a stable tag into a
+    # build failure. It is 'false' only because this repository has no certificate yet.
     env:
       REQUIRE_DEVELOPER_ID: 'false'
     steps:
+      - name: Resolve release tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then release_tag="$INPUT_TAG"; else release_tag="$GITHUB_REF_NAME"; fi
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then echo "Invalid release tag '$release_tag'" >&2; exit 1; fi
+          release_version="${release_tag#v}"
+          release_version="${release_version%%+*}"
+          if [[ "$release_version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release-tag.outputs.tag }}
+          persist-credentials: false
 
       - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         shell: bash
         run: |
           pkg_version="$(node -p "require('./package.json').version")"
-          ref_name="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
-          tag_version="${ref_name#v}"
+          if [[ "$RELEASE_TAG" != v* ]]; then echo "Expected a v-prefixed release tag, got '$RELEASE_TAG'" >&2; exit 1; fi
+          tag_version="${RELEASE_TAG#v}"
           if [ "$pkg_version" != "$tag_version" ]; then
             echo "Tag $tag_version does not match package version $pkg_version" >&2
             exit 1
@@ -133,7 +203,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Extract this version's release notes
@@ -141,6 +211,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
+
+      - name: Unit tests
+        run: npm run test:unit
 
       - name: Typecheck
         run: npm run typecheck
@@ -156,6 +229,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           mode=adhoc
           notarize=false
@@ -167,9 +241,11 @@ jobs:
           fi
           # A prerelease tag (v1.0.0-rc.1) may ship ad-hoc: RC builds must not require
           # the Apple account. A stable tag is the one users install, so say so loudly.
-          tag="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          tag="$RELEASE_TAG"
+          version_part="${tag#v}"
+          version_part="${version_part%%+*}"
           prerelease=false
-          case "$tag" in *-*) prerelease=true ;; esac
+          case "$version_part" in *-*) prerelease=true ;; esac
           if [ "$mode" = "adhoc" ] && [ "$prerelease" = "false" ]; then
             if [ "${REQUIRE_DEVELOPER_ID}" = "true" ]; then
               echo "::error::Stable tag $tag has no Developer ID secrets. Set MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD and MAC_IDENTITY_QUALIFIER, or set REQUIRE_DEVELOPER_ID=false to accept an ad-hoc build."
@@ -233,16 +309,21 @@ jobs:
       - name: Verify macOS packaging & signature (issue #18 gate)
         run: bash scripts/verify-mac-pack.sh release
 
+      - name: Verify packaged native host
+        run: node scripts/verify-packaged-native.cjs
+
       # The reported symptom was about the ZIP a user downloads, so verify the
       # signatures through a real unzip, and gate Gatekeeper (spctl) + the staple.
-      - name: "Gatekeeper / notarization gate (issue #18)"
+      - name: "Verify macOS package signature and Gatekeeper status (issue #18)"
         env:
           MODE: ${{ steps.signing.outputs.mode }}
           NOTARIZE: ${{ steps.signing.outputs.notarize }}
         run: |
           set -uo pipefail
           failures=0
+          gatekeeper_failures=0
           fail() { echo "::error::$1"; failures=$((failures + 1)); }
+          gatekeeper_fail() { gatekeeper_failures=$((gatekeeper_failures + 1)); fail "$1"; }
           pass() { echo "✅ $1"; }
 
           APP="$(find release -maxdepth 3 -name 'Weport.app' -type d | head -n 1 || true)"
@@ -275,57 +356,105 @@ jobs:
             fail "missing Contents/_CodeSignature/CodeResources — 'code has no resources but signature indicates they must be present' will follow (issue #18)"
           fi
 
-          # (3) Gatekeeper. spctl cannot accept an ad-hoc signature — that is the
-          #     documented, expected limitation of the adhoc mode, so it is a hard
-          #     gate only where a Developer ID + notarization are in play.
-          if spctl --assess --type execute --verbose=4 "$APP" 2>&1; then
-            pass "spctl --assess accepts the app"
-          elif [ "$MODE" = "developer-id" ]; then
-            fail "spctl --assess REJECTED a Developer-ID-signed app (issue #18)"
-          else
-            echo "::warning::spctl --assess rejects this app — expected for an ad-hoc signature (mode=$MODE). It is not 'damaged' (codesign passed), but users still see 'unidentified developer'."
-          fi
-
-          # (4) Notarization + staple, when credentials were available.
+          # (3) Only notarized and stapled output can claim ordinary Gatekeeper
+          #     acceptance. A successful local assessment without notarization
+          #     does not establish what a user downloading this build will see.
           if [ "$NOTARIZE" = "true" ]; then
-            xcrun stapler validate "$APP" || fail "stapler validate failed on the .app (notarization ticket not stapled)"
-            if [ -n "$DMG" ]; then
-              xcrun stapler validate "$DMG" || fail "stapler validate failed on the .dmg"
+            if spctl --assess --type execute --verbose=4 "$APP" 2>&1; then
+              pass "spctl --assess accepts the notarized app"
+            else
+              gatekeeper_fail "spctl --assess REJECTED the notarized app (issue #18)"
+            fi
+            xcrun stapler validate "$APP" || gatekeeper_fail "stapler validate failed on the .app (notarization ticket not stapled)"
+            if [ -z "$DMG" ]; then
+              gatekeeper_fail "notarized macOS build is missing its DMG"
+            else
+              xcrun stapler validate "$DMG" || gatekeeper_fail "stapler validate failed on the .dmg"
               spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" \
-                || fail "spctl rejected the notarized .dmg"
+                || gatekeeper_fail "spctl rejected the notarized .dmg"
+            fi
+            if [ "$gatekeeper_failures" -eq 0 ]; then
+              echo "| Gatekeeper | accepted (app and DMG assessment; app and DMG staple validated) |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| Gatekeeper | failed ($gatekeeper_failures assessment or staple check(s)) |" >> "$GITHUB_STEP_SUMMARY"
             fi
           else
-            echo "::notice::notarization was not requested for this build (NOTARIZE=$NOTARIZE)"
+            echo "::warning::Ordinary Gatekeeper acceptance is unsupported/unverified: no notarization ticket or staple was produced (signing mode=$MODE)."
+            echo "| Gatekeeper | unsupported/unverified (no notarization or staple; mode=$MODE) |" >> "$GITHUB_STEP_SUMMARY"
+            if spctl --assess --type execute --verbose=4 "$APP" 2>&1; then
+              echo "::notice::spctl returned success for the CI copy; without notarization this is not treated as Gatekeeper acceptance for users."
+            else
+              echo "::notice::spctl rejected the unnotarized CI copy; no ordinary Gatekeeper acceptance claim is made."
+            fi
           fi
 
-          echo "=== Gatekeeper gate: $failures failure(s) ==="
+          if [ "$NOTARIZE" = "true" ]; then
+            echo "=== Gatekeeper gate: $failures failure(s) ==="
+          else
+            echo "=== Package integrity: $failures failure(s); Gatekeeper unsupported/unverified (not notarized) ==="
+          fi
           exit $failures
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Verify required macOS release payload
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          for file in \
+            "release/Weport-${version}-arm64.dmg" \
+            "release/Weport-${version}-arm64.zip" \
+            release/latest-mac.yml \
+            release-notes-current.md; do
+            test -s "$file" || { echo "::error::Missing or empty required macOS release file: $file"; exit 1; }
+          done
+          grep -Eq "^version:[[:space:]]*['\"]?${version}['\"]?[[:space:]]*$" release/latest-mac.yml \
+            || { echo '::error::latest-mac.yml does not declare the package version'; exit 1; }
+          grep -Fxq "# Weport v${version}" release-notes-current.md \
+            || { echo '::error::Release notes do not contain this package version'; exit 1; }
+          test "$(grep -c '^# Weport v' release-notes-current.md)" -eq 1 \
+            || { echo '::error::Release notes contain multiple version sections'; exit 1; }
+
+      - name: Upload macOS release payload
+        uses: actions/upload-artifact@v4
         with:
-          # AGENTS.md: the in-app updater only sees releases that are neither a draft
-          # nor a prerelease. Never let this default drift.
-          draft: false
-          prerelease: false
-          files: |
+          name: weport-release-macos-arm64
+          path: |
             release/Weport-*.dmg
             release/Weport-*.zip
             release/latest-mac.yml
-          body_path: release-notes-current.md
-          fail_on_unmatched_files: false
+            release-notes-current.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve release tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then release_tag="$INPUT_TAG"; else release_tag="$GITHUB_REF_NAME"; fi
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then echo "Invalid release tag '$release_tag'" >&2; exit 1; fi
+          release_version="${release_tag#v}"
+          release_version="${release_version%%+*}"
+          if [[ "$release_version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release-tag.outputs.tag }}
+          persist-credentials: false
 
       - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           pkg_version="$(node -p "require('./package.json').version")"
-          ref_name="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
-          tag_version="${ref_name#v}"
+          if [[ "$RELEASE_TAG" != v* ]]; then echo "Expected a v-prefixed release tag, got '$RELEASE_TAG'" >&2; exit 1; fi
+          tag_version="${RELEASE_TAG#v}"
           if [ "$pkg_version" != "$tag_version" ]; then
             echo "Tag $tag_version does not match package version $pkg_version" >&2
             exit 1
@@ -339,7 +468,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Extract this version's release notes
@@ -348,17 +477,142 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Unit tests
+        run: npm run test:unit
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Build Linux packages (AppImage + tar.gz)
         run: npm run build:linux
 
+      - name: Verify packaged native host
+        run: node scripts/verify-packaged-native.cjs
+
+      - name: Verify required Linux release payload
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          for file in \
+            "release/Weport-${version}-x64.AppImage" \
+            "release/Weport-${version}-x64.tar.gz" \
+            release-notes-current.md; do
+            test -s "$file" || { echo "::error::Missing or empty required Linux release file: $file"; exit 1; }
+          done
+          grep -Fxq "# Weport v${version}" release-notes-current.md \
+            || { echo '::error::Release notes do not contain this package version'; exit 1; }
+          test "$(grep -c '^# Weport v' release-notes-current.md)" -eq 1 \
+            || { echo '::error::Release notes contain multiple version sections'; exit 1; }
+
+      - name: Upload Linux release payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: weport-release-linux-x64
+          path: |
+            release/Weport-*.AppImage
+            release/Weport-*.tar.gz
+            release-notes-current.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish-release:
+    name: Publish verified multi-platform release
+    needs: [build-windows, build-mac, build-linux]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: weport-release-${{ needs.build-windows.outputs.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.build-windows.outputs.tag }}
+      RELEASE_PRERELEASE: ${{ needs.build-windows.outputs.prerelease }}
+    steps:
+      - name: Download Windows release payload
+        uses: actions/download-artifact@v4
+        with:
+          name: weport-release-windows
+          path: release-artifacts/windows
+
+      - name: Download macOS release payload
+        uses: actions/download-artifact@v4
+        with:
+          name: weport-release-macos-arm64
+          path: release-artifacts/macos
+
+      - name: Download Linux release payload
+        uses: actions/download-artifact@v4
+        with:
+          name: weport-release-linux-x64
+          path: release-artifacts/linux
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify combined release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag '$RELEASE_TAG'"
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          windows="release-artifacts/windows"
+          macos="release-artifacts/macos"
+          linux="release-artifacts/linux"
+          required_files=(
+            "$windows/release/Weport-${version}-Setup.exe"
+            "$windows/release/Weport-${version}-Setup.exe.blockmap"
+            "$windows/release/latest.yml"
+            "$windows/release-notes-current.md"
+            "$windows/resources/update/force-update.json"
+            "$macos/release/Weport-${version}-arm64.dmg"
+            "$macos/release/Weport-${version}-arm64.zip"
+            "$macos/release/latest-mac.yml"
+            "$macos/release-notes-current.md"
+            "$linux/release/Weport-${version}-x64.AppImage"
+            "$linux/release/Weport-${version}-x64.tar.gz"
+            "$linux/release-notes-current.md"
+          )
+          for file in "${required_files[@]}"; do
+            test -s "$file" || { echo "::error::Missing or empty release payload: $file"; exit 1; }
+          done
+          for metadata in "$windows/release/latest.yml" "$macos/release/latest-mac.yml"; do
+            grep -Eq "^version:[[:space:]]*['\"]?${version}['\"]?[[:space:]]*$" "$metadata" \
+              || { echo "::error::$metadata does not declare version $version"; exit 1; }
+          done
+          for notes in "$windows/release-notes-current.md" "$macos/release-notes-current.md" "$linux/release-notes-current.md"; do
+            grep -Fxq "# Weport v${version}" "$notes" \
+              || { echo "::error::$notes does not contain the selected version heading"; exit 1; }
+            test "$(grep -c '^# Weport v' "$notes")" -eq 1 \
+              || { echo "::error::$notes contains multiple version sections"; exit 1; }
+          done
+          cmp -s "$windows/release-notes-current.md" "$macos/release-notes-current.md"
+          cmp -s "$windows/release-notes-current.md" "$linux/release-notes-current.md"
+          node -e "const p=require('./${windows}/resources/update/force-update.json'); if(!p.minimumSupportedVersion) process.exit(1)"
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          name: Weport ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          # Publish only after all three native builds and package gates pass.
+          # The updater requires a non-draft, non-prerelease release as latest.
+          draft: false
+          prerelease: ${{ fromJSON(env.RELEASE_PRERELEASE) }}
+          make_latest: ${{ env.RELEASE_PRERELEASE == 'false' }}
           files: |
-            release/Weport-*.AppImage
-            release/Weport-*.tar.gz
-          body_path: release-notes-current.md
-          fail_on_unmatched_files: false
+            release-artifacts/windows/release/Weport-*.exe
+            release-artifacts/windows/release/Weport-*.exe.blockmap
+            release-artifacts/windows/release/latest.yml
+            release-artifacts/windows/resources/update/force-update.json
+            release-artifacts/macos/release/Weport-*.dmg
+            release-artifacts/macos/release/Weport-*.zip
+            release-artifacts/macos/release/latest-mac.yml
+            release-artifacts/linux/release/Weport-*.AppImage
+            release-artifacts/linux/release/Weport-*.tar.gz
+          body_path: release-artifacts/windows/release-notes-current.md
+          fail_on_unmatched_files: true

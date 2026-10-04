@@ -49,6 +49,13 @@ The custom `wcdb_api` libraries are WeFlow-derived wrappers and are covered by
 the WeFlow attribution above; they should not be represented as Tencent WCDB
 official binaries.
 
+The Windows x64 `wcdb_api.dll` is locally modified on 2026-10-03 to remove
+two built-in expiry-date branches (Weport issues #30 and #31). Its remaining
+code, imports and exports are unchanged. The analysis by xkitme informed this
+adaptation; the fork's 2038-extension binary is not shipped. Exact source and
+modified hashes, offsets and reproduction instructions are recorded in
+`resources/wcdb/win32/x64/native-provenance.json` and `docs/LEGAL-PROVENANCE.md`.
+
 ## SDL2 (zlib license)
 
 - Project: https://github.com/libsdl-org/SDL

@@ -1,3 +1,4 @@
+import { localFileUrl } from './mediaUrl'
 /**
  * 朋友圈（SNS）解析工具 —— 从 WeFlow SnsPostItem 提取的纯函数部分，
  * 用于从原始 XML / URL 中还原链接卡片、位置、媒体地址等。
@@ -227,5 +228,5 @@ export const snsMediaProtocolUrl = (filePath: string): string => {
   const normalized = filePath.replace(/\\/g, '/')
   // 整个路径放进 pathname 并百分号编码：盘符放 host 会被 Chromium 规范化为
   // host `c`（冒号被当作端口分隔符），导致路径解析丢失盘符冒号
-  return `weport-media://local/${encodeURIComponent(normalized)}`
+  return localFileUrl(normalized)
 }

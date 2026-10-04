@@ -352,20 +352,26 @@ export class WcdbHostClient extends EventEmitter {
       env
     })
 
-    this.child.on('message', (msg: any) => {
+    this.attachChildListeners()
+  }
+
+  /** 子进程形态和同进程形态共用的监听挂载：消息、stderr、错误、退出。 */
+  private attachChildListeners(): void {
+    const child = this.child!
+    child.on('message', (msg: any) => {
       this.emit('message', msg)
     })
 
-    this.child.stderr!.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       const text = chunk.toString().trim()
       if (text) console.error('[wcdb-host]', text)
     })
 
-    this.child.on('error', (err) => {
+    child.on('error', (err) => {
       this.emit('error', err)
     })
 
-    this.child.on('exit', (code) => {
+    child.on('exit', (code) => {
       this.emit('exit', code)
       this.child = null
     })
