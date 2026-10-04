@@ -12,6 +12,10 @@ import {
   type PageKeyMode,
   type Page1ReadResult,
 } from './wcdbPageKey'
+import {
+  WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+  isNoLoginDbKeyScanEnabled,
+} from './v12StablePolicy'
 
 /**
  * 密钥健康面板的引擎侧（V12 §10.4）。
@@ -25,8 +29,8 @@ import {
  * | 状态 | 含义 | 用户该做什么 |
  * |---|---|---|
  * | `ok` | 存在一把能过 page 1 HMAC 的密钥 | 无 |
- * | `stale` | 存过密钥，但库的 salt 已变（库被替换/换账号） | 重新扫描 |
- * | `invalid` | 有密钥、salt 也没变，但 HMAC 不过 | 重新获取 |
+ * | `stale` | 存过密钥，但库的 salt 已变（库被替换/换账号） | 登录捕获或手动输入 |
+ * | `invalid` | 有密钥、salt 也没变，但 HMAC 不过 | 登录捕获或手动输入 |
  * | `missing` | 库文件不在 | 检查数据目录 |
  * | `unknown` | 没有这个库的密钥可验 | 扫描一次 |
  *
@@ -656,21 +660,21 @@ export class KeyHealthService {
             ...base,
             status: 'stale',
             reason: '库里记录的 salt 与文件当前 salt 不同（这个库被替换或换过账号）。',
-            action: '点「重新扫描」重新取一次该库的密钥。',
+            action: '请用登录捕获获取有效的账号级密钥，或手动输入该库当前有效的密钥。',
           }
         }
         return {
           ...base,
           status: 'invalid',
           reason: '保存的密钥过不了该库首页的 HMAC 校验。',
-          action: '点「重新扫描」重新获取；也可以把正确的密钥粘贴到这一行。',
+          action: '请用登录捕获获取有效的账号级密钥，或手动输入该库当前有效的密钥。',
         }
       }
       return {
         ...base,
         status: 'invalid',
         reason: '保存的密钥读不出来（系统密钥库变了或条目损坏）。',
-        action: '点「重新扫描」重新获取该库密钥。',
+        action: '请用登录捕获获取有效的账号级密钥，或手动输入该库当前有效的密钥。',
       }
     }
 
@@ -710,7 +714,7 @@ export class KeyHealthService {
       ...base,
       status: 'unknown',
       reason: '这个库还没有保存过密钥。',
-      action: '点「重新扫描」取一次；微信只把当前打开的库的密钥放在内存里，所以有些库可能要等它被用过之后才扫得到。',
+      action: '请用登录捕获获取有效的账号级密钥，或手动输入该库当前有效的密钥。',
       source: null,
       fingerprint: null,
       verifiedAt: null,
@@ -724,6 +728,18 @@ export class KeyHealthService {
     if (!accountDir) {
       const report = await this.getHealth(accountDirOverride)
       return { ...report, scan: { keys: 0, failed: '没有数据目录' } }
+    }
+    if (!isNoLoginDbKeyScanEnabled(process.platform)) {
+      const report = await this.getHealth(accountDir)
+      return {
+        ...report,
+        scan: {
+          keys: 0,
+          failed: process.platform === 'win32'
+            ? WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE
+            : '当前平台不支持免登录扫描',
+        },
+      }
     }
     if (!this.deps.rescanKeys) {
       const report = await this.getHealth(accountDir)

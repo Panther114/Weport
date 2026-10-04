@@ -31,6 +31,35 @@ const fallbackTarget = () => ({
   logExportDiag: vi.fn(),
 })
 
+const connectTarget = (decryptKey: string, dbKeyStore: unknown = { accounts: {} }) => {
+  const target = Object.create(Object.getPrototypeOf(chatService)) as any
+  const accountDir = 'D:\\xwechat_files\\wxid_demo_0000'
+  const values: Record<string, unknown> = {
+    myWxid: 'wxid_demo_0000',
+    dbPath: 'D:\\xwechat_files',
+    decryptKey,
+    dbKeyStore,
+  }
+  target.configService = {
+    get: (key: string) => values[key],
+    getAccountDir: () => accountDir,
+  }
+  target.runtimeConfig = { myWxid: 'wxid_demo_0000', dbPath: 'D:\\xwechat_files', decryptKey }
+  target.connectionGeneration = 1
+  target.describeInitFailure = vi.fn(() => 'account-key-invalid')
+  target.maybeShowInitFailureDialog = vi.fn(async () => undefined)
+  return { target, snapshot: target.resolveConnectSnapshot(), accountDir }
+}
+
+function installConnectMocks(openResult = false) {
+  const service = wcdbService as unknown as Record<string, any>
+  service.open = vi.fn(async () => openResult)
+  service.openScanned = vi.fn(async () => ({ success: true, sourceFingerprint: 'mirror-fingerprint' }))
+  service.getLastInitError = vi.fn(async () => 'native account-key failure')
+  service.close = vi.fn(async () => undefined)
+  return service
+}
+
 describe('explicit message-count hints', () => {
   it('accepts only explicit whole nonnegative counts', () => {
     expect(parseExplicitMessageCountHint(0)).toBe(0)
@@ -86,5 +115,57 @@ describe('ChatService message count adapter preserves unknown values', () => {
       bypassSessionCache: true,
     })
     expect(result).toMatchObject({ success: true, counts: { room: 0 } })
+  })
+})
+
+describe('V1.2 stable release does not connect through a scanned mirror', () => {
+  it('does not open a scanned mirror when the account-level key is blank, even with stored page keys', async () => {
+    const service = installConnectMocks()
+    const staleStore = {
+      accounts: {
+        wxid_demo_0000: {
+          passphrase: '',
+          dbKeys: {
+            'session/session.db': { key: `safe:${'a1'.repeat(32)}`, verified: true, source: 'scan' },
+          },
+        },
+      },
+    }
+    const { target, snapshot } = connectTarget('', staleStore)
+
+    const result = await target.connectInternal(snapshot, 1)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('账号级密钥')
+    expect(result.error).toContain('登录捕获')
+    expect(service.open).not.toHaveBeenCalled()
+    expect(service.openScanned).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back to stale per-DB keys after an account-level key fails', async () => {
+    const service = installConnectMocks(false)
+    const staleStore = {
+      accounts: {
+        wxid_demo_0000: {
+          passphrase: `safe:${'b2'.repeat(32)}`,
+          dbKeys: {
+            'session/session.db': { key: `safe:${'a1'.repeat(32)}`, verified: true, source: 'scan' },
+            'message/message_0.db': { key: `safe:${'c3'.repeat(32)}`, verified: true, source: 'scan' },
+          },
+        },
+      },
+    }
+    const { target, snapshot } = connectTarget('d4'.repeat(32), staleStore)
+
+    const result = await target.connectInternal(snapshot, 1)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('account-key-invalid')
+    if (process.platform === 'win32') {
+      expect(result.error).toContain('登录捕获')
+      expect(result.error).not.toContain('V1.3')
+    }
+    expect(service.open).toHaveBeenCalledTimes(1)
+    expect(service.openScanned).not.toHaveBeenCalled()
   })
 })

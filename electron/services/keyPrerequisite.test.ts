@@ -80,19 +80,17 @@ describe('前置条件文案矩阵', () => {
     expect(item?.action).toContain('扫码或自动登录')
   })
 
-  it('版本低于 4.1.10 → warn（不是 fail）：仍可走 Hook（K4）', () => {
+  it('Windows 稳定版暂缓扫描，因此不再按微信版本筛查', () => {
     const report = buildPrerequisiteReport(baseObservations({ wechatVersion: '4.0.3.36', scanAttempted: false, scanKeyFound: false }))
     const item = report.items.find((i) => i.id === 'wechat-version')
-    expect(item?.status).toBe('warn')
-    expect(item?.action).toContain('退出微信')
+    expect(item?.status).toBe('skip')
     expect(report.allSatisfied).toBe(true) // warn 不阻塞
   })
 
-  it('读不到版本号 → warn 且给出"按 ③ 步走"的动作', () => {
+  it('读不到版本号也不影响 Hook 路径', () => {
     const report = buildPrerequisiteReport(baseObservations({ wechatVersion: null, scanAttempted: false, scanKeyFound: false }))
     const item = report.items.find((i) => i.id === 'wechat-version')
-    expect(item?.status).toBe('warn')
-    expect(item?.message).toContain('读不到')
+    expect(item?.status).toBe('skip')
   })
 
   it('macOS / Linux → 平台项如实说明没有免登录路径（K8）', () => {
@@ -109,34 +107,36 @@ describe('前置条件文案矩阵', () => {
     expect(linux.items.find((i) => i.id === 'platform-scan-support')?.message).toContain('ptrace')
   })
 
-  it('内存读不了（模拟杀软拦截）→ 第 6 项 fail + 白名单指引（K10）', () => {
+  it('稳定版 Hook 流程不检查内存读取权限', () => {
     const report = buildPrerequisiteReport(baseObservations({ memoryReadable: false }))
     const item = report.items.find((i) => i.id === 'memory-readable')
-    expect(item?.status).toBe('fail')
-    expect(item?.action).toContain('白名单')
+    expect(item?.status).toBe('skip')
+    expect(item?.message).toContain('不读取微信进程内存')
   })
 
-  it('跨用户 → 第 5 项 fail，且文案与第 6 项不同', () => {
+  it('稳定版 Hook 流程不检查进程用户边界', () => {
     const report = buildPrerequisiteReport(baseObservations({ memoryReadable: false, sameUser: false }))
     const sameUser = report.items.find((i) => i.id === 'same-user')
     const memory = report.items.find((i) => i.id === 'memory-readable')
-    expect(sameUser?.status).toBe('fail')
-    expect(sameUser?.message).not.toBe(memory?.message)
-    expect(sameUser?.action).toContain('同一个 Windows 账号')
+    expect(sameUser?.status).toBe('skip')
+    expect(memory?.status).toBe('skip')
   })
 
-  it('扫描跑完但没命中 → warn，并说明"该版本结构可能变了"', () => {
+  it('V1.2 获取流程跳过扫描能力项，扫描状态也跳过', () => {
     const report = buildPrerequisiteReport(baseObservations({ scanAttempted: true, scanKeyFound: false }))
     const item = report.items.find((i) => i.id === 'scan-key-found')
-    expect(item?.status).toBe('warn')
-    expect(item?.message).toContain('结构')
+    const platform = report.items.find((i) => i.id === 'platform-scan-support')
+    expect(item?.status).toBe('skip')
+    expect(platform?.status).toBe('skip')
+    expect(platform?.message).toContain('稳定版')
+    expect(platform?.action).toBeUndefined()
   })
 
   it('已存密钥校验失败 → fail 且给出"重新获取会覆盖"的动作（K7）', () => {
     const report = buildPrerequisiteReport(baseObservations({ storedKeyValid: false }))
     const item = report.items.find((i) => i.id === 'stored-key-valid')
     expect(item?.status).toBe('fail')
-    expect(item?.action).toContain('覆盖')
+    expect(item?.action).toContain('登录捕获')
   })
 
   it('Hook 组件缺失 → fail，动作是重装或手动粘贴', () => {

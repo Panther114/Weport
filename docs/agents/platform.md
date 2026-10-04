@@ -46,10 +46,9 @@
   beside the copied executable; without them the process traps before WCDB
   loads. Both the copy dir and real Electron dist dir are added to
   `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
-- The `-1006` name check for `libwcdb_api.so` under a host named `WeFlow` is
-  unverified on real Linux hardware (upstream ships its own exe as lowercase
-  `weflow`, suggesting the check may be looser there); treat first-boot DB
-  connect on Linux as the acceptance test.
+- Linux x64 CI verifies native protection/init/shutdown under `WeFlow` and
+  confirms the original Weport executable is rejected with `-1006`. Real-account
+  key capture and first database connection still require a Linux-device check.
 - safeStorage on headless Linux often has no backend: config falls back to
   plaintext secrets (existing graceful degradation, unchanged).
 

@@ -46,6 +46,7 @@ try {
   if (await page.locator('.rail-group-items[hidden]').count()) throw new Error('All navigation groups must remain visible')
   if (await page.evaluate(() => document.documentElement.dataset.density) !== 'compact') throw new Error('Fixed compact density required')
   if (await page.locator('.rail-item[data-tab="diagnostics"]').count()) throw new Error('Diagnostics must only appear in Settings')
+  if (await page.locator('.wkh, button:has-text("重新扫描全部")').count()) throw new Error('V1.2 must not expose no-login key scanning')
   const packageSmoke = await app.evaluate(() => globalThis.__weportPackageSmoke())
   if (packageSmoke.xlsxBytes < 1000 || packageSmoke.wasmBytes !== 256 || !packageSmoke.mcpReady || packageSmoke.version !== '1.2.0') throw new Error('Packaged dependencies/version smoke failed')
   if (packageSmoke.momentsImage?.width !== 1 || packageSmoke.momentsImage?.contentType !== 'image/png') throw new Error('Packaged Moments image decryption failed')

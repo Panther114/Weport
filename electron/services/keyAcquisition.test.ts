@@ -6,6 +6,7 @@ import {
   type PlatformKeyDriver,
   type PlatformObservation,
 } from './keyAcquisition'
+import { isNoLoginDbKeyScanEnabled } from './v12StablePolicy'
 
 /**
  * 双模式编排的单测（A2 的验收）。
@@ -59,14 +60,15 @@ function fakeDriver(overrides: Partial<PlatformKeyDriver> = {}): PlatformKeyDriv
 }
 
 describe('planKeyAcquisition — 平台 × 模式矩阵', () => {
-  it('Windows + auto：先自校验、再扫描、最后 Hook', () => {
+  it('V1.2 Windows + auto：先校验已有密钥，免登录扫描暂缓，失败后走 Hook', () => {
     const plan = planKeyAcquisition({
       platform: 'win32', mode: 'auto', hasStoredKey: true, storedKeyValid: false,
       wechatVersion: '4.1.13.65', wechatRunning: true,
     })
-    expect(plan.steps).toEqual(['existing', 'scan', 'hook'])
-    expect(plan.scanSupported).toBe(true)
-    expect(plan.notes).toHaveLength(0)
+    expect(plan.steps).toEqual(['existing', 'hook'])
+    expect(plan.scanSupported).toBe(false)
+    expect(plan.notes).toEqual([])
+    expect(isNoLoginDbKeyScanEnabled('win32')).toBe(false)
   })
 
   it('macOS：只有 Hook，并且常驻一条能力边界说明（K8）', () => {
@@ -86,28 +88,30 @@ describe('planKeyAcquisition — 平台 × 模式矩阵', () => {
     expect(plan.notes.join(' ')).toContain('ptrace')
   })
 
-  it('版本低于 4.1.10：跳过扫描并说明原因（K4）', () => {
+  it('Windows 扫描暂缓与微信版本无关，仍走 Hook', () => {
     const plan = planKeyAcquisition({
       platform: 'win32', mode: 'auto', hasStoredKey: false, wechatVersion: '4.0.3.36', wechatRunning: true,
     })
     expect(plan.steps).toEqual(['hook'])
-    expect(plan.notes.join(' ')).toContain('4.1.10')
+    expect(plan.scanSupported).toBe(false)
+    expect(plan.notes).toEqual([])
   })
 
-  it('mode=hook 不许扫描；mode=scan 不许回落 Hook（便于测试与诊断）', () => {
+  it('mode=hook 不扫描；禁用的 mode=scan 不加入任何自动路径', () => {
     expect(planKeyAcquisition({ platform: 'win32', mode: 'hook', hasStoredKey: false, wechatVersion: '4.1.13.65', wechatRunning: true }).steps).toEqual(['hook'])
-    expect(planKeyAcquisition({ platform: 'win32', mode: 'scan', hasStoredKey: false, wechatVersion: '4.1.13.65', wechatRunning: true }).steps).toEqual(['scan'])
+    expect(planKeyAcquisition({ platform: 'win32', mode: 'scan', hasStoredKey: false, wechatVersion: '4.1.13.65', wechatRunning: true }).steps).toEqual([])
   })
 
-  it('微信没在运行也不跳过扫描项 —— 让自检去报红，而不是"点了没反应"（K2）', () => {
+  it('Windows 稳定版不扫描；微信未运行时由 Hook 前置自检报红', () => {
     const plan = planKeyAcquisition({
       platform: 'win32', mode: 'auto', hasStoredKey: false, wechatVersion: '4.1.13.65', wechatRunning: false,
     })
-    expect(plan.steps).toContain('scan')
+    expect(plan.steps).not.toContain('scan')
+    expect(plan.steps).toContain('hook')
   })
 })
 
-describe('KeyAcquisitionService — 走哪条路、为什么', () => {
+describe('KeyAcquisitionService — V1.2 稳定版路径', () => {
   it('已有密钥校验通过 → mode=existing，不扫描、不 Hook（K6）', async () => {
     const driver = fakeDriver()
     const validate = vi.fn(async () => ({ valid: true, checked: 22, matched: 22 }))
@@ -127,7 +131,24 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     expect(result.prerequisites?.length).toBeGreaterThan(0)
   })
 
-  it('扫描命中 → mode=scan，persistKeys 被调用（每库密钥要落库）', async () => {
+  it('禁用的 scan 请求仍接受通过校验的已有密钥', async () => {
+    const driver = fakeDriver()
+    const service = new KeyAcquisitionService({
+      driver,
+      accountDir: 'D:\\xwechat_files\\wxid_demo_0000',
+      storedKey: { hexKey: 'b62d'.padEnd(64, '1'), source: 'config' },
+      validateStoredKey: async () => ({ valid: true, checked: 22, matched: 22 }),
+    })
+
+    const result = await service.acquire('scan')
+
+    expect(result.success).toBe(true)
+    expect(result.mode).toBe('existing')
+    expect(driver.scanCalls).toBe(0)
+    expect(driver.hookCalls).toBe(0)
+  })
+
+  it('Windows V1.2 不调用逐库扫描，自动获取仍走 Hook', async () => {
     const driver = fakeDriver()
     const persist = vi.fn(async () => { /* noop */ })
     const service = new KeyAcquisitionService({
@@ -138,15 +159,17 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     })
     const result = await service.acquire('auto')
     expect(result.success).toBe(true)
-    expect(result.mode).toBe('scan')
-    expect(result.keys).toHaveLength(1)
-    expect(result.key).toBeUndefined() // 扫描拿的是 per-DB page key，不是账号口令
-    expect(persist).toHaveBeenCalledTimes(1)
-    expect(driver.hookCalls).toBe(0)
-    expect(result.prerequisiteSummary).toContain('全部条件已满足')
+    expect(result.mode).toBe('hook')
+    expect(result.keys).toEqual([])
+    expect(result.key).toBe('b62d'.padEnd(64, '1'))
+    expect(persist).not.toHaveBeenCalled()
+    expect(driver.scanCalls).toBe(0)
+    expect(driver.hookCalls).toBe(1)
+    expect(result.reasons?.scan).toBeUndefined()
+    expect(result.diagnostics?.scanSupported).toBe(false)
   })
 
-  it('扫描未命中 → 自动回落 Hook，并把"扫描为什么没成"写进 reasons', async () => {
+  it('禁用扫描时不调用扫描驱动，也不阻断登录捕获', async () => {
     const driver = fakeDriver({
       scanKeys: async () => ({ success: false, keys: [], error: '扫描完成但没有找到能解开这些数据库的密钥。' }),
     })
@@ -159,11 +182,12 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     expect(result.success).toBe(true)
     expect(result.mode).toBe('hook')
     expect(result.key).toBe('b62d'.padEnd(64, '1'))
-    expect(result.reasons?.scan).toContain('没有找到能解开这些数据库的密钥')
+    expect(result.reasons?.scan).toBeUndefined()
+    expect(driver.scanCalls).toBe(0)
     expect(driver.hookCalls).toBe(1)
   })
 
-  it('两条路都失败 → success=false，但一定带自检结果与下一步动作（消不掉"点了没反应"）', async () => {
+  it('已有密钥与 Hook 都失败 → 带自检结果和手动输入动作', async () => {
     const driver = fakeDriver({
       observe: async () => ({ ...HEALTHY, wechatPids: [] }),
       scanKeys: async () => ({ success: false, keys: [], error: '微信没有在运行。' }),
@@ -179,7 +203,7 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     expect(result.prerequisites?.some((i) => i.id === 'wechat-running' && i.status === 'fail')).toBe(true)
     expect(result.prerequisites?.some((i) => !!i.action)).toBe(true)
     expect(result.error).toContain('打开微信')
-    expect(result.error).toContain('手动输入密钥')
+    expect(result.error).toContain('有效的 64 位账号级密钥')
     expect(result.error).not.toContain('重试')
     expect(result.reasons?.hook).toBeTruthy()
   })
@@ -205,17 +229,17 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     expect(platformItem?.action).toContain('启动瞬间')
   })
 
-  it('没有数据目录时：扫描被跳过并说明，Hook 仍可尝试', async () => {
+  it('没有数据目录时：不调用扫描，Hook 仍可尝试', async () => {
     const driver = fakeDriver()
     const service = new KeyAcquisitionService({ driver, accountDir: null })
     const result = await service.acquire('auto')
     expect(result.success).toBe(true)
     expect(result.mode).toBe('hook')
-    expect(result.reasons?.scan).toContain('数据目录')
+    expect(result.reasons?.scan).toBeUndefined()
     expect(driver.scanCalls).toBe(0)
   })
 
-  it('mode=scan 时不回落 Hook（只报扫描结果）', async () => {
+  it('显式 scan 模式在 V1.2 拒绝执行，不调用扫描或 Hook', async () => {
     const driver = fakeDriver({ scanKeys: async () => ({ success: false, keys: [], error: '没命中' }) })
     const service = new KeyAcquisitionService({
       driver,
@@ -225,10 +249,12 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     const result = await service.acquire('scan')
     expect(result.success).toBe(false)
     expect(result.mode).toBeUndefined()
+    expect(result.error).toContain('V1.3')
+    expect(driver.scanCalls).toBe(0)
     expect(driver.hookCalls).toBe(0)
   })
 
-  it('扫描抛异常也不会把编排打断：转成 reasons 后继续走 Hook', async () => {
+  it('扫描驱动异常不会在 V1.2 调用；Hook 仍能成功', async () => {
     const driver = fakeDriver({
       scanKeys: async () => { throw new Error('koffi load failed') },
     })
@@ -240,11 +266,12 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     const result = await service.acquire('auto')
     expect(result.success).toBe(true)
     expect(result.mode).toBe('hook')
-    expect(result.reasons?.scan).toContain('koffi load failed')
-    expect(result.logs?.some((l) => l.includes('免登录扫描异常'))).toBe(true)
+    expect(result.reasons?.scan).toBeUndefined()
+    expect(driver.scanCalls).toBe(0)
+    expect(result.logs?.some((l) => l.includes('koffi load failed'))).toBe(false)
   })
 
-  it('诊断里带上耗时与扫描计数器（便于远程判断"为什么没命中"）', async () => {
+  it('诊断明确报告稳定版未启用扫描，不暴露扫描计数器', async () => {
     const driver = fakeDriver({
       scanKeys: async () => ({
         success: true,
@@ -260,8 +287,9 @@ describe('KeyAcquisitionService — 走哪条路、为什么', () => {
     })
     const result = await service.acquire('auto')
     expect(result.diagnostics?.platform).toBe('win32')
-    expect(result.diagnostics?.scanSupported).toBe(true)
+    expect(result.diagnostics?.scanSupported).toBe(false)
     expect(result.diagnostics?.elapsedMs).toBe(0)
-    expect(result.diagnostics?.scan).toEqual({ needleHits: 8, recordHits: 15, verified: 12 })
+    expect(result.diagnostics?.scan).toBeUndefined()
+    expect(driver.scanCalls).toBe(0)
   })
 })

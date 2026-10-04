@@ -11,6 +11,7 @@ import { app } from 'electron'
 import { fileURLToPath } from 'url'
 import { ConfigService } from './config'
 import { KeyHealthService } from './keyHealthService'
+import { isNoLoginDbKeyScanEnabled } from './v12StablePolicy'
 import { isAntiRevokeSessionEligible, mergeAntiRevokeBatchResult } from './antiRevokeResults'
 import { runGuardedAntiRevokeWrite } from './antiRevokeLease'
 import { wcdbService } from './wcdbService'
@@ -906,12 +907,10 @@ class ChatService {
         }
       }
 
-      // Windows per-DB scan keys are raw SQLCipher page keys, while
-      // wcdb_open_account accepts one account-level hex key. Rebuild a disposable mirror
-      // and pass that mirror to the standard WCDB account connection. Try this
-      // after a failed legacy key too: an old saved key can be stale even though
-      // a fresh scan has complete, page-1-verified coverage.
-      if (!openOk && process.platform === 'win32') {
+      // V1.2 keeps the Windows per-DB key mirror implementation dormant. It remains
+      // available behind the stable-release policy for V1.3, but every caller of
+      // ChatService.connect (desktop, export, CLI/MCP, startup and Flash) shares this gate.
+      if (!openOk && isNoLoginDbKeyScanEnabled(process.platform)) {
         const scanned = await this.connectScannedAccount(accountDir, isCurrent)
         openOk = scanned.success
         scannedOpenError = scanned.error || ''
@@ -920,7 +919,7 @@ class ChatService {
       } else if (!openOk && !decryptKey) {
         return {
           success: false,
-          error: '当前平台没有免登录逐库扫描路径。请使用已有密钥、手动输入密钥或登录捕获模式。',
+          error: '请使用已有账号级密钥、手动输入密钥或登录捕获模式。',
         }
       }
       if (!isCurrent()) {
@@ -933,7 +932,9 @@ class ChatService {
         await this.maybeShowInitFailureDialog(detailedError)
         const fallbackDetail = legacyOpenError && scannedOpenError
           ? `账号级密钥连接失败；免登录扫描连接也失败：${detailedError}`
-          : detailedError
+          : process.platform === 'win32' && !isNoLoginDbKeyScanEnabled(process.platform)
+            ? `账号级密钥无法打开当前数据库（${detailedError}）。请使用登录捕获或手动输入有效账号级密钥。`
+            : detailedError
         return { success: false, error: fallbackDetail }
       }
 

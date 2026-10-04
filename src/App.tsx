@@ -127,7 +127,6 @@ import type { ReaderOpenRequest, ReaderPosterRequest } from './pages/ReaderPage'
 // v1.2 §4：分享海报工作室（长图 / 引用卡 / 九宫格 / 小结卡，默认开启自动打码）。
 const PosterPage = lazy(() => import('./pages/PosterPage'))
 // v1.2 §10.4：密钥健康面板（每库状态 / 手工粘贴校验 / 合并写入）。设置页「连接」一节的顶部。
-const KeyHealthPanel = lazy(() => import('./components/settings/KeyHealthPanel'))
 
 /**
  * 懒加载页面的占位。
@@ -405,8 +404,6 @@ export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedWxid, setSelectedWxid] = useState('')
   const [decryptKey, setDecryptKey] = useState('')
-  const [scannedKeysReady, setScannedKeysReady] = useState(false)
-  const [readOnlySnapshot, setReadOnlySnapshot] = useState(false)
   const [readerOpenRequest, setReaderOpenRequest] = useState<ReaderOpenRequest>()
   const [posterSource, setPosterSource] = useState<ReaderPosterRequest>()
   const [showKey, setShowKey] = useState(false)
@@ -616,7 +613,6 @@ export default function App() {
   const [notifyFilterBusy, setNotifyFilterBusy] = useState(false)
 
   const api = window.electronAPI
-  useEffect(() => api.chat.onConnectionChanged((_event, info) => setReadOnlySnapshot(info.readOnlySnapshot)), [api])
   const imageKeyRequired = api.process.platform === 'win32'    || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
   // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
@@ -835,9 +831,6 @@ export default function App() {
 
   const loadAccountKey = useCallback(async (wxid: string) => {
     const seq = ++loadKeySeqRef.current
-    setScannedKeysReady(false)
-    setReadOnlySnapshot(false)
-    setReadOnlySnapshot(false)
     if (!wxid) {
       setDecryptKey('')
       setImageKeysOk(false)
@@ -850,9 +843,6 @@ export default function App() {
       const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
       if (seq !== loadKeySeqRef.current) return
       setDecryptKey(key)
-      const health = await api.keyHealth.get()
-      if (seq !== loadKeySeqRef.current) return
-      setScannedKeysReady(health.connectionReady === true)
       // 图片密钥状态（issue #9a）：aesKey 非空视为已配置（xorKey 可合法为 0）。
       // 与主进程 getImageKeysForCurrentWxid 一致：账号级缺省时回退全局配置。
       let imageOk = Boolean(cfg?.imageAesKey)
@@ -1192,7 +1182,7 @@ export default function App() {
     void refreshExportLog(exportPath)
   }, [exportPath, refreshExportLog])
 
-  const keyOk = isValidDecryptKey(decryptKey.trim()) || scannedKeysReady
+  const keyOk = isValidDecryptKey(decryptKey.trim())
   const dbReady = dbPath.trim().length > 0
   const accountReady = selectedWxid.length > 0
   const allReady = dbReady && accountReady && keyOk
@@ -1306,18 +1296,12 @@ export default function App() {
     setBusy(true)
     setKeyHookReady(false)
     setBusyLabel('正在连接微信进程…')
-    pushToast('info', '开始提取密钥', '先检查已登录的微信进程。仅在扫描未找到完整密钥时，按提示使用登录捕获。', 7000)
+    pushToast('info', '开始提取密钥', '先检查已有密钥；需要重新获取时，请等待就绪提示后登录微信。', 7000)
     try {
       const result = await api.key.autoGetDbKey()
       if (result.success) {
         if (!result.key) {
-          const health = await api.keyHealth.get()
-          setScannedKeysReady(health.connectionReady === true)
-          const connection = health.connectionReady ? await api.chat.connect() : { success: false, error: '扫描密钥尚未覆盖全部消息数据库' }
-          if (connection.success) {
-            await loadExportSessions()
-            pushToast('ok', '扫描密钥验证成功，数据库已连接')
-          } else pushToast('err', '数据库连接失败', connection.error, 10000)
+          pushToast('err', '密钥获取失败', '未返回有效数据库密钥，请重新获取或粘贴已有密钥。', 10000)
           return
         }
         const key = result.key.trim()
@@ -1350,9 +1334,7 @@ export default function App() {
     setBusy(true)
     setBusyLabel('正在验证密钥并连接数据库…')
     try {
-      const result = scannedKeysReady && !isValidDecryptKey(decryptKey.trim())
-        ? await api.chat.connect()
-        : await persistAndConnectKey(decryptKey)
+      const result = await persistAndConnectKey(decryptKey)
       if (result.success) {
         setKeyHookReady(false)
         pushToast('ok', '密钥已确认，数据库已连接', '已读取会话，可以开始导出')
@@ -2458,7 +2440,6 @@ export default function App() {
       )}
 
       <div className="workspace" key={tab}>
-        {readOnlySnapshot && <div className="hint" role="status">当前使用只读历史快照；读取时检查源数据变化并刷新。实时消息通知和数据库写入需使用原有密钥连接。</div>}
         {tab === 'connect' && (
           /* 重排：原来是「左栏 = 数据位置 + 账号，右栏 = 密钥」的两列排布，读起来
              是 1 → 3 → 2 —— 密钥排在账号前面，而它实际上必须最后做。现在改成
@@ -2583,7 +2564,7 @@ export default function App() {
                   <KeyRound size={14} />
                   解密密钥
                   <span className="exp-sec-meta">
-                    {keyOk ? <span className="badge ok">{scannedKeysReady ? '逐库密钥已验证' : '格式正确'}</span> : <span className="badge">待提取</span>}
+                    {keyOk ? <span className="badge ok">格式正确</span> : <span className="badge">待提取</span>}
                   </span>
                 </div>
 
@@ -4403,12 +4384,6 @@ export default function App() {
 
               {settingsSection === 'connect' && (
                 <>
-                <Suspense fallback={null}>
-                  <KeyHealthPanel onChanged={report => {
-                    setScannedKeysReady(report.connectionReady === true)
-                    if (!report.connectionReady) setReadOnlySnapshot(false)
-                  }} />
-                </Suspense>
                 <section className="panel">
                   <div className="panel-head">
                     <h2>

@@ -7,6 +7,10 @@ import {
 } from './keyPrerequisite'
 import type { PageKeyMode } from './wcdbPageKey'
 import type { KeySource } from './keyHealthService'
+import {
+  WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+  isNoLoginDbKeyScanEnabled,
+} from './v12StablePolicy'
 
 /**
  * 密钥获取**编排层**（V12 §1.3 / §1.4 / D1 / D2）。
@@ -17,7 +21,7 @@ import type { KeySource } from './keyHealthService'
  *
  * ```
  * 0. 已有密钥 → page 1 HMAC 自校验 → 通过就"已连接"（不打扰用户，K6）
- * 1. Windows 且版本 ≥ 4.1.10 → 免登录只读扫描（每库 page key，K1/K5）
+ * 1. Windows 免登录只读扫描（当前 V1.2 稳定版暂缓）
  * 2. Hook（平台通用；macOS/Linux 的唯一自动路径，D2/K8）
  * 3. 失败 → 逐项自检结果 + 手动粘贴（§1.5 末条：任何一项未通过都不许静默回落）
  * ```
@@ -131,13 +135,13 @@ export interface AcquisitionPlan {
  *
  * 规则（与 V12 §1.4 的状态机一一对应）：
  * - 有已存密钥 → 先自校验；通过就结束（K6）。
- * - 只有 Windows + 免登录扫描受支持的版本（≥4.1.10）才排进步骤 1（K4）。
+ * - 只有启用该能力的 Windows 版本才会排进免登录扫描（稳定发布策略见 v12StablePolicy）。
  * - 微信没在运行时**不跳过**扫描项，而是让自检第 2 项报红（K2）—— 静默跳过等于
  *   "点了没反应"，正是这次要消灭的东西。
  * - `mode: 'hook'` 时不允许扫描；`mode: 'scan'` 时扫描失败也不回落（便于测试与诊断）。
  */
 export function planKeyAcquisition(input: AcquisitionPlanInput): AcquisitionPlan {
-  const scanSupported = input.platform === 'win32'
+  const scanSupported = isNoLoginDbKeyScanEnabled(input.platform)
   const notes: string[] = []
   const steps: Array<'existing' | 'scan' | 'hook'> = []
 
@@ -145,7 +149,7 @@ export function planKeyAcquisition(input: AcquisitionPlanInput): AcquisitionPlan
 
   const versionOk = input.wechatVersion ? supportsReadOnlyScan(input.wechatVersion) : true
   if (scanSupported && input.mode !== 'hook' && versionOk) steps.push('scan')
-  if (!scanSupported) {
+  if (!scanSupported && input.platform !== 'win32') {
     notes.push(
       input.platform === 'darwin'
         ? 'macOS 没有免登录路径：微信是加固签名 + 沙盒进程，`task_for_pid` 会被系统拒绝，只能在微信启动瞬间捕获密钥。'
@@ -208,10 +212,10 @@ export function describeAcquisitionFailure(args: {
   }
   lines.push('---')
   if (args.reasons.existing) lines.push(`已有密钥：${args.reasons.existing}`)
-  if (args.plan.steps.includes('scan') && args.reasons.scan) lines.push(`免登录扫描：${args.reasons.scan}`)
-  else if (!args.plan.scanSupported) lines.push('免登录扫描：本平台不支持（已在上面说明原因）')
+  if (args.reasons.scan) lines.push(`免登录扫描：${args.reasons.scan}`)
+  else if (!args.plan.scanSupported && args.plan.notes.length > 0) lines.push(`免登录扫描：${args.plan.notes[0]}`)
   if (args.plan.steps.includes('hook') && args.reasons.hook) lines.push(`登录捕获：${args.reasons.hook}`)
-  lines.push('最后手段：把 64 位密钥粘贴到「手动输入密钥」，或在下方密钥健康面板里逐库处理。')
+  lines.push('请在「连接微信」页面粘贴有效的 64 位账号级密钥；也可完全退出并重新打开微信，再用登录捕获获取密钥。')
   return lines.join('\n')
 }
 
@@ -293,6 +297,9 @@ export class KeyAcquisitionService {
       dbFilesPresent,
     })
     for (const note of plan.notes) status(note, 1)
+    if (mode === 'scan' && this.deps.driver.platform === 'win32' && !plan.scanSupported) {
+      reasons.scan = WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE
+    }
 
     let storedKeyValid: boolean | null = null
     let scanAttempted = false
@@ -337,6 +344,23 @@ export class KeyAcquisitionService {
       }
     } else if (plan.steps.includes('existing') && storedHex && !accountDir) {
       reasons.existing = '配置里有密钥，但没有选定账号目录，无法校验。'
+    }
+
+    if (mode === 'scan' && !plan.scanSupported) {
+      const report = buildPrerequisiteReport(toPrerequisiteObservations({
+        plan, platform: this.deps.driver.platform, observation, dataDir: accountDir, dbFilesPresent,
+        storedKeyValid, keyObtained: false,
+      }))
+      return {
+        success: false,
+        error: describeAcquisitionFailure({ report, reasons, plan }),
+        keys: [],
+        logs,
+        prerequisites: report.items,
+        prerequisiteSummary: report.summary,
+        reasons: Object.keys(reasons).length ? reasons : undefined,
+        diagnostics: { platform: this.deps.driver.platform, scanSupported: false, elapsedMs: (this.deps.now ?? Date.now)() - started },
+      }
     }
 
     // ── 1) 免登录只读扫描（K1/K5）
@@ -386,7 +410,7 @@ export class KeyAcquisitionService {
               logs,
               prerequisites: report.items,
               prerequisiteSummary: report.summary,
-              diagnostics: { platform: this.deps.driver.platform, scanSupported: true, elapsedMs: (this.deps.now ?? Date.now)() - started, scan: scan.diagnostics },
+              diagnostics: { platform: this.deps.driver.platform, scanSupported: plan.scanSupported, elapsedMs: (this.deps.now ?? Date.now)() - started, scan: scan.diagnostics },
             }
           }
           reasons.scan = scan.error || '扫描完成但没有找到能解开这些数据库的密钥。'

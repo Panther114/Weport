@@ -387,7 +387,7 @@ describe('逐库状态判定（含负例：错密钥不覆盖好密钥）', () =
     const session = wrong.entries.find((e) => e.id === 'session/session.db')
     expect(session?.status).toBe('invalid')
     expect(session?.reason).toContain('HMAC')
-    expect(session?.action).toContain('重新扫描')
+    expect(session?.action).toContain('登录捕获')
 
     const staleStore: DbKeyStoreFile = {
       version: 1,
@@ -497,8 +497,8 @@ describe('粘贴：四种语法都能识别，验不过就不写盘（负例验�
   })
 })
 
-describe('rescan 合并写入 + 契约映射', () => {
-  it('rescan 把扫描结果并入，且不清掉未在本次扫描里的库', async () => {
+describe('rescan 门禁 + 契约映射', () => {
+  it('V1.2 稳定版阻止 rescan 获取密钥，即使底层扫描器仍注入', async () => {
     const { accountDir } = seedAccount()
     const store: DbKeyStoreFile = {
       version: 1,
@@ -512,24 +512,29 @@ describe('rescan 合并写入 + 契约映射', () => {
       },
     }
     const persistence = memoryPersistence(store)
+    let scanCalls = 0
     const service = new KeyHealthService({
       deps: {
         codec: testCodec,
         store: persistence,
         resolveAccountDir: () => accountDir,
-        rescanKeys: async () => ({
-          success: true,
-          keys: [
-            { id: 'session/session.db', kind: 'session', path: 'x', keyHex: KEY_A, saltHex: SALT_A, mode: 'raw' as const, fingerprint: keyFingerprint(KEY_A) },
-          ],
-        }),
+        rescanKeys: async () => {
+          scanCalls += 1
+          return {
+            success: true,
+            keys: [
+              { id: 'session/session.db', kind: 'session', path: 'x', keyHex: KEY_A, saltHex: SALT_A, mode: 'raw' as const, fingerprint: keyFingerprint(KEY_A) },
+            ],
+          }
+        },
       },
     })
     const report = await service.rescan()
-    expect(report.scan?.keys).toBe(1)
-    expect(testCodec.decrypt(persistence.current().accounts.wxid_demo_0000.dbKeys['session/session.db'].key)).toBe(KEY_A)
+    expect(report.scan?.keys).toBe(0)
+    expect(report.scan?.failed).toContain('免登录逐库扫描')
+    expect(scanCalls).toBe(0)
+    expect(persistence.current()).toEqual(store)
     expect(persistence.current().accounts.wxid_demo_0000.dbKeys['message/message_9.db']).toBeDefined()
-    expect(report.entries.find((e) => e.id === 'session/session.db')?.status).toBe('ok')
   })
 
   it('没有扫描能力时（macOS/Linux）如实说明，不假装成功', async () => {
@@ -538,7 +543,7 @@ describe('rescan 合并写入 + 契约映射', () => {
       deps: { codec: testCodec, store: memoryPersistence(emptyDbKeyStore()), resolveAccountDir: () => accountDir },
     })
     const report = await service.rescan()
-    expect(report.scan?.failed).toContain('不支持免登录扫描')
+    expect(report.scan?.failed).toContain('免登录')
   })
 
   it('toKeyHealthReport 映射成共享契约：databases/mode/error，且不含完整密钥', async () => {

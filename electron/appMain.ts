@@ -60,6 +60,10 @@ import { KeyServiceLinux } from './services/keyServiceLinux'
 import { acquireDbKeyViaOrchestrator, createHookOnlyDriver, createWindowsKeyDriver, toPrerequisiteObservations } from './services/keyAcquisition'
 import { buildPrerequisiteReport } from './services/keyPrerequisite'
 import { KeyHealthService, hasDbStorageFiles, toKeyHealthReport, validateAccountKeyAgainstDbs } from './services/keyHealthService'
+import {
+  WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+  isNoLoginDbKeyScanEnabled,
+} from './services/v12StablePolicy'
 import { MessagePushService } from './services/messagePushService'
 import { weportAiService } from './services/weportAiService'
 
@@ -2599,7 +2603,7 @@ export function registerIpcHandlers() {
   ipcMain.handle('dbpath:scanWxids', (_e, rootPath: string) => dbPathService.scanWxids(String(rootPath || '')))
   ipcMain.handle('dbpath:getDefault', () => dbPathService.getDefaultPath())
 
-  // 密钥（v1.2 §1：Windows 免登录只读扫描 → 未命中自动回落 Hook；macOS/Linux 仅 Hook）
+  // 密钥（V1.2 稳定版：已有账号级密钥校验 → Hook；Windows 免登录逐库扫描暂缓至 V1.3）
   //
   // 返回形状在旧契约（`success/key/error/logs`）之上**只做扩展**：
   // `keys`（每库 page key）、`mode`（实际走了哪条：existing/scan/hook）、
@@ -2640,9 +2644,15 @@ export function registerIpcHandlers() {
           const now = Date.now()
           if (prereqCache && now - prereqCache.at < 30_000) return prereqCache.value
           const accountDir = configService?.getAccountDir() ?? null
+          const scanSupported = isNoLoginDbKeyScanEnabled(process.platform)
+          const plan = {
+            steps: (scanSupported ? ['existing', 'scan', 'hook'] : ['existing', 'hook']) as Array<'existing' | 'scan' | 'hook'>,
+            scanSupported,
+            notes: scanSupported ? [] : [WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE],
+          }
           const report = buildPrerequisiteReport(
             toPrerequisiteObservations({
-              plan: { steps: ['existing', 'scan', 'hook'], scanSupported: true, notes: [] },
+              plan,
               platform: process.platform,
               observation: await createWindowsKeyDriver(new KeyService()).observe(),
               dataDir: accountDir,

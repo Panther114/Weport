@@ -1,3 +1,7 @@
+import {
+  isNoLoginDbKeyScanEnabled,
+} from './v12StablePolicy'
+
 /**
  * 密钥获取的**前置条件自检矩阵**（V12 §1.5 / D4）。
  *
@@ -108,7 +112,7 @@ export const PREREQ_ACTIONS: Record<PrereqId, string> = {
   'db-files-present':
     '请确认选择的是微信 4.x 的数据根目录（路径下应有 <wxid>/db_storage），旧版 3.x 的 WeChat Files 无法使用。',
   'stored-key-valid':
-    '点「获取密钥」重新获取一次：Weport 会先尝试免登录扫描，不行再走登录捕获，成功后会自动覆盖这把失效的密钥。',
+    '请使用登录捕获或手动输入有效的账号级密钥，替换这把失效的密钥。',
   'scan-key-found':
     '按下面第 ③ 步走：点「退出微信」→ 重新打开微信（可用自动登录）→ 保持 Weport 开着，启动瞬间会自动捕获密钥。',
   'hook-helper-available':
@@ -165,7 +169,7 @@ export function supportsReadOnlyScan(version: string | null | undefined): boolea
 }
 
 export function isScanPlatform(platform: string): boolean {
-  return platform === 'win32'
+  return isNoLoginDbKeyScanEnabled(platform)
 }
 
 function item(id: PrereqId, status: PrereqStatus, overrides: Partial<PrereqItem> = {}): PrereqItem {
@@ -183,10 +187,14 @@ function item(id: PrereqId, status: PrereqStatus, overrides: Partial<PrereqItem>
 export function buildPrerequisiteReport(obs: PrereqObservations): PrereqReport {
   const items: PrereqItem[] = []
   const scanPlatform = isScanPlatform(obs.platform)
-  const wantsScan = obs.mode === 'scan' || obs.mode === 'auto'
+  const wantsScan = scanPlatform && (obs.mode === 'scan' || obs.mode === 'auto')
 
   // 1) 平台能力（macOS / Linux 常驻一条，如实说明边界 —— D2 / K8）
-  if (scanPlatform) {
+  if (obs.platform === 'win32' && !scanPlatform) {
+    items.push(item('platform-scan-support', 'skip', {
+      message: '当前稳定版按已有账号级密钥和登录捕获流程获取密钥。',
+    }))
+  } else if (scanPlatform) {
     items.push(item('platform-scan-support', 'pass', {
       message: '当前系统支持免登录扫描（Windows）。',
     }))
@@ -243,7 +251,9 @@ export function buildPrerequisiteReport(obs: PrereqObservations): PrereqReport {
 
   // 6) 同一用户
   const sameUser = obs.sameUser ?? null
-  if (sameUser === null) {
+  if (!scanPlatform) {
+    items.push(item('same-user', 'skip', { message: '当前流程不读取微信进程内存。' }))
+  } else if (sameUser === null) {
     items.push(item('same-user', 'skip', { message: '尚未确认微信与 Weport 是否同一 Windows 用户。' }))
   } else if (sameUser) {
     items.push(item('same-user', 'pass', { message: '微信与 Weport 运行在同一个 Windows 用户下。' }))
@@ -253,7 +263,9 @@ export function buildPrerequisiteReport(obs: PrereqObservations): PrereqReport {
 
   // 7) 可读进程内存
   const memoryReadable = obs.memoryReadable ?? null
-  if (memoryReadable === null) {
+  if (!scanPlatform) {
+    items.push(item('memory-readable', 'skip', { message: '当前流程不读取微信进程内存。' }))
+  } else if (memoryReadable === null) {
     items.push(item('memory-readable', 'skip', { message: '尚未尝试读取微信进程内存（微信未运行时无法判断）。' }))
   } else if (memoryReadable) {
     items.push(item('memory-readable', 'pass', { message: '可以只读访问微信进程内存（非提权即可）。' }))
@@ -290,7 +302,11 @@ export function buildPrerequisiteReport(obs: PrereqObservations): PrereqReport {
 
   // 11) 扫描是否命中（只有真的跑过扫描才评价）
   if (!scanPlatform) {
-    items.push(item('scan-key-found', 'skip', { message: '当前系统不做免登录扫描。' }))
+    items.push(item('scan-key-found', 'skip', {
+      message: obs.platform === 'win32'
+        ? 'V1.2 稳定版暂不执行 Windows 免登录扫描。'
+        : '当前系统不做免登录扫描。',
+    }))
   } else if (!obs.scanAttempted) {
     items.push(item('scan-key-found', 'skip', { message: '尚未执行免登录扫描。' }))
   } else if (obs.scanKeyFound) {

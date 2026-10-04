@@ -19,6 +19,10 @@ import type {
   PlatformObservation,
 } from './keyAcquisition'
 import type { KeySource } from './keyHealthService'
+import {
+  WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+  isNoLoginDbKeyScanEnabled,
+} from './v12StablePolicy'
 
 const execFileAsync = promisify(execFile)
 
@@ -1820,7 +1824,7 @@ export class KeyService {
     return -1
   }
 
-  // === v1.2 免登录扫描 + 双模式编排（V12 §1） ===
+  // === Windows 免登录扫描实现（稳定版门禁关闭，留给 V1.3） ===
   //
   // 旧实现只有一条路：等 Hook 在微信进程启动瞬间抓到口令，因此文案被迫要求
   // 「关自动登录 → 退出 → 扫码重登」。那是**过度要求** —— Hook 真正的触发点是
@@ -1828,11 +1832,8 @@ export class KeyService {
   // 而 4.1.10.31+ 之后还有一条更省事的路：只读扫描内存里的 WCDB `Config.Cipher`，
   // 直接拿到**每库 page key**（无需登录/退出，也不需要管理员，K5）。
   //
-  // 这一层把两条路编排起来，并**如实报告走了哪条、另一条为什么没成**：
-  //   0) 已有密钥自校验（在 keyAcquisition.ts 里）
-  //   1) 扫描（本文件 scanDbKeys → keyScanService）
-  //   2) Hook（hookAcquireKey → autoGetDbKey 的既有实现）
-  // macOS/Linux 没有扫描路径（D2），由 keyAcquisition 的编排决定，不在这里假装支持。
+  // 扫描、逐库密钥存储和只读镜像仍保留完整实现；V1.2 稳定版只走已有账号级密钥
+  // 与 Hook，扫描路径统一由 v12StablePolicy.ts 关闭，不能通过环境变量或用户设置开启。
 
   /**
    * 平台观测：给自检矩阵（`keyPrerequisite.ts`）填输入。
@@ -1996,10 +1997,9 @@ export class KeyService {
   }
 
   /**
-   * 双模式编排（Windows 侧）：`auto` = 先扫描，扫描拿不到就回落 Hook。
+   * 双模式编排（Windows 侧）。扫描门禁关闭时 `auto` 直接走 Hook，`scan` 返回延期说明。
    *
-   * 这是 A2 的实现点：`mode` 三态，两条路的成败都写进返回值 —— UI 因此能显示
-   * "走了哪条、另一条为什么没成"，而不是一句"失败"。
+   * 扫描重开时，此处仍保留原来的扫描与回落实现；V1.2 发布版不会到达扫描分支。
    */
   async acquireDbKey(options: {
     mode?: KeyAcquisitionMode
@@ -2028,7 +2028,8 @@ export class KeyService {
     let scanDiagnostics: unknown
     let scanError: string | undefined
 
-    if (mode !== 'hook') {
+    const scanEnabled = isNoLoginDbKeyScanEnabled('win32')
+    if (mode !== 'hook' && scanEnabled) {
       if (!accountDir) {
         reasons.scan = '没有选定微信数据目录，扫描无法定位要校验的数据库。'
       } else if (observation.wechatPids.length === 0) {
@@ -2050,7 +2051,7 @@ export class KeyService {
               keys: scan.keys,
               mode: 'scan',
               logs,
-              diagnostics: { platform: 'win32', scanSupported: true, elapsedMs: Date.now() - started, scan: scan.diagnostics },
+              diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scan.diagnostics },
             }
           }
           scanError = scan.error
@@ -2061,21 +2062,40 @@ export class KeyService {
         }
       }
       logs.push(`[scan] keys=${scanKeys.length}${scanError ? ` error=${scanError}` : ''}`)
+    } else if (mode === 'scan') {
+      reasons.scan = WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE
+      logs.push(`[scan] disabled: ${WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE}`)
     }
 
-    if (mode === 'scan') {
+    if (mode === 'scan' && !scanEnabled) {
+      return {
+        success: false,
+        error: WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+        keys: [],
+        logs,
+        reasons,
+        diagnostics: { platform: 'win32', scanSupported: false, elapsedMs: Date.now() - started },
+      }
+    }
+
+    if (mode === 'scan' && scanEnabled) {
       return {
         success: false,
         keys: scanKeys,
         error: reasons.scan || '免登录扫描没有取到密钥。',
         logs,
         reasons,
-        diagnostics: { platform: 'win32', scanSupported: true, elapsedMs: Date.now() - started, scan: scanDiagnostics },
+        diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scanDiagnostics },
       }
     }
 
     // 回落 Hook（既有路径，行为不变）
-    options.onStatus?.('免登录扫描未命中，切换到登录捕获模式…', 1)
+    options.onStatus?.(
+      scanEnabled
+        ? '免登录扫描未命中，切换到登录捕获模式…'
+        : '正在用登录捕获模式获取账号密钥…',
+      1,
+    )
     const hook = await this.hookAcquireKey({
       timeoutMs: options.timeoutMs ?? 120_000,
       onStatus: options.onStatus,
@@ -2089,7 +2109,7 @@ export class KeyService {
         mode: 'hook',
         logs,
         reasons: Object.keys(reasons).length ? reasons : undefined,
-        diagnostics: { platform: 'win32', scanSupported: true, elapsedMs: Date.now() - started, scan: scanDiagnostics },
+        diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scanDiagnostics },
       }
     }
     reasons.hook = hook.error || '登录捕获没有拿到密钥。'
@@ -2099,7 +2119,7 @@ export class KeyService {
       error: reasons.hook,
       logs,
       reasons,
-      diagnostics: { platform: 'win32', scanSupported: true, elapsedMs: Date.now() - started, scan: scanDiagnostics },
+      diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scanDiagnostics },
     }
   }
 }
