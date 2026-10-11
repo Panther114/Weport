@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { displayWidth, stripAnsi } from '../packages/weport-tui/dist/terminal.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -61,10 +62,10 @@ step('every section wrote a frame', files.length >= 9, `${files.length} files`)
 for (const file of files) {
   const raw = readFileSync(join(dumpDir, file), 'utf8')
   // composeFrame writes "\r\n" between rows and ends each with ESC[K.
-  const lines = raw.replace(new RegExp('\\u001B\\[K', 'g'), '').split(/\r?\n/).filter((line, index, all) => index < all.length - 1 || line.length > 0)
-  const oversized = lines.find((line) => line.length > width)
+  const lines = stripAnsi(raw).split(/\r?\n/).filter((line, index, all) => index < all.length - 1 || line.length > 0)
+  const oversized = lines.find((line) => displayWidth(line) > width)
   const blank = lines.every((line) => line.trim().length === 0)
-  step(`${file} fits ${width} columns`, !oversized, oversized ? `${oversized.length} cols` : '')
+  step(`${file} fits ${width} columns`, !oversized, oversized ? `${displayWidth(oversized)} cols` : '')
   step(`${file} is not blank`, !blank, blank ? 'all lines empty' : `${lines.length} rows`)
   // The sidebar holds one section per row, so "总览" and "帮助" never share a line —
   // check each is present in the first column band instead.
