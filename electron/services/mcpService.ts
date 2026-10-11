@@ -389,6 +389,14 @@ class McpService {
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    // Native MCP clients omit Origin. Browser requests must come from this
+    // endpoint, rather than an arbitrary website reaching a local service.
+    const origin = req.headers.origin
+    if (origin && origin !== `http://${this.host}:${this.port}`) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ success: false, error: '不允许的 Origin' }))
+      return
+    }
     if (!this.checkAuth(req)) {
       res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({ success: false, error: '未授权：需要正确的 Bearer Token' }))
@@ -406,7 +414,20 @@ class McpService {
       const sessionId = String(req.headers['mcp-session-id'] || '')
       let session = sessionId ? this.sessions.get(sessionId) : undefined
 
+      // An unknown/terminated session must not become a new transport: the
+      // client needs 404 to restart initialization without its old session ID.
+      if (sessionId && !session) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ success: false, error: 'MCP 会话不存在或已结束' }))
+        return
+      }
+
       if (req.method === 'DELETE') {
+        if (!session) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ success: false, error: '缺少 MCP 会话 ID' }))
+          return
+        }
         if (session) {
           await session.transport.close()
           this.sessions.delete(sessionId)
