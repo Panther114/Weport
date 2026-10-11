@@ -82,6 +82,31 @@ describe('WeBotService — 任务 CRUD 与持久化', () => {
     expect(task.enabled).toBe(true)
   })
 
+  it('new disabled schedules have no next run, survive restart, and never dispatch', async () => {
+    const { service, clock, dir, stats } = makeService()
+    const task = service.createTask({ title: 'Disabled', schedule: daily(8, 30), enabled: false })
+    expect(task.nextRunAt).toBeNull()
+    const reopened = new WeBotService({ dataDir: dir, now: clock.now, dispatch: async () => { throw new Error('disabled task dispatched') } })
+    expect(reopened.listTasks()[0].nextRunAt).toBeNull()
+    clock.set(new Date(2026, 2, 11, 9, 0).getTime())
+    await service['tick']()
+    expect(stats().started).toHaveLength(0)
+    expect(service.listRuns()).toHaveLength(0)
+    const enabled = service.updateTask(task.id, { enabled: true })!
+    expect(enabled.nextRunAt).toBe(new Date(2026, 2, 12, 8, 30).getTime())
+  })
+
+  it('repairs persisted disabled schedules without deleting task data', () => {
+    const { service, dir, clock } = makeService()
+    const task = service.createTask({ title: 'Legacy disabled', schedule: daily(8, 30) })
+    const state = JSON.parse(readFileSync(join(dir, 'webot.json'), 'utf8'))
+    state.tasks[0].enabled = false
+    writeFileSync(join(dir, 'webot.json'), JSON.stringify(state))
+    const reopened = new WeBotService({ dataDir: dir, now: clock.now, dispatch: async () => ({ summary: 'x' }) })
+    expect(reopened.listTasks()[0]).toMatchObject({ id: task.id, title: task.title, enabled: false, nextRunAt: null })
+    expect(JSON.parse(readFileSync(join(dir, 'webot.json'), 'utf8')).tasks[0].nextRunAt).toBeNull()
+  })
+
   it('重启后任务、笔记与 nextRunAt 都能恢复', async () => {
     const clock = makeClock()
     const { service, dir } = makeService({ clock })
