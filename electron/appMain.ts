@@ -26,6 +26,7 @@ import { pathToFileURL } from 'url'
 import { fileURLToPath } from 'url'
 import * as os from 'os'
 import { videoService } from './services/videoService'
+import { ImageKeyReadiness } from './services/imageKeyReadiness'
 import { registerBugReportHandlers } from './services/bugReportService'
 import { toLocalMediaUrl } from './services/localMediaUrl'
 import { autoUpdater } from 'electron-updater'
@@ -106,6 +107,7 @@ let tray: Tray | null = null
 let isAppQuitting = false
 let mainWindowReady = false
 let configService: ConfigService | null = null
+let imageKeyReadiness: ImageKeyReadiness | null = null
 let telemetryService: TelemetryService | null = null
 let stopTelemetryHooks: (() => void) | null = null
 /** 视频背景降采样缓存（startApp 里初始化，config:get 会用到） */
@@ -2433,6 +2435,7 @@ export function registerIpcHandlers() {
     if (wcdbService.isMaintenanceActive() && ['dbPath', 'myWxid', 'decryptKey', 'wxidConfigs'].includes(key)) {
       return { success: false, error: '数据库正在恢复快照，暂时无法切换账号' }
     }
+    if (['dbPath', 'myWxid', 'decryptKey'].includes(key)) { imageKeyReadiness?.invalidate() }
     (configService as any)?.set(key, value)
     if (key === 'launchAtStartup') {
       applyLaunchAtStartupPreference(value === true)
@@ -2825,6 +2828,8 @@ export function registerIpcHandlers() {
       : process.platform === 'linux'
         ? new KeyServiceLinux()
         : new KeyService()
+  if (configService) imageKeyReadiness = new ImageKeyReadiness(configService,
+    (path, account) => createImageKeyService().autoGetImageKey(path, undefined, account))
   ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {
     if (process.platform === 'win32') {
       const dir = manualDir ? String(manualDir).trim() : ''
@@ -2874,6 +2879,7 @@ export function registerIpcHandlers() {
     taskStatusService.begin(TASK_KEY.connect, '正在连接微信数据库…')
     try {
       const result = await chatService.connect()
+      if (result?.success) await imageKeyReadiness?.ensure()
       if (result?.success) taskStatusService.end(TASK_KEY.connect, 'done', { message: '已连接' })
       else taskStatusService.end(TASK_KEY.connect, 'failed', { error: String(result?.error || '连接失败'), message: '连接失败' })
       try { mainWindow?.webContents.send('chat:connectionChanged', { readOnlySnapshot: chatService.isReadOnlySnapshot() }) } catch { /* window reclaimed */ }
@@ -2988,6 +2994,9 @@ export function registerIpcHandlers() {
     const connectResult = await chatService.connect()
     if (!connectResult.success) {
       return { success: false, successCount: 0, failCount: 1, error: connectResult.error || '数据库连接失败' }
+    }
+    if (userOptions.exportImages === true || (userOptions.exportMedia === true && userOptions.exportImages !== false)) {
+      await imageKeyReadiness?.ensure()
     }
 
     const sessionsResult = await chatService.getSessions()

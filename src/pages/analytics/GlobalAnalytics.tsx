@@ -4,6 +4,7 @@ import { Loader2, Medal, RefreshCw, Search, UserMinus, X, MessageSquareText, Ima
 import { Avatar } from '../../components/Avatar'
 import { CountUp } from '../../components/CountUp'
 import { AnalyticsWordCloud } from '../../components/analytics/AnalyticsWordCloud'
+import { activityCalendarRange } from '../../components/analytics/calendarRange'
 import { useColorMode } from '../../utils/colorMode'
 import { blueRamp, blueVerticalGradient, BLUE_STACK, MONO_STACK, CHART_TEXT, CHART_TEXT_DIM, CHART_GRID } from '../../utils/echartsTheme'
 import { animationCommon, axisCommon, baseChartTheme, tooltipCommon } from '../../utils/echartsTheme'
@@ -300,18 +301,8 @@ export const GlobalAnalytics: React.FC = () => {
     const values: Array<[string, number]> = days.map((d) => [d, dailyActivity.daily[d]])
     const max = Math.max(1, ...values.map((v) => v[1]))
 
-    const end = new Date((stats.lastMessageTime || Math.floor(Date.now() / 1000)) * 1000)
-    end.setHours(0, 0, 0, 0)
-    const start = new Date(end)
-    start.setMonth(start.getMonth() - 11)
-    start.setDate(1)
-    const first = new Date(days[0])
-    const rangeStart = first < start ? first : start
-    const pad2 = (n: number) => String(n).padStart(2, '0')
-    const range = [
-      `${rangeStart.getFullYear()}-${pad2(rangeStart.getMonth() + 1)}`,
-      `${end.getFullYear()}-${pad2(end.getMonth() + 1)}`,
-    ]
+    const range = activityCalendarRange(days, stats.lastMessageTime)
+    if (!range) return null
 
     const heatColors = colorMode === 'mono' ? MONO_STACK : BLUE_STACK
     return {

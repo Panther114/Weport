@@ -413,8 +413,6 @@ export default function App() {
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [imageKeysOk, setImageKeysOk] = useState(false)
   const loadKeySeqRef = useRef(0)
-  /** 缺图片密钥时"再点一次继续"的一次性确认（见 startExport 中的守卫） */
-  const imageKeyAckRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
   /**
@@ -616,11 +614,7 @@ export default function App() {
   const api = window.electronAPI
   const imageKeyRequired = api.process.platform === 'win32'    || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
-  // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
-  // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
-  const imageKeyHint = api.process.platform === 'win32'
-    ? '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）'
-    : '未配置：导出图片前必须先获取，密钥从微信缓存推导（无需附加微信进程）。若失败：先在微信中打开几张图片大图，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport，再重试。'
+  const imageKeyHint = '连接或导出时自动从微信缓存获取。若缓存不可用，可在微信中打开几张图片后重试，或手动获取。'
 
   useEffect(() => {
     setDurationInput(String(Math.round(notificationDuration / 1000)))
@@ -841,7 +835,12 @@ export default function App() {
       const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
       if (seq !== loadKeySeqRef.current) return
       const cfg = wxidConfigs[wxid]
-      const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      let key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      // Legacy profiles stored only the active account's global database key.
+      if (!key && await api.config.get('myWxid') === wxid) {
+        const activeKey = await api.config.get('decryptKey')
+        if (typeof activeKey === 'string') key = activeKey
+      }
       if (seq !== loadKeySeqRef.current) return
       setDecryptKey(key)
       // 图片密钥状态（issue #9a）：aesKey 非空视为已配置（xorKey 可合法为 0）。
@@ -913,11 +912,12 @@ export default function App() {
       if (!sessions?.success) {
         return { success: false, error: sessions?.error || '数据库已打开，但会话读取失败' }
       }
+      await loadAccountKey(wxid)
       return { success: true }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-  }, [api, dbPath, saveAccountKey, selectedWxid])
+  }, [api, dbPath, saveAccountKey, selectedWxid, loadAccountKey])
 
   const refreshAccounts = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -1405,27 +1405,8 @@ export default function App() {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
       return
     }
-    // issue #15：微信 4.x 在 Windows/macOS/Linux 均可能使用加密 .dat 图片，
-    // 缺失图片密钥时导出只会得到 [图片] 占位符。
-    //
-    // 但**不能直接拒绝导出**：在 macOS 上图片密钥经常拿不到（WeChat 是
-    // 加固签名 + 沙盒进程，task_for_pid 会被系统拒绝），硬拦截会把用户彻底
-    // 卡死 —— 连文字记录都导不出去，比导出占位符糟糕得多。
-    // 因此改为「先警告、再确认」：第一次点击只说明后果，第二次点击照常导出；
-    // 缺密钥的图片会以 [图片] 占位，并在完成提示里给出具体数量。
-    if (exportMedia.images && imageKeyRequired && !imageKeysOk) {
-      if (!imageKeyAckRef.current) {
-        imageKeyAckRef.current = true
-        pushToast(
-          'err',
-          '尚未配置图片密钥',
-          '导出的图片将全部显示为 [图片] 占位符。再次点击「开始导出」仍会继续；建议先点击「获取图片密钥」。',
-          12000
-        )
-        return
-      }
-      imageKeyAckRef.current = false
-    }
+    // Main-process export acquires verified account image keys from cache before
+    // media resolution. Missing cache keys never block ordinary text/history exports.
 
     setBusy(true)
     exportProgressRef.current?.reset()
@@ -1460,6 +1441,7 @@ export default function App() {
 
     try {
       const result = await api.export.exportSessions(exportPath.trim(), options)
+      await loadAccountKey(selectedWxid)
       await refreshExportLog(exportPath.trim())
       // 读回自检结果；源 ID 冲突与实际导出缺陷分别呈现。
       // Deep verification belongs to explicit diagnostics, not normal export completion.
