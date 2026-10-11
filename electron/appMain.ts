@@ -4006,9 +4006,10 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
       return getAnnotationsService().mutate(mutation as Parameters<AnnotationsService['mutate']>[0])
     }
   )
-  ipcMain.handle('annotations:export', (_event, payload: { format: 'json' | 'csv' | 'md'; path: string }) =>
-    getAnnotationsService().export(payload?.format || 'json', String(payload?.path || ''))
-  )
+  ipcMain.handle('annotations:export', (_event, payload: { format: 'json' | 'csv' | 'md'; path: string }, options?: { accountId: string }) => {
+    assertAnnotationsAccount(options)
+    return getAnnotationsService().export(payload?.format || 'json', String(payload?.path || ''))
+  })
   // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
   // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
   ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))

@@ -3219,12 +3219,12 @@ export default function App() {
         )}
         {tab === 'reader' && (
           <Suspense fallback={<LazyFallback label="聊天阅读" />}>
-            <ReaderPage openRequest={readerOpenRequest} onCreatePoster={request => { setPosterSource(request); setTab('poster') }} />
+            <ReaderPage key={selectedWxid} accountId={selectedWxid} openRequest={readerOpenRequest?.accountId === selectedWxid ? readerOpenRequest : undefined} onCreatePoster={request => { setPosterSource(request); setTab('poster') }} />
           </Suspense>
         )}
         {tab === 'search' && (
           <Suspense fallback={<LazyFallback label="搜索" />}>
-            <SearchPage onOpen={(hit, query) => { setReaderOpenRequest({ ...hit, requestId: Date.now(), query }); setTab('reader') }} onCreatePoster={request => {
+            <SearchPage key={selectedWxid} accountId={selectedWxid} onOpen={(hit, query) => { setReaderOpenRequest({ ...hit, accountId: selectedWxid, requestId: Date.now(), query }); setTab('reader') }} onCreatePoster={request => {
               setPosterSource(request)
               setTab('poster')
             }} />

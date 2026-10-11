@@ -3,7 +3,7 @@
 // Exercises auth, malformed JSON, parallel clients, tool argument validation,
 // session rejection and browser Origin policy. Does not prove real history reads.
 import { createRequire } from "node:module";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -288,6 +288,27 @@ try {
       dll: dll?.state,
     },
   );
+  const staleExportPath = join(profile, "stale-account-annotations.json");
+  const annotations = await page.evaluate(async (path) => {
+    const api = window.electronAPI;
+    await api.config.set("myWxid", "qa_annotations_a");
+    const own = await api.annotations.mutate({ op: "fav.add", payload: { sessionId: "qa_contact", localId: "", ts: 0 } }, { accountId: "qa_annotations_a" });
+    await api.config.set("myWxid", "qa_annotations_b");
+    const rejected = async (operation) => {
+      try { await operation(); return false; } catch { return true; }
+    };
+    const staleListRejected = await rejected(() => api.annotations.list({ accountId: "qa_annotations_a" }));
+    const staleWriteRejected = await rejected(() => api.annotations.mutate({ op: "fav.add", payload: { sessionId: "qa_foreign", localId: "", ts: 0 } }, { accountId: "qa_annotations_a" }));
+    const staleExportRejected = await rejected(() => api.annotations.export({ format: "json", path }, { accountId: "qa_annotations_a" }));
+    const other = await api.annotations.list({ accountId: "qa_annotations_b" });
+    await api.config.set("myWxid", "qa_annotations_a");
+    const restored = await api.annotations.list({ accountId: "qa_annotations_a" });
+    return { ownCount: own.favorites.length, otherCount: other.favorites.length, restoredCount: restored.favorites.length, staleListRejected, staleWriteRejected, staleExportRejected };
+  }, staleExportPath);
+  check("annotation stores remain account scoped", annotations.ownCount === 1 && annotations.otherCount === 0 && annotations.restoredCount === 1);
+  check("stale annotation read rejected", annotations.staleListRejected);
+  check("stale annotation mutation rejected", annotations.staleWriteRejected);
+  check("stale annotation export rejected without writing", annotations.staleExportRejected && !existsSync(staleExportPath));
   if (process.platform === "darwin") {
     execFileSync(
       "codesign",

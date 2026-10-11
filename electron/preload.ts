@@ -448,7 +448,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   annotations: {
     list: (options?: { accountId: string }) => ipcRenderer.invoke('annotations:list', options),
     mutate: (payload: { op: string; payload?: any }, options?: { accountId: string }) => ipcRenderer.invoke('annotations:mutate', payload, options),
-    export: (payload: { format: 'json' | 'csv' | 'md'; path: string }) => ipcRenderer.invoke('annotations:export', payload)
+    export: (payload: { format: 'json' | 'csv' | 'md'; path: string }, options?: { accountId: string }) => ipcRenderer.invoke('annotations:export', payload, options)
   },
 
   /**

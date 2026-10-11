@@ -55,10 +55,17 @@ function normalizeStore(raw: unknown): AnnotationsStore {
   }
 }
 
-export function useAnnotations(): UseAnnotationsResult {
+export function useAnnotations(accountId: string): UseAnnotationsResult {
   const [state, setState] = useState<AnnotationsApiState>({ data: null, loading: true, error: null, saving: false })
   const [reloadToken, setReloadToken] = useState(0)
   const queue = useRef<Promise<unknown>>(Promise.resolve())
+  const owner = useRef(accountId)
+  owner.current = accountId
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -70,7 +77,7 @@ export function useAnnotations(): UseAnnotationsResult {
     }
     setState((prev) => ({ ...prev, loading: true, error: null }))
     annotations
-      .list()
+      .list({ accountId })
       .then((raw: unknown) => {
         if (!alive) return
         const payload = raw as { error?: unknown } | null
@@ -84,7 +91,7 @@ export function useAnnotations(): UseAnnotationsResult {
     return () => {
       alive = false
     }
-  }, [reloadToken])
+  }, [accountId, reloadToken])
 
   const mutate = useCallback((mutation: AnnotationsMutation) => {
     const api = typeof window !== 'undefined' ? window.electronAPI : undefined
@@ -95,8 +102,12 @@ export function useAnnotations(): UseAnnotationsResult {
     }
     setState((prev) => (prev.saving ? prev : { ...prev, saving: true }))
     queue.current = queue.current
-      .then(() => annotations.mutate(mutation))
+      .then(() => {
+        if (!mounted.current || owner.current !== accountId) return
+        return annotations.mutate(mutation, { accountId })
+      })
       .then((raw: unknown) => {
+        if (!mounted.current || owner.current !== accountId) return
         // 引擎侧把"写盘失败"也放在这个对象里（success:false + error），不是 reject。
         // 以前这里一律当成功：内存里的改动进了 state，界面显示"已收藏"，
         // 重启后收藏消失，**全程没有任何提示**。现在把它的 error 端出来。
@@ -105,9 +116,10 @@ export function useAnnotations(): UseAnnotationsResult {
         setState({ data: normalizeStore(raw), loading: false, error: problem, saving: false })
       })
       .catch((error: unknown) => {
+        if (!mounted.current || owner.current !== accountId) return
         setState((prev) => ({ ...prev, saving: false, error: error instanceof Error ? error.message : String(error) }))
       })
-  }, [])
+  }, [accountId])
 
   const actions = useMemo<AnnotationsActions>(
     () => ({
@@ -179,7 +191,7 @@ export interface UseAnnotationsExportResult {
  * `dialog:openDirectory` / `openFile`），所以流程是：选目录 -> 拼一个带扩展名的
  * 文件名 -> 交给引擎写。名字带日期，重复导出不会互相覆盖。
  */
-export function useAnnotationsExport(): UseAnnotationsExportResult {
+export function useAnnotationsExport(accountId: string): UseAnnotationsExportResult {
   const [busy, setBusy] = useState(false)
   const [lastPath, setLastPath] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -206,7 +218,7 @@ export function useAnnotationsExport(): UseAnnotationsExportResult {
         const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
         const base = dir.endsWith(sep) ? dir.slice(0, -1) : dir
         const target = `${base}${sep}weport-annotations-${stamp}.${meta.ext}`
-        const res = await annotations.export({ format, path: target })
+        const res = await annotations.export({ format, path: target }, { accountId })
         if (res?.success) setLastPath(res.path || target)
         else setError(res?.error || '导出失败')
       } catch (err) {
@@ -215,7 +227,7 @@ export function useAnnotationsExport(): UseAnnotationsExportResult {
         setBusy(false)
       }
     })()
-  }, [])
+  }, [accountId])
 
   return { busy, lastPath, error, exportAs, dismiss: () => { setError(null); setLastPath(null) } }
 }

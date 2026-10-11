@@ -831,7 +831,7 @@ interface ElectronApi {
   annotations: {
     list: (options?: { accountId: string }) => Promise<AnnotationsStore & { error?: string }>
     mutate: (payload: AnnotationsMutation, options?: { accountId: string }) => Promise<AnnotationsStore & { error?: string }>
-    export: (payload: { format: AnnotationsExportFormat; path: string }) => Promise<{ success: boolean; path?: string; error?: string }>
+    export: (payload: { format: AnnotationsExportFormat; path: string }, options?: { accountId: string }) => Promise<{ success: boolean; path?: string; error?: string }>
   }
 }
 

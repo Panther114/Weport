@@ -64,6 +64,7 @@ interface HeaderContext {
 }
 
 export interface ReaderOpenRequest {
+  accountId?: string
   requestId: number
   sessionId: string
   sessionName?: string
@@ -84,6 +85,7 @@ export interface ReaderPosterRequest {
 }
 
 export interface ReaderPageProps {
+  accountId?: string
   openRequest?: ReaderOpenRequest
   onCreatePoster?: (request: ReaderPosterRequest) => void
 }
@@ -108,7 +110,7 @@ function OlderHeader({ context }: { context?: HeaderContext }) {
   )
 }
 
-export default function ReaderPage({ openRequest, onCreatePoster }: ReaderPageProps) {
+export default function ReaderPage({ accountId = '', openRequest, onCreatePoster }: ReaderPageProps) {
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const [channels, setChannels] = useState<ReaderChannelStatus>(() => readerChannels())
 
@@ -168,7 +170,7 @@ export default function ReaderPage({ openRequest, onCreatePoster }: ReaderPagePr
   const [viewerIndex, setViewerIndex] = useState(-1)
   const [exportState, setExportState] = useState<{ busy: boolean; message?: string; error?: string }>({ busy: false })
 
-  const annotations = useAnnotations()
+  const annotations = useAnnotations(accountId)
   const annotationsReady = annotations.error === null
   const store = annotations.data
 
