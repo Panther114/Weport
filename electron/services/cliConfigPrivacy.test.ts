@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { values, set } = vi.hoisted(() => ({ values: new Map<string, unknown>(), set: vi.fn() }))
+const { values, set, getSessions, getSessionMessageCounts } = vi.hoisted(() => ({ values: new Map<string, unknown>(), set: vi.fn(), getSessions: vi.fn(), getSessionMessageCounts: vi.fn() }))
 vi.mock('electron', () => ({ app: { getVersion: () => '1.2.1' } }))
-vi.mock('./chatService', () => ({ chatService: {} }))
+vi.mock('./chatService', () => ({ chatService: { getSessions, getSessionMessageCounts } }))
 vi.mock('./snsService', () => ({ snsService: {} }))
 vi.mock('./analyticsService', () => ({ analyticsService: {} }))
 vi.mock('./groupAnalyticsService', () => ({ groupAnalyticsService: {} }))
@@ -16,8 +16,28 @@ import { getCommandRegistry, runCommand } from './weportCommands'
 beforeEach(() => {
   values.clear()
   set.mockClear()
+  getSessions.mockReset()
+  getSessionMessageCounts.mockReset()
   getCommandRegistry().clear()
   registerCliCommands()
+})
+
+describe('CLI session type filtering', () => {
+  beforeEach(() => {
+    getSessions.mockResolvedValue({ success: true, sessions: [
+      { username: 'qa_contact', displayName: 'Contact' },
+      { username: 'qa_group@chatroom', displayName: 'Group' },
+      { username: 'gh_qa_official', displayName: 'Official' },
+    ] })
+    getSessionMessageCounts.mockResolvedValue({ counts: {} })
+  })
+
+  it.each(['private', 'group', 'official'])('only returns rows classified as %s', async type => {
+    const result = await runCommand('sessions.list', { type }, { origin: 'cli' })
+    expect(result.success).toBe(true)
+    expect(result.data).toHaveLength(1)
+    expect((result.data as Array<{ type: string }>)[0].type).toBe(type)
+  })
 })
 
 describe('CLI config credential privacy', () => {

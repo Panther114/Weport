@@ -48,6 +48,11 @@ function asInt(value: unknown, fallback: number, min: number, max: number): numb
   return Math.max(min, Math.min(max, n))
 }
 
+function sessionTypeOf(username: unknown): 'group' | 'official' | 'private' {
+  const id = String(username)
+  return id.endsWith('@chatroom') ? 'group' : id.startsWith('gh_') ? 'official' : 'private'
+}
+
 /**
  * The last-resort text of a message.
  *
@@ -110,9 +115,7 @@ export function registerCliCommands(): void {
         const keyword = String(args.keyword || '').trim().toLowerCase()
         const limit = asInt(args.limit, 50, 1, 2000)
         const matched = (result.sessions || []).filter((session) => {
-          if (type === 'group' && !String(session.username).endsWith('@chatroom')) return false
-          if (type === 'private' && String(session.username).endsWith('@chatroom')) return false
-          if (type === 'official' && !String(session.username).startsWith('gh_')) return false
+          if (['group', 'private', 'official'].includes(type) && sessionTypeOf(session.username) !== type) return false
           if (keyword) {
             const haystack = `${session.displayName || ''} ${session.username}`.toLowerCase()
             if (!haystack.includes(keyword)) return false
@@ -130,7 +133,7 @@ export function registerCliCommands(): void {
           return {
             id,
             name: session.displayName || (session as { sessionDisplayName?: string }).sessionDisplayName || id,
-            type: id.endsWith('@chatroom') ? 'group' : id.startsWith('gh_') ? 'official' : 'private',
+            type: sessionTypeOf(id),
             lastAt: Number(session.lastTimestamp || 0),
             messageCount: Number(counts[id] ?? (session as { messageCountHint?: number }).messageCountHint ?? 0),
           }
