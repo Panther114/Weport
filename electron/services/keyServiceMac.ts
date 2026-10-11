@@ -5,6 +5,7 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
 import { homedir } from 'os'
+import { redactSecretsInText } from './diagnosticsRedaction'
 
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
 type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
@@ -233,7 +234,7 @@ export class KeyServiceMac {
       try {
         const elevatedResult = await this.getDbKeyByHelperElevated(timeoutMs, onStatus)
         parsed = this.parseDbKeyResult(elevatedResult)
-        console.log('[KeyServiceMac] GetDbKey elevated returned:', parsed.raw)
+        console.log('[KeyServiceMac] GetDbKey elevated result:', { success: parsed.success, code: parsed.code })
       } catch (e: any) {
         const msg = `${e?.message || e}`
         if (msg.includes('(-128)') || msg.includes('User canceled')) {
@@ -571,7 +572,7 @@ export class KeyServiceMac {
 
       const processHelperLine = (line: string) => {
         if (!line) return
-        console.log('[KeyServiceMac][helper][stderr]', line)
+        console.log('[KeyServiceMac][helper][stderr]', redactSecretsInText(line))
         const pidMatch = line.match(/Selected PID=(\d+)/)
         if (pidMatch && !pidNotified) {
           pidNotified = true
