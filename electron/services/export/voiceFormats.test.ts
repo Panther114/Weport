@@ -16,6 +16,7 @@ vi.mock('../wcdbService', () => ({ wcdbService: {
 } }))
 vi.mock('../chatService', () => ({ chatService: { getVoiceTranscript: vi.fn() } }))
 vi.mock('../imageDecryptService', () => ({ imageDecryptService: {} }))
+vi.mock('../videoService', () => ({ videoService: { getVideoInfo: vi.fn() } }))
 vi.mock('../exportRecordService', () => ({ exportRecordService: {} }))
 import { ExportContext } from './core/ExportContext'
 import { TxtFormatter } from './formatters/TxtFormatter'
@@ -29,10 +30,39 @@ import { WeCloneFormatter } from './formatters/WeCloneFormatter'
 import ExcelJS from 'exceljs'
 import { chatService } from '../chatService'
 import { wcdbService } from '../wcdbService'
+import { videoService } from '../videoService'
 import * as fileCopy from './media/fileCopy'
 
 const temporary: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+
+describe('locally downloaded video export', () => {
+  it('copies a Reader-resolvable video and returns its real relative reference', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'weport-video-export-'))
+    temporary.push(root)
+    const source = join(root, 'downloaded.mp4')
+    writeFileSync(source, Buffer.from('local-video-fixture'))
+    vi.mocked(videoService.getVideoInfo).mockResolvedValue({ exists: true, videoUrl: source })
+    const context = new ExportContext()
+    const result = await context.exportMediaForMessage(
+      { localType: 43, videoMd5: 'a'.repeat(32), content: '<videomsg md5="' + 'a'.repeat(32) + '" />' },
+      'fixture', root, 'media', { exportVideos: true, exportConflictStrategy: 'overwrite' },
+    )
+    expect(result?.kind).toBe('video')
+    expect(readFileSync(join(root, result!.relativePath))).toEqual(readFileSync(source))
+  })
+
+  it('does not substitute another attachment for a video missing locally', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'weport-video-missing-'))
+    temporary.push(root)
+    vi.mocked(videoService.getVideoInfo).mockResolvedValue({ exists: false })
+    const result = await new ExportContext().exportMediaForMessage(
+      { localType: 43, videoMd5: 'a'.repeat(32), content: '' },
+      'fixture', root, 'media', { exportVideos: true },
+    )
+    expect(result).toBeNull()
+  })
+})
 
 describe('concurrent attachment exports', () => {
   it('reserves different paths before either same-name attachment is copied', async () => {

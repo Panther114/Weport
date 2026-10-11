@@ -61,23 +61,6 @@ function hasNonEmptyPackedInfoData(value: unknown): boolean {
     return true
 }
 
-// Weport 裁剪：视频/语音转写服务已移除（文本导出不涉及），保留等价兜底。
-// 若未来恢复媒体导出，把以下两个 stub 换回真实服务即可。
-const videoServiceStub = {
-  parseVideoMd5: (content: string): string => {
-    const m = /md5=["']([0-9a-fA-F]{32})["']/i.exec(String(content || ''))
-    return m ? m[1].toLowerCase() : ''
-  },
-  getVideoInfoBatch: async (..._args: unknown[]): Promise<any> => ({ success: false }),
-  getVideoInfo: async (..._args: unknown[]): Promise<any> => ({
-    success: false,
-    exists: false,
-    videoUrl: '',
-    coverUrl: '',
-    thumbUrl: '',
-  }),
-}
-
 export class ExportContext {
   /** Inject a fixture database for integration checks; production uses WCDB by default. */
   public integrityDbAccess?: import('../integrityChecker').IntegrityDbAccess
@@ -3648,7 +3631,7 @@ export class ExportContext {
               videoTokenSet.add(videoMd5)
               continue
             }
-            const parsedVideoMd5 = String(videoServiceStub.parseVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
+            const parsedVideoMd5 = String(this.extractVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
             if (parsedVideoMd5) {
               videoTokenSet.add(parsedVideoMd5)
             }
@@ -3883,7 +3866,7 @@ export class ExportContext {
               this.normalizeVideoFileToken(this.resolveWeliveMediaPath(msg))
             ]
             for (const content of contents) {
-              tokens.push(videoServiceStub.parseVideoMd5(content))
+              tokens.push(this.extractVideoMd5(content))
               tokens.push(this.extractVideoMd5(content))
             }
             return Array.from(new Set(tokens
@@ -3892,7 +3875,8 @@ export class ExportContext {
           }
           const resolveVideoInfo = async (token: string) => {
             if (!token) return null
-            const videoInfo = await videoServiceStub.getVideoInfo(token, { includePoster })
+            const { videoService } = await import('../../videoService')
+            const videoInfo = await videoService.getVideoInfo(token, { includePoster })
             if (!videoInfo.exists || !videoInfo.videoUrl) return null
             return videoInfo
           }
