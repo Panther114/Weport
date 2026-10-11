@@ -23,6 +23,21 @@ const APP_VERSION = (() => {
   try { return String(app.getVersion() || '1.0.0') } catch { return '1.0.0' }
 })()
 
+// Both reads and write acknowledgements must keep credentials out of terminal
+// transcripts. Account configuration is an envelope containing DB/media keys.
+const SECRET_CONFIG_KEYS = new Set([
+  'decryptKey', 'imageAesKey', 'imageXorKey', 'wxidConfigs', 'authPassword',
+  'mcpToken', 'httpApiToken', 'aiModelApiKey', 'aiInsightApiKey',
+  'aiInsightWeiboCookie', 'aiInsightTelegramToken', 'weportAiApiKey',
+  'weportAiProfilesBlob', 'weportConnectorsBlob', 'weCloneServerToken',
+])
+
+function configResponseValue(key: string, value: unknown): unknown {
+  if (!SECRET_CONFIG_KEYS.has(key)) return value
+  if (value && typeof value === 'object') return Object.keys(value).length > 0
+  return Boolean(String(value ?? ''))
+}
+
 function fail(error: unknown): CommandResult {
   return { success: false, error: String((error as Error)?.message || error) }
 }
@@ -655,16 +670,11 @@ export function registerCliCommands(): void {
       mutating: false,
       args: [{ name: 'keys', type: 'string', description: '逗号分隔，留空返回关键项' }],
       run: (args) => {
-        const SECRET = new Set(['decryptKey', 'imageAesKey', 'mcpToken', 'httpApiToken', 'weportAiApiKey', 'weportAiProfilesBlob', 'weCloneServerToken', 'weportConnectorsBlob', 'authPassword'])
         const keys = String(args.keys || '').split(',').map((value) => value.trim()).filter(Boolean)
         const wanted = keys.length > 0 ? keys : ['dbPath', 'myWxid', 'colorMode', 'notificationDuration', 'launchAtStartup', 'connectorsAllowAgent']
         const data: Record<string, unknown> = {}
         for (const key of wanted) {
-          if (SECRET.has(key)) {
-            data[key] = Boolean(String(config.get(key as never) || ''))
-            continue
-          }
-          data[key] = config.get(key as never)
+          data[key] = configResponseValue(key, config.get(key as never))
         }
         return { success: true, data }
       },
@@ -692,7 +702,8 @@ export function registerCliCommands(): void {
           value = raw.split(',').map((item) => item.trim()).filter(Boolean)
         }
         config.set(key as never, value as never)
-        return { success: true, data: { key, value }, text: `${key} = ${JSON.stringify(value)}` }
+        const responseValue = configResponseValue(key, value)
+        return { success: true, data: { key, value: responseValue }, text: `${key} = ${JSON.stringify(responseValue)}` }
       },
     },
   ]

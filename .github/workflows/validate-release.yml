@@ -56,6 +56,9 @@ jobs:
       - name: Verify packaged MCP HTTP behavior
         run: node scripts/verify-mcp-http.mjs
 
+      - name: Verify packaged CLI protocol and credential privacy
+        run: node scripts/verify-cli-protocol.mjs
+
       - name: Verify Windows artifact names
         shell: pwsh
         run: |
@@ -146,6 +149,9 @@ jobs:
       - name: Verify packaged MCP HTTP behavior
         run: node scripts/verify-mcp-http.mjs
 
+      - name: Verify packaged CLI protocol and credential privacy
+        run: node scripts/verify-cli-protocol.mjs
+
       - name: Verify macOS artifact names
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -229,6 +235,9 @@ jobs:
 
       - name: Verify packaged MCP HTTP behavior
         run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" node scripts/verify-mcp-http.mjs
+
+      - name: Verify packaged CLI protocol and credential privacy
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" node scripts/verify-cli-protocol.mjs
 
       - name: Verify Linux artifact names
         run: |
