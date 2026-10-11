@@ -29,6 +29,7 @@ export class EngineUnavailable extends Error {}
 
 export class WeportEngine {
   private child: ChildProcess | null = null
+  private starting: Promise<EngineInfo> | null = null
   private pending = new Map<string, Pending>()
   readonly token = randomUUID()
   info: EngineInfo | null = null
@@ -37,6 +38,7 @@ export class WeportEngine {
 
   async start(timeoutMs = 45000): Promise<EngineInfo> {
     if (this.info) return this.info
+    if (this.starting) return this.starting
     const child = spawn(this.exe, ['--cli', '--disable-gpu', '--weport-token', this.token], {
       // 'inherit' for the standard streams would put engine logs on top of the TUI;
       // they are still useful, so stderr is piped and shown in the log pane. stdin
@@ -51,12 +53,15 @@ export class WeportEngine {
     child.stdout?.on('data', (chunk: Buffer) => this.emitLog(chunk.toString('utf8')))
     child.stderr?.on('data', (chunk: Buffer) => this.emitLog(chunk.toString('utf8')))
 
-    child.on('message', (raw: unknown) => this.onMessage(raw))
+    child.on('message', (raw: unknown) => {
+      if (this.child === child) this.onMessage(raw)
+    })
     child.on('exit', (code) => {
+      if (this.child !== child) return
+      this.readyReject?.(new EngineUnavailable(`引擎已退出（code=${code ?? 'null'}）`))
       this.child = null
       this.info = null
       const error = new EngineUnavailable(`引擎已退出（code=${code ?? 'null'}）`)
-      this.readyReject?.(error)
       for (const [id, entry] of this.pending) {
         clearTimeout(entry.timer)
         entry.reject(error)
@@ -65,11 +70,12 @@ export class WeportEngine {
       this.onExit?.(code)
     })
     child.on('error', (error) => {
+      if (this.child !== child) return
       this.readyReject?.(new EngineUnavailable(`引擎无法启动：${error.message}`))
     })
 
     const ready = new Promise<EngineInfo>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new EngineUnavailable('引擎启动超时')), timeoutMs)
+      const timer = setTimeout(() => this.readyReject?.(new EngineUnavailable('引擎启动超时')), timeoutMs)
       this.readyResolve = (info) => {
         clearTimeout(timer)
         this.readyResolve = null
@@ -80,11 +86,20 @@ export class WeportEngine {
         clearTimeout(timer)
         this.readyResolve = null
         this.readyReject = null
+        if (this.child === child) {
+          this.child = null
+          this.info = null
+        }
+        // A failed handshake must not leave a native engine alive, nor may a late
+        // ready/exit event from it overwrite a subsequent startup.
+        try { child.kill() } catch { /* spawn may have failed before a pid existed */ }
         reject(error)
       }
     })
-    child.send?.({ kind: 'hello', token: this.token })
-    return ready
+    this.starting = ready.finally(() => { this.starting = null })
+    try { child.send?.({ kind: 'hello', token: this.token }) }
+    catch (error) { this.readyReject?.(new EngineUnavailable(String((error as Error)?.message || error))) }
+    return this.starting
   }
 
   private readyResolve: ((info: EngineInfo) => void) | null = null
@@ -132,13 +147,26 @@ export class WeportEngine {
       }, timeoutMs)
       timer.unref?.()
       this.pending.set(id, { resolve, reject, timer })
-      child.send?.({ kind: 'call', id, command, args })
+      const failSend = (error: Error | null) => {
+        if (!error || !this.pending.delete(id)) return
+        clearTimeout(timer)
+        reject(new EngineUnavailable(`命令无法发送：${error.message}`))
+      }
+      try { child.send?.({ kind: 'call', id, command, args }, failSend) }
+      catch (error) { failSend(error as Error) }
     })
   }
 
   stop(): void {
-    try { this.child?.send?.({ kind: 'bye' }) } catch { /* ignore */ }
     const child = this.child
+    this.readyReject?.(new EngineUnavailable('引擎已停止'))
+    this.info = null
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer)
+      entry.reject(new EngineUnavailable('引擎已停止'))
+    }
+    this.pending.clear()
+    try { child?.send?.({ kind: 'bye' }) } catch { /* ignore */ }
     this.child = null
     // The engine exits on its own; kill only as a backstop so a wedged native call
     // cannot hold the terminal hostage.
