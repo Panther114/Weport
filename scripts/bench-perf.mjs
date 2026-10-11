@@ -799,6 +799,7 @@ try {
     const cold = await measurePopup('cold-frost0')
     if (cold.error) {
       console.error(`  冷启动量不到：${cold.error}`)
+      failures.push(`冷启动通知量不到：${cold.error}`)
       result.popup = cold
     } else {
       result.popup = cold
@@ -846,9 +847,11 @@ try {
       const shadowOn = /9px 20px/.test(heavy.shadowInline)
       console.log(`${shadowOn ? '  ok  ' : ' FAIL '} 投影生效          — --glass-shadow="${heavy.shadowInline}"`)
       if (!shadowOn) failures.push(`投影拉满后卡片上没有用户投影（--glass-shadow="${heavy.shadowInline}"）`)
-      const shadowOff = cold.shadowInline === ''
-      console.log(`${shadowOff ? '  ok  ' : ' FAIL '} 默认无投影        — --glass-shadow="${cold.shadowInline || '(未设置)'}"`)
-      if (!shadowOff) failures.push(`投影为 0 时仍然带着用户投影（"${cold.shadowInline}"）`)
+      if (!cold.error) {
+        const shadowOff = cold.shadowInline === ''
+        console.log(`${shadowOff ? '  ok  ' : ' FAIL '} 默认无投影        — --glass-shadow="${cold.shadowInline || '(未设置)'}"`)
+        if (!shadowOff) failures.push(`投影为 0 时仍然带着用户投影（"${cold.shadowInline}"）`)
+      }
       if (result.popup && !result.popup.error && heavy.frames && result.popup.frames) {
         const diff = round(heavy.cpuDuringPopup - result.popup.cpuDuringPopup, 2)
         const ramDiff = heavy.rssDuringPopupMb - result.popup.rssDuringPopupMb

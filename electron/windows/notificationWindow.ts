@@ -996,9 +996,13 @@ export async function showNotification(data: any, opts?: { force?: boolean }) {
 
   // 确保加载完成
   if (win.webContents.isLoading()) {
-    popupMark("main:waiting-ready-to-show");
-    win.once("ready-to-show", () => {
-      popupMark("main:ready-to-show");
+    // A hidden/offscreen empty renderer may never paint, so ready-to-show can
+    // deadlock before it receives its first payload. Load completion is enough:
+    // the renderer's notification:ready handshake replays a cached payload if
+    // React subscribes after this send; resize still gates the visible reveal.
+    popupMark("main:waiting-load-finish");
+    win.webContents.once("did-finish-load", () => {
+      popupMark("main:payload-load-finished");
       showAndSend(win!, data);
     });
   } else {
