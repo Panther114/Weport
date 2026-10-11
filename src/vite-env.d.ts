@@ -198,6 +198,8 @@ interface ConnectorTaskResult {
   targetName?: string
 }
 interface ExportRequest {
+  /** Explicit diagnostic opt-in; normal exports skip the deep live-source rescan. */
+  verifyAfterExport?: boolean
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null

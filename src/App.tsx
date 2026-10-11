@@ -1462,7 +1462,8 @@ export default function App() {
       const result = await api.export.exportSessions(exportPath.trim(), options)
       await refreshExportLog(exportPath.trim())
       // 读回自检结果；源 ID 冲突与实际导出缺陷分别呈现。
-      if (!result.stopped) void refreshExportIntegrity(exportPath.trim())
+      // Deep verification belongs to explicit diagnostics, not normal export completion.
+      setExportIntegrity(null)
       // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
       const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''

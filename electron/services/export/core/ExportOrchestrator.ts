@@ -38,6 +38,7 @@ import {
   fingerprintFile,
   toLedgerRelativePath,
   unitKeyOf,
+  latestArtifactUnits,
   verifyArtifact,
 } from '../ledger';
 import { cleanupStaleAtomicTemps } from '../atomicWrite';
@@ -885,7 +886,7 @@ export class ExportOrchestrator {
           // 就是最终产物。**只在没被取消/暂停时跑** —— 取消的运行产物本身就是残缺的，
           // 报"少了 N 行"只会误导（取消路径另有清理逻辑）。
           // 自检失败绝不能让一次成功的导出变成失败：只记日志 + 落一份 ok:false 报告。
-          if (!stopRequested && !pauseRequested && successSessionIds.length > 0) {
+          if (effectiveOptions.verifyAfterExport === true && !stopRequested && !pauseRequested && successSessionIds.length > 0) {
             const uniqueSuccessSessionIds = [...new Set(successSessionIds)]
             try {
               const integrityReport = await runIntegrityCheck({
@@ -914,7 +915,7 @@ export class ExportOrchestrator {
                       emojis: effectiveOptions.exportEmojis === true,
                       files: effectiveOptions.exportFiles === true,
                     },
-                    artifactFingerprints: [...ledgerIndex.values()]
+                    artifactFingerprints: latestArtifactUnits(ledgerIndex.values())
                       .filter((unit) => unit.sessionId === sessionId && Boolean(unit.outputPath))
                       .map((unit) => ({
                         path: unit.outputPath as string,
