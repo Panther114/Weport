@@ -1270,7 +1270,7 @@ export type ArtifactRowCount =
  * 数产物里的行数。只有**确定安全**的格式才解析（其余返回 `ok:false` + 原因，
  * 调用方回退到运行计数器）：
  * - `json` / `chatlab` / `arkme-json`：读 JSON，取 `messages` 数组长度；
- * - `chatlab-jsonl` / `jsonl`：数非空行；
+ * - `chatlab-jsonl`：只数 `_type: message` 记录；`jsonl`：数非空行；
  * - `weclone`：引号感知地数 CSV 记录（减掉表头）。
  *
  * 失败原因是**分开**的：`unparsable` 意味着"这个格式本该能数出来，但文件读不出来"
@@ -1332,7 +1332,22 @@ export async function countRowsInArtifact(
 
   if (normalized === 'chatlab-jsonl' || normalized === 'jsonl') {
     const text = await fs.promises.readFile(artifactPath, 'utf-8')
-    const rows = text.split('\n').filter((line) => line.trim().length > 0).length
+    const lines = text.split('\n').filter((line) => line.trim().length > 0)
+    if (normalized === 'jsonl') return { ok: true, rows: lines.length, how: 'jsonl' }
+    let rows = 0
+    try {
+      for (const line of lines) {
+        const record: unknown = JSON.parse(line)
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+          return { ok: false, reason: 'unparsable' }
+        }
+        const type = (record as Record<string, unknown>)._type
+        if (type === 'message') rows += 1
+        else if (type !== 'header' && type !== 'member') return { ok: false, reason: 'unparsable' }
+      }
+    } catch {
+      return { ok: false, reason: 'unparsable' }
+    }
     return { ok: true, rows, how: 'jsonl' }
   }
 

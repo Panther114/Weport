@@ -650,7 +650,25 @@ describe('产物行数解析', () => {
   it('jsonl：数非空行', async () => {
     const file = path.join(root, 'a.jsonl')
     fs.writeFileSync(file, '{"a":1}\n\n{"a":2}\n')
+    expect(await countRowsInArtifact(file, 'jsonl')).toEqual({ ok: true, rows: 2, how: 'jsonl' })
+  })
+
+  it('ChatLab JSONL counts messages without counting header or members', async () => {
+    const file = path.join(root, 'chatlab.jsonl')
+    fs.writeFileSync(file, [
+      { _type: 'header', chatlab: {}, meta: {} },
+      { _type: 'member', platformId: 'sender' },
+      { _type: 'member', platformId: 'self' },
+      { _type: 'message', content: 'incoming' },
+      { _type: 'message', content: 'outgoing' },
+    ].map(record => JSON.stringify(record)).join('\r\n') + '\n\n')
     expect(await countRowsInArtifact(file, 'chatlab-jsonl')).toEqual({ ok: true, rows: 2, how: 'jsonl' })
+  })
+
+  it.each(['{"_type":"message"', '{"_type":"unexpected"}', 'null', '{"content":"missing type"}'])('ChatLab JSONL rejects damaged or unknown records: %s', async (record) => {
+    const file = path.join(root, 'damaged.jsonl')
+    fs.writeFileSync(file, '{"_type":"header"}\n' + record)
+    expect(await countRowsInArtifact(file, 'chatlab-jsonl')).toEqual({ ok: false, reason: 'unparsable' })
   })
 
   it('weclone：引号感知地数记录并减掉表头', async () => {
