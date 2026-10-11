@@ -90,6 +90,22 @@ describe('查询串 <-> 条件', () => {
     expect(queryFromParams({ text: '  x  ', scope: scope0() })).toBe('x')
   })
 
+  it.each(['Project "A"', 'quote"inside', 'C:\\team folder\\', '研发 "Alpha" 🐈'])('preserves literal quotes and backslashes in saved filter %s', (value) => {
+    const params = { text: 'fixture message', scope: { ...scope0(), tags: [value], sessionIds: [value], senders: [value] } }
+    expect(paramsFromQuery(queryFromParams(params))).toEqual(params)
+  })
+
+  it.each(['会话:qa_contact fixture', 'from:2026-01-01', '"literal quoted" words'])('keeps literal keyword text %s out of filter fields', (text) => {
+    const params = { text, scope: scope0() }
+    expect(paramsFromQuery(queryFromParams(params))).toEqual(params)
+  })
+
+  it('preserves legacy quoted Windows paths ending in a backslash', () => {
+    const parsed = paramsFromQuery('标签:"C:\\team folder\\" message')
+    expect(parsed.scope.tags).toEqual(['C:\\team folder\\'])
+    expect(parsed.text).toBe('message')
+  })
+
   it('去重：同一个前缀出现两次只留一个', () => {
     expect(paramsFromQuery('标签:a 标签:a').scope.tags).toEqual(['a'])
   })

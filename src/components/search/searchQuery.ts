@@ -11,6 +11,7 @@
  *
  * - 未知前缀（含中文冒号）原样算普通文字，不吞用户输入；
  * - 带空格的值用双引号包住（`会话:"产品 群"`）；
+ * - Quoted values double literal quotes; backslashes remain literal for existing queries.
  * - 反向序列化时只在确实需要时才加引号。
  */
 
@@ -109,11 +110,16 @@ export function parseQueryTokens(input: string): QueryToken[] {
     if (src[i] === '"') {
       i += 1
       let buf = ''
-      while (i < src.length && src[i] !== '"') {
+      while (i < src.length) {
+        if (src[i] === '"' && src[i + 1] === '"') {
+          buf += '"'
+          i += 2
+          continue
+        }
+        if (src[i] === '"') { i += 1; return buf }
         buf += src[i]
         i += 1
       }
-      if (src[i] === '"') i += 1
       return buf
     }
     let buf = ''
@@ -135,6 +141,10 @@ export function parseQueryTokens(input: string): QueryToken[] {
     let j = i
     while (j < src.length) {
       const ch = src[j]
+      if (quote && ch === '"' && src[j + 1] === '"') {
+        j += 2
+        continue
+      }
       if (ch === '"') quote = !quote
       if (!quote && ch === ':') {
         colon = j
@@ -160,8 +170,9 @@ function needsQuote(value: string): boolean {
   return /[\s"]/.test(value)
 }
 
-function encodeValue(value: string): string {
-  return needsQuote(value) ? `"${value.replace(/"/g, '')}"` : value
+function encodeValue(value: string, forceQuote = false): string {
+  // Doubling quotes preserves existing literal backslashes (including Windows paths).
+  return forceQuote || needsQuote(value) ? `"${value.replace(/"/g, '""')}"` : value
 }
 
 /** 查询串 -> 结构化条件。同一个前缀出现多次按「或」累加（标签/会话/发送者/类型）。 */
@@ -233,7 +244,11 @@ export function queryFromParams(params: QueryParams): string {
   if (scope.to) out.push(`到:${scope.to}`)
   for (const kind of scope.kinds) out.push(`类型:${encodeValue(kindLabel(kind))}`)
   const text = params.text.trim()
-  if (text) out.push(text)
+  if (text) {
+    const tokens = parseQueryTokens(text)
+    const literal = tokens.some(token => token.kind === 'cond') || tokens.map(token => token.value).join(' ') !== text
+    out.push(encodeValue(text, literal))
+  }
   return out.join(' ')
 }
 
