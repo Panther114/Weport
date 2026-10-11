@@ -3071,8 +3071,23 @@ class ChatService {
         const cursorBatchSize = Math.max(1, Math.floor(state?.batchSize || requestLimit || this.messageBatchDefault))
         const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
         const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
+        const cursorGeneration = this.connectionGeneration
         const cursorResult = await wcdbService.openMessageCursor(sessionId, cursorBatchSize, ascending, beginTimestamp, endTimestamp)
         if (!cursorResult.success || !cursorResult.cursor) {
+          // A synchronized session can exist before its local Msg table does.
+          // Native -3 is also used for a missing global store: only accept empty
+          // history after an existing store and an explicit fresh zero agree.
+          if (cursorResult.errorCode === -3 && cursorGeneration === this.connectionGeneration) {
+            const snapshot = await this.getMessageDbCountSnapshot(true)
+            if (snapshot.success && (snapshot.dbPaths?.length || 0) > 0) {
+              const counted = await wcdbService.getSessionMessageCounts([sessionId])
+              if (cursorGeneration === this.connectionGeneration && counted.success &&
+                  Object.prototype.hasOwnProperty.call(counted.counts || {}, sessionId) &&
+                  counted.counts![sessionId] === 0) {
+                return { success: true, messages: [], hasMore: false, nextOffset: 0 }
+              }
+            }
+          }
           console.error('[ChatService] 打开消息游标失败:', cursorResult.error)
           return { success: false, error: cursorResult.error || '打开消息游标失败' }
         }

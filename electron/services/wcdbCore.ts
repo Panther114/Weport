@@ -4257,7 +4257,7 @@ export class WcdbCore {
     return true
   }
 
-  async openMessageCursor(sessionId: string, batchSize: number, ascending: boolean, beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; cursor?: number; error?: string }> {
+  async openMessageCursor(sessionId: string, batchSize: number, ascending: boolean, beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; cursor?: number; error?: string; errorCode?: number }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
@@ -4310,7 +4310,7 @@ export class WcdbCore {
           : result === -7
             ? 'message schema mismatch：当前账号消息表结构与程序要求不一致'
             : `创建游标失败: ${result}，请查看日志`
-        return { success: false, error: hint }
+        return { success: false, error: hint, errorCode: result }
       }
       return { success: true, cursor: outCursor[0] }
     } catch (e) {

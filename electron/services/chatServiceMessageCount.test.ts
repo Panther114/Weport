@@ -4,13 +4,14 @@ vi.mock('./config', () => ({ ConfigService: class {
   getCacheBasePath() { return process.env.TEMP || '.' }
   get() { return '' }
 } }))
-vi.mock('./wcdbService', () => ({ wcdbService: { getSessionMessageCounts: vi.fn(), getMessageCounts: vi.fn() } }))
+vi.mock('./wcdbService', () => ({ wcdbService: { getSessionMessageCounts: vi.fn(), getMessageCounts: vi.fn(), openMessageCursor: vi.fn() } }))
 
 import { chatService, parseExplicitMessageCountHint } from './chatService'
 import { wcdbService } from './wcdbService'
 
 const countByTableScan = Object.getPrototypeOf(chatService).countSessionMessageCountsByTableScan
 const getSessionMessageCounts = Object.getPrototypeOf(chatService).getSessionMessageCounts
+const getMessages = Object.getPrototypeOf(chatService).getMessages
 const fake = () => ({
   getMessageDbCountSnapshot: vi.fn(async () => ({ success: true, dbPaths: [], dbSignature: 'fixture-signature' })),
   buildMessageDbSignature: vi.fn(() => 'fixture-signature'),
@@ -72,6 +73,52 @@ describe('explicit message-count hints', () => {
     expect(parseExplicitMessageCountHint(0.5)).toBeUndefined()
     expect(parseExplicitMessageCountHint('0.5')).toBeUndefined()
     expect(parseExplicitMessageCountHint(Number.MAX_SAFE_INTEGER + 1)).toBeUndefined()
+  })
+})
+
+describe('Reader sessions without local message history', () => {
+  const target = () => ({
+    ensureConnected: vi.fn(async () => ({ success: true })),
+    ensureCursorsValid: vi.fn(),
+    messageCursorMutex: false,
+    messageCursors: new Map(),
+    messageBatchDefault: 50,
+    connectionGeneration: 1,
+    getMessageDbCountSnapshot: vi.fn(async () => ({ success: true, dbPaths: ['message_0.db'] })),
+  })
+  beforeEach(() => {
+    vi.mocked(wcdbService.openMessageCursor).mockResolvedValue({ success: false, error: 'no message database', errorCode: -3 })
+    vi.mocked(wcdbService.getSessionMessageCounts).mockResolvedValue({ success: true, counts: { room: 0 } })
+  })
+  it('returns empty history when an existing message store explicitly counts zero', async () => {
+    const instance = target()
+    expect(await getMessages.call(instance, 'room')).toEqual({ success: true, messages: [], hasMore: false, nextOffset: 0 })
+    expect(instance.messageCursorMutex).toBe(false)
+  })
+  it.each([
+    { success: false, error: 'count failed' },
+    { success: true, counts: {} as Record<string, number> },
+    { success: true, counts: { room: 2 } },
+  ])('preserves cursor failures without a verified zero: %j', async count => {
+    vi.mocked(wcdbService.getSessionMessageCounts).mockResolvedValue(count)
+    expect(await getMessages.call(target(), 'room')).toMatchObject({ success: false, error: 'no message database' })
+  })
+  it('preserves a globally missing message store', async () => {
+    const instance = target()
+    instance.getMessageDbCountSnapshot.mockResolvedValue({ success: true, dbPaths: [] })
+    expect(await getMessages.call(instance, 'room')).toMatchObject({ success: false })
+  })
+  it('preserves schema errors even when a count is zero', async () => {
+    vi.mocked(wcdbService.openMessageCursor).mockResolvedValue({ success: false, error: 'schema mismatch', errorCode: -7 })
+    expect(await getMessages.call(target(), 'room')).toMatchObject({ success: false, error: 'schema mismatch' })
+  })
+  it('does not accept a zero returned after changing accounts', async () => {
+    const instance=target()
+    vi.mocked(wcdbService.getSessionMessageCounts).mockImplementation(async () => {
+      instance.connectionGeneration++
+      return { success: true, counts: { room: 0 } }
+    })
+    expect(await getMessages.call(instance, 'room')).toMatchObject({ success: false })
   })
 })
 
