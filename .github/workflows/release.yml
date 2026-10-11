@@ -487,16 +487,26 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Build Linux packages (AppImage + tar.gz)
+      - name: Build Linux packages (DEB + AppImage + tar.gz)
         run: node scripts/verify-telemetry-release.mjs && npm run build:linux
 
       - name: Verify packaged native host
         run: node scripts/verify-packaged-native.cjs
 
+      - name: Verify installed Linux package with sandbox enabled
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb "./release/Weport-${version}-amd64.deb"
+          test "$(stat -c '%U:%G:%a' /opt/Weport/chrome-sandbox)" = 'root:root:4755'
+          test -z "$(find /opt/Weport -type d -perm /022 -print -quit)"
+          xvfb-run --auto-servernum node scripts/verify-mcp-http.mjs .ui-probe/installed-linux /opt/Weport/weport
+
       - name: Verify required Linux release payload
         run: |
           version="$(node -p "require('./package.json').version")"
           for file in \
+            "release/Weport-${version}-amd64.deb" \
             "release/Weport-${version}-x86_64.AppImage" \
             "release/Weport-${version}-x64.tar.gz" \
             release-notes-current.md; do
@@ -512,6 +522,7 @@ jobs:
         with:
           name: weport-release-linux-x64
           path: |
+            release/Weport-*.deb
             release/Weport-*.AppImage
             release/Weport-*.tar.gz
             release-notes-current.md
@@ -578,6 +589,7 @@ jobs:
             "$macos/release/latest-mac.yml"
             "$macos/release-notes-current.md"
             "$linux/release/Weport-${version}-x86_64.AppImage"
+            "$linux/release/Weport-${version}-amd64.deb"
             "$linux/release/Weport-${version}-x64.tar.gz"
             "$linux/release-notes-current.md"
           )
@@ -617,6 +629,7 @@ jobs:
             release-artifacts/macos/release/Weport-*.zip
             release-artifacts/macos/release/latest-mac.yml
             release-artifacts/linux/release/Weport-*.AppImage
+            release-artifacts/linux/release/Weport-*.deb
             release-artifacts/linux/release/Weport-*.tar.gz
           body_path: release-artifacts/windows/release-notes-current.md
           fail_on_unmatched_files: true

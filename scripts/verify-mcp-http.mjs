@@ -3,7 +3,7 @@
 // Exercises auth, malformed JSON, parallel clients, tool argument validation,
 // session rejection and browser Origin policy. Does not prove real history reads.
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -16,6 +16,8 @@ const { resolveLayout } = require(
   join(root, "scripts/verify-packaged-native.cjs"),
 );
 const layout = resolveLayout(join(root, "release"));
+const installedLinuxExe = process.argv[3];
+if (installedLinuxExe && process.platform !== "linux") throw new Error("Installed sandbox acceptance requires Linux");
 const out = resolve(process.argv[2] || ".ui-probe/mcp-http");
 mkdirSync(out, { recursive: true });
 const { _electron } = require("playwright-core");
@@ -60,7 +62,8 @@ const check = (name, ok, detail) => {
 };
 try {
   app = await _electron.launch({
-    executablePath: layout.appExe,
+    executablePath: installedLinuxExe || layout.appExe,
+    chromiumSandbox: Boolean(installedLinuxExe),
     args: ["--background", `--user-data-dir=${profile}`],
     env: {
       ...process.env,
@@ -92,6 +95,15 @@ try {
   });
   const page = await app.firstWindow();
   await page.locator(".rail-item").first().waitFor({ timeout: 30000 });
+  if (installedLinuxExe) {
+    const renderer = await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
+      return { pid: window.webContents.getOSProcessId(), sandbox: window.webContents.getLastWebPreferences().sandbox, args: process.argv };
+    });
+    const status = readFileSync(`/proc/${renderer.pid}/status`, "utf8");
+    check("installed Linux renderer sandbox enabled", renderer.sandbox === true && !renderer.args.includes("--no-sandbox")
+      && /^NoNewPrivs:\s+1$/m.test(status) && /^Seccomp:\s+2$/m.test(status), { sandbox: renderer.sandbox, noNewPrivs: /^NoNewPrivs:\s+1$/m.test(status), seccomp: /^Seccomp:\s+2$/m.test(status) });
+  }
   await page.waitForFunction(
     async () => (await window.electronAPI.mcp.getStatus()).running,
     null,

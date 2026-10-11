@@ -243,6 +243,7 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           for file in \
+            "release/Weport-${version}-amd64.deb" \
             "release/Weport-${version}-x86_64.AppImage" \
             "release/Weport-${version}-x64.tar.gz" \
             release-notes-current.md; do
@@ -253,11 +254,20 @@ jobs:
           test "$(grep -c '^# Weport v' release-notes-current.md)" -eq 1 \
             || { echo '::error::Release notes contain multiple version sections'; exit 1; }
 
+      - name: Verify installed Linux package with sandbox enabled
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          sudo apt-get install --no-install-recommends -y "./release/Weport-${version}-amd64.deb"
+          test "$(stat -c '%U:%G:%a' /opt/Weport/chrome-sandbox)" = 'root:root:4755'
+          test -z "$(find /opt/Weport -type d -perm /022 -print -quit)"
+          xvfb-run --auto-servernum node scripts/verify-mcp-http.mjs .ui-probe/installed-linux /opt/Weport/weport
+
       - name: Upload Linux validation artifacts
         uses: actions/upload-artifact@v4
         with:
           name: weport-validation-linux-x64
           path: |
+            release/Weport-*-amd64.deb
             release/Weport-*-x86_64.AppImage
             release/Weport-*-x64.tar.gz
             release-notes-current.md
