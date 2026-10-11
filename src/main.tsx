@@ -3,6 +3,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import { installLiveTaskWiring } from './utils/liveTaskWiring'
+import { installRemoteErrorWiring } from './utils/remoteErrorWiring'
 
 /**
  * 长任务的进度接线在**应用启动时**装好，不等任何页面挂载。
@@ -12,6 +13,7 @@ import { installLiveTaskWiring } from './utils/liveTaskWiring'
  * （用户报的克隆生成 / 导出 / 连接微信三个场景都是这一条）。
  */
 installLiveTaskWiring()
+installRemoteErrorWiring()
 
 /** Preload notification controls after first paint; feature pages load on demand. */
 function warmLazyPages(): void {

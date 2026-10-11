@@ -1346,10 +1346,11 @@ export async function registerNotificationHandlers() {
   // 恢复"预创建"只需要把 createNotificationWindow() 加回来 —— 代价是那 106MB。
   const config = ConfigService.getInstance();
   const shouldPrewarm = (await config.get("messagePushEnabled")) === true;
-  if (!shouldPrewarm) return;
-  setTimeout(() => {
-    prewarmDesktopSourceId();
-  }, 3000);
+  if (shouldPrewarm) {
+    setTimeout(() => {
+      prewarmDesktopSourceId();
+    }, 3000);
+  }
 
   // Handle resize request from renderer
   ipcMain.on("notification:resize", (event, payload) => {

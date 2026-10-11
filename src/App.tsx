@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import TelemetryPreferences from './components/settings/TelemetryPreferences'
 import {
   Plug,
   PlugZap,
@@ -456,7 +457,7 @@ export default function App() {
   const [httpApiPort, setHttpApiPort] = useState(5031)
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
-  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'diagnostics' | 'report' | 'about'>('general')
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'privacy' | 'diagnostics' | 'report' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
@@ -2300,6 +2301,16 @@ export default function App() {
 
   return (
     <div className="shell">
+      <svg aria-hidden="true" className="navigation-gradient-defs" width="0" height="0">
+        <defs>
+          <linearGradient id="weport-navigation-gradient" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="var(--accent-3)" />
+            <stop offset="48%" stopColor="var(--accent)" />
+            <stop offset="100%" stopColor="var(--accent-deep)" />
+          </linearGradient>
+        </defs>
+      </svg>
+      <TelemetryPreferences />
       {/* 背景层：图片与视频共用同一个合成层（见 theme.scss 的 `.app-bg`）。
           视频必须是真实的 <video>（而且要 muted + playsInline 才允许自动播放），
           窗口在前台时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃
@@ -2602,12 +2613,12 @@ export default function App() {
                 </div>
 
                 <div className="btn-row">
-                  <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
+                  <button className={keyOk && dbReady && accountReady ? 'secondary-btn' : 'primary-btn'} type="button" onClick={() => void extractKey()} disabled={busy}>
                     <KeyRound size={14} />
                     {busy ? '提取中…' : '提取密钥'}
                   </button>
                   <button
-                    className="secondary-btn"
+                    className={keyOk && dbReady && accountReady ? 'primary-btn' : 'secondary-btn'}
                     type="button"
                     onClick={() => void confirmKeyAndConnect()}
                     disabled={busy || !dbReady || !accountReady || !keyOk}
@@ -3705,6 +3716,7 @@ export default function App() {
                   { id: 'connectors', label: '连接器', hint: 'Todoist 等第三方工具', icon: Plug },
                   { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
                   { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
+                  { id: 'privacy', label: '隐私', hint: '安装统计 · 错误报告', icon: Info },
                   { id: 'diagnostics', label: '诊断', hint: '连接 · 数据健康 · 运行自检', icon: DiagnosticsIcon },
                   { id: 'report', label: '问题反馈', hint: '本机编辑 · GitHub 手动提交', icon: Bug },
                   { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
@@ -3731,10 +3743,13 @@ export default function App() {
             </nav>
 
             <div className="settings-pane">
+              {settingsSection === 'privacy' && <TelemetryPreferences settings />}
               {settingsSection === 'diagnostics' && (
-                <Suspense fallback={<LazyFallback label="诊断" />}>
-                  <DiagnosticsPage />
-                </Suspense>
+                <>
+                  <Suspense fallback={<LazyFallback label="诊断" />}>
+                    <DiagnosticsPage />
+                  </Suspense>
+                </>
               )}
               {settingsSection === 'general' && (
                 <section className="panel">

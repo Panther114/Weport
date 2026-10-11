@@ -655,6 +655,11 @@ interface ElectronApi {
    * macOS 能力诊断（v1.0）。非 darwin 平台返回 supported:false，
    * 界面据此隐藏入口。字段与 electron/services/macDiagnosticsService.ts 对应。
    */
+  telemetry: {
+    status: () => Promise<import('../electron/services/telemetryService').TelemetryStatus>,
+    decide: (enabled: boolean) => Promise<import('../electron/services/telemetryService').TelemetryStatus>,
+    reportError: (error: { name?: string; message?: string; stack?: string }) => void,
+  },
   diagnostics: {
     monitorSnapshot: () => Promise<import('../electron/services/diagnosticsService').DiagnosticMonitorSnapshot>,
     /** 跨平台诊断（v1.2 §5）：一组检查记录 + 本地诊断包导出，不联网、不上传 */

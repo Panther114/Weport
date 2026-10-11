@@ -260,6 +260,12 @@ export class KeyAcquisitionService {
       logs.push(message)
       try { this.deps.onStatus?.(message, level) } catch { /* noop */ }
     }
+    const cancelledResult = (): KeyAcquisitionResult => {
+      const error = '已取消密钥获取'
+      status(error, 1)
+      return { success: false, error, keys: [], logs }
+    }
+    if (this.deps.cancel?.cancelled) return cancelledResult()
     const accountDir = String(this.deps.accountDir || '').trim()
     const reasons: KeyAcquisitionResult['reasons'] = {}
     const storedHex = this.deps.storedKey?.hexKey ?? null
@@ -288,6 +294,7 @@ export class KeyAcquisitionService {
         status(`检查数据库文件失败：${e instanceof Error ? e.message : String(e)}`, 2)
       }
     }
+    if (this.deps.cancel?.cancelled) return cancelledResult()
     const plan = planKeyAcquisition({
       platform: this.deps.driver.platform,
       mode,
@@ -317,6 +324,7 @@ export class KeyAcquisitionService {
         // 校验本身抛错 = "判不出来"，不是"判为无效"。当成无效会把一条可能好的密钥说成坏的。
         status(`校验已保存的密钥时失败：${e instanceof Error ? e.message : String(e)}`, 2)
       }
+      if (this.deps.cancel?.cancelled) return cancelledResult()
       if (check?.valid) {
         storedKeyValid = true
         const report = buildPrerequisiteReport(toPrerequisiteObservations({
@@ -383,6 +391,7 @@ export class KeyAcquisitionService {
             onProgress: (message, ratio) => { try { this.deps.onScanProgress?.(message, ratio) } catch { /* noop */ } },
             cancel: this.deps.cancel,
           })
+          if (this.deps.cancel?.cancelled) return cancelledResult()
           logs.push(...(scan.logs ?? []))
           scanDiagnostics = scan.diagnostics
           scanKeys = scan.keys
@@ -395,6 +404,7 @@ export class KeyAcquisitionService {
                 status(`扫描结果已取到，但写入密钥库失败：${e instanceof Error ? e.message : String(e)}`, 2)
               }
             }
+            if (this.deps.cancel?.cancelled) return cancelledResult()
             const report = buildPrerequisiteReport(toPrerequisiteObservations({
               plan, platform: this.deps.driver.platform, observation, dataDir: accountDir, dbFilesPresent,
               storedKeyValid, scanAttempted: true, scanKeyFound: true, keyObtained: true,
@@ -423,6 +433,7 @@ export class KeyAcquisitionService {
     }
 
     // ── 2) Hook（平台通用；macOS/Linux 的唯一自动路径）
+    if (this.deps.cancel?.cancelled) return cancelledResult()
     if (plan.steps.includes('hook')) {
       if (observation.wechatPids.length === 0) {
         reasons.hook = '微信没在运行。登录捕获必须在微信进程启动的瞬间完成。'
@@ -437,6 +448,9 @@ export class KeyAcquisitionService {
             timeoutMs: this.deps.timeoutMs ?? 120_000,
             onStatus: (message, level) => status(message, level),
           })
+          // Native hooks must finish their own breakpoint cleanup. Cancellation
+          // discards their result rather than publishing or persisting a late key.
+          if (this.deps.cancel?.cancelled) return cancelledResult()
           logs.push(...(hook.logs ?? []))
           if (hook.success && hook.key) {
             const report = buildPrerequisiteReport(toPrerequisiteObservations({
@@ -465,6 +479,7 @@ export class KeyAcquisitionService {
     }
 
     // ── 3) 失败：自检 + 手动粘贴
+    if (this.deps.cancel?.cancelled) return cancelledResult()
     const report = buildPrerequisiteReport(toPrerequisiteObservations({
       plan, platform: this.deps.driver.platform, observation, dataDir: accountDir, dbFilesPresent,
       storedKeyValid, scanAttempted, scanKeyFound, keyObtained: false,

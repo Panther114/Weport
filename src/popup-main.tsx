@@ -12,6 +12,9 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import NotificationWindow from './pages/NotificationWindow'
 import './styles/popupBase.css'
+import { installRemoteErrorWiring } from './utils/remoteErrorWiring'
+
+installRemoteErrorWiring()
 
 document.documentElement.style.background = 'transparent'
 document.body.style.background = 'transparent'

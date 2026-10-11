@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 vi.mock('../config', () => ({ ConfigService: class {
@@ -29,9 +29,38 @@ import { WeCloneFormatter } from './formatters/WeCloneFormatter'
 import ExcelJS from 'exceljs'
 import { chatService } from '../chatService'
 import { wcdbService } from '../wcdbService'
+import * as fileCopy from './media/fileCopy'
 
 const temporary: string[] = []
-afterEach(() => { for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+
+describe('concurrent attachment exports', () => {
+  it('reserves different paths before either same-name attachment is copied', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'weport-attachment-rename-'))
+    temporary.push(root)
+    const sourceA = join(root, 'source-a.pdf'), sourceB = join(root, 'source-b.pdf')
+    writeFileSync(sourceA, 'first attachment')
+    writeFileSync(sourceB, 'second attachment')
+    const originalCopy = fileCopy.copyFileOptimized
+    let releaseCopies!: () => void
+    const bothReady = new Promise<void>(resolve => { releaseCopies = resolve })
+    let count = 0
+    vi.spyOn(fileCopy, 'copyFileOptimized').mockImplementation(async (...args) => {
+      if (++count === 2) releaseCopies()
+      await bothReady
+      return originalCopy(...args)
+    })
+    const context = new ExportContext()
+    context.configureSharedMediaConcurrency(2)
+    const results = await Promise.all([sourceA, sourceB].map(mediaPath => context.exportMediaForMessage(
+      { localType: 49, content: '<appmsg><type>6</type></appmsg>', fileName: 'report.pdf', mediaPath },
+      'fixture', root, 'media', { exportFiles: true, exportConflictStrategy: 'rename' },
+    )))
+    expect(results.every(Boolean)).toBe(true)
+    expect(new Set(results.map(result => result!.relativePath)).size).toBe(2)
+    expect(results.map(result => readFileSync(join(root, result!.relativePath), 'utf8')).sort()).toEqual(['first attachment', 'second attachment'])
+  })
+})
 
 function packedTranscript(text: string): Buffer {
   const encoded = Buffer.from(text, 'utf8')

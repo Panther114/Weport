@@ -274,6 +274,8 @@ Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share
 
 WeportAI 例外：为了让模型回答问题，会把相关**聊天文本**发送到你在设置中配置的模型 API（默认 DeepSeek）。此功能默认关闭，只有当你填写 API 密钥后才启用；密钥仅保存在本机配置中，日志与截图均做脱敏处理。
 
+Starting with v1.2.1, installation counts send a random installation ID and platform only; this count is always enabled. Optional error reports are off by default and offered on installation/upgrade. Reports contain only error types/codes, counts, app/runtime versions, and app-code positions, with no raw logs, account IDs, chat content, credentials, or file paths. Turn reports on or off in Settings → Privacy. See the [receiver setup and data contract](infra/telemetry-worker/README.md). Offline development builds without a configured receiver upload nothing.
+
 ## ⚠️ 免责声明
 
 本工具仅供**个人学习与本地数据归档**使用。使用前请遵守微信《软件许可及服务协议》及所在国家/地区的法律法规，且仅允许处理**本人账号**的本地数据。因不当使用（包括但不限于侵犯他人隐私、违反微信服务条款、用于商业用途等）造成的一切后果由使用者自行承担，作者不对任何滥用行为负责。

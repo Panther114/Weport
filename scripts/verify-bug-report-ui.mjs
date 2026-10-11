@@ -4,6 +4,9 @@ import { _electron } from 'playwright-core'
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
+
+const { resolveLayout } = createRequire(import.meta.url)('./verify-packaged-native.cjs')
 
 const out = resolve(process.argv[2] || '.ui-probe/bug-report-ui')
 mkdirSync(out, { recursive: true })
@@ -12,11 +15,12 @@ copyFileSync(resolve('assets/icons/icon.png'), fixtureImage)
 const profile = mkdtempSync(join(tmpdir(), 'weport-bug-report-ui-'))
 const app = await _electron.launch({ executablePath: process.argv.includes('--installed')
   ? join(process.env.LOCALAPPDATA, 'Programs', 'Weport', 'Weport.exe')
-  : resolve('release/win-unpacked/Weport.exe'),
+  : resolveLayout(resolve('release')).appExe,
   args: ['--background', `--user-data-dir=${profile}`],
   env: { ...process.env, WEPORT_UI_DEMO: '1', WEPORT_PROBE_OFFSCREEN: '1', WEPORT_NATIVE_GLASS: '0' } })
 const errors = []
 try {
+  const expectedVersion = await app.evaluate(({ app }) => app.getVersion())
   await app.evaluate(async ({ app, BrowserWindow, dialog, clipboard, shell }, imagePath) => {
     await app.whenReady()
     while (!app.listenerCount('activate')) await new Promise(resolve => setTimeout(resolve, 25))
@@ -52,7 +56,7 @@ try {
   await page.getByRole('status').filter({ hasText: '正文较长' }).waitFor()
   await page.getByRole('button', { name: '复制正文', exact: true }).click()
   state = await app.evaluate(() => globalThis.__bugReportQa)
-  if (new URL(state.urls[1]).searchParams.has('body') || !state.texts.at(-1).startsWith(longBody) || !state.texts.at(-1).includes('Weport: 1.2.0')) throw new Error('Long report lost text/environment metadata')
+  if (new URL(state.urls[1]).searchParams.has('body') || !state.texts.at(-1).startsWith(longBody) || !state.texts.at(-1).includes(`Weport: ${expectedVersion}`)) throw new Error('Long report lost text/environment metadata')
   await page.getByRole('button', { name: /移除图片/ }).click()
   await page.locator('.bug-report-image-list img').waitFor({ state: 'hidden' })
   for (const width of [1000, 1440]) {

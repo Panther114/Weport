@@ -1,6 +1,6 @@
 // Packaged UI acceptance, private fake-data profile, no desktop input or clipboard.
 import { _electron } from 'playwright-core'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -48,7 +48,10 @@ try {
   if (await page.locator('.rail-item[data-tab="diagnostics"]').count()) throw new Error('Diagnostics must only appear in Settings')
   if (await page.locator('.wkh, button:has-text("重新扫描全部")').count()) throw new Error('V1.2 must not expose no-login key scanning')
   const packageSmoke = await app.evaluate(() => globalThis.__weportPackageSmoke())
-  if (packageSmoke.xlsxBytes < 1000 || packageSmoke.wasmBytes !== 256 || !packageSmoke.mcpReady || packageSmoke.version !== '1.2.0') throw new Error('Packaged dependencies/version smoke failed')
+  const expectedVersion = installed
+    ? await app.evaluate(({ app }) => app.getVersion())
+    : JSON.parse(readFileSync(resolve('package.json'), 'utf8')).version
+  if (packageSmoke.xlsxBytes < 1000 || packageSmoke.wasmBytes !== 256 || !packageSmoke.mcpReady || packageSmoke.version !== expectedVersion) throw new Error('Packaged dependencies/version smoke failed')
   if (packageSmoke.momentsImage?.width !== 1 || packageSmoke.momentsImage?.contentType !== 'image/png') throw new Error('Packaged Moments image decryption failed')
   const capture = async name => { await page.screenshot({ path: join(out, `${name}.png`) }); results.push(name) }
   const posterFitMetrics = async () => page.evaluate(() => {
@@ -317,6 +320,19 @@ try {
         return document.documentElement.scrollWidth > innerWidth + 2 || workspace.scrollWidth > workspace.clientWidth + 2
       })
       if (overflow) throw new Error(`Horizontal overflow: ${label.trim()} at ${width}px`)
+      const structure = await page.evaluate(() => {
+        const rect = selector => document.querySelector(selector)?.getBoundingClientRect()
+        const readerRail = rect('.reader-rail'), readerMain = rect('.reader-main')
+        const aiMain = rect('.ai-main'), aiMeta = rect('.ai-topbar-meta')
+        return {
+          readerGap: readerRail && readerMain && innerWidth <= 980 ? readerMain.top - readerRail.bottom : 0,
+          aiOverflow: aiMain && aiMeta ? aiMeta.right - aiMain.right : 0,
+          clippedSearchCards: [...document.querySelectorAll('.sp-rail-sec')].filter(card => card.scrollHeight > card.clientHeight + 2).length,
+          stackedExportGroups: innerWidth >= 1280 ? [...document.querySelectorAll('.export-side .opt-row .seg')].filter(group => new Set([...group.children].map(button => Math.round(button.getBoundingClientRect().top))).size > 1).length : 0,
+          narrowExportGroups: innerWidth >= 1280 ? [...document.querySelectorAll('.export-side .opt-row')].filter(row => row.querySelector('.seg')?.getBoundingClientRect().width < row.getBoundingClientRect().width - 2).length : 0,
+        }
+      })
+      if (structure.readerGap > 20 || structure.aiOverflow > 2 || structure.clippedSearchCards || structure.stackedExportGroups || structure.narrowExportGroups) throw new Error(`Clipped page structure: ${label.trim()} at ${width}px ${JSON.stringify(structure)}`)
       await capture(`${width}-${label.trim().replace(/[^a-zA-Z0-9\u4e00-\u9fff]+/g, '-')}`)
     }
 

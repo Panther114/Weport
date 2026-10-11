@@ -69,6 +69,9 @@ interface ConfigSchema {
   decryptKey: string
   myWxid: string
   onboardingDone: boolean
+  telemetryInstallationId: string
+  telemetryDiagnosticsEnabled: boolean
+  telemetryNoticeVersion: string
   imageXorKey: number
   imageAesKey: string
   wxidConfigs: Record<string, { decryptKey?: string; imageXorKey?: number; imageAesKey?: string; updatedAt?: number }>
@@ -130,6 +133,7 @@ interface ConfigSchema {
   notificationEnabled: boolean
   aiInsightNotificationEnabled: boolean
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
+  notificationGlassTextColor: string
   notificationDuration: number
   notificationAnimationEnabled: boolean
   /**
@@ -370,6 +374,11 @@ export class ConfigService {
       notificationEnabled: true,
       aiInsightNotificationEnabled: true,
       notificationPosition: 'top-right',
+      // Empty is automatic fill polarity; retain explicitly chosen manual colors.
+      notificationGlassTextColor: '',
+      telemetryInstallationId: '',
+      telemetryDiagnosticsEnabled: false,
+      telemetryNoticeVersion: '',
       notificationDuration: 3000,
       notificationAnimationEnabled: true,
       // 新的滑动动效是默认：用户要的是"从屏幕边滑进来、再滑出去"，旧版那种

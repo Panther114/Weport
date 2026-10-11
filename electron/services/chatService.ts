@@ -450,7 +450,7 @@ const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage'
 export function extractErrorCode(message?: string | null): number | null {
   const text = String(message || '').trim()
   if (!text) return null
-  const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{2,6})(?:\)|\b)/)
+  const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{1,6})(?:\)|\b)/)
   if (!match) return null
   const parsed = Number(match[1])
   return Number.isFinite(parsed) ? parsed : null

@@ -378,6 +378,7 @@ export function NotificationGlassPanel() {
                                 animationEnabled={false}
                                 duration={0}
                                 glass={glass}
+                                backdropLuma={previewBackdropLuma}
                                 onMeasure={onMeasure}
                             />
                         ) : null}
@@ -525,7 +526,7 @@ export function NotificationGlassPanel() {
                 </Group>
 
                 <Group icon={<Type size={14} />} title="文字" hint="描边光晕由自适应引擎负责，保证亮暗桌面上都读得清">
-                    <Row label="文字颜色" hint="默认跟随填充色极性">
+                    <Row label="文字颜色" hint={glass.textColor ? '当前使用手动颜色' : '自动跟随填充色极性（默认）'}>
                         <div className="ng-inline">
                             <Toggle
                                 checked={glass.textColor !== ''}

@@ -287,6 +287,22 @@ input[type='range'] {
   min-height: 0;
 }
 
+// The tooltip wrapper is a row, not a horizontal flex parent. Otherwise the
+// button's 30px vertical flex-basis becomes its width before DB connection.
+.rail .tab-tip {
+  display: block;
+  width: 100%;
+  flex: 0 0 var(--control-h);
+  min-width: 0;
+}
+
+.rail-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rail-item {
   position: relative;
   display: flex;
@@ -1580,6 +1596,25 @@ textarea,
   .export-side {
     position: sticky;
     top: var(--space-3);
+
+    .opt-row {
+      grid-template-columns: minmax(0, 1fr);
+      align-items: stretch;
+      gap: 6px;
+    }
+
+    .opt-row .seg {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
+      width: 100%;
+    }
+
+    .opt-row .seg button {
+      min-width: 0;
+      padding-inline: 5px;
+      white-space: normal;
+    }
   }
 }
 
@@ -2682,6 +2717,8 @@ textarea,
 .ai-main {
   background: var(--layer-base);
   min-width: 0;
+  container-type: inline-size;
+  container-name: ai-chat;
 }
 
 // 有背景图/视频时，WeportAI 整页透明。
@@ -2707,6 +2744,7 @@ textarea,
 .ai-topbar {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
   padding: 10px var(--space-5);
@@ -2732,7 +2770,22 @@ textarea,
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+@container ai-chat (max-width: 520px) {
+  .ai-topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 10px 12px;
+  }
+
+  .ai-topbar h1 { flex: none; }
+  .ai-topbar-meta { gap: 4px; }
 }
 
 // 中栏在默认窗口只有 ~400px 宽，三个胶囊占掉 286px，标题只剩 50px（截成
@@ -3270,3 +3323,6 @@ textarea,
     opacity: 0.5;
   }
 }
+
+// Keep settings headings readable when supporting copy wraps.
+.settings-pane .panel-head h2 { flex-shrink: 0; white-space: nowrap; }

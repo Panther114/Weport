@@ -32,7 +32,7 @@ function imageDataUrl(image: { mimeType: string; data: string }): string {
 /**
  * 工具消息带图片时的 OpenAI 兼容转换。
  *
- * **图片放在紧跟其后的 user 消息里，不放进 tool 消息的 content 数组**（v1.1）。
+ * 图片放在整批 tool 回复之后的 user 消息里，不放进 tool 的 content 数组。
  *
  * 旧实现是把 `content` 换成 `[{type:'text'},{type:'image_url'}]`：结构上完全合规，
  * 但实测网关（opencode-go → deepseek-v4.1-flash）会直接 422
@@ -45,8 +45,13 @@ function imageDataUrl(image: { mimeType: string; data: string }): string {
  */
 export function openAIChatMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
+  const pendingImages: Array<Record<string, unknown>> = []
   for (const message of messages) {
     if (message.role !== 'tool') {
+      // Strict providers require all replies to a parallel tool batch before
+      // any user turn. An image from the first tool must not split that batch.
+      out.push(...pendingImages)
+      pendingImages.length = 0
       out.push(message)
       continue
     }
@@ -57,7 +62,7 @@ export function openAIChatMessages(messages: Array<Record<string, unknown>>): Ar
     }
     // 纯文本的 tool 结果原样透传（多一次改写就多一次前缀缓存失效），图片另起一条
     out.push({ role: 'tool', tool_call_id: message.tool_call_id, content: String(message.content || '') })
-    out.push({
+    pendingImages.push({
       role: 'user',
       content: [
         { type: 'text', text: '（工具返回的图片，见下）' },
@@ -65,6 +70,7 @@ export function openAIChatMessages(messages: Array<Record<string, unknown>>): Ar
       ],
     })
   }
+  out.push(...pendingImages)
   return out
 }
 

@@ -4,6 +4,8 @@ import { homedir } from 'os'
 import { createDecipheriv } from 'crypto'
 import { expandHomePath } from '../utils/pathUtils'
 import { annotateAccounts } from './weChatLoginOracle'
+import { app } from 'electron'
+import { windowsDbRoots } from './windowsDbRoots'
 
 export interface WxidInfo {
   wxid: string
@@ -138,7 +140,7 @@ export class DbPathService {
         possiblePaths.push(...this.getLinuxCandidatePaths(home))
       } else {
         // Windows 微信4.x 数据目录
-        possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
+        possiblePaths.push(...windowsDbRoots(home, app.getPath('documents'), app.getPath('appData')))
       }
 
       for (const path of possiblePaths) {
@@ -166,13 +168,13 @@ export class DbPathService {
       if (blocked) {
         return {
           success: false,
-          error:
-            `检测到微信数据目录（${blocked}）但没有读取权限。` +
-            '请授予 Weport「完全磁盘访问权限」（系统设置 → 隐私与安全性 → 完全磁盘访问权限），然后重启 Weport。',
+          error: `检测到微信数据目录（${blocked}）但没有读取权限。` + (process.platform === 'darwin'
+            ? '请授予 Weport「完全磁盘访问权限」（系统设置 → 隐私与安全性 → 完全磁盘访问权限），然后重启 Weport。'
+            : '请检查目录读取权限，或在连接页手动选择微信数据目录。'),
         }
       }
 
-      return { success: false, error: '未能自动检测到微信数据库目录' }
+      return { success: false, error: '未找到微信 4.x 数据目录，请确认已登录微信，或在连接页手动选择设置中的文件保存位置（xwechat_files）。' }
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -572,7 +574,10 @@ export class DbPathService {
       const existing = candidates.find((candidate) => existsSync(candidate))
       return existing || candidates[0]
     }
-    return join(home, 'Documents', 'xwechat_files')
+    const candidates = windowsDbRoots(home, app.getPath('documents'), app.getPath('appData'))
+    return candidates.find(candidate => existsSync(candidate) && (
+      this.findAccountDirs(candidate).length > 0 || this.isAccountDir(candidate)
+    )) || join(app.getPath('documents'), 'xwechat_files')
   }
 }
 

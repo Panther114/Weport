@@ -1,11 +1,12 @@
 import { _electron } from 'playwright-core'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 const root = mkdtempSync(join(tmpdir(), 'weport-flash-smoke-'))
 const out = resolve(process.argv[2] || '.ui-probe/flash-smoke')
 mkdirSync(out, { recursive: true })
 const startedAt = Date.now()
+const expectedVersion = JSON.parse(readFileSync(resolve('package.json'), 'utf8')).version
 const app = await _electron.launch({ executablePath: resolve('release/flash/win-unpacked/WeportFlash.exe'),
   env: { ...process.env, PORTABLE_EXECUTABLE_DIR: root, WEPORT_PROBE_OFFSCREEN: '1' }, timeout: 90000 })
 try {
@@ -19,7 +20,7 @@ try {
   const workflowStartedAt = Date.now()
   const accounts = await page.evaluate(() => window.flash.invoke('flash_accounts'))
   const workflowReadyMs = Date.now() - workflowStartedAt
-  if (resolve(info.dataDir) !== join(root, 'data') || info.version !== '1.2.0') throw new Error('Portable profile/version mismatch')
+  if (resolve(info.dataDir) !== join(root, 'data') || info.version !== expectedVersion) throw new Error('Portable profile/version mismatch')
   await page.evaluate(() => {
     const select = document.querySelector('#account')
     select.replaceChildren(Object.assign(document.createElement('option'), { textContent: '演示账号', value: 'fixture' }))

@@ -56,6 +56,7 @@ export class WeportEngine {
       this.child = null
       this.info = null
       const error = new EngineUnavailable(`引擎已退出（code=${code ?? 'null'}）`)
+      this.readyReject?.(error)
       for (const [id, entry] of this.pending) {
         clearTimeout(entry.timer)
         entry.reject(error)
@@ -63,15 +64,22 @@ export class WeportEngine {
       }
       this.onExit?.(code)
     })
+    child.on('error', (error) => {
+      this.readyReject?.(new EngineUnavailable(`引擎无法启动：${error.message}`))
+    })
 
     const ready = new Promise<EngineInfo>((resolve, reject) => {
       const timer = setTimeout(() => reject(new EngineUnavailable('引擎启动超时')), timeoutMs)
       this.readyResolve = (info) => {
         clearTimeout(timer)
+        this.readyResolve = null
+        this.readyReject = null
         resolve(info)
       }
       this.readyReject = (error) => {
         clearTimeout(timer)
+        this.readyResolve = null
+        this.readyReject = null
         reject(error)
       }
     })

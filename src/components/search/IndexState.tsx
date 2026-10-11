@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { AlertTriangle, Database, Loader2, RefreshCw, X } from 'lucide-react'
 import { EmptyState } from '../EmptyState'
 import { useLiveTask } from '../../hooks/useLiveTask'
-import { LIVE_TASK, liveTask } from '../../utils/liveTask'
+import { LIVE_TASK } from '../../utils/liveTask'
 import { formatRelative } from './searchQuery'
 
 /**
@@ -33,9 +33,8 @@ export interface IndexStateProps {
 
 function useBuildTask() {
   const task = useLiveTask(LIVE_TASK.searchIndex)
-  const start = useCallback((message: string) => liveTask(LIVE_TASK.searchIndex).start(message), [])
   const running = task.status === 'running'
-  return { ...task, start, running }
+  return { ...task, running }
 }
 
 /** 「陈旧」只写在账号级（`accounts[].stale`），这里统一派生顶部那一档。 */
@@ -145,13 +144,9 @@ function BuildButton({
           api.search
             .buildIndex({ force: force ?? true })
             .then((res) => {
-              /**
-               * 任务的 running 状态由 `liveTaskWiring` 从主进程快照灌进来；这里只做
-               * 一件事：**任务真的起来了**（拿到了 taskId）才把本地 store 置成 running。
-               * 反过来（先 start 再调用）会让调用失败时界面上留下一条永远在跑的假进度。
-               */
-              if (res && typeof res.taskId === 'string' && res.taskId) task.start('正在准备索引…')
-              else setError('建索引没有返回任务号')
+              // Main owns task state. A fast build may finish before IPC resolves;
+              // starting locally here would resurrect a completed task.
+              if (!res || typeof res.taskId !== 'string' || !res.taskId) setError('建索引没有返回任务号')
               onStarted()
             })
             .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
@@ -173,20 +168,6 @@ function BuildButton({
 export function EmptyIndexState({ index, indexLoading, indexError, onRefresh }: IndexStateProps) {
   const task = useBuildTask()
   const building = task.running || Boolean(index?.building)
-  const doneAt = useRef<number | undefined>(undefined)
-
-  /**
-   * 任务收尾（成功 / 失败 / 取消）后刷新一次状态接口。
-   * `doneAt` 去重：状态条每次重渲染都会跑这个 effect，但终态只该触发一次刷新。
-   */
-  useEffect(() => {
-    const terminal = task.status === 'done' || task.status === 'failed' || task.status === 'aborted'
-    if (!terminal) return
-    if (doneAt.current === task.finishedAt) return
-    doneAt.current = task.finishedAt
-    onRefresh()
-  }, [task.status, task.finishedAt, onRefresh])
-
   const progress = Math.max(task.progress, Math.round((index?.progress || 0) * 100))
 
   if (indexLoading && !index) return <EmptyState icon={Database} title="正在检查索引…" />

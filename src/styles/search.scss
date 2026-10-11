@@ -664,6 +664,7 @@
 }
 
 .sp-rail-sec {
+  flex-shrink: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);

@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "weport-telemetry",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "weport-telemetry",
+    "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+    "migrations_dir": "migrations"
+  }],
+  "ratelimits": [{ "name": "INGEST_LIMITER", "namespace_id": "121", "simple": { "limit": 1000, "period": 60 } }],
+  "triggers": { "crons": ["17 3 * * *"] }
+}

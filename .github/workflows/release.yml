@@ -14,6 +14,9 @@ on:
 permissions:
   contents: read
 
+env:
+  WEPORT_TELEMETRY_URL: ${{ vars.WEPORT_TELEMETRY_URL }}
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -69,7 +72,7 @@ jobs:
         run: npm run typecheck
 
       - name: Build installer
-        run: npm run build
+        run: node scripts/verify-telemetry-release.mjs && npm run build
 
       - name: Verify packaged native host
         run: node scripts/verify-packaged-native.cjs
@@ -117,7 +120,7 @@ jobs:
           retention-days: 7
 
   build-mac:
-    runs-on: macos-14
+    runs-on: macos-15
     # ── Issue #18: the macOS signing contract ───────────────────────────────────
     #
     # v0.9.11 shipped `Weport-0.9.11-arm64.zip` with NO valid signature. `build.mac`
@@ -291,6 +294,7 @@ jobs:
           #                    runtime behaviour of the only artifact that ships today.
           # electron-builder is the LAST command in the build:mac chain, so npm's
           # `--` arguments land on it.
+          node scripts/verify-telemetry-release.mjs
           npm run build:mac -- \
             --config.mac.identity="${{ secrets.MAC_IDENTITY_QUALIFIER }}" \
             --config.mac.hardenedRuntime=true
@@ -299,7 +303,7 @@ jobs:
         if: steps.signing.outputs.mode == 'adhoc'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npm run build:mac
+        run: node scripts/verify-telemetry-release.mjs && npm run build:mac
 
       # Issue #18: v0.9.11 shipped unsigned (signing silently skipped) and failed
       # `codesign --verify --deep --strict` on user machines. This gate runs on the
@@ -484,7 +488,7 @@ jobs:
         run: npm run typecheck
 
       - name: Build Linux packages (AppImage + tar.gz)
-        run: npm run build:linux
+        run: node scripts/verify-telemetry-release.mjs && npm run build:linux
 
       - name: Verify packaged native host
         run: node scripts/verify-packaged-native.cjs

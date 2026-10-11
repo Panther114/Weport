@@ -45,9 +45,10 @@
 }
 
 .reader-rail-filters {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
-  flex-wrap: wrap;
+  .chip { width: 100%; min-width: 0; padding-inline: 8px; text-align: center; }
 }
 
 .reader-rail-note {
@@ -1220,9 +1221,14 @@
 @media (max-width: 980px) {
   .reader-page {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(180px, 28%) minmax(0, 1fr);
   }
 
   .reader-rail {
-    max-height: 260px;
+    max-height: none;
+  }
+
+  .reader-rail-filters {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }

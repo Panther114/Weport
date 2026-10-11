@@ -1,0 +1,25 @@
+.telemetry-notice {
+  margin: auto;
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--line, #777);
+  border-radius: 12px;
+  background: var(--panel, #202124);
+  color: var(--text, #eee);
+}
+.telemetry-notice::backdrop { background: rgb(0 0 0 / 48%); }
+.telemetry-notice h2 { font-size: 18px; margin: 0 0 16px; }
+.telemetry-notice p, .telemetry-settings p { line-height: 1.6; }
+.telemetry-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.telemetry-actions button { white-space: normal; }
+.telemetry-preference { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.telemetry-preference > div { min-width: 0; }
+.telemetry-preference strong { font-weight: 500; }
+.telemetry-preference p { margin: 4px 0 0; }
+.telemetry-preference input { flex: none; accent-color: var(--accent); }
+.telemetry-status { flex: none; font-size: 12px; color: var(--text-dim); }
+.telemetry-details { margin-top: 16px; }
+.telemetry-details summary { cursor: pointer; color: var(--accent); }

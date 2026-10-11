@@ -26,7 +26,7 @@ import {
   type IntegrityTableStat,
   type MediaRequestFlags,
 } from './integrityChecker'
-import { sourceMessageIdentityHash } from './sourceMessageIdentity'
+import { sourceMessageIdentityHash, stableMediaMessageKey } from './sourceMessageIdentity'
 
 /**
  * 导出正确性自检（v1.2 §10.2 ②）。
@@ -1235,3 +1235,52 @@ describe('数据库行归一化', () => {
     })
   })
 })
+
+
+describe('v1.2.1 media coverage regressions', () => {
+  const coverage = (message: IntegrityMessageRow, files: string[]) => evaluateMediaCoverage({
+    sessionId: SESSION, rows: [message], files, dirExists: true, mediaRequested: allMedia,
+  })
+  it('recognizes the exact source-scoped voice name produced by the exporter', () => {
+    const message=row({localId:42,createTime:1700000123,localType:34,serverIdRaw:'18446744073709551614'});
+    const key=stableMediaMessageKey({localId:'42',createTime:'1700000123',serverId:message.serverIdRaw!,dbPath:message.dbPath,tableName:message.tableName}).replace(/:/g,'_');
+    expect(coverage(message,[`media/voices/voice_wxid_me_${key}.wav`]).produced).toBe(1);
+    expect(coverage(message,['media/voices/voice_wxid_me_42_1700000999_0.wav']).produced).toBe(0);
+  });
+  it('accepts short and XML-escaped attachment names', () => {
+    for(const [title,name] of [['a.pdf','a.pdf'],['图.png','图.png'],['A&amp;B.pdf','A&B.pdf'],['<![CDATA[a.pdf]]>','a.pdf']]) {
+      expect(coverage(row({localType:49,content:`<appmsg><type>6</type><title>${title}</title></appmsg>`}),[`media/file/pdf/${name}`]).produced).toBe(1);
+    }
+  });
+  it('does not mistake another media type or an unrelated file for coverage', () => {
+    const md5='a'.repeat(32);
+    expect(coverage(row({localType:3,content:`<img md5="${md5}"/>`}),[`media/videos/${md5}.mp4`]).produced).toBe(0);
+    expect(coverage(row({localType:3,content:''}),['media/images/unrelated.jpg']).produced).toBe(0);
+    expect(coverage(row({localType:49,content:'<appmsg><type>6</type><title>a.pdf</title></appmsg>'}),['media/file/pdf/extra-a.pdf']).produced).toBe(0);
+  });
+  it('keeps root-level session media in scope',async()=>{
+    const md5='b'.repeat(32);
+    const report=await runIntegrityCheck({wxid:MY_WXID,outputRoot:reportRoot,ledgerEntries:0,mediaFileIndex:[`media/images/${md5}.jpg`],db:fakeDb({tableCount:1,rows:[row({localType:3,content:`<img md5="${md5}"/>`})]}),sessions:[sessionInput({sessionDir:reportRoot,runExportedMessages:1,mediaRequested:allMedia})]});
+    expect(report.totals.missingMedia).toBe(0);
+  });
+  it('recognizes decoded images named from datname and numeric renamed attachments', () => {
+    const md5 = 'c'.repeat(32)
+    expect(coverage(row({ localType: 3, content: `<img datname="${md5}.dat"/>` }), [`media/images/${md5}.jpg`]).produced).toBe(1)
+    const message = row({ localType: 49, content: '<appmsg><type>6</type><title>a.pdf</title></appmsg>' })
+    expect(coverage(message, ['media/file/pdf/a_2.pdf']).produced).toBe(1)
+    expect(coverage(message, ['media/file/pdf/a_extra.pdf']).produced).toBe(0)
+  })
+  it('removes an obsolete missing-media CSV after a successful rerun', async () => {
+    const csvPath = path.join(reportRoot, MISSING_MEDIA_CSV_FILE_NAME)
+    const md5 = 'd'.repeat(32)
+    const options = { wxid: MY_WXID, outputRoot: reportRoot, ledgerEntries: 0,
+      mediaFileIndex: [] as string[],
+      db: fakeDb({ tableCount: 1, rows: [row({ localType: 3, content: `<img md5="${md5}"/>` })] }),
+      sessions: [sessionInput({ sessionDir: reportRoot, runExportedMessages: 1, mediaRequested: allMedia })] }
+    await runIntegrityCheck(options)
+    expect(fs.existsSync(csvPath)).toBe(true)
+    const report = await runIntegrityCheck({ ...options, mediaFileIndex: [`media/images/${md5}.jpg`] })
+    expect(report.totals.missingMedia).toBe(0)
+    expect(fs.existsSync(csvPath)).toBe(false)
+  })
+});

@@ -7,7 +7,7 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { sourceFingerprint } from '../sourceFingerprint'
-import { sourceMessageIdentityHash } from '../sourceMessageIdentity'
+import { sourceMessageIdentityHash, stableMediaMessageKey } from '../sourceMessageIdentity'
 import { fileURLToPath } from 'url'
 // 只用类型（ExcelJS.Cell 出现在下面两个公开方法的签名里）；运行时按需动态加载，
 // 避免所有导出（哪怕是 TXT）都背上 exceljs 的 ~18MB 常驻。见 ExcelFormatter.ts 说明。
@@ -100,6 +100,7 @@ export class ExportContext {
     private mediaFileCacheReadyDirs = new Set<string>();
     private mediaExportTelemetry: MediaExportTelemetry | null = null;
     private mediaRunSourceDedupMap = new Map<string, string>();
+    private mediaRunReservedOutputPaths = new Set<string>();
     private mediaRunMissingImageKeys = new Set<string>();
     // ---- v1.2 §10.1 ①：账本 / 媒体去重 / 原子写 ---------------------------------
     /** 账本说"已完成且磁盘校验通过"而跳过的会话数（只读遥测）。 */
@@ -692,6 +693,7 @@ export class ExportContext {
     public resetMediaRuntimeState(): void {
         this.mediaExportTelemetry = this.createEmptyMediaTelemetry()
         this.mediaRunSourceDedupMap.clear()
+        this.mediaRunReservedOutputPaths.clear()
         this.mediaRunMissingImageKeys.clear()
         this.activeSharedMediaCount = 0
         for (const w of this.sharedMediaWaiters) try { w() } catch {}
@@ -703,6 +705,7 @@ export class ExportContext {
     public clearMediaRuntimeState(): void {
         this.mediaExportTelemetry = null
         this.mediaRunSourceDedupMap.clear()
+        this.mediaRunReservedOutputPaths.clear()
         this.mediaRunMissingImageKeys.clear()
         this.activeSharedMediaCount = 0
         for (const w of this.sharedMediaWaiters) try { w() } catch {}
@@ -1430,12 +1433,9 @@ export class ExportContext {
         const localId = this.normalizeUnsignedIntToken(msg?.localIdRaw ?? msg?.localId);
         const createTime = this.normalizeUnsignedIntToken(msg?.createTime);
         const serverId = this.normalizeUnsignedIntToken(msg?.serverIdRaw ?? msg?.serverId);
-        const sourceDb = String(msg?._db_path ?? msg?.sourceDbPath ?? '').trim().replace(/\\/g, '/').toLowerCase()
-        const sourceTable = String(msg?._table_name ?? msg?.sourceTableName ?? '').trim().toLowerCase()
-        const sourceScope = sourceDb || sourceTable
-          ? crypto.createHash('sha256').update(`${sourceDb}\0${sourceTable}`).digest('hex').slice(0, 12)
-          : ''
-        return `${sourceScope ? `${sourceScope}:` : ''}${localId}:${createTime}:${serverId}`
+        return stableMediaMessageKey({ localId, createTime, serverId,
+          dbPath: msg?._db_path ?? msg?.sourceDbPath,
+          tableName: msg?._table_name ?? msg?.sourceTableName })
     }
 
     public getSourceMessageIdentityHash(msg: { localId?: unknown; localIdRaw?: unknown; _db_path?: unknown; _table_name?: unknown; sourceDbPath?: unknown; sourceTableName?: unknown }): string | undefined {
@@ -3382,7 +3382,7 @@ export class ExportContext {
           }
           let destPath = path.join(targetDir, destFileName)
           if (kind === 'file' && this.resolveExportConflictStrategy(options) === 'rename') {
-            destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
+            destPath = await reserveUniqueOutputPath(destPath, this.mediaRunReservedOutputPaths)
             destFileName = path.basename(destPath)
           }
           const relativeMediaPath = path.posix.join(mediaRelativePrefix, dirName, destFileName)
@@ -4485,7 +4485,7 @@ export class ExportContext {
           let destFileName = path.basename(fileNameRaw).replace(/[\\/:*?"<>|]/g, '_') || 'file'
           let destPath = path.join(fileDir, destFileName)
           if (this.resolveExportConflictStrategy(options) === 'rename') {
-            destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
+            destPath = await reserveUniqueOutputPath(destPath, this.mediaRunReservedOutputPaths)
             destFileName = path.basename(destPath)
           }
           const existedBeforeCopy = await pathExists(destPath)

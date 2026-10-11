@@ -52,6 +52,8 @@ interface NotificationToastProps {
     backdropStream?: MediaStream | null
     /** 原生玻璃模式（Windows）：折射由主进程原生面板渲染，卡片背景透明 */
     nativeBackdrop?: boolean
+    /** Known preview background luminance; real popups start with mid-gray. */
+    backdropLuma?: number
     /** 是否播放入场、退场和卡片过渡动效 */
     animationEnabled?: boolean
     /** 动效风格（见 utils/notificationAnimation.ts） */
@@ -121,6 +123,7 @@ export function NotificationToast({
     backdropImage,
     backdropStream,
     nativeBackdrop = false,
+    backdropLuma = 0.5,
     animationEnabled = true,
     animationStyle = 'slide',
     slideFrom = 'right',
@@ -316,7 +319,7 @@ export function NotificationToast({
          * 都不会再改变文字色。用户显式指定文字色时 `--glass-text-color` 优先级更高，
          * 这组变量不影响它。
          */
-        ...notificationGlassTextVars(glass)
+        ...notificationGlassTextVars(glass, backdropLuma)
     } as CSSProperties
 
     /**

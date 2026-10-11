@@ -77,6 +77,7 @@ export default defineConfig(({ mode }) => ({
         entry: 'electron/main.ts',
         onstart: handleElectronOnStart,
         vite: {
+          define: { __WEPORT_TELEMETRY_URL__: JSON.stringify(process.env.WEPORT_TELEMETRY_URL || '') },
           build: {
             outDir: 'dist-electron', emptyOutDir: false,
             rolldownOptions: {

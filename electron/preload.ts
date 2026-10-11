@@ -358,6 +358,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // macOS 能力诊断（v1.0）：仅在 darwin 上返回真实结果
+  telemetry: {
+    status: () => ipcRenderer.invoke('telemetry:status'),
+    decide: (enabled: boolean) => ipcRenderer.invoke('telemetry:decide', enabled),
+    reportError: (error: { name?: string; message?: string; stack?: string }) => ipcRenderer.send('telemetry:error', error),
+  },
   diagnostics: {
     monitorSnapshot: () => ipcRenderer.invoke('diagnostics:monitorSnapshot'),
     collectMac: () => ipcRenderer.invoke('diagnostics:collectMac'),

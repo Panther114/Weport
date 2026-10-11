@@ -80,6 +80,7 @@ import { registerCliCommands } from './services/cliCommands'
 import { runCommand } from './services/weportCommands'
 import { collectMacDiagnostics } from './services/macDiagnosticsService'
 import { diagnosticsService, type DiagnosticsContext } from './services/diagnosticsService'
+import { TelemetryService, telemetryEndpoint } from './services/telemetryService'
 import {
   registerNotificationHandlers,
   destroyNotificationWindow,
@@ -105,6 +106,8 @@ let tray: Tray | null = null
 let isAppQuitting = false
 let mainWindowReady = false
 let configService: ConfigService | null = null
+let telemetryService: TelemetryService | null = null
+let stopTelemetryHooks: (() => void) | null = null
 /** 视频背景降采样缓存（startApp 里初始化，config:get 会用到） */
 let backgroundVideoService: BackgroundVideoService | null = null
 let messagePushService: MessagePushService | null = null
@@ -2357,6 +2360,9 @@ function getAnnotationsService(): AnnotationsService {
 }
 
 export function registerIpcHandlers() {
+  ipcMain.handle('telemetry:status', () => telemetryService?.status() ?? { diagnosticsEnabled: false, noticeRequired: false, receiverConfigured: false })
+  ipcMain.handle('telemetry:decide', (_event, enabled: boolean) => telemetryService?.decide(enabled))
+  ipcMain.on('telemetry:error', (_event, error: unknown) => telemetryService?.record('renderer', error))
   registerBugReportHandlers({ ipcMain, dialog, clipboard, nativeImage, shell,
     appVersion: app.getVersion(), platform: process.platform,
     platformRelease: os.release(), arch: process.arch })
@@ -2422,6 +2428,7 @@ export function registerIpcHandlers() {
     return (configService as any)?.get(key)
   })
   ipcMain.handle('config:set', async (_e, key: string, value: unknown) => {
+    if (key.startsWith('telemetry')) return { success: false, error: 'Use the telemetry consent API' }
     if (wcdbService.isMaintenanceActive() && ['dbPath', 'myWxid', 'decryptKey', 'wxidConfigs'].includes(key)) {
       return { success: false, error: '数据库正在恢复快照，暂时无法切换账号' }
     }
@@ -2622,6 +2629,13 @@ export function registerIpcHandlers() {
     new KeyHealthService({
       deps: {
         resolveAccountDir: () => configService?.getAccountDir() ?? null,
+        resolveLegacyAccountKey: (accountDir) => {
+          const selected = configService?.getAccountDir()
+          if (!selected) return ''
+          const normalize = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
+          if (normalize(accountDir) !== normalize(selected)) return ''
+          return configService?.get('decryptKey') || ''
+        },
         rescanKeys:
           process.platform === 'win32'
             ? async (dir: string) => {
@@ -2944,14 +2958,13 @@ export function registerIpcHandlers() {
   ipcMain.handle('chat:getAntiRevokeSessions', () => chatService.getAntiRevokeSessions())
   ipcMain.handle('chat:checkAntiRevokeTriggers', (_e, sessionIds: string[]) =>
     chatService.checkAntiRevokeTriggers((sessionIds || []).map(String)))
-  // v1.2 §10.3 ③：触发器安装/卸载是**写**操作（会在消息库上建/删 TRIGGER），
-  // 一律先做自动快照（含 `-wal`/`-shm`），快照成功之后才允许写入。
+  // Reversible trigger DDL uses the same serialized, account-checked WCDB path
+  // as automatic installs. Full-account snapshots blocked live WeChat and
+  // copied every database for each individual trigger change.
   ipcMain.handle('chat:installAntiRevokeTriggers', (_e, sessionIds: string[]) =>
-    withWriteSnapshot('anti-revoke-install', () =>
-      chatService.installAntiRevokeTriggers((sessionIds || []).map(String))))
+    chatService.installAntiRevokeTriggers((sessionIds || []).map(String)))
   ipcMain.handle('chat:uninstallAntiRevokeTriggers', (_e, sessionIds: string[]) =>
-    withWriteSnapshot('anti-revoke-uninstall', () =>
-      chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String))))
+    chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String)))
 
   // 导出
   ipcMain.handle('export:exportSessions', async (_e, outputRoot: string, formatOrOptions?: any, legacyOptions?: any) => {
@@ -8416,6 +8429,52 @@ export async function startEngineServices(
 
   configService = ConfigService.getInstance()
 
+  // QA and copied profiles must never count as installations or upload reports.
+  const telemetryDisabled = isAnyQaMode || options.coreOnly === true || process.env.WEPORT_PROBE_OFFSCREEN === '1' || process.env.WEPORT_UI_DEMO === '1' || app.commandLine.hasSwitch('user-data-dir')
+  telemetryService = new TelemetryService({
+    platform: process.platform, version: app.getVersion(), electronVersion: process.versions.electron || '',
+    endpoint: telemetryEndpoint(), disabled: telemetryDisabled,
+    read: () => ({ installationId: configService!.get('telemetryInstallationId') || '',
+      diagnosticsEnabled: configService!.get('telemetryDiagnosticsEnabled') === true,
+      noticeVersion: configService!.get('telemetryNoticeVersion') || '' }),
+    write: prefs => {
+      configService!.set('telemetryInstallationId', prefs.installationId)
+      configService!.set('telemetryDiagnosticsEnabled', prefs.diagnosticsEnabled)
+      configService!.set('telemetryNoticeVersion', prefs.noticeVersion)
+    },
+  })
+  if (!telemetryDisabled) {
+    const service = telemetryService
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { service.record('main', args); originalError(...args) }
+    const onException = (error: unknown) => service.record('main', error)
+    process.on('uncaughtExceptionMonitor', onException)
+    process.on('unhandledRejection', onException)
+    const onWebContents = (_event: Electron.Event, contents: Electron.WebContents) => {
+      contents.on('console-message', (details) => {
+        if (details.level === 'error') service.record('renderer', details.message)
+      })
+      contents.on('render-process-gone', (_event, details) => service.record('renderer', { code: details.exitCode }))
+    }
+    app.on('web-contents-created', onWebContents)
+    const originalHandle = ipcMain.handle.bind(ipcMain)
+    ipcMain.handle = (channel, listener) => originalHandle(channel, async (...args) => {
+      try {
+        const result = await listener(...args)
+        if (!channel.startsWith('telemetry:') && result?.success === false && result?.error) service.record('ipc', result.error)
+        return result
+      } catch (error) { service.record('ipc', error); throw error }
+    })
+    stopTelemetryHooks = () => {
+      console.error = originalError
+      ipcMain.handle = originalHandle
+      process.removeListener('uncaughtExceptionMonitor', onException)
+      process.removeListener('unhandledRejection', onException)
+      app.removeListener('web-contents-created', onWebContents)
+    }
+    telemetryService.start()
+  }
+
   // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
   avatarCacheService.init(configService.getCacheBasePath())
 
@@ -8568,11 +8627,19 @@ function startApp() {
 
   const gotLock = app.requestSingleInstanceLock()
   if (!gotLock) {
+    if (isCliMode && process.send) {
+      try {
+        process.send({ kind: 'error', error: 'Weport 已在运行，请先退出桌面应用再启动终端。' }, () => app.exit(1))
+      } catch { app.exit(1) }
+      return
+    }
     app.quit()
     return
   }
 
   app.on('second-instance', (_event, argv) => {
+    // A terminal client must never activate or focus the desktop window.
+    if (Array.isArray(argv) && argv.includes('--cli')) return
     // 静默启动（--background）时忽略第二实例：开机自启的双实例竞争
     // （历史版本残留多个 Run 键）曾通过这里把隐藏的主窗口带出来。
     // 若用户已手动打开过窗口，则仅聚焦不重复显示。
@@ -8785,6 +8852,8 @@ const shutdownAppServices = async (): Promise<void> => {
   if (shutdownPromise) return shutdownPromise
   shutdownPromise = (async () => {
     isAppQuitting = true
+    telemetryService?.stop()
+    stopTelemetryHooks?.()
     if (updateCheckTimer) clearTimeout(updateCheckTimer)
 try { tray?.destroy() } catch { /* noop */ }
     tray = null
