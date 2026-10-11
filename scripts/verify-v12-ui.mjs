@@ -178,7 +178,7 @@ try {
     })
   })
   await page.getByRole('button', { name: /^导出已选（1）$/ }).click()
-  await page.getByText('导出完成', { exact: true }).waitFor()
+  await page.getByRole('heading', { name: '导出完成', exact: true }).waitFor()
   if (await app.evaluate(() => globalThis.__weportNormalExportDiagnosticCalls)) throw new Error('Normal export unexpectedly requested diagnostics')
   if (await page.getByText(/导出数据自检(未)?通过/).count()) throw new Error('Normal export displayed a diagnostic card')
   await capture('normal-export-complete')
