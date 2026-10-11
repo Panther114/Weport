@@ -214,6 +214,8 @@ export interface SearchIndexDocSource {
   getSessions(): Promise<SearchIndexSessionRow[]>
   /** 联系人显示名（查询期给 senderName 用；失败当没有） */
   getDisplayNames?(usernames: string[]): Promise<Record<string, string>>
+  /** Resolve a shard-local Name2Id rowid without borrowing another shard's map. */
+  resolveSenderUsername?(dbPath: string, senderId: string): Promise<string | null>
 }
 
 export interface DecodedRowContext {
@@ -305,7 +307,9 @@ const MESSAGE_TABLE_RE = /^msg_/i
 const MESSAGE_DB_RE = /^message_.+\.db$/i
 const MESSAGE_DB_EXCLUDE_RE = /^message_(fts|resource)/i
 
-const INDEX_VERSION = 2
+// Earlier indexes omitted native Name2Id sender identities outside the tail.
+// Rebuild them rather than serving partially repaired sender-filter results.
+const INDEX_VERSION = 3
 const MANIFEST_FILE = 'manifest.json'
 const SHARD_DIR = 'shards'
 
@@ -1309,6 +1313,7 @@ export class SearchIndexService {
      * 起始值先量一次磁盘上已有的语料：增量构建是在**原有语料**上继续加，只数本轮新增会低估。
      */
     let textBytes = corpus.docs.reduce((sum, doc) => sum + doc.text.length, 0)
+    const senderCache = new Map<string, string | null>()
 
     for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
       const task = tasks[taskIndex]
@@ -1357,6 +1362,18 @@ export class SearchIndexService {
 
         for (const row of rows) {
           scanned += 1
+          if (this.options.source.resolveSenderUsername && !String(row.sender_username ?? row.senderUsername ?? '').trim()) {
+            const senderId = String(row.real_sender_id ?? row.realSenderId ?? '').trim()
+            if (/^[1-9]\d*$/.test(senderId)) {
+              const key = `${task.dbPath}::${senderId}`
+              if (!senderCache.has(key)) {
+                const sender = await this.options.source.resolveSenderUsername(task.dbPath, senderId).catch(() => null)
+                senderCache.set(key, sender)
+              }
+              const sender = senderCache.get(key)
+              if (sender) row.sender_username = sender
+            }
+          }
           const doc = this.decodeRow(row, task, transcripts)
           if (!doc) continue
           const existing = docIndex.get(doc.docKey)

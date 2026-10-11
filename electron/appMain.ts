@@ -2335,6 +2335,7 @@ function getSearchIndexService(): SearchIndexService {
         const result = await wcdbService.getDisplayNames(usernames)
         return result.success ? (result.map || {}) : {}
       },
+      resolveSenderUsername: (path, senderId) => chatService.resolveShardSenderUsername(path, senderId),
     },
     // 复用导出侧解码器：blob 解压 + XML/引用/链接标题 → 正文（不另写一份）
     decodeText: createExportContextDecoder(

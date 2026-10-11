@@ -28,6 +28,7 @@ interface FakeRow {
   is_send: number
   message_content: string
   sender_username: string
+  real_sender_id?: number | string
 }
 
 interface FakeTable {
@@ -176,6 +177,39 @@ function shardFiles(): string[] {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'weport-search-index-'))
   buildSyntheticCorpus()
+})
+
+describe('native shard sender identity', () => {
+  it('resolves numeric sender IDs against their own shard and supports sender scope', async () => {
+    tables = [
+      { dbFile: 'message_0.db', table: tableNameFor('wxid_alice'), rows: [{ ...row(1, 'sender fixture incoming', ''), real_sender_id: 1 }] },
+      { dbFile: 'message_1.db', table: tableNameFor('wxid_group'), rows: [{ ...row(1, 'sender fixture outgoing', ''), real_sender_id: 1 }] },
+    ]
+    const source = {
+      ...createSource(),
+      resolveSenderUsername: async (path: string, _id: string) => path.endsWith('message_0.db') ? 'wxid_alice' : 'wxid_test',
+    }
+    const service = createService({ source })
+    await service.build({ force: true })
+    const alice = await service.query({ text: 'sender fixture', scope: { senders: ['wxid_alice'] } })
+    const self = await service.query({ text: 'sender fixture', scope: { senders: ['wxid_test'] } })
+    expect(alice.hits.map(hit => hit.db)).toEqual(['message_0.db'])
+    expect(self.hits.map(hit => hit.db)).toEqual(['message_1.db'])
+  })
+
+  it('resolves repeated shard IDs once per build without replacing an explicit sender', async () => {
+    tables = [{ dbFile: 'message_0.db', table: tableNameFor('wxid_alice'), rows: [
+      { ...row(1, 'sender fixture one', ''), real_sender_id: 1 },
+      { ...row(2, 'sender fixture two', ''), real_sender_id: 1 },
+      { ...row(3, 'sender fixture direct', 'wxid_other'), real_sender_id: 1 },
+    ] }]
+    let calls = 0
+    const service = createService({ source: { ...createSource(), resolveSenderUsername: async () => { calls += 1; return 'wxid_alice' } } })
+    await service.build({ force: true })
+    expect(calls).toBe(1)
+    const direct = await service.query({ text: 'sender fixture', scope: { senders: ['wxid_other'] } })
+    expect(direct.hits).toHaveLength(1)
+  })
 })
 
 afterEach(() => {
@@ -329,7 +363,7 @@ describe('构建与增量', () => {
   it('manifest 记录每张表的 table / maxRowId / indexedAt，分片是压缩文件', async () => {
     await createService().build()
     const manifest = JSON.parse(readFileSync(join(corpusDir(), 'manifest.json'), 'utf8'))
-    expect(manifest.v).toBe(2)
+    expect(manifest.v).toBe(3)
     expect(manifest.wxid).toBe('wxid_test')
     expect(manifest.docs).toBe(4901)
     const entries = Object.values(manifest.perDb) as Array<Record<string, unknown>>
@@ -523,11 +557,11 @@ describe('查询', () => {
     expect(result.hits).toMatchObject([{ localId: serverId, localIdNumber: 0, idKind: 'server' }])
   })
 
-  it('rebuilds a previous index format before serving results', async () => {
+  it.each([1, 2])('rebuilds index format v%s before serving results', async (version) => {
     await createService().build()
     const manifestPath = join(corpusDir(), 'manifest.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    manifest.v = 1
+    manifest.v = version
     writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8')
 
     const service = createService()
