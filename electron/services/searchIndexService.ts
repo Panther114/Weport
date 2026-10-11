@@ -756,7 +756,7 @@ export class SearchIndexService {
   private cancelled = false
   private activeTaskId: string | undefined
 
-  private sessionNameCache: { at: number; map: Map<string, string> } | null = null
+  private sessionNameCache: { at: number; wxid: string; dbPath: string; map: Map<string, string> } | null = null
 
   constructor(options: SearchIndexServiceOptions) {
     this.options = {
@@ -1097,8 +1097,11 @@ export class SearchIndexService {
   }): Promise<SearchIndexBuildResult> {
     if (this.building) throw new Error('索引构建已在进行中')
     const started = Date.now()
-    const wxid = String(options?.wxid || this.options.resolveWxid() || '').trim()
+    const connectedWxid = String(this.options.resolveWxid() || '').trim()
+    const wxid = String(options?.wxid || connectedWxid).trim()
     if (!wxid) throw new Error('未指定账号（wxid），无法建立索引')
+    if (wxid !== connectedWxid) throw new Error('索引账号与当前连接账号不一致')
+    const connectedDbPath = String(this.options.resolveDbPath?.() || '').trim()
     this.building = true
     this.cancelled = false
     this.activeTaskId = options?.taskId
@@ -1111,7 +1114,9 @@ export class SearchIndexService {
         /* 进度回调不该影响构建 */
       }
     }
-    const shouldCancel = (): boolean => this.cancelled || Boolean(options?.shouldCancel?.())
+    const shouldCancel = (): boolean => this.cancelled || Boolean(options?.shouldCancel?.()) ||
+      String(this.options.resolveWxid() || '').trim() !== connectedWxid ||
+      String(this.options.resolveDbPath?.() || '').trim() !== connectedDbPath
 
     try {
       const force = options?.force === true
@@ -1177,6 +1182,7 @@ export class SearchIndexService {
   ): Promise<{ indexed: number; scanned: number; cancelled: boolean; truncated: boolean }> {
     emit({ stage: 'scan', progress: 0.02, message: '正在枚举消息库…', docs: corpus.docs.length })
     await new Promise((resolve) => setImmediate(resolve))
+    if (shouldCancel()) return { indexed: 0, scanned: 0, cancelled: true, truncated: false }
 
     const sessions = await this.options.source.getSessions().catch(() => [] as SearchIndexSessionRow[])
     const lookup = new SessionTableLookup(sessions)
@@ -1185,7 +1191,7 @@ export class SearchIndexService {
       const username = String(session?.username || '').trim()
       if (username) sessionNames.set(username, String(session?.displayName || '').trim())
     }
-    this.sessionNameCache = { at: this.now, map: sessionNames }
+    this.sessionNameCache = { at: this.now, wxid: corpus.wxid, dbPath: String(this.options.resolveDbPath?.() || '').trim(), map: sessionNames }
 
     const allDbs = await this.options.source.listMessageDbs().catch(() => [] as string[])
     const dbPaths = allDbs
@@ -1554,6 +1560,7 @@ export class SearchIndexService {
     if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
 
     emit({ stage: 'commit', progress: 0.99, message: '正在提交索引…', docs: corpus.docs.length })
+    if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
     writeJsonAtomic(join(corpus.corpusDir, MANIFEST_FILE), corpus.manifest, { pretty: false })
 
     const referenced = new Set<string>()
@@ -1713,6 +1720,14 @@ export class SearchIndexService {
    */
   async query(request: SearchQueryRequest): Promise<SearchQueryResult> {
     const startedAt = Date.now()
+    const connectedWxid = String(this.options.resolveWxid() || '').trim()
+    const connectedDbPath = String(this.options.resolveDbPath?.() || '').trim()
+    const accountChanged = (): boolean => String(this.options.resolveWxid() || '').trim() !== connectedWxid ||
+      String(this.options.resolveDbPath?.() || '').trim() !== connectedDbPath
+    const staleResult = (): SearchQueryResult => ({
+      hits: [], total: 0, cursor: null, elapsedMs: Date.now() - startedAt, truncated: false,
+      error: '账号或数据库路径已切换，请重新搜索',
+    })
     const text = String(request?.text || '').trim()
     const limit = Math.max(1, Math.min(200, toInt(request?.limit, 30)))
     const cursor = this.parseCursor(request?.cursor, text)
@@ -1731,6 +1746,7 @@ export class SearchIndexService {
         error: `索引不可用：${String((error as Error)?.message || error)}`,
       }
     }
+    if (accountChanged() || corpus.wxid !== connectedWxid) return staleResult()
     /**
      * 索引层面的问题（坏 manifest / 坏分片）**不走**这里：`ensureLoaded()` 不抛，它把坏档
      * 备份掉、返回空/部分语料，原因记在 `loadError` / `damagedShards`，由 `status().error`
@@ -1809,7 +1825,9 @@ export class SearchIndexService {
     const end = cursor.offset + limit
     const pageItems = ordered.slice(cursor.offset, end)
     const sessionNames = await this.ensureSessionNames()
+    if (accountChanged()) return staleResult()
     const senderNames = await this.resolveSenderNames(pageItems.map((item) => corpus.docs[item.index]))
+    if (accountChanged()) return staleResult()
 
     const hits: SearchHit[] = pageItems.map((item) => {
       const doc = corpus.docs[item.index]
@@ -1852,8 +1870,10 @@ export class SearchIndexService {
 
   /** 会话显示名（60 秒缓存；查询路径上唯一一次额外的会话表读取） */
   private async ensureSessionNames(): Promise<Map<string, string>> {
+    const wxid = String(this.options.resolveWxid() || '').trim()
+    const dbPath = String(this.options.resolveDbPath?.() || '').trim()
     const cached = this.sessionNameCache
-    if (cached && this.now - cached.at <= NAME_CACHE_TTL_MS) return cached.map
+    if (cached && cached.wxid === wxid && cached.dbPath === dbPath && this.now - cached.at <= NAME_CACHE_TTL_MS) return cached.map
     const map = new Map<string, string>()
     try {
       const sessions = await this.options.source.getSessions()
@@ -1866,7 +1886,9 @@ export class SearchIndexService {
     } catch {
       /* 会话名拿不到就回落 username：搜索仍然可用 */
     }
-    this.sessionNameCache = { at: this.now, map }
+    if (String(this.options.resolveWxid() || '').trim() === wxid && String(this.options.resolveDbPath?.() || '').trim() === dbPath) {
+      this.sessionNameCache = { at: this.now, wxid, dbPath, map }
+    }
     return map
   }
 
@@ -1942,10 +1964,13 @@ export class SearchIndexService {
    * 不做"最近搜索"——那属于标注存储（savedSearches）与页面层。
    */
   async suggest(prefix: string, limit = 8): Promise<string[]> {
+    const wxid = String(this.options.resolveWxid() || '').trim()
+    const dbPath = String(this.options.resolveDbPath?.() || '').trim()
     const normalized = String(prefix || '').trim().toLowerCase()
     if (!normalized) return []
     const corpus = await this.ensureLoaded().catch(() => null)
-    if (!corpus) return []
+    if (!corpus || corpus.wxid !== wxid || String(this.options.resolveWxid() || '').trim() !== wxid ||
+      String(this.options.resolveDbPath?.() || '').trim() !== dbPath) return []
     const max = Math.max(1, Math.min(50, limit || 8))
     const out: string[] = []
     for (const word of corpus.manifest.vocab || []) {

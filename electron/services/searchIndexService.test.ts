@@ -212,6 +212,89 @@ describe('native shard sender identity', () => {
   })
 })
 
+describe('index account ownership', () => {
+  it('rejects a force-build target different from the connected account', async () => {
+    const service = createService()
+    await expect(service.build({ force: true, wxid: 'wxid_other' })).rejects.toThrow('账号')
+    expect(existsSync(join(dir, 'wxid_other', 'manifest.json'))).toBe(false)
+  })
+
+  it.each(['account', 'path'])('discards a build when the connected %s changes during a native query', async (change) => {
+    await createService().build()
+    const originalManifest = readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')
+    let account = 'wxid_test'
+    let path = 'original-root'
+    const inner = createSource()
+    const service = createService({
+      resolveWxid: () => account,
+      resolveDbPath: () => path,
+      source: { ...inner, async execQuery(db, sql) {
+        const rows = await inner.execQuery(db, sql)
+        if (/SELECT \*.* FROM/.test(sql)) {
+          if (change === 'account') account = 'wxid_other'
+          else path = 'replacement-root'
+        }
+        return rows
+      } },
+    })
+    const result = await service.build({ force: true })
+    expect(result.cancelled).toBe(true)
+    expect(readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')).toBe(originalManifest)
+  })
+
+  it('honors cancellation raised by the final commit progress callback', async () => {
+    await createService().build()
+    const originalManifest = readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')
+    const service = createService()
+    const result = await service.build({ force: true, onProgress(progress) {
+      if (progress.stage === 'commit') service.requestCancel()
+    } })
+    expect(result.cancelled).toBe(true)
+    expect(readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')).toBe(originalManifest)
+  })
+
+  it('discards query results if the account changes while resolving sender names', async () => {
+    let account = 'wxid_test'
+    const inner = createSource()
+    const service = createService({ resolveWxid: () => account, source: {
+      ...inner, async getDisplayNames(usernames) {
+        const names = await inner.getDisplayNames!(usernames)
+        account = 'wxid_other'
+        return names
+      },
+    } })
+    await service.build()
+    const result = await service.query({ text: '项目复盘会议' })
+    expect(result.hits).toEqual([])
+    expect(result.error).toContain('账号')
+  })
+
+  it('does not reuse another account\'s cached session names', async () => {
+    const inner = createSource()
+    const source = (name: string): SearchIndexDocSource => ({ ...inner, async getSessions() {
+      return [{ username: 'wxid_alice', displayName: name }, { username: 'wxid_group', displayName: '项目群' }]
+    } })
+    await createService({ resolveWxid: () => 'wxid_other', source: source('Account B name') }).build()
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account, source: {
+      ...inner, async getSessions() { return source(account === 'wxid_test' ? 'Account A name' : 'Account B name').getSessions() },
+    } })
+    await service.build()
+    expect((await service.query({ text: '项目复盘会议', scope: { sessionIds: ['wxid_alice'] } })).hits[0].sessionName).toBe('Account A name')
+    account = 'wxid_other'
+    expect((await service.query({ text: '项目复盘会议', scope: { sessionIds: ['wxid_alice'] } })).hits[0].sessionName).toBe('Account B name')
+  })
+
+  it('discards suggestions when the account changes while loading its corpus', async () => {
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account })
+    await service.build()
+    const pending = service.suggest('项目', 10)
+    account = 'wxid_other'
+    expect(await pending).toEqual([])
+  })
+})
+
 afterEach(() => {
   try {
     rmSync(dir, { recursive: true, force: true })
@@ -297,7 +380,7 @@ describe('构建与增量', () => {
     const flakySource: SearchIndexDocSource = {
       ...inner,
       async execQuery(dbPath: string, sql: string) {
-        if (/SELECT \* FROM/.test(sql)) {
+        if (/SELECT \*.* FROM/.test(sql)) {
           selects += 1
           if (selects > 1) throw new Error('模拟：这一批读失败了')
         }
