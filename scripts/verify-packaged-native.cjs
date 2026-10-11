@@ -210,6 +210,17 @@ function resolveLayout(releaseDir) {
   return { platform, expectedArch, appOutDir, appExe, appContents, appResources, payloadRoot, wcdbDir, wcdbDll }
 }
 
+function removeTemporaryHostLink(filePath, unlink = fs.unlinkSync, wait = milliseconds => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)) {
+  // Windows may retain the exited image mapping briefly. Keep cleanup mandatory,
+  // but allow a bounded grace period for that mapping (or an antivirus scan).
+  for (let attempt = 0; ; attempt++) {
+    try { unlink(filePath); return } catch (error) {
+      if (!['EBUSY', 'EPERM'].includes(error.code) || attempt >= 19) throw error
+      wait(100)
+    }
+  }
+}
+
 function createHostExecutable(layout, tempRoot) {
   const hostName = layout.platform === 'win32' ? 'WeFlow.exe' : 'WeFlow'
   if (layout.platform === 'win32') {
@@ -221,7 +232,7 @@ function createHostExecutable(layout, tempRoot) {
       fs.copyFileSync(layout.appExe, hostExe)
       fs.chmodSync(hostExe, 0o755)
     }
-    return { hostExe, cleanup: () => fs.unlinkSync(hostExe) }
+    return { hostExe, cleanup: () => removeTemporaryHostLink(hostExe) }
   }
 
   if (layout.platform === 'darwin') {
@@ -406,6 +417,7 @@ module.exports = {
   elfArchitecture,
   machOArchitectures,
   createHostExecutable,
+  removeTemporaryHostLink,
   resolveLayout,
   smokeSource,
 }

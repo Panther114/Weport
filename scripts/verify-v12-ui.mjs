@@ -171,15 +171,17 @@ try {
     ipcMain.removeHandler('export:exportSessions')
     ipcMain.handle('export:exportSessions', () => ({ success: true, successCount: 1, formatFolder: 'TXT' }))
     ipcMain.removeHandler('export:integrityReport')
-    ipcMain.handle('export:integrityReport', () => ({ success: true, path: 'D:/demo/integrity-report.json', report: {
-      ok: true, totals: { sessions: 1, messages: 2, mismatches: 0, missingMedia: 0, duplicates: 0, sourceIdCollisions: 1 }, notes: [],
-    } }))
+    globalThis.__weportNormalExportDiagnosticCalls = 0
+    ipcMain.handle('export:integrityReport', () => {
+      globalThis.__weportNormalExportDiagnosticCalls++
+      throw new Error('Normal exports must not request deep diagnostics')
+    })
   })
   await page.getByRole('button', { name: /^导出已选（1）$/ }).click()
-  await page.getByText('导出数据自检通过', { exact: true }).waitFor()
-  await page.getByText(/源 server_id 冲突 1 组/).waitFor()
-  if (await page.getByText('导出数据自检未通过', { exact: true }).count()) throw new Error('Source ID collisions must not be export failures')
-  await capture('export-source-collision-info')
+  await page.getByText('导出完成', { exact: true }).waitFor()
+  if (await app.evaluate(() => globalThis.__weportNormalExportDiagnosticCalls)) throw new Error('Normal export unexpectedly requested diagnostics')
+  if (await page.getByText(/导出数据自检(未)?通过/).count()) throw new Error('Normal export displayed a diagnostic card')
+  await capture('normal-export-complete')
   await tab('搜索')
   await page.locator('input').filter({ visible: true }).first().fill('公园')
   await page.waitForTimeout(800)
