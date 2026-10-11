@@ -28,11 +28,15 @@
 
 ## Linux Packaging (v0.9.10)
 
-- `npm run build:linux` → AppImage + tar.gz x64 (`build.linux` in
+- `npm run build:linux` → DEB + AppImage + tar.gz x64 (`build.linux` in
   package.json; artifactName `Weport-${version}-${arch}.${ext}` — do NOT let
   it inherit the top-level `-Setup.` name). CI: `release.yml` `build-linux`
   job on ubuntu-latest; must `chmod +x resources/key/linux/x64/xkey_helper_linux`
   before packaging (Git-on-Windows loses the exec bit).
+- Ubuntu/Debian DEB dependencies include ffmpeg for WXGF HEVC image conversion.
+  Keep electron-builder's default desktop dependencies when overriding `deb.depends`.
+  Archive/AppImage users install ffmpeg separately; without a working converter,
+  only a decryptable thumbnail of the same image may be substituted.
 - Native artifacts ship from `resources/{wcdb,key,wedecrypt}/linux/x64/`
   via per-platform `extraResources`. `welive` is NOT shipped on Linux
   (no runtime consumer). koffi's platform binary comes from the optional dep

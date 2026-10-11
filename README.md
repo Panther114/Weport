@@ -266,7 +266,7 @@ macOS 15+ 还会要求一次「系统设置 → 隐私与安全性 → 仍要打
 
 > Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 自动更新采用手动下载新版本；Ubuntu/Debian 推荐安装 `.deb`，安装时会配置 Chromium 沙箱辅助程序，不需要关闭沙箱或修改系统安全策略。
 
-Ubuntu/Debian 安装：`sudo apt install ./Weport-1.2.1-amd64.deb`，然后从应用菜单启动 Weport。`.AppImage` 为便携兼容包，其运行时会关闭 Chromium 沙箱；`.tar.gz` 不会自动配置系统沙箱辅助程序，在限制用户命名空间的系统上可能无法直接启动。不要通过关闭系统安全策略解决启动问题。
+Ubuntu/Debian 安装：`sudo apt install ./Weport-1.2.1-amd64.deb`，然后从应用菜单启动 Weport；依赖会自动安装 ffmpeg，用于 WXGF 图片转换。便携包需自行安装 ffmpeg，无可用转换器时仅能使用同图缩略图。`.AppImage` 为便携兼容包，其运行时会关闭 Chromium 沙箱；`.tar.gz` 不会自动配置系统沙箱辅助程序，在限制用户命名空间的系统上可能无法直接启动。不要通过关闭系统安全策略解决启动问题。
 
 Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share/xwechat_files` 和 Flatpak 数据目录。若密钥提取失败，请检查 `libcrypto.so.3`、`libcurl.so.4`、helper 可执行权限及 `/proc/sys/kernel/yama/ptrace_scope`；Weport 只报告限制，不会自动降低系统安全策略。AppImage 无法启动时可安装发行版的 FUSE 2 兼容包，或使用 `.tar.gz` 安装包。
 
