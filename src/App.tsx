@@ -1462,7 +1462,7 @@ export default function App() {
       const result = await api.export.exportSessions(exportPath.trim(), options)
       await refreshExportLog(exportPath.trim())
       // 读回自检结果；源 ID 冲突与实际导出缺陷分别呈现。
-      void refreshExportIntegrity(exportPath.trim())
+      if (!result.stopped) void refreshExportIntegrity(exportPath.trim())
       // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
       const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
@@ -1471,7 +1471,10 @@ export default function App() {
       const voiceWarning = voiceFailed > 0 ? ` · ${voiceFailed} 条语音未能导出（微信里没有完整语音文件，先在微信里播放一次再导）` : ''
       const emptySkipped = Array.isArray(result.emptySkippedSessionIds) ? result.emptySkippedSessionIds.length : 0
       const emptyNote = emptySkipped > 0 ? `（已跳过 ${emptySkipped} 个确认无消息的会话）` : ''
-      if (result.success) {
+      if (result.stopped) {
+        pushToast(result.success ? 'info' : 'err', '导出已取消',
+          result.error || '本次导出已停止，未完成的会话可以重新导出', 7000)
+      } else if (result.success) {
         pushToast('ok', '导出完成', `完成 ${result.successCount ?? 0} 个会话${emptyNote} → ${result.formatFolder}/${imageKeyWarning}${voiceWarning}`, (imageKeyMissing > 0 || voiceFailed > 0) ? 12000 : 7000)
         // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
         // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
