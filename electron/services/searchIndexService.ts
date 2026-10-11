@@ -1129,6 +1129,13 @@ export class SearchIndexService {
         if (corpus.wxid !== wxid) throw new Error(`索引账号不一致：${corpus.wxid} ≠ ${wxid}`)
       }
 
+      // Forced rebuilds and format migrations must never overwrite shards
+      // referenced by the last committed manifest before their own commit.
+      const previous = readJsonTolerant<Manifest>(join(corpus.corpusDir, MANIFEST_FILE), { backupOnCorrupt: false }).value
+      if (previous?.wxid === wxid && Number.isSafeInteger(previous.generation) && previous.generation >= 0) {
+        corpus.manifest.generation = Math.max(corpus.manifest.generation, previous.generation)
+      }
+
       const outcome = await this.buildOnce(corpus, emit, shouldCancel)
       const docs = corpus.docs.length
       corpus.manifest.docs = docs
@@ -1730,7 +1737,6 @@ export class SearchIndexService {
     })
     const text = String(request?.text || '').trim()
     const limit = Math.max(1, Math.min(200, toInt(request?.limit, 30)))
-    const cursor = this.parseCursor(request?.cursor, text)
     if (!text) return { hits: [], total: 0, cursor: null, elapsedMs: 0, truncated: false }
 
     let corpus: Corpus
@@ -1747,6 +1753,8 @@ export class SearchIndexService {
       }
     }
     if (accountChanged() || corpus.wxid !== connectedWxid) return staleResult()
+    const fingerprint = this.queryHash(request, corpus)
+    const cursor = this.parseCursor(request?.cursor, fingerprint)
     /**
      * 索引层面的问题（坏 manifest / 坏分片）**不走**这里：`ensureLoaded()` 不抛，它把坏档
      * 备份掉、返回空/部分语料，原因记在 `loadError` / `damagedShards`，由 `status().error`
@@ -1861,7 +1869,7 @@ export class SearchIndexService {
     return {
       hits,
       total,
-      cursor: nextOffset < ordered.length ? this.encodeCursor(text, nextOffset) : null,
+      cursor: nextOffset < ordered.length ? this.encodeCursor(fingerprint, nextOffset) : null,
       elapsedMs: Date.now() - startedAt,
       truncated,
       error: cursor.invalid ? '游标与本次查询不匹配，已从第一页返回' : undefined,
@@ -1929,7 +1937,7 @@ export class SearchIndexService {
       .slice(0, 8)
   }
 
-  private parseCursor(cursor: string | number | null | undefined, text: string): { offset: number; invalid: boolean } {
+  private parseCursor(cursor: string | number | null | undefined, fingerprint: string): { offset: number; invalid: boolean } {
     if (cursor === undefined || cursor === null) return { offset: 0, invalid: false }
     const raw = String(cursor).trim()
     if (!raw) return { offset: 0, invalid: false }
@@ -1937,26 +1945,28 @@ export class SearchIndexService {
     if (/^\d+$/.test(raw)) return { offset: Number(raw), invalid: false }
     try {
       const decoded = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as { v?: number; o?: number; q?: string }
-      if (toInt(decoded?.v, 0) !== 1) return { offset: 0, invalid: true }
-      if (String(decoded?.q || '') !== this.queryHash(text)) return { offset: 0, invalid: true }
+      if (toInt(decoded?.v, 0) !== 2) return { offset: 0, invalid: true }
+      if (String(decoded?.q || '') !== fingerprint) return { offset: 0, invalid: true }
       return { offset: Math.max(0, toInt(decoded?.o, 0)), invalid: false }
     } catch {
       return { offset: 0, invalid: true }
     }
   }
 
-  private encodeCursor(text: string, offset: number): string {
-    return Buffer.from(JSON.stringify({ v: 1, q: this.queryHash(text), o: offset }), 'utf8').toString('base64url')
+  private encodeCursor(fingerprint: string, offset: number): string {
+    return Buffer.from(JSON.stringify({ v: 2, q: fingerprint, o: offset }), 'utf8').toString('base64url')
   }
 
-  private queryHash(text: string): string {
-    let hash = 2166136261
-    const normalized = text.trim().toLowerCase()
-    for (let i = 0; i < normalized.length; i += 1) {
-      hash ^= normalized.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return (hash >>> 0).toString(16)
+  private queryHash(request: SearchQueryRequest, corpus: Corpus): string {
+    const scope = request.scope || {}
+    const set = (values?: string[]): string[] => [...new Set((values || []).map(String))].sort()
+    return createHash('sha256').update(JSON.stringify({
+      text: String(request.text || '').trim().toLowerCase().replace(/\s+/g, ' '),
+      sessions: set(scope.sessionIds), senders: set(scope.senders), kinds: set(scope.kinds),
+      from: Math.max(0, toSecondBound(scope.from)), to: Math.max(0, toSecondBound(scope.to)),
+      wxid: corpus.wxid, generation: corpus.manifest.generation, builtAt: corpus.manifest.builtAt,
+      source: corpus.manifest.sourceSignature,
+    })).digest('hex')
   }
 
   /**

@@ -403,6 +403,38 @@ describe('构建与增量', () => {
     expect(rebuilt.indexed).toBe(4901)
   })
 
+  it('keeps every committed shard intact when a forced rebuild is cancelled after writing', async () => {
+    await createService().build()
+    const original = new Map(shardFiles().map(name => [name, readFileSync(join(corpusDir(), 'shards', name))]))
+    for (const table of tables) for (const item of table.rows) item.message_content = `replacement payload ${item.local_id}`
+    const service = createService()
+    const result = await service.build({ force: true, onProgress(progress) {
+      if (progress.stage === 'write') service.requestCancel()
+    } })
+    expect(result.cancelled).toBe(true)
+    for (const [name, bytes] of original) expect(readFileSync(join(corpusDir(), 'shards', name)).equals(bytes)).toBe(true)
+    expect((await createService().query({ text: '项目复盘会议' })).hits.length).toBeGreaterThan(0)
+    expect((await createService().query({ text: 'replacement payload' })).hits).toEqual([])
+  })
+
+  it.each([1, 2])('preserves committed shard bytes during cancelled format v%s migration', async (version) => {
+    await createService().build()
+    const manifestPath = join(corpusDir(), 'manifest.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.v = version
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const originalManifest = readFileSync(manifestPath, 'utf8')
+    const original = new Map(shardFiles().map(name => [name, readFileSync(join(corpusDir(), 'shards', name))]))
+    for (const table of tables) for (const item of table.rows) item.message_content = `migration replacement ${item.local_id}`
+    const service = createService()
+    const result = await service.build({ onProgress(progress) {
+      if (progress.stage === 'write') service.requestCancel()
+    } })
+    expect(result.cancelled).toBe(true)
+    expect(readFileSync(manifestPath, 'utf8')).toBe(originalManifest)
+    for (const [name, bytes] of original) expect(readFileSync(join(corpusDir(), 'shards', name)).equals(bytes)).toBe(true)
+  })
+
   /**
    * 字节闸：`maxDocs` 之外还要有"总文本字节"上限。
    *
@@ -609,6 +641,67 @@ describe('查询', () => {
     const invalid = await service.query({ text: '会议', limit: 5, cursor: 'not-a-cursor' })
     expect(invalid.hits.length).toBe(5)
     expect(invalid.error).toContain('游标')
+  })
+
+  it.each([
+    { sessionIds: ['wxid_alice'] },
+    { senders: ['wxid_alice'] },
+    { kinds: ['text' as const] },
+    { from: 1_700_001_000 },
+  ])('restarts pagination when filters change to %j', async (scope) => {
+    const service = createService()
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    const fresh = await service.query({ text: '会议', scope, limit: 2 })
+    const changed = await service.query({ text: '会议', scope, limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual(fresh.hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('restarts pagination after the corpus is rebuilt', async () => {
+    const service = createService()
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    tables[0].rows.push(row(3101, '会议 newest fixture', 'wxid_alice'))
+    await service.build()
+    const fresh = await service.query({ text: '会议', limit: 2 })
+    const changed = await service.query({ text: '会议', limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual(fresh.hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('restarts pagination after a forced rebuild with the same row count and build timestamp', async () => {
+    const service = createService()
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    tables[0].rows[0].message_content = '会议 replacement fixture'
+    await service.build({ force: true })
+    const changed = await service.query({ text: '会议', limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual((await service.query({ text: '会议', limit: 2 })).hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('restarts pagination when a cursor belongs to another account', async () => {
+    await createService({ resolveWxid: () => 'wxid_other' }).build()
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account })
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    account = 'wxid_other'
+    const changed = await service.query({ text: '会议', limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual((await service.query({ text: '会议', limit: 2 })).hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('accepts equivalent set filters and seconds/milliseconds on subsequent pages', async () => {
+    const service = createService()
+    await service.build()
+    const firstScope = { sessionIds: ['wxid_group', 'wxid_alice', 'wxid_alice'], from: 1_700_000_000_000 }
+    const nextScope = { sessionIds: ['wxid_alice', 'wxid_group'], from: 1_700_000_000 }
+    const first = await service.query({ text: '会议', scope: firstScope, limit: 2 })
+    const next = await service.query({ text: '会议', scope: nextScope, limit: 2, cursor: first.cursor })
+    expect(next.error).toBeUndefined()
+    expect(next.hits).toEqual((await service.query({ text: '会议', scope: nextScope, limit: 10 })).hits.slice(2, 4))
   })
 
   it('会话名与发送者名来自会话表（不是裸 username）', async () => {
