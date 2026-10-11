@@ -158,7 +158,6 @@ class ExportTaskControlService {
     }
 
     if (errors.length === 0) {
-      this.releaseTask(normalizedTaskId)
       return { success: true, filesDeleted, dirsDeleted }
     }
 

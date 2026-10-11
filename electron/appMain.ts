@@ -3116,10 +3116,13 @@ export function registerIpcHandlers() {
         appPath: app.getAppPath(),
         isPackaged: app.isPackaged,
       })
-      const result = await exportService.exportSessions(sessionIds, outDir, exportOptions, progressEmitter, control)
+      let result = await exportService.exportSessions(sessionIds, outDir, exportOptions, progressEmitter, control)
+      const cancelled = result.stopped === true || exportTaskControlService.getState(taskId) === 'cancel_requested'
       // 用户取消：清掉本次运行已写出的部分文件/目录，避免残留半截导出
-      if (exportTaskControlService.getState(taskId) === 'cancel_requested') {
+      if (cancelled) {
         const cleanup = await exportTaskControlService.cleanupTask(taskId)
+        result = { ...result, stopped: true, success: cleanup.success,
+          ...(cleanup.success ? {} : { error: `导出已停止，但清理已导出文件失败：${cleanup.error || '未知错误'}` }) }
         if (!cleanup.success) {
           console.warn('[Export] 取消后的清理未完全成功:', cleanup.error)
         }
@@ -3131,7 +3134,6 @@ export function registerIpcHandlers() {
       }
       // 终态显式落下：取消 / 失败 / 完成三种收尾在界面上完全不一样，
       // 靠"进度到 100"推断会把一次取消显示成成功。
-      const cancelled = exportTaskControlService.getState(taskId) === 'cancel_requested'
       const emptySkippedCount = result.emptySkippedSessionIds?.length || 0
       taskStatusService.end(
         TASK_KEY.export,
