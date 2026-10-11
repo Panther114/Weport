@@ -412,6 +412,19 @@ try {
     await page.locator('.bg-task').filter({ hasText: label }).waitFor()
     await tab('诊断')
     await page.locator('.bg-task').filter({ hasText: label }).waitFor()
+    if (key === 'search.index') {
+      await app.evaluate(({ ipcMain }) => {
+        globalThis.__weportIndexCancelCalls = 0
+        ipcMain.removeHandler('search:cancelIndex')
+        ipcMain.handle('search:cancelIndex', () => {
+          globalThis.__weportIndexCancelCalls += 1
+          return { success: true }
+        })
+      })
+      await page.locator('.bg-task').filter({ hasText: label }).locator('.bg-task-cancel').click()
+      await page.waitForTimeout(100)
+      if (await app.evaluate(() => globalThis.__weportIndexCancelCalls) !== 1) throw new Error('Background index Cancel must reach the native cancellation IPC')
+    }
     await app.evaluate(({ BrowserWindow }, key) => {
       const win = BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('index.html'))
       win.webContents.send('task:statusChanged', { [key]: { status: 'done', progress: 100, message: '演示任务完成', logs: [], startedAt: Date.now(), finishedAt: Date.now() } })

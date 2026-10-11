@@ -431,6 +431,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   search: {
     indexStatus: () => ipcRenderer.invoke('search:indexStatus'),
     buildIndex: (options?: { force?: boolean; wxid?: string }) => ipcRenderer.invoke('search:buildIndex', options),
+    cancelIndex: () => ipcRenderer.invoke('search:cancelIndex'),
     query: (request: {
       text: string;
       scope?: { sessionIds?: string[]; senders?: string[]; from?: number; to?: number; kinds?: string[] };

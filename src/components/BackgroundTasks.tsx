@@ -52,7 +52,7 @@ const ROWS: TaskRow[] = [
   { key: LIVE_TASK.export, label: '导出聊天记录', icon: Download, tab: 'export', cancellable: true },
   { key: LIVE_TASK.wecloneGenerate, label: '生成 WeClone', icon: Fingerprint, tab: 'weclone', cancellable: true },
   { key: LIVE_TASK.backup, label: '数据备份', icon: DatabaseBackup, tab: 'settings', cancellable: false, indeterminate: true },
-  { key: LIVE_TASK.searchIndex, label: '建立搜索索引', icon: Search, tab: 'search', cancellable: false },
+  { key: LIVE_TASK.searchIndex, label: '建立搜索索引', icon: Search, tab: 'search', cancellable: true },
   { key: LIVE_TASK.databaseMaintenance, label: '数据库维护', icon: DatabaseBackup, tab: 'diagnostics', cancellable: false, indeterminate: true },
 ]
 

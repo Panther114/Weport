@@ -74,6 +74,7 @@ import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import BackgroundTasks from './components/BackgroundTasks'
+import { WEPORT_CANCEL_INDEX_EVENT } from './components/search/IndexState'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
 import { summarizeNotifyScope } from './utils/notifyScope'
@@ -1381,9 +1382,20 @@ export default function App() {
       if (key === LIVE_TASK.wecloneGenerate) {
         void api.weclone.cancel()
       }
+      if (key === LIVE_TASK.searchIndex) {
+        void api.search.cancelIndex().catch((error: unknown) => {
+          pushToast('err', '取消索引失败', error instanceof Error ? error.message : String(error))
+        })
+      }
     },
-    [api]
+    [api, pushToast]
   )
+
+  useEffect(() => {
+    const cancelIndex = () => handleCancelTask(LIVE_TASK.searchIndex)
+    window.addEventListener(WEPORT_CANCEL_INDEX_EVENT, cancelIndex)
+    return () => window.removeEventListener(WEPORT_CANCEL_INDEX_EVENT, cancelIndex)
+  }, [handleCancelTask])
 
   async function runExport() {    if (!dbPath.trim()) {
       pushToast('err', '请选择微信数据目录')

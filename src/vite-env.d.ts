@@ -821,6 +821,7 @@ interface ElectronApi {
   search: {
     indexStatus: () => Promise<SearchIndexStatus>
     buildIndex: (payload?: { force?: boolean; wxid?: string }) => Promise<{ taskId: string }>
+    cancelIndex: () => Promise<{ success: boolean }>
     query: (payload: SearchQueryRequest) => Promise<SearchResultPage>
     suggest: (payload: { prefix: string; limit?: number }) => Promise<{ suggestions: string[] }>
   }

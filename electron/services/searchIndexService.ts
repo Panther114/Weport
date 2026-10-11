@@ -802,6 +802,12 @@ export class SearchIndexService {
   // 状态
   // -------------------------------------------------------------------------
 
+  /** UI readiness must include the persisted corpus, even before the first query. */
+  async loadStatus(): Promise<SearchIndexStatus> {
+    await this.ensureLoaded()
+    return this.status()
+  }
+
   status(): SearchIndexStatus {
     const wxid = String(this.options.resolveWxid() || '').trim()
     const corpus = this.corpus && this.corpus.wxid === wxid ? this.corpus : null

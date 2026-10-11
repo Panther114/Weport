@@ -179,6 +179,39 @@ beforeEach(() => {
   buildSyntheticCorpus()
 })
 
+describe('persisted index status after restart', () => {
+  it('reports an existing index ready before any query without rebuilding source data', async () => {
+    await createService().build({ force: true })
+    const restarted = createService({ source: {
+      ...createSource(),
+      listMessageDbs: async () => { throw new Error('status must not rebuild the source') },
+    } })
+    const status = await restarted.loadStatus()
+    expect(status.ready).toBe(true)
+    expect(status.docs).toBeGreaterThan(0)
+    expect(status.building).toBe(false)
+    expect((await restarted.query({ text: '项目' })).hits.length).toBeGreaterThan(0)
+  })
+
+  it('keeps an account without an index empty after switching from an indexed account', async () => {
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account })
+    await service.build({ force: true })
+    account = 'wxid_other_account'
+    const status = await service.loadStatus()
+    expect(status.ready).toBe(false)
+    expect(status.docs).toBe(0)
+  })
+
+  it('reports corrupt persisted indexes instead of advertising them as ready', async () => {
+    await createService().build({ force: true })
+    writeFileSync(join(corpusDir(), 'manifest.json'), '{broken')
+    const status = await createService().loadStatus()
+    expect(status.ready).toBe(false)
+    expect(status.error).toBeTruthy()
+  })
+})
+
 describe('native shard sender identity', () => {
   it('resolves numeric sender IDs against their own shard and supports sender scope', async () => {
     tables = [

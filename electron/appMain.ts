@@ -3925,7 +3925,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // 进度两条腿：taskStatusService 存快照（窗口重建后还能拿回来），
   // `search:indexProgress` 推增量事件（界面实时刷新）。
   // ---------------------------------------------------------------------------
-  ipcMain.handle('search:indexStatus', () => getSearchIndexService().status())
+  ipcMain.handle('search:indexStatus', () => getSearchIndexService().loadStatus())
   ipcMain.handle('search:buildIndex', (_event, payload?: { force?: boolean; wxid?: string }) => {
     const service = getSearchIndexService()
     // 重复点击不产生第二个构建：返回同一个 taskId，界面继续跟原来那条进度
