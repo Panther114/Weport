@@ -4,7 +4,8 @@
 // session rejection and browser Origin policy. Does not prove real history reads.
 import { createRequire } from "node:module";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
@@ -14,6 +15,7 @@ const require = createRequire(join(root, "package.json"));
 const { resolveLayout } = require(
   join(root, "scripts/verify-packaged-native.cjs"),
 );
+const layout = resolveLayout(join(root, "release"));
 const out = resolve(process.argv[2] || ".ui-probe/mcp-http");
 mkdirSync(out, { recursive: true });
 const { _electron } = require("playwright-core");
@@ -58,7 +60,7 @@ const check = (name, ok, detail) => {
 };
 try {
   app = await _electron.launch({
-    executablePath: resolveLayout(join(root, "release")).appExe,
+    executablePath: layout.appExe,
     args: ["--background", `--user-data-dir=${profile}`],
     env: {
       ...process.env,
@@ -90,7 +92,11 @@ try {
   });
   const page = await app.firstWindow();
   await page.locator(".rail-item").first().waitFor({ timeout: 30000 });
-  await page.waitForFunction(async () => (await window.electronAPI.mcp.getStatus()).running, null, { timeout: 30000 });
+  await page.waitForFunction(
+    async () => (await window.electronAPI.mcp.getStatus()).running,
+    null,
+    { timeout: 30000 },
+  );
   const state = await page.evaluate(() => window.electronAPI.mcp.getStatus());
   check("isolated MCP starts", state.running && state.port === port, {
     running: state.running,
@@ -247,6 +253,49 @@ try {
     "HTTP API health after malformed request",
     health.status === 200 && healthBody.success && healthBody.running,
   );
+  // Exercise renderer -> main -> WCDB subprocess using only an invalid fixture.
+  const fixture = join(profile, "native-fixture");
+  const storage = join(fixture, "qa_account", "db_storage", "session");
+  mkdirSync(storage, { recursive: true });
+  writeFileSync(join(storage, "session.db"), Buffer.alloc(4096));
+  const native = await page.evaluate(async (fixture) => {
+    const api = window.electronAPI;
+    const connection = await api.wcdb.testConnection(
+      fixture,
+      "00".repeat(32),
+      "qa_account",
+    );
+    const diagnostic = await api.diagnostics.collect({ full: false });
+    return {
+      connection,
+      checks: diagnostic.checks.filter((c) => c.id.startsWith("engine.")),
+    };
+  }, fixture);
+  const host = native.checks.find((c) => c.id === "engine.host");
+  const init = native.checks.find((c) => c.id === "engine.init");
+  const dll = native.checks.find((c) => c.id === "engine.dll");
+  check(
+    "real app WCDB IPC initializes and rejects invalid fixture",
+    native.connection.success === false &&
+      typeof native.connection.error === "string" &&
+      host?.raw?.includes("ready=true") &&
+      init?.state === "ok" &&
+      dll?.state === "ok",
+    {
+      rejected: native.connection.success === false,
+      host: host?.state,
+      init: init?.state,
+      dll: dll?.state,
+    },
+  );
+  if (process.platform === "darwin") {
+    execFileSync(
+      "codesign",
+      ["--verify", "--deep", "--strict", dirname(layout.appContents)],
+      { stdio: "pipe" },
+    );
+    check("macOS bundle seal survives runtime host deployment", true);
+  }
   console.log(JSON.stringify(result));
   if (result.cases.some((c) => !c.ok))
     throw new Error("Packaged MCP checks failed");
