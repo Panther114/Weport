@@ -51,7 +51,13 @@ class HttpService {
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
+    let url: URL
+    try {
+      url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
+    } catch {
+      this.sendJson(res, 400, { success: false, error: '无效的请求 URL' })
+      return
+    }
     const path = url.pathname.replace(/^\/api/, '') || '/'
 
     if (!this.checkAuth(req)) {

@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
+import http from "node:http";
 const root = resolve(process.cwd());
 const require = createRequire(join(root, "package.json"));
 const { resolveLayout } = require(
@@ -25,6 +26,10 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const port = server.address().port;
 await new Promise((r) => server.close(r));
 const token = randomBytes(32).toString("hex");
+const apiReservation = net.createServer();
+await new Promise((r) => apiReservation.listen(0, "127.0.0.1", r));
+const apiPort = apiReservation.address().port;
+await new Promise((r) => apiReservation.close(r));
 const profile = mkdtempSync(join(tmpdir(), "weport-mcp-qa-"));
 writeFileSync(
   profile + "/Weport-config.json",
@@ -33,7 +38,10 @@ writeFileSync(
     mcpHost: "127.0.0.1",
     mcpPort: port,
     mcpToken: token,
-    httpApiEnabled: false,
+    httpApiEnabled: true,
+    httpApiHost: "127.0.0.1",
+    httpApiPort: apiPort,
+    httpApiToken: token,
     dbPath: "",
     myWxid: "",
     messagePushEnabled: false,
@@ -46,7 +54,7 @@ const clients = [];
 let app;
 const check = (name, ok, detail) => {
   result.cases.push({ name, ok, detail });
-  if (!ok) throw new Error(name + " failed");
+  if (!ok) throw new Error(name + " failed: " + JSON.stringify(detail));
 };
 try {
   app = await _electron.launch({
@@ -59,14 +67,30 @@ try {
     },
     timeout: 60000,
   });
-  await app.evaluate(async ({ app }) => {
+  await app.evaluate(async ({ app, BrowserWindow }) => {
     await app.whenReady();
     while (!app.listenerCount("activate"))
       await new Promise((r) => setTimeout(r, 25));
+    const proto = BrowserWindow.prototype;
+    const inactive = proto.showInactive,
+      position = proto.setPosition,
+      hide = proto.hide;
+    const present = function () {
+      if (process.platform === "darwin") return hide.call(this);
+      position.call(this, -4000, 0);
+      return inactive.call(this);
+    };
+    proto.show = present;
+    proto.showInactive = present;
+    proto.maximize = function () {
+      position.call(this, -4000, 0);
+    };
+    proto.focus = function () {};
     app.emit("activate");
   });
   const page = await app.firstWindow();
   await page.locator(".rail-item").first().waitFor({ timeout: 30000 });
+  await page.waitForFunction(async () => (await window.electronAPI.mcp.getStatus()).running, null, { timeout: 30000 });
   const state = await page.evaluate(() => window.electronAPI.mcp.getStatus());
   check("isolated MCP starts", state.running && state.port === port, {
     running: state.running,
@@ -129,12 +153,17 @@ try {
   const remaining = await clients[1].listTools();
   check("second session survives first close", remaining.tools.length > 0);
   const windows = await app.evaluate(({ BrowserWindow }) => ({
-    positions: BrowserWindow.getAllWindows().map((w) => w.getPosition()),
+    windows: BrowserWindow.getAllWindows().map((w) => ({
+      position: w.getPosition(),
+      visible: w.isVisible(),
+    })),
     focused: !!BrowserWindow.getFocusedWindow(),
   }));
   check(
     "offscreen and unfocused",
-    !windows.focused && windows.positions.every((p) => p[0] < -3000),
+    !windows.focused &&
+      windows.windows.every((w) => !w.visible || w.position[0] < -3000),
+    windows,
   );
   for (const method of ["POST", "GET", "DELETE"]) {
     const response = await fetch(url, {
@@ -177,6 +206,47 @@ try {
     ok: foreign.status === 403,
     detail: { status: foreign.status },
   });
+  for (const endpointPort of [port, apiPort]) {
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: endpointPort,
+          path: "http://[",
+          headers: { Authorization: "Bearer " + token },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.setTimeout(10000, () =>
+        req.destroy(new Error("Malformed URL request hung")),
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    check(
+      endpointPort === port ? "MCP malformed URL" : "HTTP API malformed URL",
+      status === 400,
+      { status },
+    );
+  }
+  const healthUrl = `http://127.0.0.1:${apiPort}/api/health`;
+  const denied = await fetch(healthUrl, { signal: AbortSignal.timeout(10000) });
+  await denied.text();
+  check("HTTP API authentication", denied.status === 401, {
+    status: denied.status,
+  });
+  const health = await fetch(healthUrl, {
+    headers: { Authorization: "Bearer " + token },
+    signal: AbortSignal.timeout(10000),
+  });
+  const healthBody = await health.json();
+  check(
+    "HTTP API health after malformed request",
+    health.status === 200 && healthBody.success && healthBody.running,
+  );
   console.log(JSON.stringify(result));
   if (result.cases.some((c) => !c.ok))
     throw new Error("Packaged MCP checks failed");

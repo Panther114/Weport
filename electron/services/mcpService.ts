@@ -403,7 +403,14 @@ class McpService {
       return
     }
 
-    const url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
+    let url: URL
+    try {
+      url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ success: false, error: '无效的请求 URL' }))
+      return
+    }
     if (url.pathname !== '/mcp') {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({ success: false, error: '未知路径' }))
