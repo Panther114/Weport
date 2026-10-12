@@ -8,6 +8,24 @@ function fixture() {
   return { state, config, acquire, service: new ImageKeyReadiness(config, acquire) }
 }
 describe('automatic account image key readiness', () => {
+  it('repairs a complete but incorrect saved pair using independently verified account keys', async () => {
+    const f = fixture()
+    Object.assign(f.state.wxidConfigs.a, { imageAesKey: 'wrong-saved-key', imageXorKey: 255 })
+    expect(await f.service.ensure()).toBe(true)
+    expect(f.state.wxidConfigs.a).toMatchObject({ imageAesKey: 'image-key', imageXorKey: 0, decryptKey: 'account-db-key' })
+    await f.service.ensure()
+    expect(f.acquire).toHaveBeenCalledTimes(1)
+  })
+  it('keeps an offline manual pair when the cache cannot verify a replacement', async () => {
+    const f = fixture()
+    Object.assign(f.state.wxidConfigs.a, { imageAesKey: 'manual-offline-key', imageXorKey: 7 })
+    f.acquire.mockResolvedValue({ success: false } as any)
+    expect(await f.service.ensure()).toBe(true)
+    expect(f.state.wxidConfigs.a.imageAesKey).toBe('manual-offline-key')
+    expect(f.config.set).not.toHaveBeenCalled()
+    await f.service.ensure()
+    expect(f.acquire).toHaveBeenCalledTimes(1)
+  })
   it('saves verified image keys with XOR zero without changing database keys', async () => {
     const f = fixture()
     expect(await f.service.ensure()).toBe(true)
