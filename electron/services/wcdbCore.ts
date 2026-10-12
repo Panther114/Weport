@@ -8,6 +8,7 @@ import { expandHomePath } from '../utils/pathUtils'
 import { wcdbReadOnlyGuard } from './export/readOnlyGuard'
 import { createScannedDbMirror, removeScannedDbMirror, type ScannedDbKeyMaterial } from './scannedDbMirror'
 import { makeAntiRevokeBatchResult, verifyAntiRevokeTransition } from './antiRevokeResults'
+import { migrateAntiRevokeCollisionTrigger } from './antiRevokeCollisionTrigger'
 
 // v1.2 §10.3 ③：所有库访问（只读查询 / 游标 / 写操作）都必须经过这一个收口。
 // 默认模式是 read-only；写语句出现在只读上下文里会被**直接拒绝**，不发给引擎。
@@ -5102,6 +5103,22 @@ export class WcdbCore {
       if (status !== 0 && status !== 1) {
         return { success: false, error: msg || `DLL error ${status}` }
       }
+      await this.runWriteOperation('anti-revoke-collision-upgrade', 'upgradeMessageAntiRevokeTrigger', async () => {
+        const inventory = await this.getMessageTables(normalizedSessionId)
+        if (!inventory.success || !Array.isArray(inventory.tables) || inventory.tables.length === 0) throw new Error(inventory.error || '无法确认防撤回消息表')
+        for (const table of inventory.tables) {
+          const dbPath = String(table.db_path || table.dbPath || '')
+          const tableName = String(table.table_name || table.tableName || '')
+          if (!dbPath || !tableName) throw new Error('无法确认防撤回消息表路径')
+          const definitions = await this.execQuery('message', dbPath,
+            `SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='${tableName.replace(/'/g, "''")}'`)
+          if (!definitions.success) throw new Error(definitions.error || '无法读取防撤回触发器')
+          const blocker = definitions.rows?.find((row: any) => row.name === `anti_revoke_block_insert_${tableName}`)
+          if (!blocker || typeof blocker.sql !== 'string') throw new Error('未找到防撤回恢复触发器')
+          await migrateAntiRevokeCollisionTrigger(blocker.name, blocker.sql,
+            (sql) => this.execQuery('message', dbPath, sql))
+        }
+      })
       const operation = { success: true, alreadyInstalled: status === 1 }
       const verification = await this.checkMessageAntiRevokeTrigger(normalizedSessionId)
       return verifyAntiRevokeTransition('install', operation, verification)
