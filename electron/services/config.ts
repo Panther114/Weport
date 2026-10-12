@@ -456,7 +456,7 @@ export class ConfigService {
       weportAiReasoningEffort: 'high',
       // 图片输入默认开：默认模型都是视觉模型，作业照片/截图这类任务必须真的看图
       weportAiImageInputs: true,
-      weportAiMaxSteps: 48,
+      weportAiMaxSteps: 0,
       weportAiCustomPrompt: '',
       weportAiWorkspaceRoot: '',
       weportAiConversationLimit: 40,

@@ -289,6 +289,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
       tools: input.tools.map((tool) => ({ type: 'function', name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })),
     }
     if (input.maxOutputTokens !== undefined) body.max_output_tokens = input.maxOutputTokens
+    if (input.toolChoice) body.tool_choice = input.toolChoice
     if (instructions) body.instructions = instructions
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/responses'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
@@ -341,7 +342,7 @@ export function openAIChatBody(input: ProviderStreamInput): Record<string, unkno
   if (input.maxOutputTokens !== undefined) body.max_tokens = input.maxOutputTokens
   if (input.tools.length > 0) {
     body.tools = toolDefinitions(input)
-    body.tool_choice = 'auto'
+    body.tool_choice = input.toolChoice || 'auto'
   }
   // Unconditional: on the chat-completions wire, OpenAI (and any gateway that
   // follows it strictly) returns NO usage at all without `include_usage` — no
@@ -458,6 +459,7 @@ const anthropicAdapter: ProviderAdapter = {
     body.max_tokens = input.maxOutputTokens ?? 32768
     if (converted.system) body.system = converted.system
     if (input.tools.length > 0) body.tools = input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }))
+    if (input.toolChoice === 'none') body.tool_choice = { type: 'none' }
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/messages'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
@@ -580,6 +582,7 @@ const googleAdapter: ProviderAdapter = {
     if (converted.system) body.systemInstruction = { parts: [{ text: converted.system }] }
     if (input.maxOutputTokens !== undefined) body.generationConfig = { maxOutputTokens: input.maxOutputTokens }
     if (input.tools.length > 0) body.tools = [{ functionDeclarations: input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }]
+    if (input.toolChoice === 'none') body.toolConfig = { functionCallingConfig: { mode: 'NONE' } }
     const url = endpoint(input.profile.baseUrl, `/models/${encodeURIComponent(input.profile.model)}:streamGenerateContent?alt=sse`)
     const response = await providerFetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
     if (!response.ok) return readError(response)

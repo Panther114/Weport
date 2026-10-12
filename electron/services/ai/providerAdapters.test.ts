@@ -44,6 +44,27 @@ function streamInput(patch: Partial<ProviderStreamInput> = {}): ProviderStreamIn
  * cache. `SYSTEM_PROMPT` is frozen by `requestShape`; this pins the body.
  */
 describe('wire body has no per-request volatility', () => {
+  for (const protocol of ['openai', 'openai-compatible', 'anthropic', 'google'] as const) {
+    it(`final answer disables calls on the ${protocol} wire`, async () => {
+      const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('fixture rejection', { status: 400 }))
+      try {
+        const selected = profile({ protocol })
+        await expect(getProviderAdapter(selected).stream(streamInput({ profile: selected, toolChoice: 'none' }))).rejects.toThrow('fixture rejection')
+        const body = JSON.parse(String(fetch.mock.calls[0][1]?.body))
+        expect(body.tools).toHaveLength(1)
+        if (protocol === 'anthropic') expect(body.tool_choice).toEqual({ type: 'none' })
+        else if (protocol === 'google') expect(body.toolConfig).toEqual({ functionCallingConfig: { mode: 'NONE' } })
+        else expect(body.tool_choice).toBe('none')
+      } finally { fetch.mockRestore() }
+    })
+  }
+  it('can request a final answer without changing tools or message history', () => {
+    const normal = openAIChatBody(streamInput())
+    const final = openAIChatBody(streamInput({ toolChoice: 'none' }))
+    expect(final.tool_choice).toBe('none')
+    expect(final.tools).toEqual(normal.tools)
+    expect(final.messages).toEqual(normal.messages)
+  })
   const VOLATILE_TOP_LEVEL_KEYS = ['time', 'timestamp', 'seq', 'sequence', 'id', 'uuid', 'request_id', 'requestId', 'session_id', 'sessionId']
 
   it('omits time/sequence/identity fields at the top level', () => {

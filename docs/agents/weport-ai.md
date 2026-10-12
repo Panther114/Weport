@@ -104,3 +104,10 @@ The harness is a DSH-derived port: it keeps DSH's cache discipline and evidence 
   运行会永远停在「运行中」。
 - 笔记正文按 **Markdown** 渲染（`AiMarkdown`，模型本来就输出 md）。改回纯文本会让
   `- 第 3 题`、`**周三小测**` 原样露在卡片上。
+
+## Productive long-run completion
+
+- The legacy default `weportAiMaxSteps=48` is not a completion failure. Default 0 and legacy 48 allow productive work to continue; other positive custom budgets reserve a final-answer request.
+- Repeated identical queries AND evidence, or nearly full context, switch to answer-only finalization. Keep tool definitions and transcript prefix intact; record the `tool_choice` cache-control transition honestly as `control`.
+- Final answers at the numeric boundary are successful. User cancellation is aborted, never a provider error. Empty output remains an actual provider failure.
+- Explicitly supplied chat titles have titleVersion=2 and must not trigger title generation on reopen.

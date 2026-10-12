@@ -47,6 +47,7 @@ import { buildFallbackTitle, hasCjk, normaliseTitle, titleEchoesSource } from '.
 import { describeNetworkFailure } from './ai/netError'
 import { imagePartFromBase64, type AiImagePart } from './ai/imageParts'
 import { runToolBatch } from './ai/toolSchedule'
+import { AiRunGuard, toolRoundLimit } from './ai/runGuard'
 export type { AiImagePart } from './ai/imageParts'
 
 /**
@@ -991,7 +992,7 @@ class WeportAiService {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       sortOrder: minOrder === undefined ? 0 : minOrder - 1,
-      titleVersion: 1,
+      titleVersion: String(title || '').trim() && String(title).trim() !== '新对话' ? 2 : 1,
     }
     chats.unshift(chat)
     this.persistChats()
@@ -2767,7 +2768,8 @@ class WeportAiService {
     let error: string | null = null
 
     try {
-      const maxSteps = Number(this.configService.get('weportAiMaxSteps')) || 24
+      const maxSteps = toolRoundLimit(this.configService.get('weportAiMaxSteps'))
+      const runGuard = new AiRunGuard()
       // Freeze every provider-visible prefix component for this run. Settings
       // or plugin/tool changes take effect on the next user turn, never midway
       // through an append-only cache epoch.
@@ -2791,17 +2793,18 @@ class WeportAiService {
       }
 
       let loopCount = 0
-      let finalAssistant: AiMessage | null = null
 
-      while (loopCount < maxSteps) {
+      while (true) {
         if (ctrl.signal.aborted) {
           aborted = true
           break
         }
+        const finalize = runGuard.shouldFinalize(loopCount, maxSteps, lastRequestTokens, contextWindow)
         loopCount += 1
 
-        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape, consumer, activeProfile)
+        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape, consumer, activeProfile, finalize ? 'none' : 'auto')
         if (!stepResult.ok) {
+          if (ctrl.signal.aborted) { aborted = true; break }
           error = stepResult.error || '模型调用失败'
           // 保留网关的原文：映射后的中文只是提示，真正定位问题的是 provider 的
           // 那一句话（例如 OpenCode Go 的「This model is not available in your
@@ -2849,6 +2852,16 @@ class WeportAiService {
           })
         }
 
+        if (finalize && stepResult.toolCalls?.length) {
+          error = '模型服务未遵守最终回答模式，请重试或更换服务'
+          break
+        }
+        if (!stepResult.toolCalls?.length && !String(stepResult.content || '').trim()) {
+          if (ctrl.signal.aborted) { aborted = true; break }
+          error = '模型未返回回答，请重试'
+          break
+        }
+
         const assistant: AiMessage = {
           id: randomUUID(),
           role: 'assistant',
@@ -2858,7 +2871,6 @@ class WeportAiService {
           createdAt: Date.now(),
           timing: stepResult.timing,
         }
-        finalAssistant = assistant
         messages.push(assistant)
 
         const toolCalls = stepResult.toolCalls || []
@@ -2867,6 +2879,7 @@ class WeportAiService {
         // available for diagnosis instead of disappearing with in-memory state.
         if (toolCalls.length > 0) this.persistMessages(chatId, messages, compressed)
         if (toolCalls.length === 0) {
+          aborted = ctrl.signal.aborted
           // 最终回答
           this.persistMessages(chatId, messages, compressed)
           this.emit({ type: 'assistant_message', chatId, message: assistant, timing: stepResult.timing })
@@ -3003,6 +3016,7 @@ class WeportAiService {
           tools: toolCalls.map((call) => call.name),
         })
 
+        runGuard.observeBatch(toolCalls)
         this.persistMessages(chatId, messages, compressed)
         // 每个工具轮次也在完成后立刻进 transcript：面板据此把这一轮的思考/工具卡
         // 追加进历史并开一个**全新的** live 气泡。三个症状一起解决：工具卡不再
@@ -3015,11 +3029,6 @@ class WeportAiService {
         }
       }
 
-      if (loopCount >= maxSteps && !error) {
-        error = finalAssistant?.toolCalls?.length
-          ? `回答未完成：已超过最大执行步数（${maxSteps}）`
-          : `已超过最大执行步数（${maxSteps}），请缩小问题范围后重试`
-      }
     } catch (e) {
       if (ctrl.signal.aborted) {
         aborted = true
@@ -3318,9 +3327,10 @@ class WeportAiService {
     systemContent: string,
     tools: unknown,
     route: string,
-    apiMessages: Array<Record<string, unknown>>
+    apiMessages: Array<Record<string, unknown>>,
+    toolChoice: 'auto' | 'none' = 'auto'
   ): PrefixChange {
-    const frame = buildPrefixFrame(systemContent, tools, apiMessages, route)
+    const frame = { ...buildPrefixFrame(systemContent, tools, apiMessages, route), toolChoice }
     const inMemory = this.prefixProbe.get(chatId)
     const previous = inMemory || this.loadPrefixProbeDisk().get(chatId)
     const change = comparePrefixFrames(previous, frame)
@@ -3384,7 +3394,8 @@ class WeportAiService {
     compressed: string | undefined,
     requestShape: ModelRequestShape,
     consumer: ProviderConsumer = 'chat',
-    resolvedProfile?: ProviderProfile | null
+    resolvedProfile?: ProviderProfile | null,
+    toolChoice: 'auto' | 'none' = 'auto'
   ): Promise<{
     ok: boolean
     content?: string
@@ -3413,9 +3424,10 @@ class WeportAiService {
     // 日志事实，而不是靠猜。健康状态是一整轮全为 append，一次压缩只有一次
     // head-rewrite，重启后的第一条是 restored append。
     const route = `${profile.providerId}|${profile.model}|${resolved.protocol}`
-    const prefixChange = this.probePrefixChange(chatId, requestShape.systemContent, requestShape.tools, route, apiMessages)
+    const prefixChange = this.probePrefixChange(chatId, requestShape.systemContent, requestShape.tools, route, apiMessages, toolChoice)
     this.appendDebugLog({
       kind: 'prefix',
+      toolChoice,
       chatId,
       change: prefixChange.change,
       divergedAt: prefixChange.divergedAt,
@@ -3439,6 +3451,7 @@ class WeportAiService {
         profile: callProfile,
         messages: apiMessages,
         tools: requestShape.tools,
+        toolChoice,
         // Main path: send the model's own output limit. Before this it was
         // declared on `ProviderStreamInput` but never set here, so the Anthropic
         // adapter fell back to its hard-coded 32768 regardless of the model.
