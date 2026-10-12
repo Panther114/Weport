@@ -27,6 +27,7 @@ import { ImageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
 import { extractWechatVoiceTranscript, extractWechatVoiceTranscriptFromPackedInfo } from './voiceTranscript'
 import { LRUCache } from '../utils/LRUCache.js'
+import { discoverHistorySessions, type RecoveredHistorySession } from './historySessionRecovery'
 
 export interface ChatSession {
   username: string
@@ -521,6 +522,7 @@ function wcdbLogPathHint(): string {
 }
 
 class ChatService {
+  private recoveredHistoryCache: { signature: string; at: number; sessions: RecoveredHistorySession[] } | null = null
   private configService: ConfigService
   private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
   private connected = false
@@ -1504,6 +1506,7 @@ class ChatService {
       }
 
       await this.addMissingOfficialSessions(sessions, myWxid)
+      await this.addMissingHistorySessions(sessions, myWxid)
       await this.applySyntheticUnreadCounts(sessions)
       sessions.sort((a, b) => Number(b.sortTimestamp || b.lastTimestamp || 0) - Number(a.sortTimestamp || a.lastTimestamp || 0))
 
@@ -1728,6 +1731,29 @@ class ChatService {
       }))
 
     return { validIds, invalidRows }
+  }
+
+  private async addMissingHistorySessions(sessions: ChatSession[], myWxid?: string): Promise<void> {
+    try {
+      const snapshot = await this.getMessageDbCountSnapshot()
+      if (!snapshot.success || !snapshot.dbPaths) throw new Error('Cannot inspect message shards for history recovery')
+      const existing = new Set(sessions.map(session => session.username))
+      const signature = `${snapshot.dbSignature || snapshot.dbPaths.join('|')}:${[...existing].sort().join('|')}`
+      const cached = this.recoveredHistoryCache
+      const recovered = cached && cached.signature === signature && Date.now() - cached.at < 15000
+        ? cached.sessions : await discoverHistorySessions(wcdbService, snapshot.dbPaths, existing)
+      this.recoveredHistoryCache = { signature, at: Date.now(), sessions: recovered }
+      const openimTypes = await this.loadContactLocalTypeMapForEnterpriseOpenim(recovered.map(row => row.username))
+      for (const row of recovered) {
+        if (existing.has(row.username) || !this.shouldKeepSession(row.username, openimTypes.get(row.username))) continue
+        const contact = this.avatarCache.get(row.username)
+        sessions.push({ username: row.username, type: 0, unreadCount: 0, summary: '历史会话',
+          sortTimestamp: row.latest, lastTimestamp: row.latest, lastMsgType: 0,
+          messageCountHint: row.count, displayName: contact?.displayName || row.username,
+          avatarUrl: contact?.avatarUrl, selfWxid: myWxid })
+        existing.add(row.username)
+      }
+    } catch (error) { console.warn('[ChatService] History session recovery unavailable:', error) }
   }
 
   private async addMissingOfficialSessions(sessions: ChatSession[], myWxid?: string): Promise<void> {
