@@ -547,11 +547,14 @@ export class ExportContext {
         if (!sha256) return false
         const existing = this.contentAddressedMedia.get(sha256)
         if (!existing) return false
-        if (path.resolve(existing) === path.resolve(destPath)) return true
-        if (!await pathExists(existing)) {
+        const current = await hashFileContent(existing)
+        this.throwIfStopRequested(control)
+        if (current?.sha256 !== sha256) {
             this.contentAddressedMedia.delete(sha256)
+            this.noteLedgerMismatch('media-content-address-mismatch')
             return false
         }
+        if (path.resolve(existing) === path.resolve(destPath)) return true
         const existedBefore = await pathExists(destPath)
         const linked = await hardlinkOrCopyFile(existing, destPath)
         if (!linked.success) return false

@@ -24,6 +24,19 @@ afterEach(() => {
 })
 
 describe('incremental media without a previous ledger', () => {
+  it('does not trust a stale in-memory content address after an output is changed', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'weport-media-integrity-'))
+    roots.push(root)
+    const source = path.join(root, 'source.png'), target = path.join(root, 'output.png')
+    fs.writeFileSync(source, 'original payload')
+    const context = new ExportContext()
+    const copy = () => (context as any).copyMediaWithCacheAndDedup('image', source, target, undefined,
+      { exportConflictStrategy: 'incremental' }, 'media/output.png')
+    expect((await copy()).success).toBe(true)
+    fs.writeFileSync(target, 'changed after content address was recorded')
+    expect((await copy()).success).toBe(true)
+    expect(fs.readFileSync(target, 'utf8')).toBe('original payload')
+  })
   it.each([false, true])('validates derived cache bytes and isolates exports (corrupt cache: %s)', async corrupted => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'weport-media-integrity-'))
     roots.push(root)
