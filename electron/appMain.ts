@@ -625,6 +625,7 @@ interface UpdateCheckOutcome {
 }
 
 let initialPolicyLoad: Promise<unknown> | null = null
+let latestAvailableUpdate: UpdateCheckOutcome | null = null
 async function ensureInitialUpdatePolicy(): Promise<void> {
   if (!app.isPackaged || isDemoScreenshotMode || process.env.WEPORT_PROBE_OFFSCREEN === '1') return
   initialPolicyLoad ??= loadUpdatePolicy(process.env.WEPORT_UPDATE_POLICY_URL || `${getUpdaterFeedUrl().replace(/\/$/, '')}/force-update.json`, net.fetch as typeof fetch)
@@ -656,12 +657,14 @@ async function checkForUpdatesManual(): Promise<UpdateCheckOutcome> {
     if (!info || !isNewerVersion(String(info.version || ''), APP_VERSION)) return { hasUpdate: false, ...forced }
     const ignored = configService?.get('ignoredUpdateVersion')
     if (!restriction.forced && ignored && ignored === info.version) return { hasUpdate: false, ...forced }
-    return {
+    const available: UpdateCheckOutcome = {
       hasUpdate: true,
       version: info.version,
       releaseNotes: normalizeReleaseNotes(info.releaseNotes),
       ...forced,
     }
+    latestAvailableUpdate = available
+    return available
   } catch (e) {
     // 检查失败必须带原因回去：界面上要能说"没查到更新（附原因）"，而不是"你已经是最新"。
     return { hasUpdate: false, error: String((e as Error)?.message || e), ...restriction }
@@ -717,18 +720,30 @@ async function downloadAndInstall(): Promise<{ success: boolean; restarting?: bo
   if (!app.isPackaged) return { success: false, error: '开发模式不可更新' }
   if (!isUpdaterSupported) return { success: false, error: updaterUnsupportedReason }
   if (isDownloadInProgress) return { success: false, error: '正在下载中' }
+  const previousTask = taskStatusService.get(TASK_KEY.updateDownload)
+  if (previousTask.status === 'running' && previousTask.stage === 'installing') return { success: false, error: '正在安装中' }
   applyUpdaterChannel()
   isDownloadInProgress = true
   updateInstallTriggered = false
+  taskStatusService.begin(TASK_KEY.updateDownload, '正在下载更新…', 'downloading')
+  taskStatusService.progress(TASK_KEY.updateDownload, { detail: { updateInfo: latestAvailableUpdate }, log: false })
   try {
     return await new Promise((resolve) => {
+      let settled = false
       const onProgress = (info: { percent?: number; transferred?: number; total?: number }) => {
+        if (settled) return
+        taskStatusService.progress(TASK_KEY.updateDownload, { stage: 'downloading', progress: info.percent,
+          detail: { transferred: info.transferred, total: info.total }, log: false })
         mainWindow?.webContents.send('app:downloadProgress', info)
       }
       const onDownloaded = () => {
+        if (settled) return
+        settled = true
         autoUpdater.removeListener('download-progress', onProgress)
         autoUpdater.removeListener('update-downloaded', onDownloaded)
+        autoUpdater.removeListener('error', onError)
         isDownloadInProgress = false
+        taskStatusService.progress(TASK_KEY.updateDownload, { stage: 'installing', progress: 100, message: '正在安装并重启…' })
         // 先让渲染层把按钮切到「正在安装…」并停止交互，再退出应用
         mainWindow?.webContents.send('app:updateDownloaded')
         resolve({ success: true, restarting: true })
@@ -744,10 +759,14 @@ async function downloadAndInstall(): Promise<{ success: boolean; restarting?: bo
         }, 250)
       }
       const onError = (e: Error) => {
+        if (settled) return
+        settled = true
         autoUpdater.removeListener('download-progress', onProgress)
         autoUpdater.removeListener('update-downloaded', onDownloaded)
+        autoUpdater.removeListener('error', onError)
         isDownloadInProgress = false
         updateInstallTriggered = false
+        taskStatusService.end(TASK_KEY.updateDownload, 'failed', { error: String(e?.message || e), message: '更新下载失败' })
         resolve({ success: false, error: String(e?.message || e) })
       }
       autoUpdater.on('download-progress', onProgress)
@@ -2507,7 +2526,12 @@ export function registerIpcHandlers() {
   ipcMain.handle('app:downloadAndInstall', () => downloadAndInstall())
   ipcMain.handle('app:ignoreUpdate', (_e, version: string) => {
     if (currentUpdateRestriction(APP_VERSION).forced) return { success: false, error: '兼容性更新提示不可忽略' }
+    const task = taskStatusService.get(TASK_KEY.updateDownload)
+    if (task.status === 'running') return { success: false, error: '正在更新中，暂时无法忽略' }
     configService?.set('ignoredUpdateVersion', String(version || ''))
+    if ((task.detail?.updateInfo as UpdateCheckOutcome | undefined)?.version === String(version || '')) {
+      taskStatusService.reset(TASK_KEY.updateDownload)
+    }
     return { success: true }
   })
   ipcMain.handle('app:getChangelog', () => {

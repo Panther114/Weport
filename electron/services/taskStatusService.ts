@@ -147,6 +147,7 @@ export class TaskStatusService {
 export const TASK_KEY = {
   wecloneGenerate: 'weclone.generate',
   export: 'export',
+  updateDownload: 'app.updateDownload',
   connect: 'chat.connect',
   /** v1.2 §6 全局搜索索引构建 */
   searchIndex: 'search.index',

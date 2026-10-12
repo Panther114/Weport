@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { hydrateFromSnapshots } from './liveTaskWiring'
+import { applyUpdateDownloadProgress, hydrateFromSnapshots } from './liveTaskWiring'
 import { LIVE_TASK, liveTask, resetAllLiveTasks } from './liveTask'
 
 /**
@@ -13,6 +13,23 @@ import { LIVE_TASK, liveTask, resetAllLiveTasks } from './liveTask'
 
 beforeEach(() => {
   resetAllLiveTasks()
+})
+
+describe('updater window recreation', () => {
+  it('restores active download metadata and retains it through subsequent progress events', () => {
+    const updateInfo = { version: '2.0.0', releaseNotes: 'Fixture notes' }
+    hydrateFromSnapshots({ [LIVE_TASK.updateDownload]: { status: 'running', stage: 'downloading', progress: 23, detail: { updateInfo } } })
+    applyUpdateDownloadProgress({ percent: 37, transferred: 220, total: 600 })
+    expect(liveTask(LIVE_TASK.updateDownload).getState()).toMatchObject({ status: 'running', progress: 37,
+      detail: { updateInfo, transferred: 220, total: 600 } })
+  })
+  it('restores a recent download failure with the same release and retry details', () => {
+    const now = Date.now()
+    hydrateFromSnapshots({ [LIVE_TASK.updateDownload]: { status: 'failed', stage: 'downloading', progress: 53,
+      finishedAt: now, error: 'checksum mismatch', detail: { updateInfo: { version: '2.0.0' } } } }, now)
+    expect(liveTask(LIVE_TASK.updateDownload).getState()).toMatchObject({ status: 'failed', error: 'checksum mismatch',
+      detail: { updateInfo: { version: '2.0.0' } } })
+  })
 })
 
 describe('运行中的快照总是被采纳', () => {

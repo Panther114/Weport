@@ -50,6 +50,7 @@ interface TaskRow {
 const ROWS: TaskRow[] = [
   { key: LIVE_TASK.connect, label: '连接微信', icon: PlugZap, tab: 'connect', cancellable: false },
   { key: LIVE_TASK.export, label: '导出聊天记录', icon: Download, tab: 'export', cancellable: true },
+  { key: LIVE_TASK.updateDownload, label: '下载更新', icon: Download, tab: 'settings', cancellable: false },
   { key: LIVE_TASK.wecloneGenerate, label: '生成 WeClone', icon: Fingerprint, tab: 'weclone', cancellable: true },
   { key: LIVE_TASK.backup, label: '数据备份', icon: DatabaseBackup, tab: 'settings', cancellable: false, indeterminate: true },
   { key: LIVE_TASK.searchIndex, label: '建立搜索索引', icon: Search, tab: 'search', cancellable: true },
@@ -74,6 +75,7 @@ interface Props {
 export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const connect = useLiveTask(LIVE_TASK.connect)
   const exportTask = useLiveTask(LIVE_TASK.export)
+  const updateDownload = useLiveTask(LIVE_TASK.updateDownload)
   const clone = useLiveTask(LIVE_TASK.wecloneGenerate)
   const backup = useLiveTask(LIVE_TASK.backup)
   const searchIndex = useLiveTask(LIVE_TASK.searchIndex)
@@ -81,6 +83,7 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const states: Record<string, LiveTaskState> = {
     [LIVE_TASK.connect]: connect,
     [LIVE_TASK.export]: exportTask,
+    [LIVE_TASK.updateDownload]: updateDownload,
     [LIVE_TASK.wecloneGenerate]: clone,
     [LIVE_TASK.backup]: backup,
     [LIVE_TASK.searchIndex]: searchIndex,

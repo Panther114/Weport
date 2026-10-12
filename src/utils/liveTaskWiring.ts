@@ -31,10 +31,16 @@ const POLL_INTERVAL_MS = 1200
  * 代价说清楚：备份期间窗口被销毁重建的话，左下角那条会消失（状态只在渲染进程
  * 里）。这是已知限制，换来的是不给自己留一个无限轮询。
  */
-const POLLED_TASKS: readonly string[] = [LIVE_TASK.wecloneGenerate, LIVE_TASK.export, LIVE_TASK.connect, LIVE_TASK.searchIndex, LIVE_TASK.databaseMaintenance]
+const POLLED_TASKS: readonly string[] = [LIVE_TASK.wecloneGenerate, LIVE_TASK.export, LIVE_TASK.connect, LIVE_TASK.searchIndex, LIVE_TASK.databaseMaintenance, LIVE_TASK.updateDownload]
 
 let installed = false
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+export function applyUpdateDownloadProgress(progress: { percent?: number; transferred?: number; total?: number }): void {
+  const task = liveTask(LIVE_TASK.updateDownload)
+  task.update({ status: 'running', stage: 'downloading', progress: Number(progress?.percent) || 0,
+    detail: { ...task.getState().detail, transferred: progress?.transferred, total: progress?.total } })
+}
 
 interface RawSnapshot {
   status?: string
@@ -127,6 +133,14 @@ export function installLiveTaskWiring(): void {
   installed = true
   const api = typeof window !== 'undefined' ? window.electronAPI : undefined
   if (!api) return
+  api.app?.onDownloadProgress?.((progress: any) => {
+    applyUpdateDownloadProgress(progress)
+    ensurePolling()
+  })
+  api.app?.onUpdateDownloaded?.(() => {
+    liveTask(LIVE_TASK.updateDownload).update({ status: 'running', stage: 'installing', progress: 100 })
+    ensurePolling()
+  })
   api.task?.onStatusChanged?.((snapshots) => {
     hydrateFromSnapshots(snapshots)
     if (anyRunning()) ensurePolling()

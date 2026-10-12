@@ -74,6 +74,8 @@ import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import BackgroundTasks from './components/BackgroundTasks'
+import { UpdateDownloadLabel, UpdateDownloadProgress } from './components/settings/UpdateDownloadStatus'
+import { useLiveTaskPhase } from './hooks/useLiveTask'
 import { WEPORT_CANCEL_INDEX_EVENT } from './components/search/IndexState'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
@@ -443,8 +445,23 @@ export default function App() {
   const [silentStartup, setSilentStartup] = useState(false)
   const [closeToTray, setCloseToTray] = useState(true)
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string; forced?: boolean; reason?: string | null; url?: string | null; hasUpdate?: boolean; allowReadOnly?: boolean } | null>(null)
-  const [updateBusy, setUpdateBusy] = useState(false)
-  const [updateProgress, setUpdateProgress] = useState<{ percent: number; transferred?: number; total?: number } | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const updatePhase = useLiveTaskPhase(LIVE_TASK.updateDownload)
+  const updateBusy = updateChecking || updatePhase.startsWith('running:')
+  useEffect(() => {
+    const task = liveTask(LIVE_TASK.updateDownload)
+    let previous = ''
+    const restore = () => {
+      const info = task.getState().detail?.updateInfo as { version?: string; releaseNotes?: string } | undefined
+      if (!info?.version) return
+      const signature = JSON.stringify(info)
+      if (signature === previous) return
+      previous = signature
+      setUpdateInfo({ ...info, version: info.version, body: info.releaseNotes || undefined })
+    }
+    restore()
+    return task.subscribe(restore)
+  }, [])
   const [changelogOpen, setChangelogOpen] = useState(false)
   const [changelogContent, setChangelogContent] = useState<string | null>(null)
   const [changelogLoading, setChangelogLoading] = useState(false)
@@ -1158,14 +1175,6 @@ export default function App() {
         setUpdateInfo({ ...info, version: info.version, body: info.releaseNotes || undefined })
         pushToast('info', `发现新版本 v${info.version}`, '可在顶部横幅更新')
       }),
-      api.app.onDownloadProgress((p) => {
-        setUpdateProgress({ percent: Number(p?.percent) || 0, transferred: p?.transferred, total: p?.total })
-      }),
-      api.app.onUpdateDownloaded(() => {
-        // 下载完成：应用即将退出安装并自动重启，禁用更新按钮
-        setUpdateBusy(true)
-        setUpdateProgress({ percent: 100, total: 1, transferred: 1 })
-      })
     ]
 
     void api.app.getLaunchAtStartupStatus().then((s) => {
@@ -1527,7 +1536,7 @@ export default function App() {
   }
 
   async function checkForUpdates(fromAbout = false) {
-    setUpdateBusy(true)
+    setUpdateChecking(true)
     try {
       const result = await api.app.checkForUpdates()
       if (result.forced) {
@@ -1553,40 +1562,27 @@ export default function App() {
     } catch (e) {
       pushToast('err', '检查更新失败', String(e))
     } finally {
-      setUpdateBusy(false)
+      setUpdateChecking(false)
     }
   }
 
   async function installUpdate() {
+    if (updateBusy) return
     if (updateInfo?.forced && !updateInfo.hasUpdate && updateInfo.url) {
       await api.shell.openExternal(updateInfo.url)
       return
     }
-    setUpdateBusy(true)
-    setUpdateProgress({ percent: 0 })
-    let restarting = false
     try {
       const result = await api.app.downloadAndInstall()
       if (result.success) {
-        if (result.restarting) {
-          // 主进程已触发 quitAndInstall：应用即将退出 → 静默安装 → 自动重启，
-          // 保持「正在安装并重启…」状态直到进程退出
-          restarting = true
-          setUpdateBusy(true)
-          setUpdateProgress(null)
-        } else {
-          setUpdateProgress(null)
+        if (!result.restarting) {
           pushToast('ok', '更新已下载', '重启应用完成安装')
         }
       } else {
-        setUpdateProgress(null)
         pushToast('err', '更新失败', result.error || '未知错误', 10000)
       }
     } catch (e) {
-      setUpdateProgress(null)
       pushToast('err', '更新失败', String(e), 10000)
-    } finally {
-      if (!restarting) setUpdateBusy(false)
     }
   }
 
@@ -2430,20 +2426,10 @@ export default function App() {
               <ScrollText size={13} />
               查看完整更新日志
             </button>
-            {updateBusy && updateProgress && (
-              <div className="update-progress" aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${Math.max(0, Math.min(100, updateProgress.percent))}%` }}
-                  />
-                </div>
-                <span>{Math.round(updateProgress.percent)}%</span>
-              </div>
-            )}
+            <UpdateDownloadProgress />
           </div>
           <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-            {updateBusy ? (updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : '正在安装并重启…') : updateInfo.forced && !updateInfo.hasUpdate ? '下载兼容版本' : '立即更新'}
+            <UpdateDownloadLabel checking={updateChecking} idleLabel={updateInfo.forced && !updateInfo.hasUpdate ? '下载兼容版本' : '立即更新'} />
           </button>
         </div>
       )}
@@ -4509,14 +4495,14 @@ export default function App() {
                       <GitPullRequest size={13} />                      GitHub
                     </button>
                     <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                      {updateBusy ? '检查中…' : '检查更新'}
+                      {updateChecking ? '检查中…' : '检查更新'}
                     </button>
                     <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
                       更新日志
                     </button>
                     {updateInfo && (
                       <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                        {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                        <UpdateDownloadLabel checking={updateChecking} idleLabel={`安装 v${updateInfo.version}`} />
                       </button>
                     )}
                   </div>
@@ -4869,11 +4855,11 @@ export default function App() {
             <p style={{ marginTop: 8, fontSize: 12, color: 'var(--text-faint)' }}>更新源：GitHub Releases (Panther114/Weport)</p>
             <div className="modal-actions">
               <button className="secondary-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                {updateBusy ? '检查中…' : '检查更新'}
+                {updateChecking ? '检查中…' : '检查更新'}
               </button>
               {updateInfo && (
                 <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                  {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                  <UpdateDownloadLabel checking={updateChecking} idleLabel={`安装 v${updateInfo.version}`} />
                 </button>
               )}
               <button className="secondary-btn" type="button" onClick={() => setAboutOpen(false)}>
