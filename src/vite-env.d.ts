@@ -538,6 +538,7 @@ interface ElectronApi {
     }>
     getChat: (chatId: string) => Promise<{
       chat: { id: string; title: string; createdAt: number; updatedAt: number }
+      running: boolean
       workspaceDir: string
       memoryDir: string
       messages: Array<{

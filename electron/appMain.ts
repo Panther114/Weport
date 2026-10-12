@@ -1202,6 +1202,8 @@ function createWindow(autoShow: boolean): BrowserWindow {
 
   win.on('close', (e) => {
     if (isAppQuitting || win !== mainWindow) return
+    // A delayed first paint must not reopen a window the user has already closed.
+    autoShow = false
     const behavior = configService?.get('windowCloseBehavior') || 'tray'
     if (behavior === 'tray' && tray) {
       e.preventDefault()
@@ -1218,10 +1220,12 @@ function createWindow(autoShow: boolean): BrowserWindow {
   // isVisible() 在最小化时已经是 false，所以 tick 本身能正确处理，
   // 缺的只是"没人给它排期"。
   win.on('minimize', () => {
+    autoShow = false
     // 最小化保留窗口（任务栏按钮要在），只排期卸载渲染层。
     scheduleMainWindowDiscard('unload')
   })
   win.on('hide', () => {
+    autoShow = false
     scheduleMainWindowDiscard('destroy')
   })
   // 还原/显示时撤销回收计划；若已被回收，必须先把应用页装回来再显示 ——

@@ -133,6 +133,7 @@ export interface AiChatMeta {
 
 export interface AiChatData {
   chat: AiChatMeta
+  running: boolean
   workspaceDir: string
   memoryDir: string
   messages: AiMessage[]
@@ -1057,6 +1058,7 @@ class WeportAiService {
     this.upgradeStaleTitle(chatId)
     return {
       chat,
+      running: this.running.has(chatId),
       workspaceDir: this.chatWorkspaceDir(chatId),
       memoryDir: this.memoryDir(),
       messages: stored.messages,

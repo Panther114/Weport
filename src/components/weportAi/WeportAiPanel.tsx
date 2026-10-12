@@ -366,6 +366,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const actionsRef = useRef<HTMLDivElement | null>(null)
   // 用于异步回调里的会话一致性判断（openChat 的 getChat 可能晚于后续切换返回）
   const activeIdRef = useRef<string | null>(null)
+  const runStatusRevisionRef = useRef(0)
   useEffect(() => {
     activeIdRef.current = activeId
   }, [activeId])
@@ -413,11 +414,15 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       setError('')
       setUsage(null)
       setNotes([])
+      const statusRevision = runStatusRevisionRef.current
       try {
         const data = await api.ai.getChat(id)
         // 期间用户又切换了会话 → 丢弃过期响应，防止 A→B→A 时旧数据覆盖新会话
         if (activeIdRef.current !== id) return
         if (data) {
+          // A recreated renderer missed the initial status event. A newer event
+          // wins over this snapshot if the run finishes while getChat is pending.
+          if (runStatusRevisionRef.current === statusRevision) setRunning(data.running === true)
           setMessages(data.messages || [])
           setWorkspaceDir(data.workspaceDir)
           setMemoryDir(data.memoryDir)
@@ -492,6 +497,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       if (e.chatId !== activeId && activeId) return
       switch (e.type) {
         case 'status':
+          runStatusRevisionRef.current += 1
           setRunning(e.running)
           break
         case 'context':
