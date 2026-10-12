@@ -440,7 +440,18 @@ try {
   if (page) {
     await page.screenshot({ path: join(out, 'failure.png') }).catch(() => {})
     const status = await page.locator('.poster-status, .poster-error, .poster-warn').allTextContents().catch(() => [])
-    writeFileSync(join(out, 'failure.json'), JSON.stringify({ error: String(error), status, errors }, null, 2))
+    const scrollDiagnostics = await page.evaluate(() => {
+      const describe = node => {
+        if (!node) return null
+        const rect = node.getBoundingClientRect(), style = getComputedStyle(node)
+        return { tag: node.tagName, className: node.className, scrollTop: node.scrollTop, scrollHeight: node.scrollHeight,
+          clientHeight: node.clientHeight, overflowY: style.overflowY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }
+      }
+      const hit = []
+      for (let node = document.elementFromPoint(650, 250); node; node = node.parentElement) hit.push(describe(node))
+      return { viewport: { width: innerWidth, height: innerHeight }, workspace: describe(document.querySelector('.workspace')), wheelTargetAncestors: hit }
+    }).catch(() => null)
+    writeFileSync(join(out, 'failure.json'), JSON.stringify({ error: String(error), status, errors, scrollDiagnostics }, null, 2))
     console.log(`Failure details: ${out}`)
   }
   throw error

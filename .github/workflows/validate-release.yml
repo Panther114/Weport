@@ -146,6 +146,15 @@ jobs:
       - name: Verify packaged V1.2 UI
         run: node scripts/verify-v12-ui.mjs
 
+      - name: Preserve macOS UI failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-ui-failure-evidence
+          path: .ui-probe/v12-interactions/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Verify packaged MCP HTTP behavior
         run: node scripts/verify-mcp-http.mjs
 
