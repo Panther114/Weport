@@ -13,7 +13,7 @@ function fixture() {
 afterEach(() => {
   vi.restoreAllMocks()
   for (const root of roots.splice(0)) {
-    if (!fs.realpathSync(root).startsWith(path.resolve(os.tmpdir()) + path.sep + 'weport-copy-test-')) throw new Error('Temporary fixture boundary rejected')
+    if (!fs.realpathSync(root).startsWith(fs.realpathSync(os.tmpdir()) + path.sep + 'weport-copy-test-')) throw new Error('Temporary fixture boundary rejected')
     for (const name of fs.readdirSync(root)) fs.chmodSync(path.join(root, name), 0o600)
     fs.rmSync(root, { recursive: true, force: true })
   }
