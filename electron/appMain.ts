@@ -3142,7 +3142,7 @@ export function registerIpcHandlers() {
       }
       const when = formatLocalTime()
       // 导出日志仅跟踪 TXT / JSON（旧版格式），其他格式不覆盖这两行
-      if (fmt === 'txt' || fmt === 'json') {
+      if (!cancelled && result.success && result.failCount === 0 && (fmt === 'txt' || fmt === 'json')) {
         writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
       }
       // 终态显式落下：取消 / 失败 / 完成三种收尾在界面上完全不一样，
@@ -7459,7 +7459,9 @@ async function runSelfTest() {
     }
   })
 
-  writeExportLog(outDir, fmt, formatLocalTime(), result.successCount || 0, result.failCount || 0)
+  if (!result.stopped && result.success && result.failCount === 0) {
+    writeExportLog(outDir, fmt, formatLocalTime(), result.successCount || 0, result.failCount || 0)
+  }
   log(`export success=${result.successCount} fail=${result.failCount} in ${Math.round((Date.now() - exportStartedAt) / 1000)}s`)
   if (result.error) log(`export error: ${result.error}`)
   if (result.failedSessionErrors) {
