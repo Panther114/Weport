@@ -870,6 +870,13 @@ export class ExportContext {
         }
     }
 
+    private async tryReuseExportedBuffer(destPath: string, buffer: Buffer, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<boolean> {
+        if (!this.shouldReuseExistingExportFile(options)) return false
+        const existing = await hashFileContent(destPath)
+        this.throwIfStopRequested(control)
+        return existing?.bytes === buffer.length && existing.sha256 === crypto.createHash('sha256').update(buffer).digest('hex')
+    }
+
     private isHardlinkFallbackError(code: string | undefined): boolean {
         return code === 'EXDEV' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL' || code === 'ENOSYS' || code === 'ENOTSUP'
     }
@@ -881,21 +888,28 @@ export class ExportContext {
           // 账本说"这一份"、磁盘上却是半截/被改过 → 重做，不能因为"文件在"就跳过。
           const ledgerEntry = relativePath ? this.ledgerMediaIndex.get(relativePath) : undefined
           if (!ledgerEntry) {
-            this.noteMediaTelemetry({
-              doneFiles: 1,
-              dedupReuseFiles: 1
-            })
-            return { success: true }
+            // Legacy outputs and interrupted exports can exist without a ledger.
+            // Existence alone does not prove that they contain this payload.
+            const [sourceHash, destinationHash] = await Promise.all([
+              hashFileContent(sourcePath), hashFileContent(destPath)
+            ])
+            this.throwIfStopRequested(control)
+            if (sourceHash && destinationHash?.sha256 === sourceHash.sha256 && destinationHash.bytes === sourceHash.bytes) {
+              this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+              return { success: true }
+            }
+            this.noteLedgerMismatch('media-unverified-existing-output')
+          } else {
+            const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
+            if (verified.skip) {
+              this.noteMediaTelemetry({
+                doneFiles: 1,
+                dedupReuseFiles: 1
+              })
+              return { success: true }
+            }
+            this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
           }
-          const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
-          if (verified.skip) {
-            this.noteMediaTelemetry({
-              doneFiles: 1,
-              dedupReuseFiles: 1
-            })
-            return { success: true }
-          }
-          this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
         }
         // v1.2 §10.1：账本命中（相对路径 + 内容哈希都对得上）→ 真跳过
         if (relativePath) {
@@ -908,7 +922,16 @@ export class ExportContext {
           const reusedByContent = await this.reuseByContentHash(sourceHash.sha256, destPath, control)
           if (reusedByContent) return { success: true }
         }
-        const resolved = await this.resolvePreferredMediaSource(kind, sourcePath);
+        let resolved = await this.resolvePreferredMediaSource(kind, sourcePath);
+        if (resolved.cacheHit) {
+          const cachedHash = await hashFileContent(resolved.sourcePath)
+          if (!sourceHash || cachedHash?.sha256 !== sourceHash.sha256 || cachedHash.bytes !== sourceHash.bytes) {
+            // Old exports may share a hardlink with this derived cache. Editing
+            // an export must not make the cache authoritative over the source.
+            this.noteLedgerMismatch('media-cache-content-mismatch')
+            resolved = { sourcePath, cacheHit: false, fileStat: resolved.fileStat }
+          }
+        }
         if (resolved.cacheHit) {
           this.noteMediaTelemetry({ cacheHitFiles: 1 })
         } else {
@@ -933,9 +956,9 @@ export class ExportContext {
           }
         }
 
-        const copied = resolved.cacheHit
-                  ? await hardlinkOrCopyFile(resolved.sourcePath, destPath)
-                  : await copyFileOptimized(resolved.sourcePath, destPath);
+        // Cache-to-export copies must be independent; hardlinks are reserved
+        // for deduplication between outputs owned by the same export run.
+        const copied = await copyFileOptimized(resolved.sourcePath, destPath);
         if (!copied.success) return copied
         if (dedupeKey) {
           this.mediaRunSourceDedupMap.set(dedupeKey, destPath)
@@ -3546,7 +3569,8 @@ export class ExportContext {
             const fileName = `${messageId}_${imageKey}${ext}`
             const destPath = path.join(imagesDir, fileName)
 
-            if (await pathExists(destPath) && this.shouldReuseExistingExportFile(options)) {
+            const buffer = Buffer.from(base64Data, 'base64')
+            if (await this.tryReuseExportedBuffer(destPath, buffer, control, options)) {
               this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
               return {
                 relativePath: path.posix.join(mediaRelativePrefix, 'images', fileName),
@@ -3554,9 +3578,8 @@ export class ExportContext {
               }
             }
 
-            const buffer = Buffer.from(base64Data, 'base64')
             await this.recordCreatedFileBeforeWrite(destPath, control)
-            await fs.promises.writeFile(destPath, buffer)
+            await atomicWriteFile(destPath, buffer)
             this.noteMediaTelemetry({
               doneFiles: 1,
               cacheMissFiles: 1,
@@ -3711,14 +3734,6 @@ export class ExportContext {
           const fileName = `voice_${safeSession}_${stableKey || msgId}.wav`
           const destPath = path.join(voicesDir, fileName)
 
-          if (await pathExists(destPath) && this.shouldReuseExistingExportFile(options)) {
-            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
-            return {
-              relativePath: path.posix.join(mediaRelativePrefix, 'voices', fileName),
-              kind: 'voice'
-            }
-          }
-
           // 调用 chatService 获取语音数据
           const voiceResult = await chatService.getVoiceData(
             sessionId,
@@ -3736,8 +3751,12 @@ export class ExportContext {
 
           // voiceResult.data 是 base64 编码的 wav 数据
           const wavBuffer = Buffer.from(voiceResult.data, 'base64')
+          if (await this.tryReuseExportedBuffer(destPath, wavBuffer, control, options)) {
+            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+            return { relativePath: path.posix.join(mediaRelativePrefix, 'voices', fileName), kind: 'voice' }
+          }
           await this.recordCreatedFileBeforeWrite(destPath, control)
-          await fs.promises.writeFile(destPath, wavBuffer)
+          await atomicWriteFile(destPath, wavBuffer)
           this.noteMediaTelemetry({
             doneFiles: 1,
             bytesWritten: wavBuffer.length
