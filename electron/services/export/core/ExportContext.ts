@@ -4425,8 +4425,6 @@ export class ExportContext {
           if (!fileNameRaw) return null
 
           const fileExtDir = resolveFileAttachmentExtensionDir(msg, fileNameRaw)
-          const fileDir = path.join(mediaRootDir, mediaRelativePrefix, 'file', fileExtDir)
-          await ensureExportDir(fileDir, control, dirCache)
 
           const candidates = await this.resolveFileAttachmentCandidates(msg)
           if (candidates.length === 0) {
@@ -4466,6 +4464,19 @@ export class ExportContext {
             return null
           }
 
+          // Names are not attachment identities: different months can contain
+          // unrelated payloads with the same original filename.
+          this.throwIfStopRequested(control)
+          const sourceHash = await hashFileContent(selected.sourcePath)
+          const afterHash = await fs.promises.stat(selected.sourcePath)
+          if (!sourceHash || sourceHash.bytes !== stat.size || afterHash.size !== stat.size || afterHash.mtimeMs !== stat.mtimeMs) {
+            this.recordFileAttachmentMiss(msg, '附件读取期间发生变化', { sourcePath: selected.sourcePath })
+            return null
+          }
+          this.throwIfStopRequested(control)
+          const relativeDir = path.posix.join(mediaRelativePrefix, 'file', fileExtDir, sourceHash.sha256)
+          const fileDir = path.join(mediaRootDir, relativeDir)
+          await ensureExportDir(fileDir, control, dirCache)
           let destFileName = path.basename(fileNameRaw).replace(/[\\/:*?"<>|]/g, '_') || 'file'
           let destPath = path.join(fileDir, destFileName)
           if (this.resolveExportConflictStrategy(options) === 'rename') {
@@ -4473,10 +4484,12 @@ export class ExportContext {
             destFileName = path.basename(destPath)
           }
           const existedBeforeCopy = await pathExists(destPath)
-          if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
+          const existingHash = existedBeforeCopy && this.shouldReuseExistingExportFile(options)
+            ? await hashFileContent(destPath) : null
+          if (existingHash?.sha256 === sourceHash.sha256 && existingHash.bytes === sourceHash.bytes) {
             this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
             return {
-              relativePath: path.posix.join(mediaRelativePrefix, 'file', fileExtDir, destFileName),
+              relativePath: path.posix.join(relativeDir, destFileName),
               kind: 'file'
             }
           }
@@ -4494,12 +4507,19 @@ export class ExportContext {
           if (!existedBeforeCopy) {
             control?.recordCreatedFile?.(destPath)
           }
+          const copiedHash = await hashFileContent(destPath)
+          if (copiedHash?.sha256 !== sourceHash.sha256 || copiedHash.bytes !== sourceHash.bytes) {
+            this.recordFileAttachmentMiss(msg, '附件复制后校验失败', { sourcePath: selected.sourcePath, destPath })
+            return null
+          }
+          this.throwIfStopRequested(control)
           this.noteMediaTelemetry({ doneFiles: 1, bytesWritten: stat.size })
           return {
-            relativePath: path.posix.join(mediaRelativePrefix, 'file', fileExtDir, destFileName),
+            relativePath: path.posix.join(relativeDir, destFileName),
             kind: 'file'
           }
         } catch (error) {
+          if (this.isStopError(error) || this.isPauseError(error)) throw error
           this.logFileAttachmentEvent('error', '附件导出异常', msg, {
             error: error instanceof Error ? error.message : String(error || 'unknown')
           })

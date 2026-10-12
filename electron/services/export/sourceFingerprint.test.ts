@@ -2,9 +2,17 @@ import { afterEach, expect, it } from 'vitest'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { sourceFingerprint } from './sourceFingerprint'
+import { sourceFingerprint, optionsFingerprint, exportArtifactFingerprint } from './sourceFingerprint'
 
 const roots: string[] = []
+
+it('rebuilds legacy artifact references while preserving stable option ordering', () => {
+  const account = 'fixture'
+  const options = { format: 'json', exportFiles: true }
+  expect(exportArtifactFingerprint(account, options)).not.toBe(optionsFingerprint({ account, options }))
+  expect(exportArtifactFingerprint(account, options)).toBe(exportArtifactFingerprint(account, { exportFiles: true, format: 'json' }))
+  expect(exportArtifactFingerprint('another-account', options)).not.toBe(exportArtifactFingerprint(account, options))
+})
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 it('invalidates media recovery when an attachment is downloaded without a DB change', async () => {

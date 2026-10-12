@@ -46,7 +46,7 @@ import { hashFileContent } from '../mediaDedupeCache';
 import { runIntegrityCheck, writeIntegrityFailureReport } from '../integrityChecker';
 import { ExportContext } from "../core/ExportContext";
 import { CONFIRMED_EMPTY_SESSION_SKIP } from './emptySession'
-import { optionsFingerprint } from '../sourceFingerprint';
+import { exportArtifactFingerprint } from '../sourceFingerprint';
 import { ChatLabFormatter } from '../formatters/ChatLabFormatter';
 import { ExcelFormatter } from '../formatters/ExcelFormatter';
 import { HtmlFormatter } from '../formatters/HtmlFormatter';
@@ -578,7 +578,7 @@ export class ExportOrchestrator {
               // 续跑时同样的选项算出同样的键，才能命中。
               const ledgerChunkStart = Number(effectiveOptions.dateRange?.start) || 0
               const ledgerChunkEnd = Number(effectiveOptions.dateRange?.end) || 0
-              const ledgerArtifact = `${String(effectiveOptions.format || 'unknown')}#${optionsFingerprint({ account: conn.cleanedWxid, options: effectiveOptions })}#${this.nextLedgerDiscriminator(sessionId, ledgerSequence)}`
+              const ledgerArtifact = `${String(effectiveOptions.format || 'unknown')}#${exportArtifactFingerprint(conn.cleanedWxid, effectiveOptions)}#${this.nextLedgerDiscriminator(sessionId, ledgerSequence)}`
               const ledgerKey = unitKeyOf({
                 sessionId,
                 chunkStart: ledgerChunkStart,
