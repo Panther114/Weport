@@ -47,6 +47,9 @@ export async function verifyFixtureModules(page, scratch, manifest, result) {
   assert.equal(r.identity.message.parsedContent, manifest.messages[0][3])
   result.indexedSearchAccepted = true
   result.nativeFtsAcceptance = { verified: false, reason: 'Synthetic fixture has no message_fts.db; direct FTS search is not a positive acceptance gate' }
+  // Reload normally so the renderer reads the real private profile persisted above.
+  await page.reload()
+  await page.locator('.rail-item').first().waitFor({ timeout: 30000 })
   await page.locator('.rail-item[data-tab="reader"]').click()
   await page.locator('.reader-session').first().click()
   await page.locator('.reader-row').first().waitFor({ timeout: 30000 })
