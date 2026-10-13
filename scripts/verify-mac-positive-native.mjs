@@ -30,10 +30,13 @@ try {
   result.productVersion = execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim()
   assert(Number(result.productVersion.split('.')[0]) >= 15)
   const before = Date.now()
-  const clock = await fetch(`https://api.github.com/?weport_clock=${before}`, { method: 'HEAD', signal: AbortSignal.timeout(15000) })
+  const clock = await fetch(`https://api.github.com/rate_limit?weport_clock=${before}`, {
+    headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' }, signal: AbortSignal.timeout(15000) })
   const after = Date.now(), serverUtc = Date.parse(clock.headers.get('date'))
+  result.utc = { before: new Date(before).toISOString(), after: new Date(after).toISOString(),
+    server: Number.isFinite(serverUtc) ? new Date(serverUtc).toISOString() : null,
+    httpStatus: clock.status, age: clock.headers.get('age'), cacheControl: clock.headers.get('cache-control') }
   assert(Number.isFinite(serverUtc) && serverUtc >= before - 2000 && serverUtc <= after + 2000, 'Actual UTC must match independent HTTPS server time')
-  result.utc = { before: new Date(before).toISOString(), after: new Date(after).toISOString(), server: new Date(serverUtc).toISOString() }
   for (const file of manifest.files) {
     assert.equal(hash(join(source, file.source)), file.sha256)
     const target = join(fixture, file.target)
