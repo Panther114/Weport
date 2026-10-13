@@ -46,6 +46,20 @@ export async function verifyFixtureModules(page, scratch, manifest, result) {
   assert.equal(r.search.hits.length, 1)
   assert.equal(r.identity.message.parsedContent, manifest.messages[0][3])
   result.indexedSearchAccepted = true
-  assert.equal(r.directSearch.messages.length, 1, 'Native direct search must return the incoming fixture row')
+  result.nativeFtsAcceptance = { verified: false, reason: 'Synthetic fixture has no message_fts.db; direct FTS search is not a positive acceptance gate' }
+  await page.locator('.rail-item[data-tab="reader"]').click()
+  await page.locator('.reader-session').first().click()
+  await page.locator('.reader-row').first().waitFor({ timeout: 30000 })
+  await page.locator('.reader-search-input').fill('incoming')
+  await page.waitForFunction(() => {
+    const note = document.querySelector('.reader-hits-note')?.textContent || ''
+    return note && !note.includes('正在搜索')
+  }, { timeout: 30000 })
+  result.readerSearchUI = { hits: await page.locator('.reader-hit-row').count(),
+    note: await page.locator('.reader-hits-note').textContent(),
+    excerpt: await page.locator('.reader-hit-excerpt').allTextContents() }
+  await page.screenshot({ path: '.ui-probe/mac-native-positive/reader-search.png' })
+  assert.equal(result.readerSearchUI.hits, 1, 'Reader must retain a loaded matching message when optional FTS search returns empty')
+  assert.equal(result.readerSearchUI.excerpt[0], manifest.messages[0][3])
   result.fixtureModulesAccepted = true
 }
