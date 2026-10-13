@@ -17,6 +17,8 @@ on:
       - 'scripts/build-mac-image-helper.sh'
       - 'resources/key/macos/source/**'
       - 'scripts/verify-mac-positive-native.mjs'
+      - 'scripts/verify-mac-fixture-modules.mjs'
+      - 'scripts/verify-mac-export-artifact.py'
       - 'scripts/fixtures/mac-native-positive/**'
       - 'scripts/prepare-native-modes.cjs'
       - 'scripts/prepare-host-bundle.cjs'

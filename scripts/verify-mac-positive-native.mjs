@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import assert from 'node:assert/strict'
+import { verifyFixtureModules } from './verify-mac-fixture-modules.mjs'
 
 assert.equal(process.platform, 'darwin')
 assert.equal(process.arch, 'arm64')
@@ -78,6 +79,7 @@ try {
   result.hostProcessEvidence = execFileSync('/bin/ps', ['-ww', '-axo', 'pid=,ppid=,comm='], { encoding: 'utf8' }).split('\n')
     .filter(line => Number(line.trim().split(/\s+/)[1]) === app.process().pid && hostPaths.some(path => line.includes(path)))
   assert(result.hostProcessEvidence.length > 0, 'Actual deployed WeFlow host must be alive during the read')
+  await verifyFixtureModules(page, scratch, manifest, result)
   await page.evaluate(() => window.electronAPI.chat.close())
   await app.close(); app = undefined
   for (const file of manifest.files) {
