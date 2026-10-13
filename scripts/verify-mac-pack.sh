@@ -176,6 +176,7 @@ def version(value):
 minimum = version(floor)
 payloads = app / 'Contents/Resources/resources'
 checked = 0
+errors = []
 for family in ('wcdb', 'key', 'wedecrypt', 'welive'):
     for path in (payloads / family / 'macos').rglob('*'):
         if not path.is_file():
@@ -194,11 +195,13 @@ for family in ('wcdb', 'key', 'wedecrypt', 'welive'):
             raise SystemExit(f'No native macOS minimum recorded in {path}')
         native_floor = match.group(1)
         if minimum < version(native_floor):
-            raise SystemExit(f'App allows macOS {floor}, but {path.relative_to(app)} requires {native_floor}')
+            errors.append(f'App allows macOS {floor}, but {path.relative_to(app)} requires {native_floor}')
         checked += 1
         print(f'{path.relative_to(app)}: native minimum {native_floor}, app minimum {floor}')
 if not checked:
     raise SystemExit('No native macOS payloads checked')
+if errors:
+    raise SystemExit('\n'.join(errors))
 PY
 then
   pass "app minimum macOS version covers shipped Apple Silicon native payloads"
