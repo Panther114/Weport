@@ -434,7 +434,7 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
         setHitsNote(
           result.engineSearch
             ? `引擎搜索命中 ${result.hits.length} 处`
-            : `引擎未提供会话内搜索通道（chat:searchMessages），仅在已加载的 ${messages.length} 条里找到 ${result.hits.length} 处`,
+            : `${result.error || '会话内搜索不可用'}；仅在已加载的 ${messages.length} 条里找到 ${result.hits.length} 处`,
         )
       })
     }, 260)
