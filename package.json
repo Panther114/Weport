@@ -128,6 +128,7 @@
         "zip"
       ],
       "category": "public.app-category.utilities",
+      "minimumSystemVersion": "15.0",
       "artifactName": "Weport-${version}-${arch}.${ext}",
       "icon": "resources/icons/macos/icon.icns",
       "hardenedRuntime": false,

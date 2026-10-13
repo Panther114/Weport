@@ -14,6 +14,8 @@ on:
       - 'package.json'
       - 'scripts/after-pack.cjs'
       - 'scripts/verify-mac-pack.sh'
+      - 'scripts/verify-mac-positive-native.mjs'
+      - 'scripts/fixtures/mac-native-positive/**'
       - 'scripts/prepare-native-modes.cjs'
       - 'scripts/prepare-host-bundle.cjs'
       - 'electron/entitlements.mac.plist'
@@ -30,6 +32,7 @@ permissions:
 jobs:
   verify-mac-pack:
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,3 +64,18 @@ jobs:
 
       - name: Verify macOS packaging & signature
         run: bash scripts/verify-mac-pack.sh release
+
+      - name: Verify packaged native host contracts
+        run: node scripts/verify-packaged-native.cjs release
+
+      - name: Read synthetic encrypted fixture through actual packaged app
+        run: node scripts/verify-mac-positive-native.mjs release
+
+      - name: Preserve Mac native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-native-positive-evidence
+          path: .ui-probe/mac-native-positive/
+          if-no-files-found: ignore
+          retention-days: 7
