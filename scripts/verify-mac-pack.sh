@@ -174,7 +174,7 @@ def version(value):
     return parts + (0,) * (3 - len(parts))
 
 minimum = version(floor)
-payloads = app / 'Contents/Resources'
+payloads = app / 'Contents/Resources/resources'
 checked = 0
 for family in ('wcdb', 'key', 'wedecrypt', 'welive'):
     for path in (payloads / family / 'macos').rglob('*'):
