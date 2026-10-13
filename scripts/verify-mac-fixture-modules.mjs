@@ -25,6 +25,12 @@ export async function verifyFixtureModules(page, scratch, manifest, result) {
     const counts = await api.chat.getSessionMessageCounts([contact])
     const dates = await api.chat.getMessageDates(contact)
     const directSearch = await api.chat.searchMessages('incoming', contact, 10, 0)
+    const directSearchVariants = []
+    for (const [keyword, session, begin, end] of [
+      ['Synthetic', contact, undefined, undefined], ['outgoing', contact, undefined, undefined],
+      ['incoming', undefined, undefined, undefined], ['incoming', contact, 1791599900, 1791600100],
+      ['incoming', contact, 0, 2147483647], ['Synthetic incoming message', contact, undefined, undefined],
+    ]) directSearchVariants.push({ keyword, session, begin, end, result: await api.chat.searchMessages(keyword, session, 10, 0, begin, end) })
     const build = await api.search.buildIndex({ force: true, wxid: 'qa_account' })
     const deadline = Date.now() + 120000
     let status
@@ -32,13 +38,14 @@ export async function verifyFixtureModules(page, scratch, manifest, result) {
     const search = await api.search.query({ text: 'incoming', limit: 10 })
     const hit = search.hits?.[0]
     const identity = hit ? await api.chat.getMessageByIdentity({ sessionId: hit.sessionId, localId: hit.localId, ts: hit.ts, db: hit.db, table: hit.table, idKind: hit.idKind }) : null
-    return { counts, dates, directSearch, build, status, search, identity }
+    return { counts, dates, directSearch, directSearchVariants, build, status, search, identity }
   }, manifest.contact)
   const r = result.readerSearch
   assert.equal(r.counts.counts[manifest.contact], 2)
   assert.equal(r.dates.success, true); assert(r.dates.dates.length > 0)
-  assert.equal(r.directSearch.messages.length, 1)
   assert.equal(r.search.hits.length, 1)
   assert.equal(r.identity.message.parsedContent, manifest.messages[0][3])
+  result.indexedSearchAccepted = true
+  assert.equal(r.directSearch.messages.length, 1, 'Native direct search must return the incoming fixture row')
   result.fixtureModulesAccepted = true
 }
