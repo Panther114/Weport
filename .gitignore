@@ -102,3 +102,6 @@ commit-msg-*.txt
 release-commit-msg.txt
 /weflow-export-records.json
 /.vitest/
+
+# Deferred receiver experiments and generated local state are not release source.
+/infra/telemetry-worker/

@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest'
+it('records final-answer tool control changes without rewriting history', () => {
+  const previous = buildPrefixFrame('system', [], [{ role: 'user', content: 'fixture' }], 'route')
+  expect(comparePrefixFrames(previous, { ...previous, toolChoice: 'none' }).change).toBe('control')
+  expect(comparePrefixFrames(previous, { ...previous, toolChoice: 'auto' }).change).toBe('append')
+})
 import {
   COMPACT_RETAIN_RATIO,
   COMPACT_TRIGGER_RATIO,

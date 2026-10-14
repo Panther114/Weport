@@ -1,6 +1,18 @@
 import { createHash } from 'node:crypto'
 import * as path from 'node:path'
 
+/** Shared legacy-compatible filename identity for exported media. */
+export function stableMediaMessageKey(input: {
+  localId: string; createTime: string; serverId: string; dbPath?: unknown; tableName?: unknown
+}): string {
+  const sourceDb = String(input.dbPath ?? '').trim().replace(/\\/g, '/').toLowerCase()
+  const sourceTable = String(input.tableName ?? '').trim().toLowerCase()
+  const scope = sourceDb || sourceTable
+    ? createHash('sha256').update(`${sourceDb}\0${sourceTable}`).digest('hex').slice(0, 12)
+    : ''
+  return `${scope ? `${scope}:` : ''}${input.localId}:${input.createTime}:${input.serverId}`
+}
+
 /** Normalize a table primary key without losing decimal precision. */
 export function exactLocalIdToken(value: unknown): string | undefined {
   if (typeof value === 'number') {

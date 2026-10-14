@@ -7,7 +7,7 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { sourceFingerprint } from '../sourceFingerprint'
-import { sourceMessageIdentityHash } from '../sourceMessageIdentity'
+import { sourceMessageIdentityHash, stableMediaMessageKey } from '../sourceMessageIdentity'
 import { fileURLToPath } from 'url'
 // 只用类型（ExcelJS.Cell 出现在下面两个公开方法的签名里）；运行时按需动态加载，
 // 避免所有导出（哪怕是 TXT）都背上 exceljs 的 ~18MB 常驻。见 ExcelFormatter.ts 说明。
@@ -23,7 +23,7 @@ import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
 import { normalizeTimestampSeconds, formatTimestamp, formatIsoTimestamp, parseCompactDateTimeDigitsToSeconds, parseDateTimeTextToSeconds, normalizeExportDateRange, normalizeRowTimestampSeconds, getTimestampSecondsFromRow } from '../../export/utils/timestamp';
 import { escapeHtml, escapeAttribute, renderMultilineText, decodeHtmlEntities } from '../../export/utils/htmlEscape';
-import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, normalizeExportConflictStrategy, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath } from '../../export/utils/fileNaming';
+import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, normalizeExportConflictStrategy, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath, isWeChatSuffixRenamedEntry, pickWeChatSuffixRenamedEntries } from '../../export/utils/fileNaming';
 import { extractXmlValue, extractXmlAttribute, extractAppMessageType, normalizeAppMessageContent } from '../../export/parsers/xmlExtractor';
 import { decodeMessageContent, decodeMaybeCompressed, decodeBinaryContent, looksLikeHex, looksLikeBase64 } from '../../export/parsers/contentDecoder';
 import { parseVoipMessage } from '../../export/parsers/voipParser';
@@ -61,23 +61,6 @@ function hasNonEmptyPackedInfoData(value: unknown): boolean {
     return true
 }
 
-// Weport 裁剪：视频/语音转写服务已移除（文本导出不涉及），保留等价兜底。
-// 若未来恢复媒体导出，把以下两个 stub 换回真实服务即可。
-const videoServiceStub = {
-  parseVideoMd5: (content: string): string => {
-    const m = /md5=["']([0-9a-fA-F]{32})["']/i.exec(String(content || ''))
-    return m ? m[1].toLowerCase() : ''
-  },
-  getVideoInfoBatch: async (..._args: unknown[]): Promise<any> => ({ success: false }),
-  getVideoInfo: async (..._args: unknown[]): Promise<any> => ({
-    success: false,
-    exists: false,
-    videoUrl: '',
-    coverUrl: '',
-    thumbUrl: '',
-  }),
-}
-
 export class ExportContext {
   /** Inject a fixture database for integration checks; production uses WCDB by default. */
   public integrityDbAccess?: import('../integrityChecker').IntegrityDbAccess
@@ -100,6 +83,7 @@ export class ExportContext {
     private mediaFileCacheReadyDirs = new Set<string>();
     private mediaExportTelemetry: MediaExportTelemetry | null = null;
     private mediaRunSourceDedupMap = new Map<string, string>();
+    private mediaRunReservedOutputPaths = new Set<string>();
     private mediaRunMissingImageKeys = new Set<string>();
     // ---- v1.2 §10.1 ①：账本 / 媒体去重 / 原子写 ---------------------------------
     /** 账本说"已完成且磁盘校验通过"而跳过的会话数（只读遥测）。 */
@@ -563,11 +547,14 @@ export class ExportContext {
         if (!sha256) return false
         const existing = this.contentAddressedMedia.get(sha256)
         if (!existing) return false
-        if (path.resolve(existing) === path.resolve(destPath)) return true
-        if (!await pathExists(existing)) {
+        const current = await hashFileContent(existing)
+        this.throwIfStopRequested(control)
+        if (current?.sha256 !== sha256) {
             this.contentAddressedMedia.delete(sha256)
+            this.noteLedgerMismatch('media-content-address-mismatch')
             return false
         }
+        if (path.resolve(existing) === path.resolve(destPath)) return true
         const existedBefore = await pathExists(destPath)
         const linked = await hardlinkOrCopyFile(existing, destPath)
         if (!linked.success) return false
@@ -692,6 +679,7 @@ export class ExportContext {
     public resetMediaRuntimeState(): void {
         this.mediaExportTelemetry = this.createEmptyMediaTelemetry()
         this.mediaRunSourceDedupMap.clear()
+        this.mediaRunReservedOutputPaths.clear()
         this.mediaRunMissingImageKeys.clear()
         this.activeSharedMediaCount = 0
         for (const w of this.sharedMediaWaiters) try { w() } catch {}
@@ -703,6 +691,7 @@ export class ExportContext {
     public clearMediaRuntimeState(): void {
         this.mediaExportTelemetry = null
         this.mediaRunSourceDedupMap.clear()
+        this.mediaRunReservedOutputPaths.clear()
         this.mediaRunMissingImageKeys.clear()
         this.activeSharedMediaCount = 0
         for (const w of this.sharedMediaWaiters) try { w() } catch {}
@@ -884,6 +873,13 @@ export class ExportContext {
         }
     }
 
+    private async tryReuseExportedBuffer(destPath: string, buffer: Buffer, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<boolean> {
+        if (!this.shouldReuseExistingExportFile(options)) return false
+        const existing = await hashFileContent(destPath)
+        this.throwIfStopRequested(control)
+        return existing?.bytes === buffer.length && existing.sha256 === crypto.createHash('sha256').update(buffer).digest('hex')
+    }
+
     private isHardlinkFallbackError(code: string | undefined): boolean {
         return code === 'EXDEV' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL' || code === 'ENOSYS' || code === 'ENOTSUP'
     }
@@ -895,21 +891,28 @@ export class ExportContext {
           // 账本说"这一份"、磁盘上却是半截/被改过 → 重做，不能因为"文件在"就跳过。
           const ledgerEntry = relativePath ? this.ledgerMediaIndex.get(relativePath) : undefined
           if (!ledgerEntry) {
-            this.noteMediaTelemetry({
-              doneFiles: 1,
-              dedupReuseFiles: 1
-            })
-            return { success: true }
+            // Legacy outputs and interrupted exports can exist without a ledger.
+            // Existence alone does not prove that they contain this payload.
+            const [sourceHash, destinationHash] = await Promise.all([
+              hashFileContent(sourcePath), hashFileContent(destPath)
+            ])
+            this.throwIfStopRequested(control)
+            if (sourceHash && destinationHash?.sha256 === sourceHash.sha256 && destinationHash.bytes === sourceHash.bytes) {
+              this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+              return { success: true }
+            }
+            this.noteLedgerMismatch('media-unverified-existing-output')
+          } else {
+            const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
+            if (verified.skip) {
+              this.noteMediaTelemetry({
+                doneFiles: 1,
+                dedupReuseFiles: 1
+              })
+              return { success: true }
+            }
+            this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
           }
-          const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
-          if (verified.skip) {
-            this.noteMediaTelemetry({
-              doneFiles: 1,
-              dedupReuseFiles: 1
-            })
-            return { success: true }
-          }
-          this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
         }
         // v1.2 §10.1：账本命中（相对路径 + 内容哈希都对得上）→ 真跳过
         if (relativePath) {
@@ -922,7 +925,16 @@ export class ExportContext {
           const reusedByContent = await this.reuseByContentHash(sourceHash.sha256, destPath, control)
           if (reusedByContent) return { success: true }
         }
-        const resolved = await this.resolvePreferredMediaSource(kind, sourcePath);
+        let resolved = await this.resolvePreferredMediaSource(kind, sourcePath);
+        if (resolved.cacheHit) {
+          const cachedHash = await hashFileContent(resolved.sourcePath)
+          if (!sourceHash || cachedHash?.sha256 !== sourceHash.sha256 || cachedHash.bytes !== sourceHash.bytes) {
+            // Old exports may share a hardlink with this derived cache. Editing
+            // an export must not make the cache authoritative over the source.
+            this.noteLedgerMismatch('media-cache-content-mismatch')
+            resolved = { sourcePath, cacheHit: false, fileStat: resolved.fileStat }
+          }
+        }
         if (resolved.cacheHit) {
           this.noteMediaTelemetry({ cacheHitFiles: 1 })
         } else {
@@ -947,9 +959,9 @@ export class ExportContext {
           }
         }
 
-        const copied = resolved.cacheHit
-                  ? await hardlinkOrCopyFile(resolved.sourcePath, destPath)
-                  : await copyFileOptimized(resolved.sourcePath, destPath);
+        // Cache-to-export copies must be independent; hardlinks are reserved
+        // for deduplication between outputs owned by the same export run.
+        const copied = await copyFileOptimized(resolved.sourcePath, destPath);
         if (!copied.success) return copied
         if (dedupeKey) {
           this.mediaRunSourceDedupMap.set(dedupeKey, destPath)
@@ -1430,12 +1442,9 @@ export class ExportContext {
         const localId = this.normalizeUnsignedIntToken(msg?.localIdRaw ?? msg?.localId);
         const createTime = this.normalizeUnsignedIntToken(msg?.createTime);
         const serverId = this.normalizeUnsignedIntToken(msg?.serverIdRaw ?? msg?.serverId);
-        const sourceDb = String(msg?._db_path ?? msg?.sourceDbPath ?? '').trim().replace(/\\/g, '/').toLowerCase()
-        const sourceTable = String(msg?._table_name ?? msg?.sourceTableName ?? '').trim().toLowerCase()
-        const sourceScope = sourceDb || sourceTable
-          ? crypto.createHash('sha256').update(`${sourceDb}\0${sourceTable}`).digest('hex').slice(0, 12)
-          : ''
-        return `${sourceScope ? `${sourceScope}:` : ''}${localId}:${createTime}:${serverId}`
+        return stableMediaMessageKey({ localId, createTime, serverId,
+          dbPath: msg?._db_path ?? msg?.sourceDbPath,
+          tableName: msg?._table_name ?? msg?.sourceTableName })
     }
 
     public getSourceMessageIdentityHash(msg: { localId?: unknown; localIdRaw?: unknown; _db_path?: unknown; _table_name?: unknown; sourceDbPath?: unknown; sourceTableName?: unknown }): string | undefined {
@@ -3382,7 +3391,7 @@ export class ExportContext {
           }
           let destPath = path.join(targetDir, destFileName)
           if (kind === 'file' && this.resolveExportConflictStrategy(options) === 'rename') {
-            destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
+            destPath = await reserveUniqueOutputPath(destPath, this.mediaRunReservedOutputPaths)
             destFileName = path.basename(destPath)
           }
           const relativeMediaPath = path.posix.join(mediaRelativePrefix, dirName, destFileName)
@@ -3563,7 +3572,8 @@ export class ExportContext {
             const fileName = `${messageId}_${imageKey}${ext}`
             const destPath = path.join(imagesDir, fileName)
 
-            if (await pathExists(destPath) && this.shouldReuseExistingExportFile(options)) {
+            const buffer = Buffer.from(base64Data, 'base64')
+            if (await this.tryReuseExportedBuffer(destPath, buffer, control, options)) {
               this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
               return {
                 relativePath: path.posix.join(mediaRelativePrefix, 'images', fileName),
@@ -3571,9 +3581,8 @@ export class ExportContext {
               }
             }
 
-            const buffer = Buffer.from(base64Data, 'base64')
             await this.recordCreatedFileBeforeWrite(destPath, control)
-            await fs.promises.writeFile(destPath, buffer)
+            await atomicWriteFile(destPath, buffer)
             this.noteMediaTelemetry({
               doneFiles: 1,
               cacheMissFiles: 1,
@@ -3648,7 +3657,7 @@ export class ExportContext {
               videoTokenSet.add(videoMd5)
               continue
             }
-            const parsedVideoMd5 = String(videoServiceStub.parseVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
+            const parsedVideoMd5 = String(this.extractVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
             if (parsedVideoMd5) {
               videoTokenSet.add(parsedVideoMd5)
             }
@@ -3728,14 +3737,6 @@ export class ExportContext {
           const fileName = `voice_${safeSession}_${stableKey || msgId}.wav`
           const destPath = path.join(voicesDir, fileName)
 
-          if (await pathExists(destPath) && this.shouldReuseExistingExportFile(options)) {
-            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
-            return {
-              relativePath: path.posix.join(mediaRelativePrefix, 'voices', fileName),
-              kind: 'voice'
-            }
-          }
-
           // 调用 chatService 获取语音数据
           const voiceResult = await chatService.getVoiceData(
             sessionId,
@@ -3753,8 +3754,12 @@ export class ExportContext {
 
           // voiceResult.data 是 base64 编码的 wav 数据
           const wavBuffer = Buffer.from(voiceResult.data, 'base64')
+          if (await this.tryReuseExportedBuffer(destPath, wavBuffer, control, options)) {
+            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+            return { relativePath: path.posix.join(mediaRelativePrefix, 'voices', fileName), kind: 'voice' }
+          }
           await this.recordCreatedFileBeforeWrite(destPath, control)
-          await fs.promises.writeFile(destPath, wavBuffer)
+          await atomicWriteFile(destPath, wavBuffer)
           this.noteMediaTelemetry({
             doneFiles: 1,
             bytesWritten: wavBuffer.length
@@ -3883,7 +3888,7 @@ export class ExportContext {
               this.normalizeVideoFileToken(this.resolveWeliveMediaPath(msg))
             ]
             for (const content of contents) {
-              tokens.push(videoServiceStub.parseVideoMd5(content))
+              tokens.push(this.extractVideoMd5(content))
               tokens.push(this.extractVideoMd5(content))
             }
             return Array.from(new Set(tokens
@@ -3892,7 +3897,8 @@ export class ExportContext {
           }
           const resolveVideoInfo = async (token: string) => {
             if (!token) return null
-            const videoInfo = await videoServiceStub.getVideoInfo(token, { includePoster })
+            const { videoService } = await import('../../videoService')
+            const videoInfo = await videoService.getVideoInfo(token, { includePoster })
             if (!videoInfo.exists || !videoInfo.videoUrl) return null
             return videoInfo
           }
@@ -4293,10 +4299,39 @@ export class ExportContext {
         }
     }
 
-    private collectFileStorageCandidatesByName(rootDir: string, fileName: string, maxDepth = 3): string[] {
-        const normalizedName = String(fileName || '').trim().toLowerCase();
-        if (!rootDir || !normalizedName) return []
-        const matches: string[] = [];
+    /**
+     * 列出某目录下「文件名匹配目标附件」的全部条目。
+     *
+     * 除了精确同名，还要认得微信自动追加的 `(N)` 后缀：同一个附件被重复接收时，
+     * 磁盘上是 `报告(1).docx`，而消息里记的是 `报告.docx`。只按精确名找会让这类
+     * 附件全部丢失（实测某群 23 个文件消息里有 10 个是这么丢的）。
+     */
+    private listFileAttachmentNameMatches(dir: string, fileName: string): Array<{ name: string; nameMatch: 'exact' | 'suffix' }> {
+        const base = path.basename(String(fileName || ''))
+        if (!base) return []
+        let entries: string[] = []
+        try {
+          entries = fs.readdirSync(dir)
+        } catch {
+          return []
+        }
+
+        const matches: Array<{ name: string; nameMatch: 'exact' | 'suffix' }> = []
+        const exact = entries.find(name => name.toLowerCase() === base.toLowerCase())
+        if (exact) {
+          matches.push({ name: exact, nameMatch: 'exact' })
+        }
+        for (const variant of pickWeChatSuffixRenamedEntries(entries, base)) {
+          matches.push({ name: variant, nameMatch: 'suffix' })
+        }
+        return matches
+    }
+
+    private collectFileStorageCandidatesByName(rootDir: string, fileName: string, maxDepth = 3): Array<{ sourcePath: string; nameMatch: 'exact' | 'suffix' }> {
+        const base = path.basename(String(fileName || ''))
+        if (!rootDir || !base) return []
+        const normalizedName = base.toLowerCase()
+        const matches: Array<{ sourcePath: string; nameMatch: 'exact' | 'suffix' }> = [];
         const stack: Array<{ dir: string; depth: number }> = [{ dir: rootDir, depth: 0 }];
         while (stack.length > 0) {
           const current = stack.pop()!
@@ -4309,8 +4344,12 @@ export class ExportContext {
 
           for (const entry of entries) {
             const entryPath = path.join(current.dir, entry.name)
-            if (entry.isFile() && entry.name.toLowerCase() === normalizedName) {
-              matches.push(entryPath)
+            if (entry.isFile()) {
+              if (entry.name.toLowerCase() === normalizedName) {
+                matches.push({ sourcePath: entryPath, nameMatch: 'exact' })
+              } else if (isWeChatSuffixRenamedEntry(entry.name.toLowerCase(), normalizedName)) {
+                matches.push({ sourcePath: entryPath, nameMatch: 'suffix' })
+              }
               continue
             }
             if (entry.isDirectory() && current.depth < maxDepth) {
@@ -4366,7 +4405,7 @@ export class ExportContext {
         const candidates: FileExportCandidate[] = [];
         const seen = new Set<string>();
         let searchOrder = 0;
-        const appendCandidate = async (sourcePath: string, yearMonth?: string) => {
+        const appendCandidate = async (sourcePath: string, yearMonth?: string, nameMatch: 'exact' | 'suffix' = 'exact') => {
                   if (!sourcePath || !fs.existsSync(sourcePath)) return
 
                   const resolvedPath = path.resolve(sourcePath)
@@ -4385,16 +4424,22 @@ export class ExportContext {
                   candidates.push({
                     sourcePath: resolvedPath,
                     matchedBy,
+                    nameMatch,
                     yearMonth,
                     preferredMonth: Boolean(yearMonth && preferredMonths.has(yearMonth)),
                     mtimeMs: Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0,
                     searchOrder: searchOrder++
                   })
                 };
+        const appendCandidatesInDir = async (dir: string, yearMonth?: string) => {
+                  for (const match of this.listFileAttachmentNameMatches(dir, fileName)) {
+                    await appendCandidate(path.join(dir, match.name), yearMonth, match.nameMatch)
+                  }
+                };
         for (const root of roots) {
           if (root.msgFileRoot) {
             for (const month of preferredMonths) {
-              await appendCandidate(path.join(root.msgFileRoot, month, fileName), month)
+              await appendCandidatesInDir(path.join(root.msgFileRoot, month), month)
             }
 
             let monthDirs: string[] = []
@@ -4408,14 +4453,14 @@ export class ExportContext {
             }
 
             for (const month of monthDirs) {
-              await appendCandidate(path.join(root.msgFileRoot, month, fileName), month)
+              await appendCandidatesInDir(path.join(root.msgFileRoot, month), month)
             }
-            await appendCandidate(path.join(root.msgFileRoot, fileName))
+            await appendCandidatesInDir(root.msgFileRoot)
           }
 
           if (root.fileStorageRoot) {
-            for (const candidatePath of this.collectFileStorageCandidatesByName(root.fileStorageRoot, fileName, 3)) {
-              await appendCandidate(candidatePath)
+            for (const candidate of this.collectFileStorageCandidatesByName(root.fileStorageRoot, fileName, 3)) {
+              await appendCandidate(candidate.sourcePath, undefined, candidate.nameMatch)
             }
           }
         }
@@ -4423,6 +4468,12 @@ export class ExportContext {
         candidates.sort((left, right) => {
           if (left.matchedBy !== right.matchedBy) {
             return left.matchedBy === 'md5' ? -1 : 1
+          }
+          // 精确同名永远比「微信加 (1) 后缀」的更可信，不能被更新的 mtime 顶掉。
+          const leftNameMatch = left.nameMatch ?? 'exact'
+          const rightNameMatch = right.nameMatch ?? 'exact'
+          if (leftNameMatch !== rightNameMatch) {
+            return leftNameMatch === 'exact' ? -1 : 1
           }
           if (left.preferredMonth !== right.preferredMonth) {
             return left.preferredMonth ? -1 : 1
@@ -4441,8 +4492,6 @@ export class ExportContext {
           if (!fileNameRaw) return null
 
           const fileExtDir = resolveFileAttachmentExtensionDir(msg, fileNameRaw)
-          const fileDir = path.join(mediaRootDir, mediaRelativePrefix, 'file', fileExtDir)
-          await ensureExportDir(fileDir, control, dirCache)
 
           const candidates = await this.resolveFileAttachmentCandidates(msg)
           if (candidates.length === 0) {
@@ -4482,17 +4531,32 @@ export class ExportContext {
             return null
           }
 
+          // Names are not attachment identities: different months can contain
+          // unrelated payloads with the same original filename.
+          this.throwIfStopRequested(control)
+          const sourceHash = await hashFileContent(selected.sourcePath)
+          const afterHash = await fs.promises.stat(selected.sourcePath)
+          if (!sourceHash || sourceHash.bytes !== stat.size || afterHash.size !== stat.size || afterHash.mtimeMs !== stat.mtimeMs) {
+            this.recordFileAttachmentMiss(msg, '附件读取期间发生变化', { sourcePath: selected.sourcePath })
+            return null
+          }
+          this.throwIfStopRequested(control)
+          const relativeDir = path.posix.join(mediaRelativePrefix, 'file', fileExtDir, sourceHash.sha256)
+          const fileDir = path.join(mediaRootDir, relativeDir)
+          await ensureExportDir(fileDir, control, dirCache)
           let destFileName = path.basename(fileNameRaw).replace(/[\\/:*?"<>|]/g, '_') || 'file'
           let destPath = path.join(fileDir, destFileName)
           if (this.resolveExportConflictStrategy(options) === 'rename') {
-            destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
+            destPath = await reserveUniqueOutputPath(destPath, this.mediaRunReservedOutputPaths)
             destFileName = path.basename(destPath)
           }
           const existedBeforeCopy = await pathExists(destPath)
-          if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
+          const existingHash = existedBeforeCopy && this.shouldReuseExistingExportFile(options)
+            ? await hashFileContent(destPath) : null
+          if (existingHash?.sha256 === sourceHash.sha256 && existingHash.bytes === sourceHash.bytes) {
             this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
             return {
-              relativePath: path.posix.join(mediaRelativePrefix, 'file', fileExtDir, destFileName),
+              relativePath: path.posix.join(relativeDir, destFileName),
               kind: 'file'
             }
           }
@@ -4510,12 +4574,19 @@ export class ExportContext {
           if (!existedBeforeCopy) {
             control?.recordCreatedFile?.(destPath)
           }
+          const copiedHash = await hashFileContent(destPath)
+          if (copiedHash?.sha256 !== sourceHash.sha256 || copiedHash.bytes !== sourceHash.bytes) {
+            this.recordFileAttachmentMiss(msg, '附件复制后校验失败', { sourcePath: selected.sourcePath, destPath })
+            return null
+          }
+          this.throwIfStopRequested(control)
           this.noteMediaTelemetry({ doneFiles: 1, bytesWritten: stat.size })
           return {
-            relativePath: path.posix.join(mediaRelativePrefix, 'file', fileExtDir, destFileName),
+            relativePath: path.posix.join(relativeDir, destFileName),
             kind: 'file'
           }
         } catch (error) {
+          if (this.isStopError(error) || this.isPauseError(error)) throw error
           this.logFileAttachmentEvent('error', '附件导出异常', msg, {
             error: error instanceof Error ? error.message : String(error || 'unknown')
           })

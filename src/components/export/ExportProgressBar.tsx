@@ -133,13 +133,16 @@ const ExportProgressBar = forwardRef<ExportProgressBarHandle, ExportProgressBarP
   const lastAnnouncedRef = useRef('')
   useEffect(() => {
     if (!progress) return
-    const phase = progress.phase || 'running'
+    const phase = live.status === 'aborted' ? 'cancelled'
+      : live.status === 'failed' ? 'failed'
+        : isExportCompletionAuthoritative({ busy, taskStatus: live.status, confirmedByResult: confirmedComplete })
+          ? 'complete' : progress.phase || 'running'
     if (lastAnnouncedRef.current === phase) return
     lastAnnouncedRef.current = phase
     setAnnouncement(
-      phase === 'complete' ? '导出完成' : phase === 'preparing' ? '正在准备导出' : phase === 'verifying' ? '正在校验导出结果' : phase === 'cancelled' ? '导出已取消' : '正在导出会话',
+      phase === 'complete' ? '导出完成' : phase === 'failed' ? '导出失败' : phase === 'preparing' ? '正在准备导出' : phase === 'verifying' ? '正在校验导出结果' : phase === 'cancelled' ? '导出已取消' : '正在导出会话',
     )
-  }, [progress])
+  }, [progress, live.status, busy, confirmedComplete])
 
   useImperativeHandle(
     ref,

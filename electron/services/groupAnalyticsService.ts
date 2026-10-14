@@ -1174,7 +1174,8 @@ class GroupAnalyticsService {
       const conn = await this.ensureConnected()
       if (!conn.success) return { success: false, error: conn.error }
 
-      const sessionResult = await wcdbService.getSessions()
+      // Reader/export and analytics must share the recovered history inventory.
+      const sessionResult = await chatService.getSessions()
       if (!sessionResult.success || !sessionResult.sessions) {
         return { success: false, error: sessionResult.error || '获取会话失败' }
       }

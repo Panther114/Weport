@@ -27,6 +27,7 @@ import { ImageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
 import { extractWechatVoiceTranscript, extractWechatVoiceTranscriptFromPackedInfo } from './voiceTranscript'
 import { LRUCache } from '../utils/LRUCache.js'
+import { discoverHistorySessions, type RecoveredHistorySession } from './historySessionRecovery'
 
 export interface ChatSession {
   username: string
@@ -450,7 +451,7 @@ const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage'
 export function extractErrorCode(message?: string | null): number | null {
   const text = String(message || '').trim()
   if (!text) return null
-  const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{2,6})(?:\)|\b)/)
+  const match = text.match(/(?:错误码\s*[:：]\s*|\()(-?\d{1,6})(?:\)|\b)/)
   if (!match) return null
   const parsed = Number(match[1])
   return Number.isFinite(parsed) ? parsed : null
@@ -521,6 +522,7 @@ function wcdbLogPathHint(): string {
 }
 
 class ChatService {
+  private recoveredHistoryCache: { signature: string; at: number; sessions: RecoveredHistorySession[] } | null = null
   private configService: ConfigService
   private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
   private connected = false
@@ -1504,6 +1506,7 @@ class ChatService {
       }
 
       await this.addMissingOfficialSessions(sessions, myWxid)
+      await this.addMissingHistorySessions(sessions, myWxid)
       await this.applySyntheticUnreadCounts(sessions)
       sessions.sort((a, b) => Number(b.sortTimestamp || b.lastTimestamp || 0) - Number(a.sortTimestamp || a.lastTimestamp || 0))
 
@@ -1728,6 +1731,29 @@ class ChatService {
       }))
 
     return { validIds, invalidRows }
+  }
+
+  private async addMissingHistorySessions(sessions: ChatSession[], myWxid?: string): Promise<void> {
+    try {
+      const snapshot = await this.getMessageDbCountSnapshot()
+      if (!snapshot.success || !snapshot.dbPaths) throw new Error('Cannot inspect message shards for history recovery')
+      const existing = new Set(sessions.map(session => session.username))
+      const signature = `${snapshot.dbSignature || snapshot.dbPaths.join('|')}:${[...existing].sort().join('|')}`
+      const cached = this.recoveredHistoryCache
+      const recovered = cached && cached.signature === signature && Date.now() - cached.at < 15000
+        ? cached.sessions : await discoverHistorySessions(wcdbService, snapshot.dbPaths, existing)
+      this.recoveredHistoryCache = { signature, at: Date.now(), sessions: recovered }
+      const openimTypes = await this.loadContactLocalTypeMapForEnterpriseOpenim(recovered.map(row => row.username))
+      for (const row of recovered) {
+        if (existing.has(row.username) || !this.shouldKeepSession(row.username, openimTypes.get(row.username))) continue
+        const contact = this.avatarCache.get(row.username)
+        sessions.push({ username: row.username, type: 0, unreadCount: 0, summary: '历史会话',
+          sortTimestamp: row.latest, lastTimestamp: row.latest, lastMsgType: 0,
+          messageCountHint: row.count, displayName: contact?.displayName || row.username,
+          avatarUrl: contact?.avatarUrl, selfWxid: myWxid })
+        existing.add(row.username)
+      }
+    } catch (error) { console.warn('[ChatService] History session recovery unavailable:', error) }
   }
 
   private async addMissingOfficialSessions(sessions: ChatSession[], myWxid?: string): Promise<void> {
@@ -3071,8 +3097,23 @@ class ChatService {
         const cursorBatchSize = Math.max(1, Math.floor(state?.batchSize || requestLimit || this.messageBatchDefault))
         const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
         const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
+        const cursorGeneration = this.connectionGeneration
         const cursorResult = await wcdbService.openMessageCursor(sessionId, cursorBatchSize, ascending, beginTimestamp, endTimestamp)
         if (!cursorResult.success || !cursorResult.cursor) {
+          // A synchronized session can exist before its local Msg table does.
+          // Native -3 is also used for a missing global store: only accept empty
+          // history after an existing store and an explicit fresh zero agree.
+          if (cursorResult.errorCode === -3 && cursorGeneration === this.connectionGeneration) {
+            const snapshot = await this.getMessageDbCountSnapshot(true)
+            if (snapshot.success && (snapshot.dbPaths?.length || 0) > 0) {
+              const counted = await wcdbService.getSessionMessageCounts([sessionId])
+              if (cursorGeneration === this.connectionGeneration && counted.success &&
+                  Object.prototype.hasOwnProperty.call(counted.counts || {}, sessionId) &&
+                  counted.counts![sessionId] === 0) {
+                return { success: true, messages: [], hasMore: false, nextOffset: 0 }
+              }
+            }
+          }
           console.error('[ChatService] 打开消息游标失败:', cursorResult.error)
           return { success: false, error: cursorResult.error || '打开消息游标失败' }
         }

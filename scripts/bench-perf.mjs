@@ -38,9 +38,9 @@ const require = createRequire(import.meta.url)
 const { _electron: electron } = require('playwright-core')
 
 const root = resolve(process.cwd())
-// The current v1.2 default notification is 422×114 DIP; the app probe adds a 40px margin
+// The settled max-shadow v1.2.1 notification is 422×146 DIP; the app probe adds a 40px margin
 // on each edge and schedules the next synthetic frame 33ms after sending the current one.
-const syntheticFrameProfile = { width: 502, height: 194, margin: 40, intervalMs: 33, costMs: 11 }
+const syntheticFrameProfile = { width: 502, height: 226, margin: 40, intervalMs: 33, costMs: 11 }
 const useInstalled = process.argv.includes('--installed')
 const skipPopup = process.argv.includes('--skip-popup')
 const updateBaseline = process.argv.includes('--update')
@@ -368,7 +368,13 @@ try {
   const page = await app.firstWindow({ timeout: 90000 })
   const firstWindowState = await app.evaluate(async ({ BrowserWindow }) => {
     const armWindow = BrowserWindow.prototype.__weportProbeArmWindow
-    for (const win of BrowserWindow.getAllWindows()) armWindow?.(win)
+    for (const win of BrowserWindow.getAllWindows()) {
+      armWindow?.(win)
+      // --background can win the ready-to-show race. Present only after the
+      // offscreen guard is armed so Chromium measures real frames without focus.
+      win.webContents.setBackgroundThrottling(false)
+      win.showInactive()
+    }
     return {
       windows: BrowserWindow.getAllWindows().map((win) => ({ position: win.getPosition(), visible: win.isVisible() })),
       focused: Boolean(BrowserWindow.getFocusedWindow()),
@@ -397,6 +403,7 @@ try {
   })
   const startupProcs = await sampleProcMetrics()
   result.start = { railMs, ...navTiming, rssMb: Math.round(startupProcs.total) }
+  if (navTiming.fcpMs === null) failures.push('启动未记录首帧：后台窗口可能被遮挡，不能判为性能通过')
   console.log(
     `\n[A] 启动  rail=${railMs}ms  FCP=${navTiming.fcpMs}ms  DCL=${navTiming.domContentLoadedMs}ms  ` +
       `heap=${navTiming.heapMb}MB  RSS=${result.start.rssMb}MB`
@@ -469,7 +476,8 @@ try {
     await sampleProcMetrics()
     // 切页后停一下：连续点会互相叠加，量到的不是单页成本
     await sleep(350)
-    if (row.missing) continue
+    if (row.missing) { failures.push(`切页入口缺失：${label}`); continue }
+    if (row.frames < 2) failures.push(`切页未采到有效帧：${label}（可能被遮挡）`)
     result.pages.push(row)
     console.log(
       `  ${String(row.label).padEnd(10)} frames=${String(row.frames).padEnd(3)} p95=${String(row.p95Delta).padEnd(6)}ms max=${String(row.maxDelta).padEnd(6)}ms ` +
@@ -519,6 +527,8 @@ try {
   // ---------------------------------------------------------------- C/D. 弹窗与玻璃
   if (!skipPopup) {
     const setGlass = (key, value) => page.evaluate(({ k, v }) => window.electronAPI.config.set(k, v), { k: key, v: value })
+    // Keep the synthetic card alive through settling and the 1.6s sample.
+    await setGlass('notificationDuration', 15000)
 
     /** 弹一条真通知并量它：窗口创建 → 首帧 → 1.6s 内的帧间隔与 CPU */
     const measurePopup = async (tag) => {
@@ -583,18 +593,19 @@ try {
        */
       await popupPage
         .waitForFunction(
-          () => {
+          (requiresBackdrop) => {
             const card = document.querySelector('#notification-current .notification-toast-container')
             if (!card) return false
             const shadow = card.style.getPropertyValue('--glass-shadow').trim()
             const frost = Number(card.style.getPropertyValue('--glass-shadow') ? 1 : 0)
             // 投射滑块拉满时内联属性必须已经写进卡片（用户配置 → 卡片容器）
-            if (shadow) return true
-            return card.querySelectorAll('img, video, canvas').length > 0
+            if (!card.querySelector('.notification-time') || !card.querySelector('.notification-body')) return false
+            if (!requiresBackdrop) return true
+            return Boolean(shadow) || card.querySelectorAll('img, video, canvas').length > 0
           },
+          tag === 'frost100-blur100',
           { timeout: 4000 },
         )
-        .catch(() => {})
 
       // Use one known synthetic frame source per build. v1.2 owns its synthetic probe stream;
       // v1.1 has no probe stream, so the harness supplies the same BGRA tile at the same cadence.
@@ -614,9 +625,22 @@ try {
           frameProvider = `harness synthetic BGRA ${delivery.width}x${delivery.height} @ ${delivery.intervalMs}ms`
           await sleep(160)
         } else {
+          // v1.2.1 registers resize even with push disabled. The slide window is
+          // deliberately expanded during entry; compare settled tile geometry.
+          const settleDeadline = Date.now() + 3000
+          while (Date.now() < settleDeadline) {
+            const settledSize = await app.evaluate(({ BrowserWindow }) => {
+              const popup = BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('popup.html'))
+              return popup?.getSize() ?? []
+            })
+            if (settledSize[0] + syntheticFrameProfile.margin * 2 === syntheticFrameProfile.width &&
+                settledSize[1] + syntheticFrameProfile.margin * 2 === syntheticFrameProfile.height) break
+            await sleep(100)
+          }
           if (sequence === 0) {
             await popupPage.waitForFunction(
               () => Number(document.documentElement.dataset.glassSeq || 0) > 0,
+              null,
               { timeout: 3000 },
             )
           }
@@ -775,6 +799,7 @@ try {
     const cold = await measurePopup('cold-frost0')
     if (cold.error) {
       console.error(`  冷启动量不到：${cold.error}`)
+      failures.push(`冷启动通知量不到：${cold.error}`)
       result.popup = cold
     } else {
       result.popup = cold
@@ -785,7 +810,8 @@ try {
           `cpu=${cold.cpuDuringPopup}% RSS=${cold.rssDuringPopupMb}MB`
       )
       console.log(`              背景像素层=${cold.backdropLayers}（0 = 透明玻璃，符合默认）  时间字色=${cold.timeColor}`)
-      const sameColour = cold.timeColor === cold.bodyColor
+      const sameColour = Boolean(cold.timeColor && cold.bodyColor && cold.timeColor === cold.bodyColor)
+      if (cold.backdropLayers !== 0) failures.push(`默认透明卡片读数无效：背景层=${cold.backdropLayers}`)
       console.log(`${sameColour ? '  ok  ' : ' FAIL '} 时间小字与正文同色 — time=${cold.timeColor} body=${cold.bodyColor}`)
       if (!sameColour) failures.push(`时间小字颜色与正文不一致：${cold.timeColor} vs ${cold.bodyColor}`)
     }
@@ -821,9 +847,11 @@ try {
       const shadowOn = /9px 20px/.test(heavy.shadowInline)
       console.log(`${shadowOn ? '  ok  ' : ' FAIL '} 投影生效          — --glass-shadow="${heavy.shadowInline}"`)
       if (!shadowOn) failures.push(`投影拉满后卡片上没有用户投影（--glass-shadow="${heavy.shadowInline}"）`)
-      const shadowOff = cold.shadowInline === ''
-      console.log(`${shadowOff ? '  ok  ' : ' FAIL '} 默认无投影        — --glass-shadow="${cold.shadowInline || '(未设置)'}"`)
-      if (!shadowOff) failures.push(`投影为 0 时仍然带着用户投影（"${cold.shadowInline}"）`)
+      if (!cold.error) {
+        const shadowOff = cold.shadowInline === ''
+        console.log(`${shadowOff ? '  ok  ' : ' FAIL '} 默认无投影        — --glass-shadow="${cold.shadowInline || '(未设置)'}"`)
+        if (!shadowOff) failures.push(`投影为 0 时仍然带着用户投影（"${cold.shadowInline}"）`)
+      }
       if (result.popup && !result.popup.error && heavy.frames && result.popup.frames) {
         const diff = round(heavy.cpuDuringPopup - result.popup.cpuDuringPopup, 2)
         const ramDiff = heavy.rssDuringPopupMb - result.popup.rssDuringPopupMb

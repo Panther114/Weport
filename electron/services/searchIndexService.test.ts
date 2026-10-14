@@ -28,6 +28,7 @@ interface FakeRow {
   is_send: number
   message_content: string
   sender_username: string
+  real_sender_id?: number | string
 }
 
 interface FakeTable {
@@ -178,6 +179,155 @@ beforeEach(() => {
   buildSyntheticCorpus()
 })
 
+describe('persisted index status after restart', () => {
+  it('reports an existing index ready before any query without rebuilding source data', async () => {
+    await createService().build({ force: true })
+    const restarted = createService({ source: {
+      ...createSource(),
+      listMessageDbs: async () => { throw new Error('status must not rebuild the source') },
+    } })
+    const status = await restarted.loadStatus()
+    expect(status.ready).toBe(true)
+    expect(status.docs).toBeGreaterThan(0)
+    expect(status.building).toBe(false)
+    expect((await restarted.query({ text: '项目' })).hits.length).toBeGreaterThan(0)
+  })
+
+  it('keeps an account without an index empty after switching from an indexed account', async () => {
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account })
+    await service.build({ force: true })
+    account = 'wxid_other_account'
+    const status = await service.loadStatus()
+    expect(status.ready).toBe(false)
+    expect(status.docs).toBe(0)
+  })
+
+  it('reports corrupt persisted indexes instead of advertising them as ready', async () => {
+    await createService().build({ force: true })
+    writeFileSync(join(corpusDir(), 'manifest.json'), '{broken')
+    const status = await createService().loadStatus()
+    expect(status.ready).toBe(false)
+    expect(status.error).toBeTruthy()
+  })
+})
+
+describe('native shard sender identity', () => {
+  it('resolves numeric sender IDs against their own shard and supports sender scope', async () => {
+    tables = [
+      { dbFile: 'message_0.db', table: tableNameFor('wxid_alice'), rows: [{ ...row(1, 'sender fixture incoming', ''), real_sender_id: 1 }] },
+      { dbFile: 'message_1.db', table: tableNameFor('wxid_group'), rows: [{ ...row(1, 'sender fixture outgoing', ''), real_sender_id: 1 }] },
+    ]
+    const source = {
+      ...createSource(),
+      resolveSenderUsername: async (path: string, _id: string) => path.endsWith('message_0.db') ? 'wxid_alice' : 'wxid_test',
+    }
+    const service = createService({ source })
+    await service.build({ force: true })
+    const alice = await service.query({ text: 'sender fixture', scope: { senders: ['wxid_alice'] } })
+    const self = await service.query({ text: 'sender fixture', scope: { senders: ['wxid_test'] } })
+    expect(alice.hits.map(hit => hit.db)).toEqual(['message_0.db'])
+    expect(self.hits.map(hit => hit.db)).toEqual(['message_1.db'])
+  })
+
+  it('resolves repeated shard IDs once per build without replacing an explicit sender', async () => {
+    tables = [{ dbFile: 'message_0.db', table: tableNameFor('wxid_alice'), rows: [
+      { ...row(1, 'sender fixture one', ''), real_sender_id: 1 },
+      { ...row(2, 'sender fixture two', ''), real_sender_id: 1 },
+      { ...row(3, 'sender fixture direct', 'wxid_other'), real_sender_id: 1 },
+    ] }]
+    let calls = 0
+    const service = createService({ source: { ...createSource(), resolveSenderUsername: async () => { calls += 1; return 'wxid_alice' } } })
+    await service.build({ force: true })
+    expect(calls).toBe(1)
+    const direct = await service.query({ text: 'sender fixture', scope: { senders: ['wxid_other'] } })
+    expect(direct.hits).toHaveLength(1)
+  })
+})
+
+describe('index account ownership', () => {
+  it('rejects a force-build target different from the connected account', async () => {
+    const service = createService()
+    await expect(service.build({ force: true, wxid: 'wxid_other' })).rejects.toThrow('账号')
+    expect(existsSync(join(dir, 'wxid_other', 'manifest.json'))).toBe(false)
+  })
+
+  it.each(['account', 'path'])('discards a build when the connected %s changes during a native query', async (change) => {
+    await createService().build()
+    const originalManifest = readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')
+    let account = 'wxid_test'
+    let path = 'original-root'
+    const inner = createSource()
+    const service = createService({
+      resolveWxid: () => account,
+      resolveDbPath: () => path,
+      source: { ...inner, async execQuery(db, sql) {
+        const rows = await inner.execQuery(db, sql)
+        if (/SELECT \*.* FROM/.test(sql)) {
+          if (change === 'account') account = 'wxid_other'
+          else path = 'replacement-root'
+        }
+        return rows
+      } },
+    })
+    const result = await service.build({ force: true })
+    expect(result.cancelled).toBe(true)
+    expect(readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')).toBe(originalManifest)
+  })
+
+  it('honors cancellation raised by the final commit progress callback', async () => {
+    await createService().build()
+    const originalManifest = readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')
+    const service = createService()
+    const result = await service.build({ force: true, onProgress(progress) {
+      if (progress.stage === 'commit') service.requestCancel()
+    } })
+    expect(result.cancelled).toBe(true)
+    expect(readFileSync(join(corpusDir(), 'manifest.json'), 'utf8')).toBe(originalManifest)
+  })
+
+  it('discards query results if the account changes while resolving sender names', async () => {
+    let account = 'wxid_test'
+    const inner = createSource()
+    const service = createService({ resolveWxid: () => account, source: {
+      ...inner, async getDisplayNames(usernames) {
+        const names = await inner.getDisplayNames!(usernames)
+        account = 'wxid_other'
+        return names
+      },
+    } })
+    await service.build()
+    const result = await service.query({ text: '项目复盘会议' })
+    expect(result.hits).toEqual([])
+    expect(result.error).toContain('账号')
+  })
+
+  it('does not reuse another account\'s cached session names', async () => {
+    const inner = createSource()
+    const source = (name: string): SearchIndexDocSource => ({ ...inner, async getSessions() {
+      return [{ username: 'wxid_alice', displayName: name }, { username: 'wxid_group', displayName: '项目群' }]
+    } })
+    await createService({ resolveWxid: () => 'wxid_other', source: source('Account B name') }).build()
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account, source: {
+      ...inner, async getSessions() { return source(account === 'wxid_test' ? 'Account A name' : 'Account B name').getSessions() },
+    } })
+    await service.build()
+    expect((await service.query({ text: '项目复盘会议', scope: { sessionIds: ['wxid_alice'] } })).hits[0].sessionName).toBe('Account A name')
+    account = 'wxid_other'
+    expect((await service.query({ text: '项目复盘会议', scope: { sessionIds: ['wxid_alice'] } })).hits[0].sessionName).toBe('Account B name')
+  })
+
+  it('discards suggestions when the account changes while loading its corpus', async () => {
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account })
+    await service.build()
+    const pending = service.suggest('项目', 10)
+    account = 'wxid_other'
+    expect(await pending).toEqual([])
+  })
+})
+
 afterEach(() => {
   try {
     rmSync(dir, { recursive: true, force: true })
@@ -263,7 +413,7 @@ describe('构建与增量', () => {
     const flakySource: SearchIndexDocSource = {
       ...inner,
       async execQuery(dbPath: string, sql: string) {
-        if (/SELECT \* FROM/.test(sql)) {
+        if (/SELECT \*.* FROM/.test(sql)) {
           selects += 1
           if (selects > 1) throw new Error('模拟：这一批读失败了')
         }
@@ -284,6 +434,38 @@ describe('构建与增量', () => {
     const rebuilt = await createService().build({ force: true })
     expect(rebuilt.docs).toBe(4901)
     expect(rebuilt.indexed).toBe(4901)
+  })
+
+  it('keeps every committed shard intact when a forced rebuild is cancelled after writing', async () => {
+    await createService().build()
+    const original = new Map(shardFiles().map(name => [name, readFileSync(join(corpusDir(), 'shards', name))]))
+    for (const table of tables) for (const item of table.rows) item.message_content = `replacement payload ${item.local_id}`
+    const service = createService()
+    const result = await service.build({ force: true, onProgress(progress) {
+      if (progress.stage === 'write') service.requestCancel()
+    } })
+    expect(result.cancelled).toBe(true)
+    for (const [name, bytes] of original) expect(readFileSync(join(corpusDir(), 'shards', name)).equals(bytes)).toBe(true)
+    expect((await createService().query({ text: '项目复盘会议' })).hits.length).toBeGreaterThan(0)
+    expect((await createService().query({ text: 'replacement payload' })).hits).toEqual([])
+  })
+
+  it.each([1, 2])('preserves committed shard bytes during cancelled format v%s migration', async (version) => {
+    await createService().build()
+    const manifestPath = join(corpusDir(), 'manifest.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.v = version
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const originalManifest = readFileSync(manifestPath, 'utf8')
+    const original = new Map(shardFiles().map(name => [name, readFileSync(join(corpusDir(), 'shards', name))]))
+    for (const table of tables) for (const item of table.rows) item.message_content = `migration replacement ${item.local_id}`
+    const service = createService()
+    const result = await service.build({ onProgress(progress) {
+      if (progress.stage === 'write') service.requestCancel()
+    } })
+    expect(result.cancelled).toBe(true)
+    expect(readFileSync(manifestPath, 'utf8')).toBe(originalManifest)
+    for (const [name, bytes] of original) expect(readFileSync(join(corpusDir(), 'shards', name)).equals(bytes)).toBe(true)
   })
 
   /**
@@ -329,7 +511,7 @@ describe('构建与增量', () => {
   it('manifest 记录每张表的 table / maxRowId / indexedAt，分片是压缩文件', async () => {
     await createService().build()
     const manifest = JSON.parse(readFileSync(join(corpusDir(), 'manifest.json'), 'utf8'))
-    expect(manifest.v).toBe(2)
+    expect(manifest.v).toBe(3)
     expect(manifest.wxid).toBe('wxid_test')
     expect(manifest.docs).toBe(4901)
     const entries = Object.values(manifest.perDb) as Array<Record<string, unknown>>
@@ -494,6 +676,67 @@ describe('查询', () => {
     expect(invalid.error).toContain('游标')
   })
 
+  it.each([
+    { sessionIds: ['wxid_alice'] },
+    { senders: ['wxid_alice'] },
+    { kinds: ['text' as const] },
+    { from: 1_700_001_000 },
+  ])('restarts pagination when filters change to %j', async (scope) => {
+    const service = createService()
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    const fresh = await service.query({ text: '会议', scope, limit: 2 })
+    const changed = await service.query({ text: '会议', scope, limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual(fresh.hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('restarts pagination after the corpus is rebuilt', async () => {
+    const service = createService()
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    tables[0].rows.push(row(3101, '会议 newest fixture', 'wxid_alice'))
+    await service.build()
+    const fresh = await service.query({ text: '会议', limit: 2 })
+    const changed = await service.query({ text: '会议', limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual(fresh.hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('restarts pagination after a forced rebuild with the same row count and build timestamp', async () => {
+    const service = createService()
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    tables[0].rows[0].message_content = '会议 replacement fixture'
+    await service.build({ force: true })
+    const changed = await service.query({ text: '会议', limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual((await service.query({ text: '会议', limit: 2 })).hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('restarts pagination when a cursor belongs to another account', async () => {
+    await createService({ resolveWxid: () => 'wxid_other' }).build()
+    let account = 'wxid_test'
+    const service = createService({ resolveWxid: () => account })
+    await service.build()
+    const previous = await service.query({ text: '会议', limit: 2 })
+    account = 'wxid_other'
+    const changed = await service.query({ text: '会议', limit: 2, cursor: previous.cursor })
+    expect(changed.hits).toEqual((await service.query({ text: '会议', limit: 2 })).hits)
+    expect(changed.error).toContain('游标')
+  })
+
+  it('accepts equivalent set filters and seconds/milliseconds on subsequent pages', async () => {
+    const service = createService()
+    await service.build()
+    const firstScope = { sessionIds: ['wxid_group', 'wxid_alice', 'wxid_alice'], from: 1_700_000_000_000 }
+    const nextScope = { sessionIds: ['wxid_alice', 'wxid_group'], from: 1_700_000_000 }
+    const first = await service.query({ text: '会议', scope: firstScope, limit: 2 })
+    const next = await service.query({ text: '会议', scope: nextScope, limit: 2, cursor: first.cursor })
+    expect(next.error).toBeUndefined()
+    expect(next.hits).toEqual((await service.query({ text: '会议', scope: nextScope, limit: 10 })).hits.slice(2, 4))
+  })
+
   it('会话名与发送者名来自会话表（不是裸 username）', async () => {
     await createService().build()
     const result = await createService().query({ text: '项目复盘会议', limit: 5 })
@@ -523,11 +766,11 @@ describe('查询', () => {
     expect(result.hits).toMatchObject([{ localId: serverId, localIdNumber: 0, idKind: 'server' }])
   })
 
-  it('rebuilds a previous index format before serving results', async () => {
+  it.each([1, 2])('rebuilds index format v%s before serving results', async (version) => {
     await createService().build()
     const manifestPath = join(corpusDir(), 'manifest.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    manifest.v = 1
+    manifest.v = version
     writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8')
 
     const service = createService()

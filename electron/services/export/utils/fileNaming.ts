@@ -32,6 +32,55 @@ export function resolveFileAttachmentExtensionDir(msg: any, fileName: string): s
   return safeExt || 'no-extension'
 }
 
+/**
+ * 微信把收到的附件落盘时，如果目标目录里已经有同名文件，会自动追加 `(1)` / `(2)` 这类后缀；
+ * 同一份文件被反复接收时会累加成 `(1)(3)(1)(1)`。但聊天消息里记录的**始终是原始文件名**，
+ * 于是「拿消息里的文件名去 `msg/file/<yyyy-MM>/` 精确匹配」会整批落空，
+ * 导出的 `src` 就只剩一个指向不存在文件的裸文件名。
+ *
+ * 这里解析出条目名相对目标文件名的「纯数字括号后缀序列」；不是这种形态就返回 null。
+ * 只认纯 `(数字)` 后缀，因此 `报告（从A到B）(1).docx` 能匹配，`报告(1) - 副本.docx` 不会误匹配。
+ */
+function parseWeChatRenameSuffixNumbers(entryName: string, expectedName: string): number[] | null {
+  const base = path.basename(String(expectedName || '')).toLowerCase()
+  const entry = String(entryName || '').toLowerCase()
+  if (!base || !entry || entry === base) return null
+
+  const ext = path.extname(base)
+  const stem = ext ? base.slice(0, base.length - ext.length) : base
+  if (!entry.startsWith(stem) || !entry.endsWith(ext)) return null
+
+  const middle = entry.slice(stem.length, entry.length - ext.length)
+  if (!/^(?:\(\d+\))+$/.test(middle)) return null
+
+  return (middle.match(/\d+/g) || []).map(value => Number.parseInt(value, 10))
+}
+
+export function isWeChatSuffixRenamedEntry(entryName: string, expectedName: string): boolean {
+  return parseWeChatRenameSuffixNumbers(entryName, expectedName) !== null
+}
+
+/** 从一批目录条目里挑出「微信加了 (N) 后缀」的候选，按后缀序号升序排列（`(1)` < `(2)` < `(10)`）。 */
+export function pickWeChatSuffixRenamedEntries(entryNames: readonly string[], expectedName: string): string[] {
+  const matched: Array<{ name: string; suffixNumbers: number[] }> = []
+  for (const entryName of entryNames) {
+    const suffixNumbers = parseWeChatRenameSuffixNumbers(entryName, expectedName)
+    if (suffixNumbers) matched.push({ name: String(entryName), suffixNumbers })
+  }
+
+  matched.sort((left, right) => {
+    const depth = Math.max(left.suffixNumbers.length, right.suffixNumbers.length)
+    for (let index = 0; index < depth; index += 1) {
+      const leftValue = left.suffixNumbers[index] ?? 0
+      const rightValue = right.suffixNumbers[index] ?? 0
+      if (leftValue !== rightValue) return leftValue - rightValue
+    }
+    return left.name.localeCompare(right.name)
+  })
+
+  return matched.map(item => item.name)
+}
+
 export function normalizeFileNamingMode(value: unknown): 'classic' | 'date-range' {
   return String(value || '').trim().toLowerCase() === 'date-range' ? 'date-range' : 'classic'
 }

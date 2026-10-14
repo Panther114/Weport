@@ -130,6 +130,7 @@ interface ConfigSchema {
   notificationEnabled: boolean
   aiInsightNotificationEnabled: boolean
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
+  notificationGlassTextColor: string
   notificationDuration: number
   notificationAnimationEnabled: boolean
   /**
@@ -370,6 +371,8 @@ export class ConfigService {
       notificationEnabled: true,
       aiInsightNotificationEnabled: true,
       notificationPosition: 'top-right',
+      // Empty is automatic fill polarity; retain explicitly chosen manual colors.
+      notificationGlassTextColor: '',
       notificationDuration: 3000,
       notificationAnimationEnabled: true,
       // 新的滑动动效是默认：用户要的是"从屏幕边滑进来、再滑出去"，旧版那种
@@ -447,7 +450,7 @@ export class ConfigService {
       weportAiReasoningEffort: 'high',
       // 图片输入默认开：默认模型都是视觉模型，作业照片/截图这类任务必须真的看图
       weportAiImageInputs: true,
-      weportAiMaxSteps: 48,
+      weportAiMaxSteps: 0,
       weportAiCustomPrompt: '',
       weportAiWorkspaceRoot: '',
       weportAiConversationLimit: 40,

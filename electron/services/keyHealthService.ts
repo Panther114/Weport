@@ -172,6 +172,8 @@ export interface KeyHealthDeps {
   now: () => number
   /** 解析账号目录；生产走 ConfigService.getAccountDir。 */
   resolveAccountDir?: () => string | null
+  /** Read-only legacy account key, scoped by the caller to this exact account. */
+  resolveLegacyAccountKey?: (accountDir: string) => string
   /** 重新扫描（生产走 keyScanService 的免登录扫描）。 */
   rescanKeys?: (accountDir: string) => Promise<ScanResultLike>
   /**
@@ -510,7 +512,8 @@ export class KeyHealthService {
         error: String((error as Error)?.message || error),
       }
     }
-    const entries = dbs.map((db) => this.evaluateOne(db, account))
+    const legacyKey = this.deps.resolveLegacyAccountKey?.(accountDir) || ''
+    const entries = dbs.map((db) => this.evaluateOne(db, account, legacyKey))
     const summary = { ok: 0, stale: 0, invalid: 0, missing: 0, unknown: 0 }
     for (const entry of entries) summary[entry.status]++
     const required = dbs.filter((db) =>
@@ -560,6 +563,7 @@ export class KeyHealthService {
     if (!dbStorage) return { success: false, keys: [], missing: [], invalid: [], error: '数据目录里找不到 db_storage。' }
     const accountRef = this.accountRef(accountDir)
     const stored = this.deps.store.read().accounts[accountRef]
+    const legacyKey = this.deps.resolveLegacyAccountKey?.(accountDir) || ''
     const keys: VerifiedDbKeyMaterial[] = []
     const missing: string[] = []
     const invalid: string[] = []
@@ -578,7 +582,7 @@ export class KeyHealthService {
       const entry = stored?.dbKeys?.[db.id]
       // Match getHealth: an account passphrase may cover a DB without a per-DB entry.
       // Every returned page key is still authenticated against that database's current page.
-      const storedSecret = entry?.key || stored?.passphrase
+      const storedSecret = entry?.key || stored?.passphrase || legacyKey
       if (!storedSecret) {
         missing.push(db.id)
         continue
@@ -611,7 +615,7 @@ export class KeyHealthService {
     }
   }
 
-  private evaluateOne(db: DbFileEntry, account: StoredAccountKeys | undefined): DbKeyHealthEntry {
+  private evaluateOne(db: DbFileEntry, account: StoredAccountKeys | undefined, legacyKey = ''): DbKeyHealthEntry {
     const loaded = this.deps.readPage1(db.path)
     const stored = account?.dbKeys?.[db.id] ?? null
     const now = this.deps.now()
@@ -679,21 +683,23 @@ export class KeyHealthService {
     }
 
     // ② 账号级密钥（配置里的 decryptKey）：口令模式下它能覆盖所有库
-    if (account?.passphrase) {
+    if (account?.passphrase || /^[0-9a-f]{64}$/i.test(legacyKey)) {
       // 同样的记忆（键前缀区分来源）：没有 per-DB 密钥的库每个都要试一次账号口令，而口令形态
       // 一次就是 ~98ms 的 PBKDF2 —— 22 个库里若有十来个没存 per-DB 密钥，光这一段就是一秒。
-      const accountCacheKey = `account|${db.path}|${currentSalt}|${account.updatedAt ?? 0}`
+      const accountCacheKey = account?.passphrase
+        ? `account|${db.path}|${currentSalt}|${account.updatedAt ?? 0}`
+        : `legacy|${db.path}|${currentSalt}|${keyFingerprint(legacyKey)}`
       const cachedAccount = verdictCache.get(accountCacheKey)
       if (cachedAccount) {
         return {
           ...base,
           status: 'ok',
-          source: account.passphraseSource ?? 'config',
+          source: account?.passphraseSource ?? 'config',
           mode: cachedAccount,
-          verifiedAt: account.updatedAt ?? null,
+          verifiedAt: account?.updatedAt ?? null,
         }
       }
-      const plain = this.deps.codec.decrypt(account.passphrase)
+      const plain = account?.passphrase ? this.deps.codec.decrypt(account.passphrase) : legacyKey
       if (plain && /^[0-9a-f]{64}$/i.test(plain)) {
         const verdict = verifyHexKeyForPage(page1, plain)
         if (verdict) {
@@ -701,10 +707,10 @@ export class KeyHealthService {
           return {
             ...base,
             status: 'ok',
-            source: account.passphraseSource ?? 'config',
+            source: account?.passphraseSource ?? 'config',
             mode: verdict.mode,
             fingerprint: keyFingerprint(plain),
-            verifiedAt: account.updatedAt ?? null,
+            verifiedAt: account?.updatedAt ?? null,
           }
         }
       }
@@ -933,7 +939,7 @@ export function toKeyHealthReport(
     ? 'scan'
     : sources.has('hook')
       ? 'hook'
-      : sources.has('manual')
+      : sources.has('manual') || sources.has('config')
         ? 'manual'
         : 'none'
   return {

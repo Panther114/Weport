@@ -46,7 +46,7 @@ import { createHash } from 'node:crypto'
 import { atomicWriteFile } from './atomicWrite'
 import { LEDGER_FILE_NAME, verifyArtifact } from './ledger'
 import { decodeMessageContent } from './parsers/contentDecoder'
-import { sourceMessageIdentityHash } from './sourceMessageIdentity'
+import { sourceMessageIdentityHash, stableMediaMessageKey } from './sourceMessageIdentity'
 import { wcdbService } from '../wcdbService'
 import { chatService } from '../chatService'
 
@@ -935,12 +935,16 @@ export function mediaTokensOf(row: IntegrityMessageRow, kind: MediaKind): string
   const tokens = new Set<string>()
   const push = (value: unknown) => {
     const token = String(value || '').trim().toLowerCase()
-    if (token.length >= 8) tokens.add(token)
+    if (token.length >= (kind === 'file' ? 1 : 8)) tokens.add(token)
   }
   const content = String(row.content || '')
   if (kind === 'image') {
     for (const match of content.matchAll(/md5="([0-9a-fA-F]{32})"/g)) push(match[1])
-    for (const match of content.matchAll(/datname="([^"]+)"/g)) push(match[1])
+    for (const match of content.matchAll(/datname="([^"]+)"/g)) {
+      // WeChat stores <md5>.dat; the exporter writes <md5>.<decoded extension>.
+      const md5 = match[1].match(/[0-9a-fA-F]{32}/)
+      push(md5 ? md5[0] : match[1])
+    }
   } else if (kind === 'video') {
     for (const match of content.matchAll(/md5="([0-9a-fA-F]{32})"/g)) push(match[1])
     for (const match of content.matchAll(/[0-9a-fA-F]{32}/g)) push(match[0])
@@ -949,13 +953,23 @@ export function mediaTokensOf(row: IntegrityMessageRow, kind: MediaKind): string
     for (const match of content.matchAll(/[0-9a-fA-F]{32}/g)) push(match[0])
   } else if (kind === 'voice') {
     // `exportVoice` 的落盘名：`voice_<会话>_<localId>_<createTime>_<serverId>.wav`
-    push(`_${row.localId}_${row.createTime}`)
-    push(`_${row.localId}_`)
+    const localId = exactUnsignedIdToken(row.localIdRaw) || exactUnsignedIdToken(row.localId) || '0'
+    const serverId = exactUnsignedIdToken(row.serverIdRaw) || exactUnsignedIdToken(row.serverId) || '0'
+    const identity = stableMediaMessageKey({ localId, createTime: String(row.createTime), serverId,
+      dbPath: row.dbPath, tableName: row.tableName }).replace(/:/g, '_')
+    push(`_${identity}.wav`)
+    // Pre-scope exports still include timestamp and server ID; never match a local ID alone.
+    const safeSession = row.sessionId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'session'
+    push(`voice_${safeSession}_${localId}_${row.createTime}_${serverId}.wav`)
   } else if (kind === 'file') {
     // 注意必须带 `g`：`String.prototype.matchAll` 对非全局正则直接抛 TypeError，
     // 而这一抛会把整次自检打成"未能运行完成"（实测在真实数据上撞到过）。
-    for (const match of content.matchAll(/<filename>([^<]+)<\/filename>/gi)) push(basename(match[1]))
-    for (const match of content.matchAll(/<title>([^<]+)<\/title>/gi)) push(basename(match[1]))
+    const pushFile = (name: string) => {
+      const decoded = name.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      push(basename(decoded).replace(/[\\/:*?"<>|]/g, '_'))
+    }
+    for (const match of content.matchAll(/<filename>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/filename>/gi)) pushFile(match[1])
+    for (const match of content.matchAll(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/gi)) pushFile(match[1])
   }
   return [...tokens]
 }
@@ -986,6 +1000,47 @@ export function evaluateMediaCoverage(params: {
   let produced = 0
   let notRequested = 0
   const missing: MissingMediaRow[] = []
+  const namesByKind = new Map<MediaKind, Set<string>>()
+  const hashesByKind = new Map<MediaKind, Set<string>>()
+  const voiceSuffixes = new Set<string>()
+  const renamedFiles = new Set<string>()
+  // Build once, rather than scanning/normalizing every file for every message.
+  for (const file of files) {
+    const normalized = `/${file.replace(/\\/g, '/').toLowerCase().replace(/^\/+/, '')}`
+    for (const kind of ['image', 'voice', 'video', 'emoji', 'file'] as MediaKind[]) {
+      if (!normalized.includes(`/${mediaDirName(kind)}/`)) continue
+      const name = basename(normalized)
+      const names = namesByKind.get(kind) ?? new Set<string>()
+      names.add(name)
+      namesByKind.set(kind, names)
+      const hashes = hashesByKind.get(kind) ?? new Set<string>()
+      for (const match of name.matchAll(/[a-f0-9]{32}/g)) hashes.add(match[0])
+      hashesByKind.set(kind, hashes)
+      if (kind === 'voice') {
+        const suffix = name.match(/_((?:[a-f0-9]{12}_)?\d+_\d+_\d+\.wav)$/)
+        if (suffix) voiceSuffixes.add(`_${suffix[1]}`)
+      }
+      if (kind === 'file') {
+        const ext = path.posix.extname(name)
+        const stem = name.slice(0, name.length - ext.length)
+        const renamed = stem.match(/^(.*)_([2-9]\d*|1\d+)$/)
+        if (renamed) renamedFiles.add(`${renamed[1]}${ext}`)
+      }
+    }
+  }
+  const tokenHits = new Map<string, boolean>()
+  const hasToken = (kind: MediaKind, token: string): boolean => {
+    const key = `${kind}:${token}`
+    const previous = tokenHits.get(key)
+    if (previous !== undefined) return previous
+    const names = namesByKind.get(kind)
+    const hit = kind === 'file' ? Boolean(names?.has(token) || renamedFiles.has(token))
+      : kind === 'voice' ? Boolean(token.startsWith('voice_') ? names?.has(token) : voiceSuffixes.has(token))
+      : /^[a-f0-9]{32}$/.test(token) ? Boolean(hashesByKind.get(kind)?.has(token))
+      : Boolean(names && [...names].some(name => name.includes(token)))
+    tokenHits.set(key, hit)
+    return hit
+  }
 
   for (const row of rows) {
     const kind = mediaKindOf(row)
@@ -1000,11 +1055,7 @@ export function evaluateMediaCoverage(params: {
       continue
     }
     const tokens = mediaTokensOf(row, kind)
-    const dirToken = `/${mediaDirName(kind)}/`
-    const hit = tokens.length === 0
-      // 没有可用的文件名线索时退化为"该类型目录里有东西"（弱信号，但不会漏报整类）
-      ? files.some((file) => file.includes(dirToken))
-      : tokens.some((token) => files.some((file) => file.includes(token)))
+    const hit = tokens.some(token => hasToken(kind, token))
     if (hit) {
       produced += 1
       continue
@@ -1219,7 +1270,7 @@ export type ArtifactRowCount =
  * 数产物里的行数。只有**确定安全**的格式才解析（其余返回 `ok:false` + 原因，
  * 调用方回退到运行计数器）：
  * - `json` / `chatlab` / `arkme-json`：读 JSON，取 `messages` 数组长度；
- * - `chatlab-jsonl` / `jsonl`：数非空行；
+ * - `chatlab-jsonl`：只数 `_type: message` 记录；`jsonl`：数非空行；
  * - `weclone`：引号感知地数 CSV 记录（减掉表头）。
  *
  * 失败原因是**分开**的：`unparsable` 意味着"这个格式本该能数出来，但文件读不出来"
@@ -1281,7 +1332,22 @@ export async function countRowsInArtifact(
 
   if (normalized === 'chatlab-jsonl' || normalized === 'jsonl') {
     const text = await fs.promises.readFile(artifactPath, 'utf-8')
-    const rows = text.split('\n').filter((line) => line.trim().length > 0).length
+    const lines = text.split('\n').filter((line) => line.trim().length > 0)
+    if (normalized === 'jsonl') return { ok: true, rows: lines.length, how: 'jsonl' }
+    let rows = 0
+    try {
+      for (const line of lines) {
+        const record: unknown = JSON.parse(line)
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+          return { ok: false, reason: 'unparsable' }
+        }
+        const type = (record as Record<string, unknown>)._type
+        if (type === 'message') rows += 1
+        else if (type !== 'header' && type !== 'member') return { ok: false, reason: 'unparsable' }
+      }
+    } catch {
+      return { ok: false, reason: 'unparsable' }
+    }
     return { ok: true, rows, how: 'jsonl' }
   }
 
@@ -1685,9 +1751,10 @@ export async function runIntegrityCheck(input: IntegrityCheckInput): Promise<Int
       sessionNotes.push(`系统消息挂着 ${attribution.systemSenderIds.length} 个 Name2Id 里没有名字的 sender id（${attribution.systemSenderIds.join(', ')}）——正常数据，不计为归属缺陷`)
     }
 
-    const sessionFileScope = session.sessionDir
-      ? `${path.relative(outputRoot, path.resolve(session.sessionDir)).split(path.sep).join('/').toLowerCase()}/`
+    const relativeSessionDir = session.sessionDir
+      ? path.relative(outputRoot, path.resolve(session.sessionDir)).split(path.sep).join('/').toLowerCase()
       : ''
+    const sessionFileScope = relativeSessionDir ? `${relativeSessionDir}/` : ''
     const scopedFiles = sessionFileScope
       ? indexResult.files.filter((file) => file.startsWith(sessionFileScope))
       : indexResult.files
@@ -1837,6 +1904,12 @@ export async function runIntegrityCheck(input: IntegrityCheckInput): Promise<Int
     } catch (error) {
       csvPath = null
       notes.push(`missing-media.csv 写入失败：${String(error)}`)
+    }
+  } else {
+    // A repaired export must not leave yesterday's missing-media report behind.
+    try { await fs.promises.unlink(path.join(outputRoot, MISSING_MEDIA_CSV_FILE_NAME)) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') notes.push(`旧 missing-media.csv 清理失败：${String(error)}`)
     }
   }
   if (csv.truncated) {

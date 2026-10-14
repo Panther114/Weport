@@ -214,6 +214,8 @@ export interface SearchIndexDocSource {
   getSessions(): Promise<SearchIndexSessionRow[]>
   /** 联系人显示名（查询期给 senderName 用；失败当没有） */
   getDisplayNames?(usernames: string[]): Promise<Record<string, string>>
+  /** Resolve a shard-local Name2Id rowid without borrowing another shard's map. */
+  resolveSenderUsername?(dbPath: string, senderId: string): Promise<string | null>
 }
 
 export interface DecodedRowContext {
@@ -305,7 +307,9 @@ const MESSAGE_TABLE_RE = /^msg_/i
 const MESSAGE_DB_RE = /^message_.+\.db$/i
 const MESSAGE_DB_EXCLUDE_RE = /^message_(fts|resource)/i
 
-const INDEX_VERSION = 2
+// Earlier indexes omitted native Name2Id sender identities outside the tail.
+// Rebuild them rather than serving partially repaired sender-filter results.
+const INDEX_VERSION = 3
 const MANIFEST_FILE = 'manifest.json'
 const SHARD_DIR = 'shards'
 
@@ -752,7 +756,7 @@ export class SearchIndexService {
   private cancelled = false
   private activeTaskId: string | undefined
 
-  private sessionNameCache: { at: number; map: Map<string, string> } | null = null
+  private sessionNameCache: { at: number; wxid: string; dbPath: string; map: Map<string, string> } | null = null
 
   constructor(options: SearchIndexServiceOptions) {
     this.options = {
@@ -797,6 +801,12 @@ export class SearchIndexService {
   // -------------------------------------------------------------------------
   // 状态
   // -------------------------------------------------------------------------
+
+  /** UI readiness must include the persisted corpus, even before the first query. */
+  async loadStatus(): Promise<SearchIndexStatus> {
+    await this.ensureLoaded()
+    return this.status()
+  }
 
   status(): SearchIndexStatus {
     const wxid = String(this.options.resolveWxid() || '').trim()
@@ -1093,8 +1103,11 @@ export class SearchIndexService {
   }): Promise<SearchIndexBuildResult> {
     if (this.building) throw new Error('索引构建已在进行中')
     const started = Date.now()
-    const wxid = String(options?.wxid || this.options.resolveWxid() || '').trim()
+    const connectedWxid = String(this.options.resolveWxid() || '').trim()
+    const wxid = String(options?.wxid || connectedWxid).trim()
     if (!wxid) throw new Error('未指定账号（wxid），无法建立索引')
+    if (wxid !== connectedWxid) throw new Error('索引账号与当前连接账号不一致')
+    const connectedDbPath = String(this.options.resolveDbPath?.() || '').trim()
     this.building = true
     this.cancelled = false
     this.activeTaskId = options?.taskId
@@ -1107,7 +1120,9 @@ export class SearchIndexService {
         /* 进度回调不该影响构建 */
       }
     }
-    const shouldCancel = (): boolean => this.cancelled || Boolean(options?.shouldCancel?.())
+    const shouldCancel = (): boolean => this.cancelled || Boolean(options?.shouldCancel?.()) ||
+      String(this.options.resolveWxid() || '').trim() !== connectedWxid ||
+      String(this.options.resolveDbPath?.() || '').trim() !== connectedDbPath
 
     try {
       const force = options?.force === true
@@ -1118,6 +1133,13 @@ export class SearchIndexService {
         // manifest 损坏/缺失时 loadCorpus 返回空语料：下面走的就是一次全新构建
         corpus = await this.ensureLoaded()
         if (corpus.wxid !== wxid) throw new Error(`索引账号不一致：${corpus.wxid} ≠ ${wxid}`)
+      }
+
+      // Forced rebuilds and format migrations must never overwrite shards
+      // referenced by the last committed manifest before their own commit.
+      const previous = readJsonTolerant<Manifest>(join(corpus.corpusDir, MANIFEST_FILE), { backupOnCorrupt: false }).value
+      if (previous?.wxid === wxid && Number.isSafeInteger(previous.generation) && previous.generation >= 0) {
+        corpus.manifest.generation = Math.max(corpus.manifest.generation, previous.generation)
       }
 
       const outcome = await this.buildOnce(corpus, emit, shouldCancel)
@@ -1173,6 +1195,7 @@ export class SearchIndexService {
   ): Promise<{ indexed: number; scanned: number; cancelled: boolean; truncated: boolean }> {
     emit({ stage: 'scan', progress: 0.02, message: '正在枚举消息库…', docs: corpus.docs.length })
     await new Promise((resolve) => setImmediate(resolve))
+    if (shouldCancel()) return { indexed: 0, scanned: 0, cancelled: true, truncated: false }
 
     const sessions = await this.options.source.getSessions().catch(() => [] as SearchIndexSessionRow[])
     const lookup = new SessionTableLookup(sessions)
@@ -1181,7 +1204,7 @@ export class SearchIndexService {
       const username = String(session?.username || '').trim()
       if (username) sessionNames.set(username, String(session?.displayName || '').trim())
     }
-    this.sessionNameCache = { at: this.now, map: sessionNames }
+    this.sessionNameCache = { at: this.now, wxid: corpus.wxid, dbPath: String(this.options.resolveDbPath?.() || '').trim(), map: sessionNames }
 
     const allDbs = await this.options.source.listMessageDbs().catch(() => [] as string[])
     const dbPaths = allDbs
@@ -1309,6 +1332,7 @@ export class SearchIndexService {
      * 起始值先量一次磁盘上已有的语料：增量构建是在**原有语料**上继续加，只数本轮新增会低估。
      */
     let textBytes = corpus.docs.reduce((sum, doc) => sum + doc.text.length, 0)
+    const senderCache = new Map<string, string | null>()
 
     for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
       const task = tasks[taskIndex]
@@ -1357,6 +1381,18 @@ export class SearchIndexService {
 
         for (const row of rows) {
           scanned += 1
+          if (this.options.source.resolveSenderUsername && !String(row.sender_username ?? row.senderUsername ?? '').trim()) {
+            const senderId = String(row.real_sender_id ?? row.realSenderId ?? '').trim()
+            if (/^[1-9]\d*$/.test(senderId)) {
+              const key = `${task.dbPath}::${senderId}`
+              if (!senderCache.has(key)) {
+                const sender = await this.options.source.resolveSenderUsername(task.dbPath, senderId).catch(() => null)
+                senderCache.set(key, sender)
+              }
+              const sender = senderCache.get(key)
+              if (sender) row.sender_username = sender
+            }
+          }
           const doc = this.decodeRow(row, task, transcripts)
           if (!doc) continue
           const existing = docIndex.get(doc.docKey)
@@ -1537,6 +1573,7 @@ export class SearchIndexService {
     if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
 
     emit({ stage: 'commit', progress: 0.99, message: '正在提交索引…', docs: corpus.docs.length })
+    if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
     writeJsonAtomic(join(corpus.corpusDir, MANIFEST_FILE), corpus.manifest, { pretty: false })
 
     const referenced = new Set<string>()
@@ -1696,9 +1733,16 @@ export class SearchIndexService {
    */
   async query(request: SearchQueryRequest): Promise<SearchQueryResult> {
     const startedAt = Date.now()
+    const connectedWxid = String(this.options.resolveWxid() || '').trim()
+    const connectedDbPath = String(this.options.resolveDbPath?.() || '').trim()
+    const accountChanged = (): boolean => String(this.options.resolveWxid() || '').trim() !== connectedWxid ||
+      String(this.options.resolveDbPath?.() || '').trim() !== connectedDbPath
+    const staleResult = (): SearchQueryResult => ({
+      hits: [], total: 0, cursor: null, elapsedMs: Date.now() - startedAt, truncated: false,
+      error: '账号或数据库路径已切换，请重新搜索',
+    })
     const text = String(request?.text || '').trim()
     const limit = Math.max(1, Math.min(200, toInt(request?.limit, 30)))
-    const cursor = this.parseCursor(request?.cursor, text)
     if (!text) return { hits: [], total: 0, cursor: null, elapsedMs: 0, truncated: false }
 
     let corpus: Corpus
@@ -1714,6 +1758,9 @@ export class SearchIndexService {
         error: `索引不可用：${String((error as Error)?.message || error)}`,
       }
     }
+    if (accountChanged() || corpus.wxid !== connectedWxid) return staleResult()
+    const fingerprint = this.queryHash(request, corpus)
+    const cursor = this.parseCursor(request?.cursor, fingerprint)
     /**
      * 索引层面的问题（坏 manifest / 坏分片）**不走**这里：`ensureLoaded()` 不抛，它把坏档
      * 备份掉、返回空/部分语料，原因记在 `loadError` / `damagedShards`，由 `status().error`
@@ -1792,7 +1839,9 @@ export class SearchIndexService {
     const end = cursor.offset + limit
     const pageItems = ordered.slice(cursor.offset, end)
     const sessionNames = await this.ensureSessionNames()
+    if (accountChanged()) return staleResult()
     const senderNames = await this.resolveSenderNames(pageItems.map((item) => corpus.docs[item.index]))
+    if (accountChanged()) return staleResult()
 
     const hits: SearchHit[] = pageItems.map((item) => {
       const doc = corpus.docs[item.index]
@@ -1826,7 +1875,7 @@ export class SearchIndexService {
     return {
       hits,
       total,
-      cursor: nextOffset < ordered.length ? this.encodeCursor(text, nextOffset) : null,
+      cursor: nextOffset < ordered.length ? this.encodeCursor(fingerprint, nextOffset) : null,
       elapsedMs: Date.now() - startedAt,
       truncated,
       error: cursor.invalid ? '游标与本次查询不匹配，已从第一页返回' : undefined,
@@ -1835,8 +1884,10 @@ export class SearchIndexService {
 
   /** 会话显示名（60 秒缓存；查询路径上唯一一次额外的会话表读取） */
   private async ensureSessionNames(): Promise<Map<string, string>> {
+    const wxid = String(this.options.resolveWxid() || '').trim()
+    const dbPath = String(this.options.resolveDbPath?.() || '').trim()
     const cached = this.sessionNameCache
-    if (cached && this.now - cached.at <= NAME_CACHE_TTL_MS) return cached.map
+    if (cached && cached.wxid === wxid && cached.dbPath === dbPath && this.now - cached.at <= NAME_CACHE_TTL_MS) return cached.map
     const map = new Map<string, string>()
     try {
       const sessions = await this.options.source.getSessions()
@@ -1849,7 +1900,9 @@ export class SearchIndexService {
     } catch {
       /* 会话名拿不到就回落 username：搜索仍然可用 */
     }
-    this.sessionNameCache = { at: this.now, map }
+    if (String(this.options.resolveWxid() || '').trim() === wxid && String(this.options.resolveDbPath?.() || '').trim() === dbPath) {
+      this.sessionNameCache = { at: this.now, wxid, dbPath, map }
+    }
     return map
   }
 
@@ -1890,7 +1943,7 @@ export class SearchIndexService {
       .slice(0, 8)
   }
 
-  private parseCursor(cursor: string | number | null | undefined, text: string): { offset: number; invalid: boolean } {
+  private parseCursor(cursor: string | number | null | undefined, fingerprint: string): { offset: number; invalid: boolean } {
     if (cursor === undefined || cursor === null) return { offset: 0, invalid: false }
     const raw = String(cursor).trim()
     if (!raw) return { offset: 0, invalid: false }
@@ -1898,26 +1951,28 @@ export class SearchIndexService {
     if (/^\d+$/.test(raw)) return { offset: Number(raw), invalid: false }
     try {
       const decoded = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as { v?: number; o?: number; q?: string }
-      if (toInt(decoded?.v, 0) !== 1) return { offset: 0, invalid: true }
-      if (String(decoded?.q || '') !== this.queryHash(text)) return { offset: 0, invalid: true }
+      if (toInt(decoded?.v, 0) !== 2) return { offset: 0, invalid: true }
+      if (String(decoded?.q || '') !== fingerprint) return { offset: 0, invalid: true }
       return { offset: Math.max(0, toInt(decoded?.o, 0)), invalid: false }
     } catch {
       return { offset: 0, invalid: true }
     }
   }
 
-  private encodeCursor(text: string, offset: number): string {
-    return Buffer.from(JSON.stringify({ v: 1, q: this.queryHash(text), o: offset }), 'utf8').toString('base64url')
+  private encodeCursor(fingerprint: string, offset: number): string {
+    return Buffer.from(JSON.stringify({ v: 2, q: fingerprint, o: offset }), 'utf8').toString('base64url')
   }
 
-  private queryHash(text: string): string {
-    let hash = 2166136261
-    const normalized = text.trim().toLowerCase()
-    for (let i = 0; i < normalized.length; i += 1) {
-      hash ^= normalized.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return (hash >>> 0).toString(16)
+  private queryHash(request: SearchQueryRequest, corpus: Corpus): string {
+    const scope = request.scope || {}
+    const set = (values?: string[]): string[] => [...new Set((values || []).map(String))].sort()
+    return createHash('sha256').update(JSON.stringify({
+      text: String(request.text || '').trim().toLowerCase().replace(/\s+/g, ' '),
+      sessions: set(scope.sessionIds), senders: set(scope.senders), kinds: set(scope.kinds),
+      from: Math.max(0, toSecondBound(scope.from)), to: Math.max(0, toSecondBound(scope.to)),
+      wxid: corpus.wxid, generation: corpus.manifest.generation, builtAt: corpus.manifest.builtAt,
+      source: corpus.manifest.sourceSignature,
+    })).digest('hex')
   }
 
   /**
@@ -1925,10 +1980,13 @@ export class SearchIndexService {
    * 不做"最近搜索"——那属于标注存储（savedSearches）与页面层。
    */
   async suggest(prefix: string, limit = 8): Promise<string[]> {
+    const wxid = String(this.options.resolveWxid() || '').trim()
+    const dbPath = String(this.options.resolveDbPath?.() || '').trim()
     const normalized = String(prefix || '').trim().toLowerCase()
     if (!normalized) return []
     const corpus = await this.ensureLoaded().catch(() => null)
-    if (!corpus) return []
+    if (!corpus || corpus.wxid !== wxid || String(this.options.resolveWxid() || '').trim() !== wxid ||
+      String(this.options.resolveDbPath?.() || '').trim() !== dbPath) return []
     const max = Math.max(1, Math.min(50, limit || 8))
     const out: string[] = []
     for (const word of corpus.manifest.vocab || []) {

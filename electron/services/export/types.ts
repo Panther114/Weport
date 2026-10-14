@@ -63,6 +63,8 @@ export interface ChatLabExport {
 }
 
 export interface ExportOptions {
+  /** Explicit diagnostic verification; normal exports do not rescan a live database. */
+  verifyAfterExport?: boolean
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null
@@ -119,6 +121,8 @@ export type MediaContentType = 'voice' | 'image' | 'video' | 'emoji' | 'file'
 export interface FileExportCandidate {
   sourcePath: string
   matchedBy: 'md5' | 'name'
+  /** 文件名是精确命中，还是靠「微信自动加的 (N) 后缀」匹配到的。精确命中优先。 */
+  nameMatch?: 'exact' | 'suffix'
   yearMonth?: string
   preferredMonth?: boolean
   mtimeMs: number

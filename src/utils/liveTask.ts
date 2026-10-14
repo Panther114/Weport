@@ -249,6 +249,7 @@ export const LIVE_TASK = {
   wecloneGenerate: 'weclone.generate',
   /** 聊天记录导出 */
   export: 'export',
+  updateDownload: 'app.updateDownload',
   /** 连接微信（取密钥 / 建连接） */
   connect: 'chat.connect',
   /**

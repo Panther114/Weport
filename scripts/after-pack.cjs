@@ -116,7 +116,10 @@ function patchWcdbDylib(dylibPath) {
  * Verified after pruning: the window renders, the glass refracts, the video
  * background plays and the GPU process stays hardware-accelerated.
  */
-const WINDOWS_UNUSED_RUNTIME = ['dxcompiler.dll', 'dxil.dll']
+// Dev WCDB calls create this host beside electron.exe. A local electronDist
+// can copy it into the package before the app executable is rebranded; the
+// installed host must instead be deployed from the packaged executable.
+const WINDOWS_UNUSED_RUNTIME = ['dxcompiler.dll', 'dxil.dll', 'WeFlow.exe']
 
 function pruneWindowsRuntime(appOutDir) {
   let removedBytes = 0

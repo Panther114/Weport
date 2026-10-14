@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import PrivacySettings from './components/settings/PrivacySettings'
 import {
   Plug,
   PlugZap,
@@ -73,6 +74,9 @@ import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import BackgroundTasks from './components/BackgroundTasks'
+import { UpdateDownloadLabel, UpdateDownloadProgress } from './components/settings/UpdateDownloadStatus'
+import { useLiveTaskPhase } from './hooks/useLiveTask'
+import { WEPORT_CANCEL_INDEX_EVENT } from './components/search/IndexState'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
 import { summarizeNotifyScope } from './utils/notifyScope'
@@ -412,8 +416,6 @@ export default function App() {
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [imageKeysOk, setImageKeysOk] = useState(false)
   const loadKeySeqRef = useRef(0)
-  /** 缺图片密钥时"再点一次继续"的一次性确认（见 startExport 中的守卫） */
-  const imageKeyAckRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
   /**
@@ -443,8 +445,23 @@ export default function App() {
   const [silentStartup, setSilentStartup] = useState(false)
   const [closeToTray, setCloseToTray] = useState(true)
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string; forced?: boolean; reason?: string | null; url?: string | null; hasUpdate?: boolean; allowReadOnly?: boolean } | null>(null)
-  const [updateBusy, setUpdateBusy] = useState(false)
-  const [updateProgress, setUpdateProgress] = useState<{ percent: number; transferred?: number; total?: number } | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const updatePhase = useLiveTaskPhase(LIVE_TASK.updateDownload)
+  const updateBusy = updateChecking || updatePhase.startsWith('running:')
+  useEffect(() => {
+    const task = liveTask(LIVE_TASK.updateDownload)
+    let previous = ''
+    const restore = () => {
+      const info = task.getState().detail?.updateInfo as { version?: string; releaseNotes?: string } | undefined
+      if (!info?.version) return
+      const signature = JSON.stringify(info)
+      if (signature === previous) return
+      previous = signature
+      setUpdateInfo({ ...info, version: info.version, body: info.releaseNotes || undefined })
+    }
+    restore()
+    return task.subscribe(restore)
+  }, [])
   const [changelogOpen, setChangelogOpen] = useState(false)
   const [changelogContent, setChangelogContent] = useState<string | null>(null)
   const [changelogLoading, setChangelogLoading] = useState(false)
@@ -456,7 +473,7 @@ export default function App() {
   const [httpApiPort, setHttpApiPort] = useState(5031)
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
-  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'diagnostics' | 'report' | 'about'>('general')
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'privacy' | 'diagnostics' | 'report' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
@@ -615,11 +632,7 @@ export default function App() {
   const api = window.electronAPI
   const imageKeyRequired = api.process.platform === 'win32'    || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
-  // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
-  // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
-  const imageKeyHint = api.process.platform === 'win32'
-    ? '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）'
-    : '未配置：导出图片前必须先获取，密钥从微信缓存推导（无需附加微信进程）。若失败：先在微信中打开几张图片大图，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport，再重试。'
+  const imageKeyHint = '连接或导出时自动从微信缓存获取。若缓存不可用，可在微信中打开几张图片后重试，或手动获取。'
 
   useEffect(() => {
     setDurationInput(String(Math.round(notificationDuration / 1000)))
@@ -840,7 +853,12 @@ export default function App() {
       const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
       if (seq !== loadKeySeqRef.current) return
       const cfg = wxidConfigs[wxid]
-      const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      let key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      // Legacy profiles stored only the active account's global database key.
+      if (!key && await api.config.get('myWxid') === wxid) {
+        const activeKey = await api.config.get('decryptKey')
+        if (typeof activeKey === 'string') key = activeKey
+      }
       if (seq !== loadKeySeqRef.current) return
       setDecryptKey(key)
       // 图片密钥状态（issue #9a）：aesKey 非空视为已配置（xorKey 可合法为 0）。
@@ -912,11 +930,12 @@ export default function App() {
       if (!sessions?.success) {
         return { success: false, error: sessions?.error || '数据库已打开，但会话读取失败' }
       }
+      await loadAccountKey(wxid)
       return { success: true }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-  }, [api, dbPath, saveAccountKey, selectedWxid])
+  }, [api, dbPath, saveAccountKey, selectedWxid, loadAccountKey])
 
   const refreshAccounts = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -1156,14 +1175,6 @@ export default function App() {
         setUpdateInfo({ ...info, version: info.version, body: info.releaseNotes || undefined })
         pushToast('info', `发现新版本 v${info.version}`, '可在顶部横幅更新')
       }),
-      api.app.onDownloadProgress((p) => {
-        setUpdateProgress({ percent: Number(p?.percent) || 0, transferred: p?.transferred, total: p?.total })
-      }),
-      api.app.onUpdateDownloaded(() => {
-        // 下载完成：应用即将退出安装并自动重启，禁用更新按钮
-        setUpdateBusy(true)
-        setUpdateProgress({ percent: 100, total: 1, transferred: 1 })
-      })
     ]
 
     void api.app.getLaunchAtStartupStatus().then((s) => {
@@ -1380,9 +1391,20 @@ export default function App() {
       if (key === LIVE_TASK.wecloneGenerate) {
         void api.weclone.cancel()
       }
+      if (key === LIVE_TASK.searchIndex) {
+        void api.search.cancelIndex().catch((error: unknown) => {
+          pushToast('err', '取消索引失败', error instanceof Error ? error.message : String(error))
+        })
+      }
     },
-    [api]
+    [api, pushToast]
   )
+
+  useEffect(() => {
+    const cancelIndex = () => handleCancelTask(LIVE_TASK.searchIndex)
+    window.addEventListener(WEPORT_CANCEL_INDEX_EVENT, cancelIndex)
+    return () => window.removeEventListener(WEPORT_CANCEL_INDEX_EVENT, cancelIndex)
+  }, [handleCancelTask])
 
   async function runExport() {    if (!dbPath.trim()) {
       pushToast('err', '请选择微信数据目录')
@@ -1404,27 +1426,8 @@ export default function App() {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
       return
     }
-    // issue #15：微信 4.x 在 Windows/macOS/Linux 均可能使用加密 .dat 图片，
-    // 缺失图片密钥时导出只会得到 [图片] 占位符。
-    //
-    // 但**不能直接拒绝导出**：在 macOS 上图片密钥经常拿不到（WeChat 是
-    // 加固签名 + 沙盒进程，task_for_pid 会被系统拒绝），硬拦截会把用户彻底
-    // 卡死 —— 连文字记录都导不出去，比导出占位符糟糕得多。
-    // 因此改为「先警告、再确认」：第一次点击只说明后果，第二次点击照常导出；
-    // 缺密钥的图片会以 [图片] 占位，并在完成提示里给出具体数量。
-    if (exportMedia.images && imageKeyRequired && !imageKeysOk) {
-      if (!imageKeyAckRef.current) {
-        imageKeyAckRef.current = true
-        pushToast(
-          'err',
-          '尚未配置图片密钥',
-          '导出的图片将全部显示为 [图片] 占位符。再次点击「开始导出」仍会继续；建议先点击「获取图片密钥」。',
-          12000
-        )
-        return
-      }
-      imageKeyAckRef.current = false
-    }
+    // Main-process export acquires verified account image keys from cache before
+    // media resolution. Missing cache keys never block ordinary text/history exports.
 
     setBusy(true)
     exportProgressRef.current?.reset()
@@ -1459,9 +1462,11 @@ export default function App() {
 
     try {
       const result = await api.export.exportSessions(exportPath.trim(), options)
+      await loadAccountKey(selectedWxid)
       await refreshExportLog(exportPath.trim())
       // 读回自检结果；源 ID 冲突与实际导出缺陷分别呈现。
-      void refreshExportIntegrity(exportPath.trim())
+      // Deep verification belongs to explicit diagnostics, not normal export completion.
+      setExportIntegrity(null)
       // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
       const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
@@ -1470,7 +1475,10 @@ export default function App() {
       const voiceWarning = voiceFailed > 0 ? ` · ${voiceFailed} 条语音未能导出（微信里没有完整语音文件，先在微信里播放一次再导）` : ''
       const emptySkipped = Array.isArray(result.emptySkippedSessionIds) ? result.emptySkippedSessionIds.length : 0
       const emptyNote = emptySkipped > 0 ? `（已跳过 ${emptySkipped} 个确认无消息的会话）` : ''
-      if (result.success) {
+      if (result.stopped) {
+        pushToast(result.success ? 'info' : 'err', '导出已取消',
+          result.error || '本次导出已停止，未完成的会话可以重新导出', 7000)
+      } else if (result.success) {
         pushToast('ok', '导出完成', `完成 ${result.successCount ?? 0} 个会话${emptyNote} → ${result.formatFolder}/${imageKeyWarning}${voiceWarning}`, (imageKeyMissing > 0 || voiceFailed > 0) ? 12000 : 7000)
         // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
         // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
@@ -1528,7 +1536,7 @@ export default function App() {
   }
 
   async function checkForUpdates(fromAbout = false) {
-    setUpdateBusy(true)
+    setUpdateChecking(true)
     try {
       const result = await api.app.checkForUpdates()
       if (result.forced) {
@@ -1554,40 +1562,27 @@ export default function App() {
     } catch (e) {
       pushToast('err', '检查更新失败', String(e))
     } finally {
-      setUpdateBusy(false)
+      setUpdateChecking(false)
     }
   }
 
   async function installUpdate() {
+    if (updateBusy) return
     if (updateInfo?.forced && !updateInfo.hasUpdate && updateInfo.url) {
       await api.shell.openExternal(updateInfo.url)
       return
     }
-    setUpdateBusy(true)
-    setUpdateProgress({ percent: 0 })
-    let restarting = false
     try {
       const result = await api.app.downloadAndInstall()
       if (result.success) {
-        if (result.restarting) {
-          // 主进程已触发 quitAndInstall：应用即将退出 → 静默安装 → 自动重启，
-          // 保持「正在安装并重启…」状态直到进程退出
-          restarting = true
-          setUpdateBusy(true)
-          setUpdateProgress(null)
-        } else {
-          setUpdateProgress(null)
+        if (!result.restarting) {
           pushToast('ok', '更新已下载', '重启应用完成安装')
         }
       } else {
-        setUpdateProgress(null)
         pushToast('err', '更新失败', result.error || '未知错误', 10000)
       }
     } catch (e) {
-      setUpdateProgress(null)
       pushToast('err', '更新失败', String(e), 10000)
-    } finally {
-      if (!restarting) setUpdateBusy(false)
     }
   }
 
@@ -2300,6 +2295,15 @@ export default function App() {
 
   return (
     <div className="shell">
+      <svg aria-hidden="true" className="navigation-gradient-defs" width="0" height="0">
+        <defs>
+          <linearGradient id="weport-navigation-gradient" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="var(--accent-3)" />
+            <stop offset="48%" stopColor="var(--accent)" />
+            <stop offset="100%" stopColor="var(--accent-deep)" />
+          </linearGradient>
+        </defs>
+      </svg>
       {/* 背景层：图片与视频共用同一个合成层（见 theme.scss 的 `.app-bg`）。
           视频必须是真实的 <video>（而且要 muted + playsInline 才允许自动播放），
           窗口在前台时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃
@@ -2421,20 +2425,10 @@ export default function App() {
               <ScrollText size={13} />
               查看完整更新日志
             </button>
-            {updateBusy && updateProgress && (
-              <div className="update-progress" aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${Math.max(0, Math.min(100, updateProgress.percent))}%` }}
-                  />
-                </div>
-                <span>{Math.round(updateProgress.percent)}%</span>
-              </div>
-            )}
+            <UpdateDownloadProgress />
           </div>
           <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-            {updateBusy ? (updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : '正在安装并重启…') : updateInfo.forced && !updateInfo.hasUpdate ? '下载兼容版本' : '立即更新'}
+            <UpdateDownloadLabel checking={updateChecking} idleLabel={updateInfo.forced && !updateInfo.hasUpdate ? '下载兼容版本' : '立即更新'} />
           </button>
         </div>
       )}
@@ -2602,12 +2596,12 @@ export default function App() {
                 </div>
 
                 <div className="btn-row">
-                  <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
+                  <button className={keyOk && dbReady && accountReady ? 'secondary-btn' : 'primary-btn'} type="button" onClick={() => void extractKey()} disabled={busy}>
                     <KeyRound size={14} />
                     {busy ? '提取中…' : '提取密钥'}
                   </button>
                   <button
-                    className="secondary-btn"
+                    className={keyOk && dbReady && accountReady ? 'primary-btn' : 'secondary-btn'}
                     type="button"
                     onClick={() => void confirmKeyAndConnect()}
                     disabled={busy || !dbReady || !accountReady || !keyOk}
@@ -3208,12 +3202,12 @@ export default function App() {
         )}
         {tab === 'reader' && (
           <Suspense fallback={<LazyFallback label="聊天阅读" />}>
-            <ReaderPage openRequest={readerOpenRequest} onCreatePoster={request => { setPosterSource(request); setTab('poster') }} />
+            <ReaderPage key={selectedWxid} accountId={selectedWxid} openRequest={readerOpenRequest?.accountId === selectedWxid ? readerOpenRequest : undefined} onCreatePoster={request => { setPosterSource(request); setTab('poster') }} />
           </Suspense>
         )}
         {tab === 'search' && (
           <Suspense fallback={<LazyFallback label="搜索" />}>
-            <SearchPage onOpen={(hit, query) => { setReaderOpenRequest({ ...hit, requestId: Date.now(), query }); setTab('reader') }} onCreatePoster={request => {
+            <SearchPage key={selectedWxid} accountId={selectedWxid} onOpen={(hit, query) => { setReaderOpenRequest({ ...hit, accountId: selectedWxid, requestId: Date.now(), query }); setTab('reader') }} onCreatePoster={request => {
               setPosterSource(request)
               setTab('poster')
             }} />
@@ -3705,6 +3699,7 @@ export default function App() {
                   { id: 'connectors', label: '连接器', hint: 'Todoist 等第三方工具', icon: Plug },
                   { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
                   { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
+                  { id: 'privacy', label: '隐私', hint: '本机处理 · 数据使用说明', icon: Info },
                   { id: 'diagnostics', label: '诊断', hint: '连接 · 数据健康 · 运行自检', icon: DiagnosticsIcon },
                   { id: 'report', label: '问题反馈', hint: '本机编辑 · GitHub 手动提交', icon: Bug },
                   { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
@@ -3731,10 +3726,13 @@ export default function App() {
             </nav>
 
             <div className="settings-pane">
+              {settingsSection === 'privacy' && <PrivacySettings />}
               {settingsSection === 'diagnostics' && (
-                <Suspense fallback={<LazyFallback label="诊断" />}>
-                  <DiagnosticsPage />
-                </Suspense>
+                <>
+                  <Suspense fallback={<LazyFallback label="诊断" />}>
+                    <DiagnosticsPage />
+                  </Suspense>
+                </>
               )}
               {settingsSection === 'general' && (
                 <section className="panel">
@@ -4496,14 +4494,14 @@ export default function App() {
                       <GitPullRequest size={13} />                      GitHub
                     </button>
                     <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                      {updateBusy ? '检查中…' : '检查更新'}
+                      {updateChecking ? '检查中…' : '检查更新'}
                     </button>
                     <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
                       更新日志
                     </button>
                     {updateInfo && (
                       <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                        {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                        <UpdateDownloadLabel checking={updateChecking} idleLabel={`安装 v${updateInfo.version}`} />
                       </button>
                     )}
                   </div>
@@ -4856,11 +4854,11 @@ export default function App() {
             <p style={{ marginTop: 8, fontSize: 12, color: 'var(--text-faint)' }}>更新源：GitHub Releases (Panther114/Weport)</p>
             <div className="modal-actions">
               <button className="secondary-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                {updateBusy ? '检查中…' : '检查更新'}
+                {updateChecking ? '检查中…' : '检查更新'}
               </button>
               {updateInfo && (
                 <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                  {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                  <UpdateDownloadLabel checking={updateChecking} idleLabel={`安装 v${updateInfo.version}`} />
                 </button>
               )}
               <button className="secondary-btn" type="button" onClick={() => setAboutOpen(false)}>

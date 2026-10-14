@@ -198,6 +198,8 @@ interface ConnectorTaskResult {
   targetName?: string
 }
 interface ExportRequest {
+  /** Explicit diagnostic opt-in; normal exports skip the deep live-source rescan. */
+  verifyAfterExport?: boolean
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null
@@ -536,6 +538,7 @@ interface ElectronApi {
     }>
     getChat: (chatId: string) => Promise<{
       chat: { id: string; title: string; createdAt: number; updatedAt: number }
+      running: boolean
       workspaceDir: string
       memoryDir: string
       messages: Array<{
@@ -814,6 +817,7 @@ interface ElectronApi {
   search: {
     indexStatus: () => Promise<SearchIndexStatus>
     buildIndex: (payload?: { force?: boolean; wxid?: string }) => Promise<{ taskId: string }>
+    cancelIndex: () => Promise<{ success: boolean }>
     query: (payload: SearchQueryRequest) => Promise<SearchResultPage>
     suggest: (payload: { prefix: string; limit?: number }) => Promise<{ suggestions: string[] }>
   }
@@ -826,7 +830,7 @@ interface ElectronApi {
   annotations: {
     list: (options?: { accountId: string }) => Promise<AnnotationsStore & { error?: string }>
     mutate: (payload: AnnotationsMutation, options?: { accountId: string }) => Promise<AnnotationsStore & { error?: string }>
-    export: (payload: { format: AnnotationsExportFormat; path: string }) => Promise<{ success: boolean; path?: string; error?: string }>
+    export: (payload: { format: AnnotationsExportFormat; path: string }, options?: { accountId: string }) => Promise<{ success: boolean; path?: string; error?: string }>
   }
 }
 

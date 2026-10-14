@@ -26,6 +26,7 @@ import { pathToFileURL } from 'url'
 import { fileURLToPath } from 'url'
 import * as os from 'os'
 import { videoService } from './services/videoService'
+import { ImageKeyReadiness } from './services/imageKeyReadiness'
 import { registerBugReportHandlers } from './services/bugReportService'
 import { toLocalMediaUrl } from './services/localMediaUrl'
 import { autoUpdater } from 'electron-updater'
@@ -105,6 +106,7 @@ let tray: Tray | null = null
 let isAppQuitting = false
 let mainWindowReady = false
 let configService: ConfigService | null = null
+let imageKeyReadiness: ImageKeyReadiness | null = null
 /** 视频背景降采样缓存（startApp 里初始化，config:get 会用到） */
 let backgroundVideoService: BackgroundVideoService | null = null
 let messagePushService: MessagePushService | null = null
@@ -620,6 +622,7 @@ interface UpdateCheckOutcome {
 }
 
 let initialPolicyLoad: Promise<unknown> | null = null
+let latestAvailableUpdate: UpdateCheckOutcome | null = null
 async function ensureInitialUpdatePolicy(): Promise<void> {
   if (!app.isPackaged || isDemoScreenshotMode || process.env.WEPORT_PROBE_OFFSCREEN === '1') return
   initialPolicyLoad ??= loadUpdatePolicy(process.env.WEPORT_UPDATE_POLICY_URL || `${getUpdaterFeedUrl().replace(/\/$/, '')}/force-update.json`, net.fetch as typeof fetch)
@@ -651,12 +654,14 @@ async function checkForUpdatesManual(): Promise<UpdateCheckOutcome> {
     if (!info || !isNewerVersion(String(info.version || ''), APP_VERSION)) return { hasUpdate: false, ...forced }
     const ignored = configService?.get('ignoredUpdateVersion')
     if (!restriction.forced && ignored && ignored === info.version) return { hasUpdate: false, ...forced }
-    return {
+    const available: UpdateCheckOutcome = {
       hasUpdate: true,
       version: info.version,
       releaseNotes: normalizeReleaseNotes(info.releaseNotes),
       ...forced,
     }
+    latestAvailableUpdate = available
+    return available
   } catch (e) {
     // 检查失败必须带原因回去：界面上要能说"没查到更新（附原因）"，而不是"你已经是最新"。
     return { hasUpdate: false, error: String((e as Error)?.message || e), ...restriction }
@@ -712,18 +717,30 @@ async function downloadAndInstall(): Promise<{ success: boolean; restarting?: bo
   if (!app.isPackaged) return { success: false, error: '开发模式不可更新' }
   if (!isUpdaterSupported) return { success: false, error: updaterUnsupportedReason }
   if (isDownloadInProgress) return { success: false, error: '正在下载中' }
+  const previousTask = taskStatusService.get(TASK_KEY.updateDownload)
+  if (previousTask.status === 'running' && previousTask.stage === 'installing') return { success: false, error: '正在安装中' }
   applyUpdaterChannel()
   isDownloadInProgress = true
   updateInstallTriggered = false
+  taskStatusService.begin(TASK_KEY.updateDownload, '正在下载更新…', 'downloading')
+  taskStatusService.progress(TASK_KEY.updateDownload, { detail: { updateInfo: latestAvailableUpdate }, log: false })
   try {
     return await new Promise((resolve) => {
+      let settled = false
       const onProgress = (info: { percent?: number; transferred?: number; total?: number }) => {
+        if (settled) return
+        taskStatusService.progress(TASK_KEY.updateDownload, { stage: 'downloading', progress: info.percent,
+          detail: { transferred: info.transferred, total: info.total }, log: false })
         mainWindow?.webContents.send('app:downloadProgress', info)
       }
       const onDownloaded = () => {
+        if (settled) return
+        settled = true
         autoUpdater.removeListener('download-progress', onProgress)
         autoUpdater.removeListener('update-downloaded', onDownloaded)
+        autoUpdater.removeListener('error', onError)
         isDownloadInProgress = false
+        taskStatusService.progress(TASK_KEY.updateDownload, { stage: 'installing', progress: 100, message: '正在安装并重启…' })
         // 先让渲染层把按钮切到「正在安装…」并停止交互，再退出应用
         mainWindow?.webContents.send('app:updateDownloaded')
         resolve({ success: true, restarting: true })
@@ -739,10 +756,14 @@ async function downloadAndInstall(): Promise<{ success: boolean; restarting?: bo
         }, 250)
       }
       const onError = (e: Error) => {
+        if (settled) return
+        settled = true
         autoUpdater.removeListener('download-progress', onProgress)
         autoUpdater.removeListener('update-downloaded', onDownloaded)
+        autoUpdater.removeListener('error', onError)
         isDownloadInProgress = false
         updateInstallTriggered = false
+        taskStatusService.end(TASK_KEY.updateDownload, 'failed', { error: String(e?.message || e), message: '更新下载失败' })
         resolve({ success: false, error: String(e?.message || e) })
       }
       autoUpdater.on('download-progress', onProgress)
@@ -1197,6 +1218,8 @@ function createWindow(autoShow: boolean): BrowserWindow {
 
   win.on('close', (e) => {
     if (isAppQuitting || win !== mainWindow) return
+    // A delayed first paint must not reopen a window the user has already closed.
+    autoShow = false
     const behavior = configService?.get('windowCloseBehavior') || 'tray'
     if (behavior === 'tray' && tray) {
       e.preventDefault()
@@ -1213,10 +1236,12 @@ function createWindow(autoShow: boolean): BrowserWindow {
   // isVisible() 在最小化时已经是 false，所以 tick 本身能正确处理，
   // 缺的只是"没人给它排期"。
   win.on('minimize', () => {
+    autoShow = false
     // 最小化保留窗口（任务栏按钮要在），只排期卸载渲染层。
     scheduleMainWindowDiscard('unload')
   })
   win.on('hide', () => {
+    autoShow = false
     scheduleMainWindowDiscard('destroy')
   })
   // 还原/显示时撤销回收计划；若已被回收，必须先把应用页装回来再显示 ——
@@ -2332,6 +2357,7 @@ function getSearchIndexService(): SearchIndexService {
         const result = await wcdbService.getDisplayNames(usernames)
         return result.success ? (result.map || {}) : {}
       },
+      resolveSenderUsername: (path, senderId) => chatService.resolveShardSenderUsername(path, senderId),
     },
     // 复用导出侧解码器：blob 解压 + XML/引用/链接标题 → 正文（不另写一份）
     decodeText: createExportContextDecoder(
@@ -2425,6 +2451,7 @@ export function registerIpcHandlers() {
     if (wcdbService.isMaintenanceActive() && ['dbPath', 'myWxid', 'decryptKey', 'wxidConfigs'].includes(key)) {
       return { success: false, error: '数据库正在恢复快照，暂时无法切换账号' }
     }
+    if (['dbPath', 'myWxid', 'decryptKey'].includes(key)) { imageKeyReadiness?.invalidate() }
     (configService as any)?.set(key, value)
     if (key === 'launchAtStartup') {
       applyLaunchAtStartupPreference(value === true)
@@ -2492,7 +2519,12 @@ export function registerIpcHandlers() {
   ipcMain.handle('app:downloadAndInstall', () => downloadAndInstall())
   ipcMain.handle('app:ignoreUpdate', (_e, version: string) => {
     if (currentUpdateRestriction(APP_VERSION).forced) return { success: false, error: '兼容性更新提示不可忽略' }
+    const task = taskStatusService.get(TASK_KEY.updateDownload)
+    if (task.status === 'running') return { success: false, error: '正在更新中，暂时无法忽略' }
     configService?.set('ignoredUpdateVersion', String(version || ''))
+    if ((task.detail?.updateInfo as UpdateCheckOutcome | undefined)?.version === String(version || '')) {
+      taskStatusService.reset(TASK_KEY.updateDownload)
+    }
     return { success: true }
   })
   ipcMain.handle('app:getChangelog', () => {
@@ -2622,6 +2654,13 @@ export function registerIpcHandlers() {
     new KeyHealthService({
       deps: {
         resolveAccountDir: () => configService?.getAccountDir() ?? null,
+        resolveLegacyAccountKey: (accountDir) => {
+          const selected = configService?.getAccountDir()
+          if (!selected) return ''
+          const normalize = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
+          if (normalize(accountDir) !== normalize(selected)) return ''
+          return configService?.get('decryptKey') || ''
+        },
         rescanKeys:
           process.platform === 'win32'
             ? async (dir: string) => {
@@ -2810,6 +2849,8 @@ export function registerIpcHandlers() {
       : process.platform === 'linux'
         ? new KeyServiceLinux()
         : new KeyService()
+  if (configService) imageKeyReadiness = new ImageKeyReadiness(configService,
+    (path, account) => createImageKeyService().autoGetImageKey(path, undefined, account))
   ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {
     if (process.platform === 'win32') {
       const dir = manualDir ? String(manualDir).trim() : ''
@@ -2859,6 +2900,7 @@ export function registerIpcHandlers() {
     taskStatusService.begin(TASK_KEY.connect, '正在连接微信数据库…')
     try {
       const result = await chatService.connect()
+      if (result?.success) await imageKeyReadiness?.ensure()
       if (result?.success) taskStatusService.end(TASK_KEY.connect, 'done', { message: '已连接' })
       else taskStatusService.end(TASK_KEY.connect, 'failed', { error: String(result?.error || '连接失败'), message: '连接失败' })
       try { mainWindow?.webContents.send('chat:connectionChanged', { readOnlySnapshot: chatService.isReadOnlySnapshot() }) } catch { /* window reclaimed */ }
@@ -2944,14 +2986,13 @@ export function registerIpcHandlers() {
   ipcMain.handle('chat:getAntiRevokeSessions', () => chatService.getAntiRevokeSessions())
   ipcMain.handle('chat:checkAntiRevokeTriggers', (_e, sessionIds: string[]) =>
     chatService.checkAntiRevokeTriggers((sessionIds || []).map(String)))
-  // v1.2 §10.3 ③：触发器安装/卸载是**写**操作（会在消息库上建/删 TRIGGER），
-  // 一律先做自动快照（含 `-wal`/`-shm`），快照成功之后才允许写入。
+  // Reversible trigger DDL uses the same serialized, account-checked WCDB path
+  // as automatic installs. Full-account snapshots blocked live WeChat and
+  // copied every database for each individual trigger change.
   ipcMain.handle('chat:installAntiRevokeTriggers', (_e, sessionIds: string[]) =>
-    withWriteSnapshot('anti-revoke-install', () =>
-      chatService.installAntiRevokeTriggers((sessionIds || []).map(String))))
+    chatService.installAntiRevokeTriggers((sessionIds || []).map(String)))
   ipcMain.handle('chat:uninstallAntiRevokeTriggers', (_e, sessionIds: string[]) =>
-    withWriteSnapshot('anti-revoke-uninstall', () =>
-      chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String))))
+    chatService.uninstallAntiRevokeTriggers((sessionIds || []).map(String)))
 
   // 导出
   ipcMain.handle('export:exportSessions', async (_e, outputRoot: string, formatOrOptions?: any, legacyOptions?: any) => {
@@ -2974,6 +3015,9 @@ export function registerIpcHandlers() {
     const connectResult = await chatService.connect()
     if (!connectResult.success) {
       return { success: false, successCount: 0, failCount: 1, error: connectResult.error || '数据库连接失败' }
+    }
+    if (userOptions.exportImages === true || (userOptions.exportMedia === true && userOptions.exportImages !== false)) {
+      await imageKeyReadiness?.ensure()
     }
 
     const sessionsResult = await chatService.getSessions()
@@ -3102,22 +3146,24 @@ export function registerIpcHandlers() {
         appPath: app.getAppPath(),
         isPackaged: app.isPackaged,
       })
-      const result = await exportService.exportSessions(sessionIds, outDir, exportOptions, progressEmitter, control)
+      let result = await exportService.exportSessions(sessionIds, outDir, exportOptions, progressEmitter, control)
+      const cancelled = result.stopped === true || exportTaskControlService.getState(taskId) === 'cancel_requested'
       // 用户取消：清掉本次运行已写出的部分文件/目录，避免残留半截导出
-      if (exportTaskControlService.getState(taskId) === 'cancel_requested') {
+      if (cancelled) {
         const cleanup = await exportTaskControlService.cleanupTask(taskId)
+        result = { ...result, stopped: true, success: cleanup.success,
+          ...(cleanup.success ? {} : { error: `导出已停止，但清理已导出文件失败：${cleanup.error || '未知错误'}` }) }
         if (!cleanup.success) {
           console.warn('[Export] 取消后的清理未完全成功:', cleanup.error)
         }
       }
       const when = formatLocalTime()
       // 导出日志仅跟踪 TXT / JSON（旧版格式），其他格式不覆盖这两行
-      if (fmt === 'txt' || fmt === 'json') {
+      if (!cancelled && result.success && result.failCount === 0 && (fmt === 'txt' || fmt === 'json')) {
         writeExportLog(root, fmt, when, result.successCount || 0, result.failCount || 0)
       }
       // 终态显式落下：取消 / 失败 / 完成三种收尾在界面上完全不一样，
       // 靠"进度到 100"推断会把一次取消显示成成功。
-      const cancelled = exportTaskControlService.getState(taskId) === 'cancel_requested'
       const emptySkippedCount = result.emptySkippedSessionIds?.length || 0
       taskStatusService.end(
         TASK_KEY.export,
@@ -3900,7 +3946,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // 进度两条腿：taskStatusService 存快照（窗口重建后还能拿回来），
   // `search:indexProgress` 推增量事件（界面实时刷新）。
   // ---------------------------------------------------------------------------
-  ipcMain.handle('search:indexStatus', () => getSearchIndexService().status())
+  ipcMain.handle('search:indexStatus', () => getSearchIndexService().loadStatus())
   ipcMain.handle('search:buildIndex', (_event, payload?: { force?: boolean; wxid?: string }) => {
     const service = getSearchIndexService()
     // 重复点击不产生第二个构建：返回同一个 taskId，界面继续跟原来那条进度
@@ -3992,9 +4038,10 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
       return getAnnotationsService().mutate(mutation as Parameters<AnnotationsService['mutate']>[0])
     }
   )
-  ipcMain.handle('annotations:export', (_event, payload: { format: 'json' | 'csv' | 'md'; path: string }) =>
-    getAnnotationsService().export(payload?.format || 'json', String(payload?.path || ''))
-  )
+  ipcMain.handle('annotations:export', (_event, payload: { format: 'json' | 'csv' | 'md'; path: string }, options?: { accountId: string }) => {
+    assertAnnotationsAccount(options)
+    return getAnnotationsService().export(payload?.format || 'json', String(payload?.path || ''))
+  })
   // 对话历史（v1.0.1）：有了它才谈得上「回看 / 改标题 / 删掉」。
   // 全部存在本机 `{userData}/weclone-chats/<cloneId>.json`，没有云端副本。
   ipcMain.handle('weclone:listChats', (_e, cloneId: string) => weCloneService.listChats(String(cloneId || '')))
@@ -7429,7 +7476,9 @@ async function runSelfTest() {
     }
   })
 
-  writeExportLog(outDir, fmt, formatLocalTime(), result.successCount || 0, result.failCount || 0)
+  if (!result.stopped && result.success && result.failCount === 0) {
+    writeExportLog(outDir, fmt, formatLocalTime(), result.successCount || 0, result.failCount || 0)
+  }
   log(`export success=${result.successCount} fail=${result.failCount} in ${Math.round((Date.now() - exportStartedAt) / 1000)}s`)
   if (result.error) log(`export error: ${result.error}`)
   if (result.failedSessionErrors) {
@@ -8568,11 +8617,19 @@ function startApp() {
 
   const gotLock = app.requestSingleInstanceLock()
   if (!gotLock) {
+    if (isCliMode && process.send) {
+      try {
+        process.send({ kind: 'error', error: 'Weport 已在运行，请先退出桌面应用再启动终端。' }, () => app.exit(1))
+      } catch { app.exit(1) }
+      return
+    }
     app.quit()
     return
   }
 
   app.on('second-instance', (_event, argv) => {
+    // A terminal client must never activate or focus the desktop window.
+    if (Array.isArray(argv) && argv.includes('--cli')) return
     // 静默启动（--background）时忽略第二实例：开机自启的双实例竞争
     // （历史版本残留多个 Run 键）曾通过这里把隐藏的主窗口带出来。
     // 若用户已手动打开过窗口，则仅聚焦不重复显示。

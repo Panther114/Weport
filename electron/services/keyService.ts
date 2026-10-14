@@ -350,7 +350,7 @@ export function selectVerifiedImageKey(options: ImageKeySelectionInput): ImageKe
         attempts++
         if (!verifyDerivedAesKey(aesKey, ciphertext)) continue
         onProgress?.(`密钥获取成功（wxid: ${candidateWxid}, code: ${code}）`)
-        console.log('[ImageKey] 校验命中: wxid=', candidateWxid, 'code=', code, 'dirs=', templates.dirs)
+        console.log('[ImageKey] 账号图片模板校验通过')
         return { success: true, xorKey, aesKey, verified: true, accountDir: templates.dirs[0] }
       }
     }
@@ -1291,7 +1291,7 @@ export class KeyService {
       if (mmkvCodes.length > 0) {
         parsed = imageKeyPayloadFromMmkv(mmkvCodes)
         onProgress?.(`缓存目录里读到 ${mmkvCodes.length} 个候选密钥码，正在用本账号图片模板校验…`)
-        console.log('[ImageKey] wx_key.dll 没给出密钥码，改用 MMKV 文件名派生候选:', mmkvCodes)
+        console.log('[ImageKey] 使用 MMKV 缓存候选，数量:', mmkvCodes.length)
       }
     }
     if (!parsed.accounts?.length || !parsed.accounts.some((account) => (account.keys || []).length)) {

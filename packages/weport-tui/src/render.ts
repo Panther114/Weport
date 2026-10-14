@@ -20,7 +20,7 @@ export interface Column<T> {
 }
 
 export function renderTable<T>(rows: T[], columns: Column<T>[], width: number, paint: Paint): string[] {
-  if (rows.length === 0) return [paint.muted('（没有数据）')]
+  if (rows.length === 0) return [truncate(paint.muted('（没有数据）'), width)]
   const widths = columns.map((column) => {
     if (column.width) return column.width
     const content = rows.reduce((max, row) => Math.max(max, displayWidth(column.value(row))), displayWidth(column.title))
@@ -30,12 +30,10 @@ export function renderTable<T>(rows: T[], columns: Column<T>[], width: number, p
   const gap = 2
   let total = widths.reduce((sum, value) => sum + value, 0) + gap * (columns.length - 1)
   while (total > width) {
-    let widest = 0
-    for (let index = 1; index < widths.length; index += 1) {
-      if ((columns[index].max ?? 48) > (columns[widest].max ?? 48) && widths[index] > 8) widest = index
-      else if (widths[index] > widths[widest] && widths[index] > 8) widest = index
-    }
-    if (widths[widest] <= 8) break
+    const flexible = widths.map((_, index) => index).filter(index => !columns[index].width && widths[index] > 1)
+    const candidates = flexible.length ? flexible : widths.map((_, index) => index).filter(index => widths[index] > 1)
+    if (!candidates.length) break
+    const widest = candidates.reduce((best, index) => widths[index] > widths[best] ? index : best)
     widths[widest] -= 1
     total -= 1
   }
@@ -43,17 +41,17 @@ export function renderTable<T>(rows: T[], columns: Column<T>[], width: number, p
   const header = columns
     .map((column, index) => (column.align === 'right' ? padStart(column.title, widths[index]) : padEnd(column.title, widths[index])))
     .join(' '.repeat(gap))
-  const lines = [paint.bold(paint.muted(header))]
+  const lines = [truncate(paint.bold(paint.muted(header)), width)]
   for (const row of rows) {
     const cells = columns.map((column, index) => {
       const text = column.value(row)
       const styled = column.styled ? column.styled(row, paint) : text
-      const clipped = truncate(text, widths[index])
+      const clipped = truncate(styled, widths[index])
       const padding = widths[index] - displayWidth(clipped)
-      if (column.align === 'right') return `${' '.repeat(Math.max(0, padding))}${styled}`
-      return `${styled}${' '.repeat(Math.max(0, padding))}`
+      if (column.align === 'right') return `${' '.repeat(Math.max(0, padding))}${clipped}`
+      return `${clipped}${' '.repeat(Math.max(0, padding))}`
     })
-    lines.push(cells.join(' '.repeat(gap)))
+    lines.push(truncate(cells.join(' '.repeat(gap)), width))
   }
   return lines
 }

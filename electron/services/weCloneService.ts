@@ -2189,8 +2189,10 @@ export class WeCloneService {
         hint: '在「WeClone」页面点「生成克隆」—— 全程在本机完成，不需要任何服务器。',
       }
     }
-    // 没指定就用最新那个；指定了但找不到也退回最新（比报错更不容易卡住用户）
-    const meta = listed.find((m) => m.id === input.cloneId) || listed[0]
+    // An explicit selection must never silently send a different persona to the provider.
+    const requestedId = String(input.cloneId || '').trim()
+    const meta = requestedId ? listed.find((m) => m.id === requestedId) : listed[0]
+    if (!meta) return { success: false, error: '所选 WeClone 不存在', hint: '请刷新列表并重新选择分身。' }
     const dir = this.findCloneDir(meta.id)
     if (!dir) return { success: false, error: '克隆目录已丢失，请重新生成' }
 

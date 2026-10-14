@@ -59,6 +59,42 @@ function fakeDriver(overrides: Partial<PlatformKeyDriver> = {}): PlatformKeyDriv
   return driver as PlatformKeyDriver & { scanCalls: number; hookCalls: number }
 }
 
+describe('acquisition cancellation', () => {
+  it('does not start a hook for an already cancelled request', async () => {
+    const driver = fakeDriver({ platform: 'linux' })
+    const result = await new KeyAcquisitionService({ driver, cancel: { cancelled: true } }).acquire('auto')
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('取消')
+    expect(driver.hookCalls).toBe(0)
+  })
+
+  it('discards a successful hook result after cancellation', async () => {
+    const cancel = { cancelled: false }
+    const driver = fakeDriver({ platform: 'linux', hookAcquire: async () => {
+      cancel.cancelled = true
+      return { success: true, key: 'aa'.repeat(32) }
+    } })
+    const result = await new KeyAcquisitionService({ driver, cancel }).acquire('auto')
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('取消')
+    expect(result.key).toBeUndefined()
+    expect(result.keys).toEqual([])
+  })
+
+  it('does not return a stored key when its validation finishes after cancellation', async () => {
+    const cancel = { cancelled: false }
+    const driver = fakeDriver()
+    const result = await new KeyAcquisitionService({ driver, cancel, accountDir: '/fixture',
+      storedKey: { hexKey: 'aa'.repeat(32), source: 'config' },
+      validateStoredKey: async () => { cancel.cancelled = true; return { valid: true, checked: 1, matched: 1 } },
+      hasDbFiles: async () => true,
+    }).acquire('auto')
+    expect(result.success).toBe(false)
+    expect(result.key).toBeUndefined()
+    expect(result.error).toContain('取消')
+  })
+})
+
 describe('planKeyAcquisition — 平台 × 模式矩阵', () => {
   it('V1.2 Windows + auto：先校验已有密钥，免登录扫描暂缓，失败后走 Hook', () => {
     const plan = planKeyAcquisition({

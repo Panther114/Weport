@@ -1,6 +1,6 @@
 // Packaged UI acceptance, private fake-data profile, no desktop input or clipboard.
 import { _electron } from 'playwright-core'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -48,7 +48,10 @@ try {
   if (await page.locator('.rail-item[data-tab="diagnostics"]').count()) throw new Error('Diagnostics must only appear in Settings')
   if (await page.locator('.wkh, button:has-text("重新扫描全部")').count()) throw new Error('V1.2 must not expose no-login key scanning')
   const packageSmoke = await app.evaluate(() => globalThis.__weportPackageSmoke())
-  if (packageSmoke.xlsxBytes < 1000 || packageSmoke.wasmBytes !== 256 || !packageSmoke.mcpReady || packageSmoke.version !== '1.2.0') throw new Error('Packaged dependencies/version smoke failed')
+  const expectedVersion = installed
+    ? await app.evaluate(({ app }) => app.getVersion())
+    : JSON.parse(readFileSync(resolve('package.json'), 'utf8')).version
+  if (packageSmoke.xlsxBytes < 1000 || packageSmoke.wasmBytes !== 256 || !packageSmoke.mcpReady || packageSmoke.version !== expectedVersion) throw new Error('Packaged dependencies/version smoke failed')
   if (packageSmoke.momentsImage?.width !== 1 || packageSmoke.momentsImage?.contentType !== 'image/png') throw new Error('Packaged Moments image decryption failed')
   const capture = async name => { await page.screenshot({ path: join(out, `${name}.png`) }); results.push(name) }
   const posterFitMetrics = async () => page.evaluate(() => {
@@ -168,15 +171,17 @@ try {
     ipcMain.removeHandler('export:exportSessions')
     ipcMain.handle('export:exportSessions', () => ({ success: true, successCount: 1, formatFolder: 'TXT' }))
     ipcMain.removeHandler('export:integrityReport')
-    ipcMain.handle('export:integrityReport', () => ({ success: true, path: 'D:/demo/integrity-report.json', report: {
-      ok: true, totals: { sessions: 1, messages: 2, mismatches: 0, missingMedia: 0, duplicates: 0, sourceIdCollisions: 1 }, notes: [],
-    } }))
+    globalThis.__weportNormalExportDiagnosticCalls = 0
+    ipcMain.handle('export:integrityReport', () => {
+      globalThis.__weportNormalExportDiagnosticCalls++
+      throw new Error('Normal exports must not request deep diagnostics')
+    })
   })
   await page.getByRole('button', { name: /^导出已选（1）$/ }).click()
-  await page.getByText('导出数据自检通过', { exact: true }).waitFor()
-  await page.getByText(/源 server_id 冲突 1 组/).waitFor()
-  if (await page.getByText('导出数据自检未通过', { exact: true }).count()) throw new Error('Source ID collisions must not be export failures')
-  await capture('export-source-collision-info')
+  await page.getByRole('heading', { name: '导出完成', exact: true }).waitFor()
+  if (await app.evaluate(() => globalThis.__weportNormalExportDiagnosticCalls)) throw new Error('Normal export unexpectedly requested diagnostics')
+  if (await page.getByText(/导出数据自检(未)?通过/).count()) throw new Error('Normal export displayed a diagnostic card')
+  await capture('normal-export-complete')
   await tab('搜索')
   await page.locator('input').filter({ visible: true }).first().fill('公园')
   await page.waitForTimeout(800)
@@ -317,6 +322,19 @@ try {
         return document.documentElement.scrollWidth > innerWidth + 2 || workspace.scrollWidth > workspace.clientWidth + 2
       })
       if (overflow) throw new Error(`Horizontal overflow: ${label.trim()} at ${width}px`)
+      const structure = await page.evaluate(() => {
+        const rect = selector => document.querySelector(selector)?.getBoundingClientRect()
+        const readerRail = rect('.reader-rail'), readerMain = rect('.reader-main')
+        const aiMain = rect('.ai-main'), aiMeta = rect('.ai-topbar-meta')
+        return {
+          readerGap: readerRail && readerMain && innerWidth <= 980 ? readerMain.top - readerRail.bottom : 0,
+          aiOverflow: aiMain && aiMeta ? aiMeta.right - aiMain.right : 0,
+          clippedSearchCards: [...document.querySelectorAll('.sp-rail-sec')].filter(card => card.scrollHeight > card.clientHeight + 2).length,
+          stackedExportGroups: innerWidth >= 1280 ? [...document.querySelectorAll('.export-side .opt-row .seg')].filter(group => new Set([...group.children].map(button => Math.round(button.getBoundingClientRect().top))).size > 1).length : 0,
+          narrowExportGroups: innerWidth >= 1280 ? [...document.querySelectorAll('.export-side .opt-row')].filter(row => row.querySelector('.seg')?.getBoundingClientRect().width < row.getBoundingClientRect().width - 2).length : 0,
+        }
+      })
+      if (structure.readerGap > 20 || structure.aiOverflow > 2 || structure.clippedSearchCards || structure.stackedExportGroups || structure.narrowExportGroups) throw new Error(`Clipped page structure: ${label.trim()} at ${width}px ${JSON.stringify(structure)}`)
       await capture(`${width}-${label.trim().replace(/[^a-zA-Z0-9\u4e00-\u9fff]+/g, '-')}`)
     }
 
@@ -394,6 +412,19 @@ try {
     await page.locator('.bg-task').filter({ hasText: label }).waitFor()
     await tab('诊断')
     await page.locator('.bg-task').filter({ hasText: label }).waitFor()
+    if (key === 'search.index') {
+      await app.evaluate(({ ipcMain }) => {
+        globalThis.__weportIndexCancelCalls = 0
+        ipcMain.removeHandler('search:cancelIndex')
+        ipcMain.handle('search:cancelIndex', () => {
+          globalThis.__weportIndexCancelCalls += 1
+          return { success: true }
+        })
+      })
+      await page.locator('.bg-task').filter({ hasText: label }).locator('.bg-task-cancel').click()
+      await page.waitForTimeout(100)
+      if (await app.evaluate(() => globalThis.__weportIndexCancelCalls) !== 1) throw new Error('Background index Cancel must reach the native cancellation IPC')
+    }
     await app.evaluate(({ BrowserWindow }, key) => {
       const win = BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('index.html'))
       win.webContents.send('task:statusChanged', { [key]: { status: 'done', progress: 100, message: '演示任务完成', logs: [], startedAt: Date.now(), finishedAt: Date.now() } })
@@ -409,7 +440,18 @@ try {
   if (page) {
     await page.screenshot({ path: join(out, 'failure.png') }).catch(() => {})
     const status = await page.locator('.poster-status, .poster-error, .poster-warn').allTextContents().catch(() => [])
-    writeFileSync(join(out, 'failure.json'), JSON.stringify({ error: String(error), status, errors }, null, 2))
+    const scrollDiagnostics = await page.evaluate(() => {
+      const describe = node => {
+        if (!node) return null
+        const rect = node.getBoundingClientRect(), style = getComputedStyle(node)
+        return { tag: node.tagName, className: node.className, scrollTop: node.scrollTop, scrollHeight: node.scrollHeight,
+          clientHeight: node.clientHeight, overflowY: style.overflowY, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }
+      }
+      const hit = []
+      for (let node = document.elementFromPoint(650, 250); node; node = node.parentElement) hit.push(describe(node))
+      return { viewport: { width: innerWidth, height: innerHeight }, workspace: describe(document.querySelector('.workspace')), wheelTargetAncestors: hit }
+    }).catch(() => null)
+    writeFileSync(join(out, 'failure.json'), JSON.stringify({ error: String(error), status, errors, scrollDiagnostics }, null, 2))
     console.log(`Failure details: ${out}`)
   }
   throw error

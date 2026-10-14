@@ -426,6 +426,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   search: {
     indexStatus: () => ipcRenderer.invoke('search:indexStatus'),
     buildIndex: (options?: { force?: boolean; wxid?: string }) => ipcRenderer.invoke('search:buildIndex', options),
+    cancelIndex: () => ipcRenderer.invoke('search:cancelIndex'),
     query: (request: {
       text: string;
       scope?: { sessionIds?: string[]; senders?: string[]; from?: number; to?: number; kinds?: string[] };
@@ -443,7 +444,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   annotations: {
     list: (options?: { accountId: string }) => ipcRenderer.invoke('annotations:list', options),
     mutate: (payload: { op: string; payload?: any }, options?: { accountId: string }) => ipcRenderer.invoke('annotations:mutate', payload, options),
-    export: (payload: { format: 'json' | 'csv' | 'md'; path: string }) => ipcRenderer.invoke('annotations:export', payload)
+    export: (payload: { format: 'json' | 'csv' | 'md'; path: string }, options?: { accountId: string }) => ipcRenderer.invoke('annotations:export', payload, options)
   },
 
   /**

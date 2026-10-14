@@ -389,6 +389,12 @@ export async function searchSession(
       return { hits: searchLoadedMessages(loaded, needle, limit), engineSearch: false, error: String(payload?.error || '搜索失败，已退回已加载消息') }
     }
     const rows = Array.isArray(payload.messages) ? payload.messages : []
+    if (rows.length === 0) {
+      const loadedHits = searchLoadedMessages(loaded, needle, limit)
+      if (loadedHits.length > 0) {
+        return { hits: loadedHits, engineSearch: false, error: '搜索索引未返回已加载的匹配消息' }
+      }
+    }
     const hits: ReaderSearchHit[] = rows.map((row) => {
       const message = normalizeMessage(row as EngineMessageLike, sessionId)
       return {

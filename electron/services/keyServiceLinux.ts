@@ -410,14 +410,9 @@ export class KeyServiceLinux {
       const helperPath = this.getHelperPath()
 
       try {
-        console.log(`[Debug] 准备执行 Helper: ${helperPath} image_mem ${pid} ${ciphertextHex}`);
-
-        const { stdout: memOut, stderr } = await execFileAsync(helperPath, ['image_mem', pid.toString(), ciphertextHex])
-
-        console.log(`[Debug] Helper stdout: ${memOut}`);
-        if (stderr) {
-          console.warn(`[Debug] Helper stderr: ${stderr}`);
-        }
+        // Helper buffers can contain the acquired key, including on failures.
+        // Keep them inside this acquisition operation, outside persisted logs.
+        const { stdout: memOut } = await execFileAsync(helperPath, ['image_mem', pid.toString(), ciphertextHex])
 
         if (!memOut || memOut.trim() === '') {
           return { success: false, error: 'Helper 返回为空，请检查是否有足够的权限(如需sudo)读取进程内存。' }
@@ -431,11 +426,10 @@ export class KeyServiceLinux {
         }
         return { success: false, error: res.result || '未知错误' }
 
-      } catch (err: any) {
-        console.error('[Debug] 执行或解析 Helper 时发生崩溃:', err);
+      } catch {
         return {
           success: false,
-          error: `内存扫描失败: ${err.message}\nstdout: ${err.stdout || '无'}\nstderr: ${err.stderr || '无'}`
+          error: '图片密钥内存扫描失败，请检查原生组件和进程读取权限后重试'
         }
       }
     } catch (err: any) {

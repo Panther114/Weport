@@ -2527,7 +2527,7 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
 
                         const decodedMagicMime = detectImageMime(decoded, '')
                         if (!decodedMagicMime.startsWith('image/')) {
-                            console.error(`[SnsService] 图片解密失败: 原始mime=${rawMagicMime}, 解密后mime=${decodedMagicMime}, key=${key}`)
+                            console.error(`[SnsService] 图片解密失败: 原始mime=${rawMagicMime}, 解密后mime=${decodedMagicMime}`)
                             // 密钥不匹配/资源损坏是确定性失败，5 分钟内快速失败不再重试
                             this.rememberFailedResource(failKey)
                             resolve({ success: false, error: '图片解密失败：无法识别图片格式' })

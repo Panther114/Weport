@@ -6,7 +6,29 @@ const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 const vm = require('node:vm')
-const { assertArchitecture, createHostExecutable, elfArchitecture, machOArchitectures, smokeSource } = require('./verify-packaged-native.cjs')
+const { assertArchitecture, createHostExecutable, removeTemporaryHostLink, elfArchitecture, machOArchitectures, smokeSource } = require('./verify-packaged-native.cjs')
+
+test('temporary Windows image lock is retried before deleting the host link', () => {
+  let calls = 0, waits = 0
+  removeTemporaryHostLink('owned-probe-link', () => {
+    if (++calls < 3) throw Object.assign(new Error('image mapping busy'), { code: 'EBUSY' })
+  }, () => { waits++ })
+  assert.equal(calls, 3)
+  assert.equal(waits, 2)
+})
+
+test('host-link cleanup still fails for permanent locks and unrelated errors', () => {
+  let calls = 0
+  assert.throws(() => removeTemporaryHostLink('owned-probe-link', () => {
+    calls++; throw Object.assign(new Error('busy'), { code: 'EBUSY' })
+  }, () => {}), /busy/)
+  assert.equal(calls, 20)
+  calls = 0
+  assert.throws(() => removeTemporaryHostLink('owned-probe-link', () => {
+    calls++; throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  }, () => {}), /permission denied/)
+  assert.equal(calls, 1)
+})
 
 function elf64(machine = 62, elfClass = 2, dataEncoding = 1) {
   const buffer = Buffer.alloc(64)

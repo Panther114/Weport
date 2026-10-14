@@ -108,6 +108,36 @@ function seedHistoryAccount(): { accountDir: string; dbs: Array<{ id: string; pa
 }
 
 describe('合并写入（绝不互相覆盖）', () => {
+  it('validates legacy account keys without persisting them or exposing them in health reports', async () => {
+    const fixture = seedHistoryAccount()
+    const persistence = memoryPersistence()
+    const service = new KeyHealthService({ deps: {
+      codec: testCodec, store: persistence, resolveAccountDir: () => fixture.accountDir,
+      resolveLegacyAccountKey: dir => dir === fixture.accountDir ? KEY_A : '',
+    } })
+    const report = await service.getHealth()
+    expect(report.connectionReady).toBe(true)
+    expect(report.entries.every(entry => entry.status === 'ok' && entry.source === 'config')).toBe(true)
+    expect(toKeyHealthReport(report).mode).toBe('manual')
+    expect(JSON.stringify(report)).not.toContain(KEY_A)
+    expect(persistence.current()).toEqual(emptyDbKeyStore())
+    expect(service.getVerifiedDbKeyMaterial().keys).toHaveLength(fixture.dbs.length)
+    const other = seedHistoryAccount()
+    expect((await service.getHealth(other.accountDir)).connectionReady).toBe(false)
+    expect(service.getVerifiedDbKeyMaterial(other.accountDir).keys).toEqual([])
+  })
+  it('a changed legacy key cannot reuse a successful verdict for the old key', async () => {
+    const fixture = seedHistoryAccount()
+    let legacy = KEY_A
+    const service = new KeyHealthService({ deps: {
+      codec: testCodec, store: memoryPersistence(), resolveAccountDir: () => fixture.accountDir,
+      resolveLegacyAccountKey: () => legacy,
+    } })
+    expect((await service.getHealth()).connectionReady).toBe(true)
+    legacy = KEY_B
+    expect((await service.getHealth()).connectionReady).toBe(false)
+    expect(service.getVerifiedDbKeyMaterial().keys).toEqual([])
+  })
   it('account-passphrase readiness returns all authenticated page keys for mirror fallback', async () => {
     const fixture = seedHistoryAccount()
     const expected = fixture.dbs.map(db => {

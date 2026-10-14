@@ -71,8 +71,17 @@
   }
 
   :is(.rail-item, .settings-nav-item)[data-active='true'] {
-    background: var(--accent-soft);
+    background: linear-gradient(112deg,
+      color-mix(in srgb, var(--accent) 22%, transparent) 0%,
+      color-mix(in srgb, var(--accent-deep) 14%, transparent) 55%,
+      color-mix(in srgb, var(--accent-3) 9%, transparent) 100%);
     color: var(--text);
+  }
+
+  .navigation-gradient-defs { position: absolute; pointer-events: none; }
+
+  :is(.rail-item, .settings-nav-item) > svg {
+    stroke: url(#weport-navigation-gradient);
   }
 
   :is(.badge.ok, .toast.ok, [data-state='ok']) svg { color: var(--ok); }

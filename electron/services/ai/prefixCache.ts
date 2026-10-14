@@ -164,9 +164,10 @@ export function compressOverflow<T extends CompressibleMessage>(
 // 前缀稳定性探针
 // ---------------------------------------------------------------------------
 
-export type PrefixChangeKind = 'first' | 'append' | 'system' | 'tools' | 'route' | 'head-rewrite'
+export type PrefixChangeKind = 'first' | 'append' | 'system' | 'tools' | 'route' | 'control' | 'head-rewrite'
 
 export interface PrefixFrame {
+  toolChoice?: 'auto' | 'none'
   systemHash: string
   toolsHash: string
   /**
@@ -231,6 +232,9 @@ export function comparePrefixFrames(previous: PrefixFrame | undefined, current: 
   if (!previous) return { change: 'first', divergedAt: 0, previousLength: 0 }
   if (previous.systemHash !== current.systemHash) {
     return { change: 'system', divergedAt: 0, previousLength: previous.wireHashes.length }
+  }
+  if ((previous.toolChoice || 'auto') !== (current.toolChoice || 'auto')) {
+    return { change: 'control', divergedAt: 0, previousLength: previous.wireHashes.length }
   }
   if (previous.toolsHash !== current.toolsHash) {
     return { change: 'tools', divergedAt: 0, previousLength: previous.wireHashes.length }

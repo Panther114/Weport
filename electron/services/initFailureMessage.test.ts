@@ -75,6 +75,8 @@ describe('describeInitFailure — 哨兵值不再以裸数字示人 (issue #17)'
   })
 
   it('extractErrorCode 认得出两种书写形式，且不会把普通文本当错误码', () => {
+    expect(extractErrorCode('打开数据库失败 (错误码: -3)')).toBe(-3)
+    expect(describeInitFailure('打开数据库失败 (错误码: -3)')).not.toContain('-3999')
     expect(extractErrorCode('错误码: -3999')).toBe(-3999)
     expect(extractErrorCode('未找到数据库目录 (错误码: -3001)')).toBe(-3001)
     expect(extractErrorCode('错误码：-2301')).toBe(-2301)

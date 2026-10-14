@@ -401,4 +401,22 @@ describe('searchSession', () => {
     expect(result.hits).toEqual([])
     expect(searchMessages).not.toHaveBeenCalled()
   })
+
+  it('keeps loaded matches when an absent or stale native FTS index returns success with no rows', async () => {
+    stubChat({ searchMessages: async () => ({ success: true, messages: [] }) })
+    const result = await searchSession('s1', '项目', loaded)
+    expect(result.engineSearch).toBe(false)
+    expect(result.hits).toHaveLength(1)
+    expect(result.hits[0].key).toBe(loaded[0].key)
+    expect(result.hits[0].index).toBe(0)
+    expect(result.error).toContain('搜索索引未返回')
+  })
+
+  it('retains a genuine empty engine result when loaded messages do not match either', async () => {
+    stubChat({ searchMessages: async () => ({ success: true, messages: [] }) })
+    const result = await searchSession('s1', 'no such text', loaded)
+    expect(result.engineSearch).toBe(true)
+    expect(result.hits).toEqual([])
+    expect(result.error).toBeUndefined()
+  })
 })

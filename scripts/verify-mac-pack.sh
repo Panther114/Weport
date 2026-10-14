@@ -21,6 +21,7 @@
 #   6. The app is actually signed (not silently skipped): `codesign -dvv`
 #      must report an Authority (Developer ID) or an ad-hoc signature —
 #      never "code object is not signed at all".
+#   7. The app's minimum macOS version covers shipped Apple Silicon native artifacts.
 set -euo pipefail
 
 RELEASE_DIR="${1:-release}"
@@ -155,6 +156,57 @@ if echo "$SIGN_INFO" | grep -qE 'Sealed Resources version=2.*files=[1-9]'; then
   pass "sealed resources recorded"
 else
   fail "codesign reports no sealed resources — the bundle seal is incomplete (issue #18)"
+fi
+
+# --- 7. Launch Services must not admit an OS rejected by native loaders --------
+if python3 - "$APP_PATH" <<'PY'
+import pathlib, plistlib, re, subprocess, sys
+
+app = pathlib.Path(sys.argv[1])
+with (app / 'Contents/Info.plist').open('rb') as stream:
+    info = plistlib.load(stream)
+floor = info.get('LSMinimumSystemVersionByArchitecture', {}).get('arm64', info.get('LSMinimumSystemVersion'))
+
+def version(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d+(?:\.\d+){0,2}', value):
+        raise SystemExit(f'Invalid minimum macOS version: {value!r}')
+    parts = tuple(map(int, value.split('.')))
+    return parts + (0,) * (3 - len(parts))
+
+minimum = version(floor)
+payloads = app / 'Contents/Resources/resources'
+checked = 0
+errors = []
+for family in ('wcdb', 'key', 'wedecrypt', 'welive'):
+    for path in (payloads / family / 'macos').rglob('*'):
+        if not path.is_file():
+            continue
+        with path.open('rb') as stream:
+            magic = stream.read(4)
+        if magic not in (bytes.fromhex('cffaedfe'), bytes.fromhex('feedfacf'), bytes.fromhex('cafebabe'), bytes.fromhex('bebafeca'), bytes.fromhex('cafebabf'), bytes.fromhex('bfbafeca')):
+            continue
+        arches = subprocess.check_output(['lipo', '-archs', str(path)], text=True).split()
+        arch = next((item for item in arches if item.startswith('arm64')), None)
+        if arch is None:
+            continue
+        commands = subprocess.check_output(['otool', '-arch', arch, '-l', str(path)], text=True)
+        match = re.search(r'\bcmd (?:LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX)\b.*?\n\s*(?:minos|version)\s+(\d+(?:\.\d+){0,2})', commands, re.S)
+        if match is None:
+            raise SystemExit(f'No native macOS minimum recorded in {path}')
+        native_floor = match.group(1)
+        if minimum < version(native_floor):
+            errors.append(f'App allows macOS {floor}, but {path.relative_to(app)} requires {native_floor}')
+        checked += 1
+        print(f'{path.relative_to(app)}: native minimum {native_floor}, app minimum {floor}')
+if not checked:
+    raise SystemExit('No native macOS payloads checked')
+if errors:
+    raise SystemExit('\n'.join(errors))
+PY
+then
+  pass "app minimum macOS version covers shipped Apple Silicon native payloads"
+else
+  fail "app minimum macOS version does not cover shipped native payloads"
 fi
 
 echo "=== verify-mac-pack: $FAILURES failure(s) ==="

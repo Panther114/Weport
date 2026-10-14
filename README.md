@@ -262,9 +262,11 @@ macOS 15+ 还会要求一次「系统设置 → 隐私与安全性 → 仍要打
 |------|------|--------|------|
 | Windows | x64 | `.exe`（NSIS） | 微信 4.x，完整功能 |
 | macOS | Apple Silicon（arm64） | `.dmg` / `.zip` | macOS 15+、微信 4.x；自动获取密钥受 SIP/AMFI 调试权限限制 |
-| Linux | x64 | `.AppImage` / `.tar.gz` | glibc 2.34+、GLIBCXX 3.4.30+、OpenSSL 3、微信 4.x；密钥提取可能需要 sudo |
+| Linux | x64 | `.deb` / `.AppImage` / `.tar.gz` | glibc 2.34+、GLIBCXX 3.4.30+、OpenSSL 3、微信 4.x；密钥提取可能需要 sudo |
 
-> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 提供 x64 AppImage 与 tar.gz 安装包，自动更新采用手动下载新版本。
+> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 自动更新采用手动下载新版本；Ubuntu/Debian 推荐安装 `.deb`，安装时会配置 Chromium 沙箱辅助程序，不需要关闭沙箱或修改系统安全策略。
+
+Ubuntu/Debian 安装：`sudo apt install ./Weport-1.2.1-amd64.deb`，然后从应用菜单启动 Weport；依赖会自动安装 ffmpeg，用于 WXGF 图片转换。便携包需自行安装 ffmpeg，无可用转换器时仅能使用同图缩略图。`.AppImage` 为便携兼容包，其运行时会关闭 Chromium 沙箱；`.tar.gz` 不会自动配置系统沙箱辅助程序，在限制用户命名空间的系统上可能无法直接启动。不要通过关闭系统安全策略解决启动问题。
 
 Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share/xwechat_files` 和 Flatpak 数据目录。若密钥提取失败，请检查 `libcrypto.so.3`、`libcurl.so.4`、helper 可执行权限及 `/proc/sys/kernel/yama/ptrace_scope`；Weport 只报告限制，不会自动降低系统安全策略。AppImage 无法启动时可安装发行版的 FUSE 2 兼容包，或使用 `.tar.gz` 安装包。
 
@@ -273,6 +275,8 @@ Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share
 所有处理都在本机完成。应用只读取你指定的微信数据目录，并在提取密钥时挂接微信进程捕获登录密钥；不会向任何服务器上传聊天内容。
 
 WeportAI 例外：为了让模型回答问题，会把相关**聊天文本**发送到你在设置中配置的模型 API（默认 DeepSeek）。此功能默认关闭，只有当你填写 API 密钥后才启用；密钥仅保存在本机配置中，日志与截图均做脱敏处理。
+
+Weport v1.2.1 不收集安装统计或远程错误报告。诊断结果保存在本机，问题反馈由你自行提交。
 
 ## ⚠️ 免责声明
 

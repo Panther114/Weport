@@ -252,8 +252,15 @@ export class WeBotService {
           ? parsed.notes.map((note) => normalizeNote(note)).filter((note): note is WeBotNote => note !== null)
           : [],
       }
+      let repairedDisabledSchedule = false
+      for (const task of this.state.tasks) {
+        if (task?.enabled === false && task.nextRunAt !== null) {
+          task.nextRunAt = null
+          repairedDisabledSchedule = true
+        }
+      }
       // 清理是一次性的：只在真的丢了东西时回写，避免每次启动都无谓地写盘。
-      if (this.state.notes.length !== (Array.isArray(parsed.notes) ? parsed.notes.length : 0)) this.persist()
+      if (repairedDisabledSchedule || this.state.notes.length !== (Array.isArray(parsed.notes) ? parsed.notes.length : 0)) this.persist()
     } catch (error) {
       // 损坏的状态文件不能让整个功能崩掉：留空并继续，旧文件保留在磁盘上。
       console.warn('[WeBot] 状态文件无法解析，已从空状态启动:', error)
@@ -475,7 +482,7 @@ export class WeBotService {
       allowParallel: input.allowParallel === true,
       createdAt: now,
       updatedAt: now,
-      nextRunAt: nextRunAfter(input.schedule, now),
+      nextRunAt: input.enabled === false ? null : nextRunAfter(input.schedule, now),
       lastRunAt: null,
     }
     this.state.tasks.push(task)

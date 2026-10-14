@@ -49,3 +49,8 @@ export function optionsFingerprint(value: unknown): string {
     : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(key => [key, canonical(v[key])])) : v
   return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex').slice(0, 20)
 }
+
+/** Rebuild older artifacts whose valid file hashes can still hide lost references. */
+export function exportArtifactFingerprint(account: string | undefined, options: unknown): string {
+  return optionsFingerprint({ contractVersion: 2, account, options })
+}

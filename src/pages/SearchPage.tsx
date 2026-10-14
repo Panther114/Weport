@@ -19,6 +19,8 @@ import {
 } from '../components/search/searchQuery'
 import { loadRecentSessions, loadSessionCandidates, rememberRecentSession, type SessionCandidate } from '../components/search/searchData'
 import { useAnnotations, useAnnotationsExport } from '../hooks/useAnnotations'
+import { useLiveTask } from '../hooks/useLiveTask'
+import { LIVE_TASK } from '../utils/liveTask'
 import { useDebouncedValue, useHitsStore, useSearchQuery, type HitsStore } from '../hooks/useSearchQuery'
 import { loadMessageByIdentity } from '../components/reader/readerSource'
 import type { ReaderPosterRequest } from './ReaderPage'
@@ -39,6 +41,7 @@ import '../styles/search.scss'
  * 命中项通过 onOpen 交给外壳切到阅读器；query 一并传出，阅读器可以高亮命中词。
  */
 export interface SearchPageProps {
+  accountId?: string
   /** 打开命中位置；查询词用于阅读器高亮。 */
   onOpen?: (hit: SearchHit, query?: string) => void
   /** 精确读取并把命中消息送入海报工作室。 */
@@ -64,7 +67,7 @@ function readStoredSort(): SortOrder {
   }
 }
 
-export default function SearchPage({ onOpen, onCreatePoster, initialQuery }: SearchPageProps) {
+export default function SearchPage({ accountId = '', onOpen, onCreatePoster, initialQuery }: SearchPageProps) {
   // ---- 输入与条件 ----------------------------------------------------------
   /**
    * 初始查询串。
@@ -157,10 +160,16 @@ export default function SearchPage({ onOpen, onCreatePoster, initialQuery }: Sea
     refreshIndex()
   }, [refreshIndex])
 
+  // Result metadata must refresh even when an existing index hides the empty panel.
+  const indexTask = useLiveTask(LIVE_TASK.searchIndex)
+  useEffect(() => {
+    if (indexTask.status === 'done' || indexTask.status === 'failed' || indexTask.status === 'aborted') refreshIndex()
+  }, [indexTask.status, indexTask.finishedAt, refreshIndex])
+
   // ---- 注解（标签 / 收藏 / 保存搜索） ------------------------------------
-  const annotations = useAnnotations()
+  const annotations = useAnnotations(accountId)
   const annotationStore = annotations.data
-  const exportState = useAnnotationsExport()
+  const exportState = useAnnotationsExport(accountId)
 
   // ---- 会话候选（筛选面板用） --------------------------------------------
   const [candidates, setCandidates] = useState<SessionCandidate[]>([])

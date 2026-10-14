@@ -46,7 +46,7 @@ export function colourEnabled(): boolean {
 /** Visible width: CJK glyphs occupy two columns, so padding needs this, not `.length`. */
 export function displayWidth(text: string): number {
   let width = 0
-  for (const char of text) {
+  for (const char of stripAnsi(text)) {
     const code = char.codePointAt(0) || 0
     if (code === 0x200b || code === 0xfe0f) continue
     const wide =
@@ -67,9 +67,17 @@ export function truncate(text: string, width: number): string {
   if (width <= 0) return ''
   let out = ''
   let used = 0
-  for (const char of text) {
+  let styled = false
+  const tokens = new RegExp(`${ESC}\\[[0-9;]*m|[\\s\\S]`, 'gu')
+  for (const match of text.matchAll(tokens)) {
+    const char = match[0]
+    if (char.startsWith(`${ESC}[`)) {
+      out += char
+      styled = true
+      continue
+    }
     const charWidth = displayWidth(char)
-    if (used + charWidth > width) return `${out}${used + 1 <= width ? '…' : ''}`
+    if (used + charWidth > width) return `${out}${used + 1 <= width ? '…' : ''}${styled ? `${CSI}0m` : ''}`
     out += char
     used += charWidth
   }
@@ -86,9 +94,9 @@ export function padStart(text: string, width: number): string {
   return current >= width ? truncate(text, width) : ' '.repeat(width - current) + text
 }
 
-/** Strip ANSI so a styled line can be measured/padded correctly. */
+/** Strip CSI styling/cursor controls so measurement and plain-text dumps agree. */
 export function stripAnsi(text: string): string {
-  return text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '')
+  return text.replace(new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]`, 'g'), '')
 }
 
 export function wrapText(text: string, width: number): string[] {
@@ -142,10 +150,18 @@ export function enterTerminal(): TerminalSession {
   input.resume()
   input.setEncoding('utf8')
 
+  let restored = false
   const restore = () => {
+    if (restored) return
+    restored = true
     try { if (input.isTTY) input.setRawMode(false) } catch { /* ignore */ }
     out.write(`${CSI}?25h${CSI}?1049l`)
+    input.pause()
+    process.off('exit', restore)
   }
+  // Startup and unexpected command failures can exit before normal key/signal
+  // cleanup is installed. Always restore the cursor and alternate screen.
+  process.once('exit', restore)
 
   const session: TerminalSession = {
     width: out.columns || 100,
@@ -175,10 +191,7 @@ export function enterTerminal(): TerminalSession {
     }
   }
   session.onResize = (handler) => { resizeHandlers.push(handler) }
-  session.restore = () => {
-    restore()
-    input.pause()
-  }
+  session.restore = restore
   return session
 }
 

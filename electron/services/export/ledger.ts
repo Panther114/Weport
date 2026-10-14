@@ -61,6 +61,19 @@ export interface UnitKey {
   artifact: string
 }
 
+/** A file overwritten by a later run cannot still match an older chunk's hash. */
+export function latestArtifactUnits<T extends { outputPath?: string; at?: number }>(units: Iterable<T>): T[] {
+  const latest = new Map<string, T>()
+  for (const unit of units) {
+    if (!unit.outputPath) continue
+    const resolved = path.resolve(unit.outputPath)
+    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved
+    const previous = latest.get(key)
+    if (!previous || (unit.at || 0) >= (previous.at || 0)) latest.set(key, unit)
+  }
+  return [...latest.values()]
+}
+
 export interface LedgerReadResult {
   entries: LedgerUnit[]
   /** 被丢弃的行的原因统计（调试/自检用）。 */

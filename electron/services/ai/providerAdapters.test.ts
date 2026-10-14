@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { anthropicMessages, getProviderAdapter, googleContents, openAIChatBody, openAIChatMessages, selectAdapter, usageFromAnthropic, usageFromOpenAI } from './providerAdapters'
 import type { ProviderProfile, ProviderStreamInput } from './providerTypes'
 
@@ -44,6 +44,27 @@ function streamInput(patch: Partial<ProviderStreamInput> = {}): ProviderStreamIn
  * cache. `SYSTEM_PROMPT` is frozen by `requestShape`; this pins the body.
  */
 describe('wire body has no per-request volatility', () => {
+  for (const protocol of ['openai', 'openai-compatible', 'anthropic', 'google'] as const) {
+    it(`final answer disables calls on the ${protocol} wire`, async () => {
+      const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('fixture rejection', { status: 400 }))
+      try {
+        const selected = profile({ protocol })
+        await expect(getProviderAdapter(selected).stream(streamInput({ profile: selected, toolChoice: 'none' }))).rejects.toThrow('fixture rejection')
+        const body = JSON.parse(String(fetch.mock.calls[0][1]?.body))
+        expect(body.tools).toHaveLength(1)
+        if (protocol === 'anthropic') expect(body.tool_choice).toEqual({ type: 'none' })
+        else if (protocol === 'google') expect(body.toolConfig).toEqual({ functionCallingConfig: { mode: 'NONE' } })
+        else expect(body.tool_choice).toBe('none')
+      } finally { fetch.mockRestore() }
+    })
+  }
+  it('can request a final answer without changing tools or message history', () => {
+    const normal = openAIChatBody(streamInput())
+    const final = openAIChatBody(streamInput({ toolChoice: 'none' }))
+    expect(final.tool_choice).toBe('none')
+    expect(final.tools).toEqual(normal.tools)
+    expect(final.messages).toEqual(normal.messages)
+  })
   const VOLATILE_TOP_LEVEL_KEYS = ['time', 'timestamp', 'seq', 'sequence', 'id', 'uuid', 'request_id', 'requestId', 'session_id', 'sessionId']
 
   it('omits time/sequence/identity fields at the top level', () => {
@@ -159,6 +180,48 @@ describe('per-model protocol selects the endpoint adapter', () => {
  * 不能拼进文本。拼进去模型只会收到一坨 base64 字符，等于没给它看图。
  */
 describe('工具结果里的图片 → 内容块', () => {
+  it('streams successfully through a strict DeepSeek-shaped endpoint after parallel image calls', async () => {
+    const messages = [
+      { role: 'assistant', content: '', reasoning_content: 'inspect both', tool_calls: ['a', 'b'].map(id => ({ id, type: 'function', function: { name: 'read_chat_images', arguments: '{}' } })) },
+      { role: 'tool', tool_call_id: 'a', content: 'first', images: [{ mimeType: 'image/png', data: 'AAAA' }] },
+      { role: 'tool', tool_call_id: 'b', content: 'second' },
+    ]
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const wire = JSON.parse(String(init?.body)).messages as Array<Record<string, any>>
+      const pending = new Set<string>()
+      for (const message of wire) {
+        if (message.role === 'tool') {
+          if (!pending.delete(message.tool_call_id)) return new Response('Unexpected tool reply', { status: 400 })
+        } else {
+          if (pending.size) return new Response("An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'", { status: 400 })
+          for (const call of message.tool_calls || []) pending.add(call.id)
+        }
+      }
+      if (pending.size) return new Response('Missing tool replies', { status: 400 })
+      return new Response('data: {"choices":[{"delta":{"content":"完成"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    })
+    try {
+      const input = streamInput({ profile: profile({ providerId: 'deepseek' }), messages })
+      const result = await getProviderAdapter(input.profile).stream(input)
+      expect(result.content).toBe('完成')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+  it('keeps every parallel tool reply before image user turns (issue #35)', () => {
+    const messages = [
+      { role: 'assistant', content: '', tool_calls: ['a', 'b'].map(id => ({ id, type: 'function', function: { name: 'read_chat_images', arguments: '{}' } })) },
+      { role: 'tool', tool_call_id: 'a', content: 'first', images: [{ mimeType: 'image/png', data: 'AAAA' }] },
+      { role: 'tool', tool_call_id: 'b', content: 'second', images: [{ mimeType: 'image/png', data: 'BBBB' }] },
+      { role: 'assistant', content: 'done' },
+    ]
+    const wire = openAIChatMessages(messages)
+    expect(wire.map(m => m.role)).toEqual(['assistant', 'tool', 'tool', 'user', 'user', 'assistant'])
+    expect(wire.slice(1, 3).map(m => m.tool_call_id)).toEqual(['a', 'b'])
+    expect(JSON.stringify(wire)).toContain('BBBB')
+    expect(JSON.stringify(openAIChatMessages([...messages, { role: 'user', content: 'next' }])).startsWith(JSON.stringify(wire).slice(0, -1))).toBe(true)
+  })
   const withImage = (): Array<Record<string, unknown>> => [
     { role: 'system', content: 'sys' },
     { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_chat_images', arguments: '{}' } }] },
