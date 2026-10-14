@@ -20,7 +20,7 @@ import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
 import { normalizeTimestampSeconds, formatTimestamp, formatIsoTimestamp, parseCompactDateTimeDigitsToSeconds, parseDateTimeTextToSeconds, normalizeExportDateRange, normalizeRowTimestampSeconds, getTimestampSecondsFromRow } from '../../export/utils/timestamp';
 import { escapeHtml, escapeAttribute, renderMultilineText, decodeHtmlEntities } from '../../export/utils/htmlEscape';
-import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, normalizeExportConflictStrategy, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath } from '../../export/utils/fileNaming';
+import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, normalizeExportConflictStrategy, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath, isWeChatSuffixRenamedEntry, pickWeChatSuffixRenamedEntries } from '../../export/utils/fileNaming';
 import { extractXmlValue, extractXmlAttribute, extractAppMessageType, normalizeAppMessageContent } from '../../export/parsers/xmlExtractor';
 import { decodeMessageContent, decodeMaybeCompressed, decodeBinaryContent, looksLikeHex, looksLikeBase64 } from '../../export/parsers/contentDecoder';
 import { parseVoipMessage } from '../../export/parsers/voipParser';
@@ -3915,10 +3915,38 @@ export class ExportContext {
         }
     }
 
-    private collectFileStorageCandidatesByName(rootDir: string, fileName: string, maxDepth = 3): string[] {
-        const normalizedName = String(fileName || '').trim().toLowerCase();
-        if (!rootDir || !normalizedName) return []
-        const matches: string[] = [];
+    /**
+     * 列出某目录下「文件名匹配目标附件」的全部条目。
+     *
+     * 除了精确同名，还要认得微信自动追加的 `(N)` 后缀：同一个附件被重复接收时，
+     * 磁盘上是 `报告(1).docx`，而消息里记的是 `报告.docx`。只按精确名找会让这类
+     * 附件全部丢失（实测某群 23 个文件消息里有 10 个是这么丢的）。
+     */
+    private listFileAttachmentNameMatches(dir: string, fileName: string): Array<{ name: string; nameMatch: 'exact' | 'suffix' }> {
+        const base = path.basename(String(fileName || ''))
+        if (!base) return []
+        let entries: string[] = []
+        try {
+          entries = fs.readdirSync(dir)
+        } catch {
+          return []
+        }
+
+        const matches: Array<{ name: string; nameMatch: 'exact' | 'suffix' }> = []
+        if (entries.includes(base)) {
+          matches.push({ name: base, nameMatch: 'exact' })
+        }
+        for (const variant of pickWeChatSuffixRenamedEntries(entries, base)) {
+          matches.push({ name: variant, nameMatch: 'suffix' })
+        }
+        return matches
+    }
+
+    private collectFileStorageCandidatesByName(rootDir: string, fileName: string, maxDepth = 3): Array<{ sourcePath: string; nameMatch: 'exact' | 'suffix' }> {
+        const base = path.basename(String(fileName || ''))
+        if (!rootDir || !base) return []
+        const normalizedName = base.toLowerCase()
+        const matches: Array<{ sourcePath: string; nameMatch: 'exact' | 'suffix' }> = [];
         const stack: Array<{ dir: string; depth: number }> = [{ dir: rootDir, depth: 0 }];
         while (stack.length > 0) {
           const current = stack.pop()!
@@ -3931,8 +3959,12 @@ export class ExportContext {
 
           for (const entry of entries) {
             const entryPath = path.join(current.dir, entry.name)
-            if (entry.isFile() && entry.name.toLowerCase() === normalizedName) {
-              matches.push(entryPath)
+            if (entry.isFile()) {
+              if (entry.name.toLowerCase() === normalizedName) {
+                matches.push({ sourcePath: entryPath, nameMatch: 'exact' })
+              } else if (isWeChatSuffixRenamedEntry(entry.name.toLowerCase(), normalizedName)) {
+                matches.push({ sourcePath: entryPath, nameMatch: 'suffix' })
+              }
               continue
             }
             if (entry.isDirectory() && current.depth < maxDepth) {
@@ -3978,7 +4010,7 @@ export class ExportContext {
         const candidates: FileExportCandidate[] = [];
         const seen = new Set<string>();
         let searchOrder = 0;
-        const appendCandidate = async (sourcePath: string, yearMonth?: string) => {
+        const appendCandidate = async (sourcePath: string, yearMonth?: string, nameMatch: 'exact' | 'suffix' = 'exact') => {
                   if (!sourcePath || !fs.existsSync(sourcePath)) return
 
                   const resolvedPath = path.resolve(sourcePath)
@@ -3997,16 +4029,22 @@ export class ExportContext {
                   candidates.push({
                     sourcePath: resolvedPath,
                     matchedBy,
+                    nameMatch,
                     yearMonth,
                     preferredMonth: Boolean(yearMonth && preferredMonths.has(yearMonth)),
                     mtimeMs: Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0,
                     searchOrder: searchOrder++
                   })
                 };
+        const appendCandidatesInDir = async (dir: string, yearMonth?: string) => {
+                  for (const match of this.listFileAttachmentNameMatches(dir, fileName)) {
+                    await appendCandidate(path.join(dir, match.name), yearMonth, match.nameMatch)
+                  }
+                };
         for (const root of roots) {
           if (root.msgFileRoot) {
             for (const month of preferredMonths) {
-              await appendCandidate(path.join(root.msgFileRoot, month, fileName), month)
+              await appendCandidatesInDir(path.join(root.msgFileRoot, month), month)
             }
 
             let monthDirs: string[] = []
@@ -4020,14 +4058,14 @@ export class ExportContext {
             }
 
             for (const month of monthDirs) {
-              await appendCandidate(path.join(root.msgFileRoot, month, fileName), month)
+              await appendCandidatesInDir(path.join(root.msgFileRoot, month), month)
             }
-            await appendCandidate(path.join(root.msgFileRoot, fileName))
+            await appendCandidatesInDir(root.msgFileRoot)
           }
 
           if (root.fileStorageRoot) {
-            for (const candidatePath of this.collectFileStorageCandidatesByName(root.fileStorageRoot, fileName, 3)) {
-              await appendCandidate(candidatePath)
+            for (const candidate of this.collectFileStorageCandidatesByName(root.fileStorageRoot, fileName, 3)) {
+              await appendCandidate(candidate.sourcePath, undefined, candidate.nameMatch)
             }
           }
         }
@@ -4035,6 +4073,12 @@ export class ExportContext {
         candidates.sort((left, right) => {
           if (left.matchedBy !== right.matchedBy) {
             return left.matchedBy === 'md5' ? -1 : 1
+          }
+          // 精确同名永远比「微信加 (1) 后缀」的更可信，不能被更新的 mtime 顶掉。
+          const leftNameMatch = left.nameMatch ?? 'exact'
+          const rightNameMatch = right.nameMatch ?? 'exact'
+          if (leftNameMatch !== rightNameMatch) {
+            return leftNameMatch === 'exact' ? -1 : 1
           }
           if (left.preferredMonth !== right.preferredMonth) {
             return left.preferredMonth ? -1 : 1
