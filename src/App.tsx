@@ -79,6 +79,7 @@ import { useLiveTaskPhase } from './hooks/useLiveTask'
 import { WEPORT_CANCEL_INDEX_EVENT } from './components/search/IndexState'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
+import { acquireKeyForSelectedAccount } from './utils/accountKeyAcquisition'
 import { summarizeNotifyScope } from './utils/notifyScope'
 import type { NotificationAnimationStyle } from './utils/notificationAnimation'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
@@ -1309,7 +1310,11 @@ export default function App() {
     setBusyLabel('正在连接微信进程…')
     pushToast('info', '开始提取密钥', '先检查已有密钥；需要重新获取时，请等待就绪提示后登录微信。', 7000)
     try {
-      const result = await api.key.autoGetDbKey()
+      const result = await acquireKeyForSelectedAccount(
+        api.config,
+        { dbPath, wxid: selectedWxid },
+        () => api.key.autoGetDbKey(),
+      )
       if (result.success) {
         if (!result.key) {
           pushToast('err', '密钥获取失败', '未返回有效数据库密钥，请重新获取或粘贴已有密钥。', 10000)
