@@ -1,5 +1,16 @@
 # 平台打包、TUI、连接器与参考仓库
 
+## Explicit Windows-first releases
+
+When the user explicitly requests a Windows-first release, manually dispatch
+`release.yml` on the committed build branch with the package-matching `tag` and
+`windows_only=true`. That mode builds the selected SHA, skips Mac/Linux jobs,
+and publishes Windows only after unit/type/native/UI/anti-delete/MCP/CLI gates.
+Its CI publisher creates the version tag at that SHA; do not push the tag ahead
+of it, because tag pushes use the normal three-platform release path. Default
+releases retain the three-platform gate. Windows-first releases still require
+`latest.yml`, a non-draft/non-prerelease latest release, and per-version notes.
+
 > 从 `AGENTS.md` 拆出：这里是模块与历史说明，不是动手前必读的不变量。
 
 ## Windows NSIS reinstall (v1.2)

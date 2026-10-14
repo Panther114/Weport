@@ -9,7 +9,12 @@ on:
       tag:
         description: 'Version tag (e.g. v1.2.0)'
         required: true
-        default: 'v1.2.0'
+        default: 'v1.2.1'
+      windows_only:
+        description: 'Publish Windows only; defer macOS and Linux assets'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,7 +41,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.release-tag.outputs.tag }}
+          # Windows-first manual releases build the selected branch and create
+          # the tag only after acceptance. Normal releases keep the tagged ref.
+          ref: ${{ inputs.windows_only && github.sha || steps.release-tag.outputs.tag }}
           persist-credentials: false
 
       - name: Verify tag matches package version
@@ -79,6 +86,14 @@ jobs:
           node scripts/verify-v12-ui.mjs
           node scripts/verify-bug-report-ui.mjs
 
+      - name: Verify Moments anti-delete feedback
+        run: node scripts/verify-sns-anti-delete-ui.mjs
+
+      - name: Verify packaged MCP and CLI
+        run: |
+          node scripts/verify-mcp-http.mjs
+          node scripts/verify-cli-protocol.mjs
+
       - name: Verify required Windows release payload
         shell: pwsh
         run: |
@@ -117,6 +132,7 @@ jobs:
           retention-days: 7
 
   build-mac:
+    if: ${{ !inputs.windows_only }}
     runs-on: macos-15
     # ── Issue #18: the macOS signing contract ───────────────────────────────────
     #
@@ -429,6 +445,7 @@ jobs:
           retention-days: 7
 
   build-linux:
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Resolve release tag
@@ -530,8 +547,9 @@ jobs:
           retention-days: 7
 
   publish-release:
-    name: Publish verified multi-platform release
+    name: Publish verified release
     needs: [build-windows, build-mac, build-linux]
+    if: ${{ always() && needs.build-windows.result == 'success' && (inputs.windows_only || (needs.build-mac.result == 'success' && needs.build-linux.result == 'success')) }}
     runs-on: ubuntu-latest
     concurrency:
       group: weport-release-${{ needs.build-windows.outputs.tag }}
@@ -541,6 +559,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.build-windows.outputs.tag }}
       RELEASE_PRERELEASE: ${{ needs.build-windows.outputs.prerelease }}
+      WINDOWS_ONLY: ${{ inputs.windows_only || false }}
     steps:
       - name: Download Windows release payload
         uses: actions/download-artifact@v4
@@ -549,12 +568,14 @@ jobs:
           path: release-artifacts/windows
 
       - name: Download macOS release payload
+        if: ${{ !inputs.windows_only }}
         uses: actions/download-artifact@v4
         with:
           name: weport-release-macos-arm64
           path: release-artifacts/macos
 
       - name: Download Linux release payload
+        if: ${{ !inputs.windows_only }}
         uses: actions/download-artifact@v4
         with:
           name: weport-release-linux-x64
@@ -583,6 +604,11 @@ jobs:
             "$windows/release/latest.yml"
             "$windows/release-notes-current.md"
             "$windows/resources/update/force-update.json"
+          )
+          metadata_files=("$windows/release/latest.yml")
+          notes_files=("$windows/release-notes-current.md")
+          if [[ "$WINDOWS_ONLY" != "true" ]]; then
+            required_files+=(
             "$macos/release/Weport-${version}-arm64.dmg"
             "$macos/release/Weport-${version}-arm64.zip"
             "$macos/release/latest-mac.yml"
@@ -591,29 +617,36 @@ jobs:
             "$linux/release/Weport-${version}-amd64.deb"
             "$linux/release/Weport-${version}-x64.tar.gz"
             "$linux/release-notes-current.md"
-          )
+            )
+            metadata_files+=("$macos/release/latest-mac.yml")
+            notes_files+=("$macos/release-notes-current.md" "$linux/release-notes-current.md")
+          fi
           for file in "${required_files[@]}"; do
             test -s "$file" || { echo "::error::Missing or empty release payload: $file"; exit 1; }
           done
-          for metadata in "$windows/release/latest.yml" "$macos/release/latest-mac.yml"; do
+          for metadata in "${metadata_files[@]}"; do
             grep -Eq "^version:[[:space:]]*['\"]?${version}['\"]?[[:space:]]*$" "$metadata" \
               || { echo "::error::$metadata does not declare version $version"; exit 1; }
           done
-          for notes in "$windows/release-notes-current.md" "$macos/release-notes-current.md" "$linux/release-notes-current.md"; do
+          for notes in "${notes_files[@]}"; do
             grep -Fxq "# Weport v${version}" "$notes" \
               || { echo "::error::$notes does not contain the selected version heading"; exit 1; }
             test "$(grep -c '^# Weport v' "$notes")" -eq 1 \
               || { echo "::error::$notes contains multiple version sections"; exit 1; }
           done
-          cmp -s "$windows/release-notes-current.md" "$macos/release-notes-current.md"
-          cmp -s "$windows/release-notes-current.md" "$linux/release-notes-current.md"
+          if [[ "$WINDOWS_ONLY" != "true" ]]; then
+            cmp -s "$windows/release-notes-current.md" "$macos/release-notes-current.md"
+            cmp -s "$windows/release-notes-current.md" "$linux/release-notes-current.md"
+          fi
           node -e "const p=require('./${windows}/resources/update/force-update.json'); if(!p.minimumSupportedVersion) process.exit(1)"
 
       - name: Publish GitHub release
+        if: ${{ !inputs.windows_only }}
         uses: softprops/action-gh-release@v2
         with:
           name: Weport ${{ env.RELEASE_TAG }}
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           # Publish only after all three native builds and package gates pass.
           # The updater requires a non-draft, non-prerelease release as latest.
           draft: false
@@ -630,5 +663,23 @@ jobs:
             release-artifacts/linux/release/Weport-*.AppImage
             release-artifacts/linux/release/Weport-*.deb
             release-artifacts/linux/release/Weport-*.tar.gz
+          body_path: release-artifacts/windows/release-notes-current.md
+          fail_on_unmatched_files: true
+
+      - name: Publish Windows-first GitHub release
+        if: ${{ inputs.windows_only }}
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Weport ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: ${{ fromJSON(env.RELEASE_PRERELEASE) }}
+          make_latest: ${{ env.RELEASE_PRERELEASE == 'false' }}
+          files: |
+            release-artifacts/windows/release/Weport-*.exe
+            release-artifacts/windows/release/Weport-*.exe.blockmap
+            release-artifacts/windows/release/latest.yml
+            release-artifacts/windows/resources/update/force-update.json
           body_path: release-artifacts/windows/release-notes-current.md
           fail_on_unmatched_files: true
