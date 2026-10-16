@@ -79,6 +79,7 @@ try {
   // Poll from the test process instead of leaving an unresolved CDP promise in
   // Electron during startup. V8 can collect that promise before app readiness.
   const readyDeadline = Date.now() + 60000
+  result.startupPhase = 'waiting-for-activation-handler'
   let ready = false
   while (Date.now() < readyDeadline) {
     ready = await app.evaluate(({ app }) => app.isReady() && app.listenerCount('activate') > 0)
@@ -86,6 +87,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   assert(ready, 'Application must register its activation handler within 60 seconds')
+  result.startupPhase = 'installing-hidden-window-guard-and-activating'
   await app.evaluate(({ app: electronApp, BrowserWindow }) => {
     const hide = BrowserWindow.prototype.hide
     BrowserWindow.prototype.show = function () { hide.call(this) }
@@ -94,10 +96,13 @@ try {
     BrowserWindow.prototype.focus = function () {}
     electronApp.emit('activate')
   })
+  result.startupPhase = 'reading-private-profile-path'
   const actualProfile = await app.evaluate(({ app }) => app.getPath('userData'))
   assert.equal(realpathSync(actualProfile), realpathSync(profile), 'Actual app must use the private profile')
+  result.startupPhase = 'waiting-for-renderer'
   page = await app.firstWindow()
   await page.locator('.rail-item').first().waitFor({ timeout: 180000 }); result.rendererReady = true
+  result.startupPhase = 'reading-encrypted-fixture'
   result.native = await page.evaluate(async ({ fixture, manifest }) => {
     const api = window.electronAPI
     const connection = await api.wcdb.testConnection(fixture, manifest.keyHex, manifest.account)
