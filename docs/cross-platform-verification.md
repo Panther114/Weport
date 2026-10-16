@@ -49,6 +49,9 @@ identifies the exact checked-out SHA; a branch or version label alone is not pro
   readiness after recreation. Forced `destroy()` has different shutdown semantics.
 - Wheel tests await actual workspace movement rather than assuming dispatch
   acknowledgement means compositor scrolling finished.
+- DOM state waits use timer polling in hidden/offscreen windows, where Chromium
+  may suspend animation-frame polling. Assertion conditions and deadlines remain
+  unchanged.
 - Browser plugin unavailable: rendered acceptance uses the repository's packaged
   Electron/Playwright harness, isolated profiles and offscreen/hidden windows.
 
