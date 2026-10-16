@@ -1,3 +1,4 @@
+import { normalizeLocalMediaUrl } from '../../utils/mediaUrl'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, Code2, Heart, ImageIcon, MapPin, Trash2 } from 'lucide-react'
@@ -50,7 +51,7 @@ const CommentEmoji: React.FC<{
 
   return (
     <img
-      src={localSrc}
+      src={normalizeLocalMediaUrl(localSrc)}
       alt="emoji"
       className="comment-custom-emoji"
       draggable={false}
@@ -132,7 +133,7 @@ const SnsLinkCard: React.FC<{ card: SnsLinkCardData; thumbKey?: string }> = ({ c
       <div className="link-thumb">
         {thumbSrc && !thumbFailed ? (
           <img
-            src={thumbSrc}
+            src={normalizeLocalMediaUrl(thumbSrc)}
             alt=""
             referrerPolicy="no-referrer"
             loading="lazy"

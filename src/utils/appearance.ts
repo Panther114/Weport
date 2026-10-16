@@ -1,3 +1,5 @@
+import { localFileUrl } from './mediaUrl'
+import { accessibleAccent } from './accentContrast'
 import { useEffect, useState } from 'react'
 
 /**
@@ -17,7 +19,7 @@ import { useEffect, useState } from 'react'
  */
 
 export type AccentId = 'blue' | 'violet' | 'teal' | 'rose' | 'amber' | 'graphite' | 'custom'
-export type Density = 'comfortable' | 'compact'
+export type Density = 'compact'
 export type Mode = 'dark' | 'light'
 export type BackgroundKind = 'none' | 'image' | 'video'
 /** 强调色的用量：只影响色块浓度，不改色相。 */
@@ -115,7 +117,7 @@ export const APPEARANCE_DEFAULT: Appearance = {
   accent: 'blue',
   customAccent: '#5b8eff',
   mode: 'dark',
-  density: 'comfortable',
+  density: 'compact',
   accentStrength: 'standard',
   modeAuto: true,
 }
@@ -141,11 +143,6 @@ export const PRESET_ACCENTS = ACCENT_OPTIONS.filter((option) => option.id !== 'c
 export const MODE_OPTIONS: Array<{ id: Mode; label: string; hint: string }> = [
   { id: 'dark', label: '深色', hint: '默认，长时间阅读更省眼' },
   { id: 'light', label: '浅色', hint: '白天 / 强光环境下更清晰' },
-]
-
-export const DENSITY_OPTIONS: Array<{ id: Density; label: string }> = [
-  { id: 'comfortable', label: '宽松' },
-  { id: 'compact', label: '紧凑' },
 ]
 
 /** 视频背景支持的扩展名（Chromium 能直接播的容器）。 */
@@ -177,7 +174,6 @@ const listeners = new Set<() => void>()
 const isAccent = (value: unknown): value is AccentId =>
   value === 'custom' || ACCENT_OPTIONS.some((option) => option.id === value)
 const isMode = (value: unknown): value is Mode => value === 'dark' || value === 'light'
-const isDensity = (value: unknown): value is Density => value === 'comfortable' || value === 'compact'
 const isStrength = (value: unknown): value is AccentStrength =>
   ACCENT_STRENGTH_OPTIONS.some((option) => option.id === value)
 const isVideoQuality = (value: unknown): value is VideoQuality =>
@@ -192,26 +188,10 @@ export function normalizeHexColor(value: unknown): string {
   return `#${hex.split('').map((c) => c + c).join('').toLowerCase()}`
 }
 
-/**
- * 浅色模式下强调色需要压深（否则当文字用在浅底上对比度不足），预设色在
- * `theme.scss` 里写死，自定义色只能运行时算。
- *
- * 为什么 `--accent` 必须是字面色值、不能用 `color-mix()` 现算：Chromium 不支持
- * `color-mix()` 嵌套，而 `--accent` 会被塞进二十多处 `color-mix(in srgb, var(--accent) …)`；
- * 它一旦是 color-mix，那些声明在浅色下全部作废（主按钮没有底色 → 白字落在白面板上）。
- */
-function darkenForLight(hex: string, factor = 0.72): string {
-  const value = normalizeHexColor(hex)
-  if (!value) return hex
-  const channel = (start: number) =>
-    Math.max(0, Math.min(255, Math.round(parseInt(value.slice(start, start + 2), 16) * factor)))
-  return `#${[1, 3, 5].map((i) => channel(i).toString(16).padStart(2, '0')).join('')}`
-}
-
 /** 把绝对路径转成渲染层可用的协议 URL（盘符必须编码进 pathname，不能放 host）。 */
 export function backgroundProtocolUrl(filePath: string): string {
   const normalized = String(filePath || '').replace(/\\/g, '/')
-  return `weport-media://local/${encodeURIComponent(normalized)}`
+  return localFileUrl(normalized)
 }
 
 function applyDom(appearance: Appearance): void {
@@ -241,12 +221,18 @@ function applyDom(appearance: Appearance): void {
   if (appearance.accent === 'custom') {
     const hex = normalizeHexColor(appearance.customAccent) || APPEARANCE_DEFAULT.customAccent
     root.style.setProperty('--accent-raw', hex)
-    // 浅色模式的压深值预设色写在 CSS 里，自定义色只能这里算。
-    if (appearance.mode === 'light') root.style.setProperty('--accent', darkenForLight(hex))
-    else root.style.removeProperty('--accent')
+    // Custom black/white/neon colors need readable tones in both themes.
+    const readable = accessibleAccent(hex, appearance.mode === 'light' ? '#eef0f6' : '#1e1e26')
+    root.style.setProperty('--accent', readable)
+    root.style.setProperty('--icon-color', readable)
+    const fill = accessibleAccent(hex, '#ffffff')
+    root.style.setProperty('--accent-fill', fill)
+    root.style.setProperty('--accent-fill-color', fill)
+    root.style.setProperty('--accent-fill-text', '#ffffff')
   } else {
     root.style.removeProperty('--accent-raw')
     root.style.removeProperty('--accent')
+    for (const token of ['--icon-color', '--accent-fill', '--accent-fill-color', '--accent-fill-text']) root.style.removeProperty(token)
   }
   // 旧字段：仍有少量 CSS（以及 ECharts 主题）按 data-theme 判断灰阶。
   root.dataset.theme = appearance.accent === 'graphite' ? 'mono' : 'colorful'
@@ -371,9 +357,6 @@ export const setMode = (mode: Mode, opts?: { auto?: boolean }): void => {
 export const setModeAuto = (auto: boolean): void =>
   commit({ modeAuto: auto }, (key, value) => void window.electronAPI.config.set(key, value))
 
-export const setDensity = (density: Density): void =>
-  commit({ density: isDensity(density) ? density : 'comfortable' }, (key, value) => void window.electronAPI.config.set(key, value))
-
 export const setAccentStrength = (strength: AccentStrength): void =>
   commit({ accentStrength: isStrength(strength) ? strength : 'standard' }, (key, value) => void window.electronAPI.config.set(key, value))
 
@@ -462,7 +445,7 @@ export async function initAppearance(): Promise<Appearance> {
     }
   }
 
-  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, density, accentStrength, modeAuto, legacyColorMode, backgroundPlaybackPath, backgroundRejected, videoQuality, videoInfo] = await Promise.all([
+  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, accentStrength, modeAuto, legacyColorMode, backgroundPlaybackPath, backgroundRejected, videoQuality, videoInfo] = await Promise.all([
     // 存的两个键：Source = 用户选的文件（界面显示），Path = 实际该播的
     // （主进程可能换成转码缓存；被拒时为空串）。
     read('appearanceBackgroundSource'),
@@ -471,7 +454,6 @@ export async function initAppearance(): Promise<Appearance> {
     read(KEYS.accent),
     read(KEYS.customAccent),
     read(KEYS.mode),
-    read(KEYS.density),
     read(KEYS.accentStrength),
     read(KEYS.modeAuto),
     // v1.0 之前的「色彩主题」：colorful / mono。它现在只是强调色的一种，
@@ -518,7 +500,8 @@ export async function initAppearance(): Promise<Appearance> {
     accent: isAccent(accent) ? accent : legacyAccent || APPEARANCE_DEFAULT.accent,
     customAccent: normalizeHexColor(customAccent) || APPEARANCE_DEFAULT.customAccent,
     mode: isMode(mode) ? mode : APPEARANCE_DEFAULT.mode,
-    density: isDensity(density) ? density : APPEARANCE_DEFAULT.density,
+    // Ignore retired saved density choices; there is one compact layout.
+    density: 'compact',
     accentStrength: isStrength(accentStrength) ? accentStrength : APPEARANCE_DEFAULT.accentStrength,
     // 从来没写过这个键 → 老用户，默认交给背景自适应；写过就用存下来的值
     modeAuto: modeAuto === undefined ? APPEARANCE_DEFAULT.modeAuto : modeAuto === true,

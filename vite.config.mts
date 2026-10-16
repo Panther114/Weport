@@ -51,7 +51,7 @@ export default defineConfig(({ mode }) => ({
     commonjsOptions: {
       ignoreDynamicRequires: true
     },
-    rollupOptions: {
+    rolldownOptions: {
       input: {
         index: resolve(import.meta.dirname, 'index.html'),
         // 通知弹窗独立入口：只打包 NotificationWindow 依赖，渲染进程内存更低
@@ -64,17 +64,24 @@ export default defineConfig(({ mode }) => ({
     react(),
     electron([
       {
+        entry: 'electron/flashMain.ts',
+        onstart: handleElectronOnStart,
+        vite: { build: { outDir: 'dist-electron', emptyOutDir: false, rolldownOptions: { external: ['better-sqlite3', 'koffi', 'fsevents', 'exceljs', 'electron', '@vscode/sudo-prompt', 'silk-wasm', '@hicccc77/electron-liquid-glass'], output: { entryFileNames: 'flashMain.js' } } } },
+      },
+      {
+        entry: 'electron/flashPreload.ts',
+        onstart: handleElectronOnStart,
+        vite: { build: { outDir: 'dist-electron', emptyOutDir: false, rolldownOptions: { output: { entryFileNames: 'flashPreload.js' } } } },
+      },
+      {
         entry: 'electron/main.ts',
         onstart: handleElectronOnStart,
         vite: {
           build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
+            outDir: 'dist-electron', emptyOutDir: false,
+            rolldownOptions: {
               external: [
-                'better-sqlite3',
-                'koffi',
-                'fsevents',
-                'exceljs',
+                  'better-sqlite3','koffi','fsevents','exceljs',
                 '@vscode/sudo-prompt',
                 'silk-wasm',
                 // 原生 .node 二进制不可打包，运行时从 asarUnpack 目录解析
@@ -89,7 +96,11 @@ export default defineConfig(({ mode }) => ({
         onstart: handleElectronOnStart,
         vite: {
           build: {
-            outDir: 'dist-electron'
+            outDir: 'dist-electron', emptyOutDir: false,
+            rolldownOptions: {
+              // koffi 是原生 .node，不可打包（v1.2 间接链路可能摸到它，见 imageDecryptWorker 的说明）
+              external: ['koffi', '@koromix/koffi-win32-x64', 'exceljs', 'silk-wasm']
+            }
           }
         }
       },
@@ -98,8 +109,8 @@ export default defineConfig(({ mode }) => ({
         onstart: handleElectronOnStart,
         vite: {
           build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
+            outDir: 'dist-electron', emptyOutDir: false,
+            rolldownOptions: {
               external: ['better-sqlite3', 'koffi', 'fsevents', 'electron'],
               output: {
                 entryFileNames: 'wcdbHost.js',
@@ -114,8 +125,10 @@ export default defineConfig(({ mode }) => ({
         onstart: handleElectronOnStart,
         vite: {
           build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
+            outDir: 'dist-electron', emptyOutDir: false,
+            rolldownOptions: {
+              // Native worker dependencies are resolved at runtime.
+              external: ['electron', 'koffi', '@koromix/koffi-win32-x64'],
               output: {
                 entryFileNames: 'imageDecryptWorker.js',
                 codeSplitting: false
@@ -129,9 +142,9 @@ export default defineConfig(({ mode }) => ({
         onstart: handleElectronOnStart,
         vite: {
           build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
-              external: ['electron'],
+            outDir: 'dist-electron', emptyOutDir: false,
+            rolldownOptions: {
+              external: ['electron', 'koffi', '@koromix/koffi-win32-x64'],
               output: {
                 entryFileNames: 'annualReportWorker.js',
                 codeSplitting: false
@@ -145,9 +158,9 @@ export default defineConfig(({ mode }) => ({
         onstart: handleElectronOnStart,
         vite: {
           build: {
-            outDir: 'dist-electron',
-            rollupOptions: {
-              external: ['electron'],
+            outDir: 'dist-electron', emptyOutDir: false,
+            rolldownOptions: {
+              external: ['electron', 'koffi', '@koromix/koffi-win32-x64'],
               output: {
                 entryFileNames: 'dualReportWorker.js',
                 codeSplitting: false
@@ -165,4 +178,3 @@ export default defineConfig(({ mode }) => ({
     }
   }
 }))
-

@@ -13,6 +13,7 @@
  * 可能整个重建。重建期间主进程推的所有事件都没人收 —— 只有快照能把它们补回来。
  */
 import { LIVE_TASK, liveTask, type LiveTaskState } from './liveTask'
+import { normalizeExportProgressPhase } from './exportProgress'
 
 /** 终态快照的有效期：更早的终态当作"上一次的事"，不要糊在界面上 */
 const TERMINAL_SNAPSHOT_TTL_MS = 3 * 60_000
@@ -30,10 +31,16 @@ const POLL_INTERVAL_MS = 1200
  * 代价说清楚：备份期间窗口被销毁重建的话，左下角那条会消失（状态只在渲染进程
  * 里）。这是已知限制，换来的是不给自己留一个无限轮询。
  */
-const POLLED_TASKS: readonly string[] = [LIVE_TASK.wecloneGenerate, LIVE_TASK.export, LIVE_TASK.connect]
+const POLLED_TASKS: readonly string[] = [LIVE_TASK.wecloneGenerate, LIVE_TASK.export, LIVE_TASK.connect, LIVE_TASK.searchIndex, LIVE_TASK.databaseMaintenance, LIVE_TASK.updateDownload]
 
 let installed = false
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+export function applyUpdateDownloadProgress(progress: { percent?: number; transferred?: number; total?: number }): void {
+  const task = liveTask(LIVE_TASK.updateDownload)
+  task.update({ status: 'running', stage: 'downloading', progress: Number(progress?.percent) || 0,
+    detail: { ...task.getState().detail, transferred: progress?.transferred, total: progress?.total } })
+}
 
 interface RawSnapshot {
   status?: string
@@ -126,6 +133,19 @@ export function installLiveTaskWiring(): void {
   installed = true
   const api = typeof window !== 'undefined' ? window.electronAPI : undefined
   if (!api) return
+  api.app?.onDownloadProgress?.((progress: any) => {
+    applyUpdateDownloadProgress(progress)
+    ensurePolling()
+  })
+  api.app?.onUpdateDownloaded?.(() => {
+    liveTask(LIVE_TASK.updateDownload).update({ status: 'running', stage: 'installing', progress: 100 })
+    ensurePolling()
+  })
+  api.task?.onStatusChanged?.((snapshots) => {
+    hydrateFromSnapshots(snapshots)
+    if (anyRunning()) ensurePolling()
+    else stopPolling()
+  })
 
   // ---- 1. WeClone 生成 -----------------------------------------------------
   api.weclone?.onProgress?.((payload: any) => {
@@ -151,18 +171,24 @@ export function installLiveTaskWiring(): void {
     const task = liveTask(LIVE_TASK.export)
     const total = Number(payload?.total) || 0
     const current = Number(payload?.current) || 0
-    const complete = String(payload?.phase || '') === 'complete' || (total > 0 && current >= total)
+    const rawPhase = String(payload?.phase || '')
+    const phase = normalizeExportProgressPhase(rawPhase, current, total)
+    const phaseLabel = rawPhase === 'complete'
+      ? (phase === 'verifying' ? '正在校验导出结果…' : String(payload?.currentSession || '导出中…'))
+      : String(payload?.phaseLabel || payload?.currentSession || '导出中…')
     task.update({
-      status: complete ? 'done' : 'running',
-      stage: String(payload?.phase || ''),
+      // Progress events are never authoritative terminal signals. The main
+      // process task snapshot ends only after integrity checking and IPC return.
+      status: 'running',
+      stage: phase,
       progress: total > 0 ? (current / total) * 100 : 0,
-      message: complete ? '导出完成' : String(payload?.phaseLabel || payload?.currentSession || '导出中…'),
+      message: phaseLabel,
       detail: {
         taskId: payload?.taskId ? String(payload.taskId) : undefined,
         current,
         total,
-        phase: String(payload?.phase || ''),
-        phaseLabel: String(payload?.phaseLabel || ''),
+        phase,
+        phaseLabel,
         currentSession: String(payload?.currentSession || ''),
       },
     })
@@ -177,7 +203,7 @@ export function installLiveTaskWiring(): void {
      * 一直挂着一条不存在的导出。轮询在 1.2 秒内会用快照把它纠正过来。
      */
     ensurePolling()
-    if (complete) void refreshFromMain()
+    if (phase === 'verifying') void refreshFromMain()
   })
 
   // ---- 3. 启动时先补一次，然后按需轮询 ------------------------------------

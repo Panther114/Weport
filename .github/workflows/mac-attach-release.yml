@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build-mac-arm64:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Resolve target release tag
         id: resolve
@@ -49,7 +49,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -112,6 +112,9 @@ jobs:
       # failure anywhere. Gate it exactly like release.yml does.
       - name: Verify macOS packaging & signature (issue #18 gate)
         run: bash scripts/verify-mac-pack.sh release
+
+      - name: Verify encrypted Mac fixture and export behavior
+        run: node scripts/verify-mac-positive-native.mjs release
 
       - name: "Gatekeeper / notarization gate (issue #18)"
         env:

@@ -161,6 +161,7 @@ export interface ProviderProfileStore {
 }
 
 export interface ProviderStreamInput {
+  toolChoice?: 'auto' | 'none'
   profile: ProviderProfile
   messages: Array<Record<string, unknown>>
   tools: Array<{

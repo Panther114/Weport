@@ -83,10 +83,6 @@ export class ExcelFormatter {
         ? collected.rows.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const senderUsernames = new Set<string>()
       let senderScanIndex = 0
       for (const msg of collected.rows) {
@@ -313,7 +309,7 @@ export class ExcelFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 50,
@@ -330,7 +326,7 @@ export class ExcelFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -468,7 +464,7 @@ export class ExcelFormatter {
 
         // 转账消息：追加 "谁转账给谁" 信息
         let enrichedContentValue = contentValue
-        if (isTransferExportContent(contentValue) && msg.content) {
+        if (!shouldUseTranscript && isTransferExportContent(contentValue) && msg.content) {
           const transferDesc = await resolveTransferDesc(
             msg.content,
             cleanedMyWxid,
@@ -496,7 +492,7 @@ export class ExcelFormatter {
           rawMyWxid,
           myDisplayName: myInfo.displayName || cleanedMyWxid
         })
-        if (quotedReplyDisplay) {
+        if (quotedReplyDisplay && !shouldUseTranscript) {
           enrichedContentValue = this.exportService.buildQuotedReplyText(quotedReplyDisplay)
         }
 
@@ -523,7 +519,7 @@ export class ExcelFormatter {
           worksheet.getCell(currentRow, 7).value = this.exportService.getMessageTypeName(msg.localType, msg.content)
         }
         contentCell.value = enrichedContentValue
-        if (!quotedReplyDisplay) {
+        if (!quotedReplyDisplay && !shouldUseTranscript) {
           const appliedMediaLink = mediaPathValue && enrichedContentValue === mediaPathValue
             ? this.exportService.applyExcelMediaLinkCell(contentCell, mediaItem, options)
             : false
@@ -562,7 +558,11 @@ export class ExcelFormatter {
       // 写入文件
       this.exportService.throwIfStopRequested(control)
       await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-      await workbook.xlsx.writeFile(outputPath)
+      // v1.2 §10.1：xlsx 由 exceljs 自己写，包一层原子写（写 tmp → fsync → os.replace），
+      // 中断时留下的是上一份完整 xlsx，而不是被截断的压缩包
+      await this.exportService.writeArtifactWith(outputPath, async (tmpPath: string) => {
+        await workbook.xlsx.writeFile(tmpPath)
+      })
 
       onProgress?.({
         current: 100,

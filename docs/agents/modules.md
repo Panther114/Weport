@@ -133,6 +133,10 @@ analytics-group / settings) — 12 captures total, all asserted non-blank.
 - Global: 交流画像 radar (6 dims incl. 深夜活跃 23:00–05:59), 活跃日历 calendar
   (rolling ≤12 months, visualMap), 高频词云 wordCloud (`echarts-wordcloud@2.1.0`
   — verified compatible with ECharts 6.1.0, registers on `echarts/lib/echarts`).
+- Calendar array endpoints must be full local `YYYY-MM-DD` dates. ECharts treats
+  `['YYYY-MM', 'YYYY-MM']` endpoints as the first day of each month and silently
+  clips later days. Use `activityCalendarRange`, including newer daily detail
+  when overview statistics are stale; construct rolling month starts on day 1.
 - Group: 画像 tab (member radar + 24×7 heatmap), member dialog word cloud
   (Top 40). Data: `analyticsService.getDailyActivity(force)` /
   `getWordFrequency(limit, force)` (150k scanned-text cap, 10-min cache) /

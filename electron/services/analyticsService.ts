@@ -193,7 +193,8 @@ class AnalyticsService {
     excludedUsernames?: Set<string>,
     includeGroupChats = false,
   ): Promise<{ usernames: string[]; numericIds: string[]; revision: string }> {
-    const sessionResult = await wcdbService.getSessions()
+    // Include table-backed history whose conversation was removed from WeChat's inventory.
+    const sessionResult = await chatService.getSessions()
     if (!sessionResult.success || !sessionResult.sessions) {
       return { usernames: [], numericIds: [], revision: 'empty' }
     }
@@ -220,7 +221,7 @@ class AnalyticsService {
         row.last_timestamp ?? row.lastTimestamp ?? row.last_msg_time ?? row.lastMsgTime ?? row.sort_timestamp ?? row.sortTimestamp ?? 0,
       ) || 0
       const messageCount = Number(
-        row.message_count ?? row.messageCount ?? row.msg_count ?? row.msgCount ?? row.total_count ?? row.totalCount ?? 0,
+        row.message_count ?? row.messageCount ?? row.messageCountHint ?? row.msg_count ?? row.msgCount ?? row.total_count ?? row.totalCount ?? 0,
       ) || 0
       return { username, idValue, lastTimestamp, messageCount }
     })

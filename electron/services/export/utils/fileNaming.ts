@@ -42,8 +42,8 @@ export function resolveFileAttachmentExtensionDir(msg: any, fileName: string): s
  * 只认纯 `(数字)` 后缀，因此 `报告（从A到B）(1).docx` 能匹配，`报告(1) - 副本.docx` 不会误匹配。
  */
 function parseWeChatRenameSuffixNumbers(entryName: string, expectedName: string): number[] | null {
-  const base = path.basename(String(expectedName || ''))
-  const entry = String(entryName || '')
+  const base = path.basename(String(expectedName || '')).toLowerCase()
+  const entry = String(entryName || '').toLowerCase()
   if (!base || !entry || entry === base) return null
 
   const ext = path.extname(base)

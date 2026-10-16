@@ -37,6 +37,19 @@ import { spawn, type ChildProcess } from 'child_process'
 import { join, dirname, delimiter } from 'path'
 import { existsSync, linkSync, unlinkSync, statSync, copyFileSync, mkdirSync, utimesSync, chmodSync, symlinkSync, readlinkSync } from 'fs'
 
+/** Electron's pure-Node mode still loads ICU and V8 snapshots beside argv[0]. */
+export function copyLinuxHostRuntimeFiles(sourceExe: string, hostExe: string): void {
+  const sourceDir = dirname(sourceExe)
+  const hostDir = dirname(hostExe)
+  for (const fileName of ['icudtl.dat', 'snapshot_blob.bin', 'v8_context_snapshot.bin']) {
+    const sourceFile = join(sourceDir, fileName)
+    if (!existsSync(sourceFile)) {
+      throw new Error(`Electron runtime file is missing beside the source executable: ${sourceFile}`)
+    }
+    copyFileSync(sourceFile, join(hostDir, fileName))
+  }
+}
+
 /**
  * macOS 宿主归宿：`{userData}/wcdb-host/Contents/MacOS/WeFlow`。
  *
@@ -254,12 +267,21 @@ function resolveHostExe(): string {
       if (fallbackDir) {
         const copiedPath = join(fallbackDir, hostName)
         try {
-          copyFileSync(target, copiedPath)
-          try {
-            const t = statSync(target)
-            utimesSync(copiedPath, t.atime, t.mtime)
-            chmodSync(copiedPath, 0o755)
-          } catch { /* 权限位/mtime 尽力而为 */ }
+          // The copied Linux binary no longer sits beside Electron's ICU/V8 runtime files.
+          // Without them ELECTRON_RUN_AS_NODE traps before wcdbHost.js starts.
+          if (process.platform === 'linux') copyLinuxHostRuntimeFiles(target, copiedPath)
+          // AppImage and other read-only Linux installs take this fallback on
+          // every launch. Reuse a same-version copy instead of copying ~225 MB
+          // for each WCDB client reconnect. The runtime sidecars above are always
+          // refreshed because they can be required independently of the exe.
+          if (process.platform !== 'linux' || !matchesTarget(copiedPath)) {
+            copyFileSync(target, copiedPath)
+            try {
+              const t = statSync(target)
+              utimesSync(copiedPath, t.atime, t.mtime)
+              chmodSync(copiedPath, 0o755)
+            } catch { /* 权限位/mtime 尽力而为 */ }
+          }
           console.warn(`[wcdb-host] exe 目录不可写，宿主已复制到 ${copiedPath}`)
           return copiedPath
         } catch (e2) {
@@ -352,20 +374,26 @@ export class WcdbHostClient extends EventEmitter {
       env
     })
 
-    this.child.on('message', (msg: any) => {
+    this.attachChildListeners()
+  }
+
+  /** 子进程形态和同进程形态共用的监听挂载：消息、stderr、错误、退出。 */
+  private attachChildListeners(): void {
+    const child = this.child!
+    child.on('message', (msg: any) => {
       this.emit('message', msg)
     })
 
-    this.child.stderr!.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       const text = chunk.toString().trim()
       if (text) console.error('[wcdb-host]', text)
     })
 
-    this.child.on('error', (err) => {
+    child.on('error', (err) => {
       this.emit('error', err)
     })
 
-    this.child.on('exit', (code) => {
+    child.on('exit', (code) => {
       this.emit('exit', code)
       this.child = null
     })

@@ -1,0 +1,6 @@
+const fs = require('node:fs')
+const path = require('node:path')
+const source = path.resolve(__dirname, '../electron/flash')
+const target = path.resolve(__dirname, '../dist-electron/flash')
+fs.mkdirSync(target, { recursive: true })
+for (const name of ['index.html', 'ui.js']) fs.copyFileSync(path.join(source, name), path.join(target, name))

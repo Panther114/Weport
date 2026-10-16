@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "artifact": "libwcdb_api.dylib",
+  "platform": "darwin-arm64",
+  "architecture": "arm64",
+  "source": {
+    "project": "WeFlow",
+    "repository": "https://github.com/Panther114/WeFlow",
+    "path": "resources/wcdb/macos/universal/libwcdb_api.dylib",
+    "size": 1502800,
+    "sha256": "9917b74e6723efea63ac64927c9f6be1ed53133a62ff2c694c68d647690cead1",
+    "license": "CC BY-NC-SA 4.0 attribution as recorded in docs/LEGAL-PROVENANCE.md",
+    "commit": "ccbd15466873e05092c8bee20833ca3420292b91",
+    "gitBlob": "2d457d1ceb9f3fc05ae11936195b4385fd6be151"
+  },
+  "macho": {
+    "cpuType": "0x0100000c",
+    "fileType": 6,
+    "textSection": {
+      "segment": "__TEXT",
+      "name": "__text",
+      "address": "0x2d30",
+      "fileOffset": 11568,
+      "size": 1144540,
+      "sourceSha256": "237d71cf3771eb7dd9e8e969633a5d78f8d4dafa7b28c8fe00617cbb14a60a2e"
+    },
+    "symbolGuards": [
+      {
+        "name": "_InitProtection",
+        "address": "0x6d0c",
+        "sectionIndex": 1
+      },
+      {
+        "name": "_wcdb_init",
+        "address": "0x6d7c",
+        "sectionIndex": 1
+      }
+    ]
+  },
+  "adaptation": {
+    "issues": [
+      30,
+      31
+    ],
+    "summary": "Only the two October 2026 expiry branches are redirected to their existing success paths. Host-name and other security checks remain intact.",
+    "patches": [
+      {
+        "symbol": "_InitProtection",
+        "offset": 27996,
+        "sourceHex": "8d000054",
+        "expectedHex": "04000014",
+        "cutoff": "2026-09-30 23:59:59 UTC (0x6abda27f seconds since Unix epoch)",
+        "purpose": "Branch to the existing success path regardless of the UTC expiry comparison."
+      },
+      {
+        "symbol": "_wcdb_init",
+        "offset": 28360,
+        "sourceHex": "8d060054",
+        "expectedHex": "34000014",
+        "cutoff": "2026-09-30 23:59:59 local time via mktime; tm_isdst is zero",
+        "purpose": "Branch to the existing success path regardless of the local-time expiry comparison."
+      }
+    ],
+    "hostGuard": {
+      "symbol": "_wcdb_init",
+      "offset": 28284,
+      "expectedHex": "48080036",
+      "branchTarget": "0x6f84",
+      "failureCode": -1006,
+      "purpose": "Preserve the existing host-name rejection path."
+    },
+    "expectedSha256": "c52cea6e6031273687034aa6fd31cf9ab8b99bfa2387d3b325e4ef837efea9bd",
+    "expectedTextSha256": "a675137ecf12b91381b59db3c1940870b907df52b7aaf2ec6c5ed6b5e98fcf63"
+  },
+  "packagedVerification": {
+    "textSectionSha256": "a675137ecf12b91381b59db3c1940870b907df52b7aaf2ec6c5ed6b5e98fcf63",
+    "reason": "install_name_tool and code signing legitimately change load commands and LC_CODE_SIGNATURE after the offline patch. Packaged checks pin the ARM64 Mach-O layout, __TEXT,__text bytes, expiry instructions, exported symbol locations, and host guard rather than the whole-file hash."
+  },
+  "notice": "WeFlow-derived native wrapper, locally adapted by Weport. No x86_64 slice is present in this artifact. This provenance record does not change the license or other bundled component notices."
+}

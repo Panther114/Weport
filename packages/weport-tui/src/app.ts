@@ -628,14 +628,9 @@ export async function runTui(options: TuiOptions = {}): Promise<number> {
   } catch (error) {
     fatal = String((error as Error)?.message || error)
     busy = ''
-    draw()
-    tty().onKey((key) => {
-      if (key.name === 'q' || (key.ctrl && key.name === 'c') || key.name === 'escape') {
-        engine.stop()
-        session?.restore()
-        process.exit(fatal ? 1 : 0)
-      }
-    })
+    engine.stop()
+    session.restore()
+    process.stderr.write(`无法连接 Weport 引擎：${fatal}\n`)
     return 1
   }
 

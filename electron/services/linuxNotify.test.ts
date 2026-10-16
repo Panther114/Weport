@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -136,8 +136,7 @@ describe('linuxNotify: 点击回传（假 notify-send）', () => {
     expect(sent).toBe(true)
     // 投递成功不等于被点击：回调必须等动作行
     expect(clicked).toBe(0)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(clicked).toBe(1)
+    await vi.waitFor(() => expect(clicked).toBe(1), { timeout: 3000, interval: 20 })
   })
 
   it.skipIf(process.platform === 'win32')('通知被关闭（没有动作行）不触发 onAction', async () => {

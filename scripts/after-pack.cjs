@@ -1,6 +1,9 @@
 const { execFileSync } = require('child_process')
-const { existsSync, readdirSync, rmSync, statSync } = require('fs')
+const { existsSync, readFileSync, readdirSync, rmSync, statSync } = require('fs')
 const { dirname, join } = require('path')
+const { Arch } = require('electron-builder')
+const { verifyNativeDllAtResourcePath } = require('./verify-native-assets.cjs')
+const { METADATA, validatePatchedBinary, validatePackagedNativeBinary } = require('./verify-mac-native.cjs')
 
 // libwcdb_api.dylib is built against the private WCDB framework name used by
 // WeFlow.  Weport ships the companion libWCDB.dylib next to it instead of the
@@ -113,7 +116,10 @@ function patchWcdbDylib(dylibPath) {
  * Verified after pruning: the window renders, the glass refracts, the video
  * background plays and the GPU process stays hardware-accelerated.
  */
-const WINDOWS_UNUSED_RUNTIME = ['dxcompiler.dll', 'dxil.dll']
+// Dev WCDB calls create this host beside electron.exe. A local electronDist
+// can copy it into the package before the app executable is rebranded; the
+// installed host must instead be deployed from the packaged executable.
+const WINDOWS_UNUSED_RUNTIME = ['dxcompiler.dll', 'dxil.dll', 'WeFlow.exe']
 
 function pruneWindowsRuntime(appOutDir) {
   let removedBytes = 0
@@ -135,7 +141,33 @@ function pruneWindowsRuntime(appOutDir) {
 
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName === 'win32') {
+    if (context.arch === Arch.x64) {
+      // Verify the copy electron-builder placed in the actual app resources.
+      // This catches direct electron-builder/Flash packaging paths that skip
+      // the package.json build-script preflight.
+      const verified = verifyNativeDllAtResourcePath(context.appOutDir)
+      const provenancePath = join(dirname(verified.dllPath), 'native-provenance.json')
+      if (!existsSync(provenancePath)) {
+        throw new Error(`[afterPack] Missing WCDB provenance record ${provenancePath}`)
+      }
+      const packagedProvenance = JSON.parse(readFileSync(provenancePath, 'utf8'))
+      if (packagedProvenance.adaptation?.expectedSha256 !== verified.sha256) {
+        throw new Error(`[afterPack] WCDB provenance hash does not match ${verified.dllPath}`)
+      }
+      console.log(`[afterPack] verified packaged WCDB asset ${verified.dllPath}`)
+    }
     pruneWindowsRuntime(context.appOutDir)
+    return
+  }
+  if (context.electronPlatformName === 'linux') {
+    const nativeRoot = join(context.appOutDir, 'resources', 'resources', 'wcdb', 'linux', 'x64')
+    const { METADATA: linuxMetadata, validatePatchedBinary: validateLinux } = require('./verify-linux-native.cjs')
+    validateLinux(readFileSync(join(nativeRoot, 'libwcdb_api.so')))
+    const provenance = JSON.parse(readFileSync(join(nativeRoot, 'native-provenance.json'), 'utf8'))
+    if (provenance.adaptation?.expectedSha256 !== linuxMetadata.adaptation.expectedSha256) {
+      throw new Error('[afterPack] Linux WCDB provenance mismatch')
+    }
+    console.log('[afterPack] verified packaged Linux WCDB asset')
     return
   }
   if (context.electronPlatformName !== 'darwin') return
@@ -147,6 +179,13 @@ module.exports = async function afterPack(context) {
     'Resources',
   )
 
+  const mainDylib = join(resourcesDir, 'resources', 'wcdb', 'macos', 'universal', 'libwcdb_api.dylib')
+  validatePatchedBinary(readFileSync(mainDylib))
+  const provenance = JSON.parse(readFileSync(join(dirname(mainDylib), 'native-provenance.json'), 'utf8'))
+  if (provenance.adaptation?.expectedSha256 !== METADATA.adaptation.expectedSha256) {
+    throw new Error('[afterPack] macOS WCDB provenance mismatch')
+  }
+
   const dylibs = walk(resourcesDir)
   if (dylibs.length === 0) {
     throw new Error(`[afterPack] No libwcdb_api.dylib found under ${resourcesDir}`)
@@ -157,6 +196,8 @@ module.exports = async function afterPack(context) {
       console.log(`[afterPack] Rewired WCDB dependency for ${dylibPath}`)
     }
   }
+
+  validatePackagedNativeBinary(readFileSync(mainDylib))
 
   // Older resource layouts could include a nested framework copy.  Once the
   // dependency points at the sibling dylib it is dead weight and can contain

@@ -88,6 +88,8 @@ export default function SnsPage() {
   const [overview, setOverview] = useState<OverviewStats | null>(null)
   const [antiDelete, setAntiDelete] = useState<'unknown' | 'installed' | 'uninstalled'>('unknown')
   const [antiDeleteBusy, setAntiDeleteBusy] = useState(false)
+  const [antiDeleteFeedback, setAntiDeleteFeedback] = useState<{ error: boolean; message: string } | null>(null)
+  const antiDeleteOperationRef = useRef(false)
   const [migration, setMigration] = useState<CacheMigrationStatus | null>(null)
   const [migrationProgress, setMigrationProgress] = useState<{ current: number; total: number; status: string } | null>(null)
   const [migrationBusy, setMigrationBusy] = useState(false)
@@ -447,13 +449,35 @@ export default function SnsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey])
 
+  const readAntiDeleteState = useCallback(async () => {
+    const result = await window.electronAPI.sns.checkBlockDeleteTrigger()
+    if (!result.success || typeof result.installed !== 'boolean') {
+      throw new Error(result.error || '无法确认防删除状态，请重新检查')
+    }
+    return result.installed ? 'installed' as const : 'uninstalled' as const
+  }, [])
+
+  const refreshAntiDeleteState = useCallback(async () => {
+    if (antiDeleteOperationRef.current) return
+    antiDeleteOperationRef.current = true
+    setAntiDeleteBusy(true)
+    setAntiDeleteFeedback(null)
+    try {
+      setAntiDelete(await readAntiDeleteState())
+    } catch (error) {
+      setAntiDelete('unknown')
+      setAntiDeleteFeedback({ error: true, message: `检查防删除状态失败：${error instanceof Error ? error.message : String(error)}` })
+    } finally {
+      antiDeleteOperationRef.current = false
+      setAntiDeleteBusy(false)
+    }
+  }, [readAntiDeleteState])
+
   // 首次挂载：先秒开页缓存，再加载真实数据
   useEffect(() => {
     void loadOverview()
     void loadAuthors()
-    void window.electronAPI.sns.checkBlockDeleteTrigger().then((r) => {
-      if (r.success) setAntiDelete(r.installed ? 'installed' : 'uninstalled')
-    })
+    void refreshAntiDeleteState()
     void window.electronAPI.sns.getCacheMigrationStatus().then((r) => {
       if (r.success) setMigration({ needed: r.needed, inProgress: r.inProgress, totalFiles: r.totalFiles || 0, items: r.items || [] })
     })
@@ -461,7 +485,7 @@ export default function SnsPage() {
       if (hydrated) void loadTimeline(true)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadOverview, loadAuthors])
+  }, [loadOverview, loadAuthors, refreshAntiDeleteState])
 
   // 前置合并后修正滚动位置（新内容插入列表顶部导致视口下移）
   useLayoutEffect(() => {
@@ -605,17 +629,36 @@ export default function SnsPage() {
   }
 
   const toggleAntiDelete = async () => {
-    if (antiDeleteBusy) return
+    if (antiDeleteOperationRef.current) return
+    if (antiDelete === 'unknown') {
+      await refreshAntiDeleteState()
+      return
+    }
+    const enabling = antiDelete !== 'installed'
+    antiDeleteOperationRef.current = true
     setAntiDeleteBusy(true)
+    setAntiDeleteFeedback(null)
+    let operationApplied = false
     try {
-      if (antiDelete === 'installed') {
-        const r = await window.electronAPI.sns.uninstallBlockDeleteTrigger()
-        if (r.success) setAntiDelete('uninstalled')
+      const result = enabling
+        ? await window.electronAPI.sns.installBlockDeleteTrigger()
+        : await window.electronAPI.sns.uninstallBlockDeleteTrigger()
+      if (!result.success) throw new Error(result.error || '操作失败，请重试')
+      operationApplied = true
+      const verified = await readAntiDeleteState()
+      setAntiDelete(verified)
+      if ((verified === 'installed') !== enabling) {
+        setAntiDeleteFeedback({ error: true, message: '操作后的防删除状态未改变，请重试' })
       } else {
-        const r = await window.electronAPI.sns.installBlockDeleteTrigger()
-        if (r.success) setAntiDelete(r.alreadyInstalled ? 'installed' : 'installed')
+        setAntiDeleteFeedback({ error: false, message: enabling ? '防删除已开启，当前状态已确认' : '防删除已关闭，当前状态已确认' })
       }
+    } catch (error) {
+      setAntiDelete('unknown')
+      const reason = error instanceof Error ? error.message : String(error)
+      const outcome = operationApplied ? '防删除操作已完成，但状态确认失败' : `${enabling ? '开启' : '关闭'}防删除失败`
+      setAntiDeleteFeedback({ error: true, message: `${outcome}：${reason}。点击上方按钮重新检查状态。` })
     } finally {
+      antiDeleteOperationRef.current = false
       setAntiDeleteBusy(false)
     }
   }
@@ -899,12 +942,15 @@ export default function SnsPage() {
           <button
             type="button"
             className={`chip ${antiDelete === 'installed' ? 'chip-active' : ''}`}
-            disabled={antiDeleteBusy || antiDelete === 'unknown'}
+            disabled={antiDeleteBusy}
+            aria-pressed={antiDelete === 'unknown' ? undefined : antiDelete === 'installed'}
+            aria-busy={antiDeleteBusy}
+            data-sns-anti-delete
             onClick={() => void toggleAntiDelete()}
-            title="安装朋友圈删除拦截触发器（防删除）"
+            title={antiDelete === 'unknown' ? '重新检查朋友圈防删除状态' : antiDelete === 'installed' ? '点击关闭朋友圈防删除' : '点击开启朋友圈防删除'}
           >
-            {antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
-            {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : '防删除'}
+            {antiDeleteBusy ? <Loader2 size={13} className="spin" /> : antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
+            {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : antiDelete === 'uninstalled' ? '防删除已关闭' : '防删除状态未知 · 重试'}
           </button>
           <button type="button" className="chip" onClick={() => setExportOpen(true)}>
             <Download size={13} />
@@ -916,6 +962,13 @@ export default function SnsPage() {
           </button>
         </div>
       </div>
+
+      {antiDeleteFeedback && (
+        <div className={`sns-anti-delete-feedback${antiDeleteFeedback.error ? ' is-error' : ''}`}
+          role={antiDeleteFeedback.error ? 'alert' : 'status'}>
+          {antiDeleteFeedback.message}
+        </div>
+      )}
 
       <div className="sns-main">
         {/* 筛选侧栏：搜索 / 日期 / 发布者 三段，每段一条小标题。之前三段连着排，

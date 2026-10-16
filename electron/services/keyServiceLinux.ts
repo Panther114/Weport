@@ -136,6 +136,38 @@ export class KeyServiceLinux {
     throw new Error('找不到 xkey_helper_linux，请检查路径')
   }
 
+  /**
+   * 平台观测（v1.2 双模式编排的自检输入）。
+   *
+   * Linux **没有**免登录扫描路径：读密钥要 ptrace 断点并提权（会弹一次 sudo 提示），
+   * 只能在微信启动瞬间捕获（V12 §1.3 / D2 / K8）。这里只报告"微信在不在 /
+   * helper 在不在 / 有没有执行权限"。
+   */
+  async observePlatform(): Promise<{
+    wechatInstalled: boolean
+    wechatPids: number[]
+    hookHelperAvailable: boolean | null
+    wechatVersion: string | null
+  }> {
+    let pid: number | null = null
+    try {
+      pid = await findWeChatRootPid(defaultCommandEnvironment())
+    } catch { /* noop */ }
+    let helper: boolean | null = null
+    try {
+      const helperPath = this.getHelperPath()
+      helper = existsSync(helperPath)
+      if (helper) {
+        const mode = statSync(helperPath).mode
+        // 没有执行位时 helper 存在也跑不起来 —— 报出来比"神秘失败"强
+        if ((mode & 0o111) === 0) helper = false
+      }
+    } catch {
+      helper = false
+    }
+    return { wechatInstalled: true, wechatPids: pid ? [pid] : [], hookHelperAvailable: helper, wechatVersion: null }
+  }
+
   public async autoGetDbKey(
       timeoutMs = 60_000,
       onStatus?: (message: string, level: number) => void
@@ -378,14 +410,9 @@ export class KeyServiceLinux {
       const helperPath = this.getHelperPath()
 
       try {
-        console.log(`[Debug] 准备执行 Helper: ${helperPath} image_mem ${pid} ${ciphertextHex}`);
-
-        const { stdout: memOut, stderr } = await execFileAsync(helperPath, ['image_mem', pid.toString(), ciphertextHex])
-
-        console.log(`[Debug] Helper stdout: ${memOut}`);
-        if (stderr) {
-          console.warn(`[Debug] Helper stderr: ${stderr}`);
-        }
+        // Helper buffers can contain the acquired key, including on failures.
+        // Keep them inside this acquisition operation, outside persisted logs.
+        const { stdout: memOut } = await execFileAsync(helperPath, ['image_mem', pid.toString(), ciphertextHex])
 
         if (!memOut || memOut.trim() === '') {
           return { success: false, error: 'Helper 返回为空，请检查是否有足够的权限(如需sudo)读取进程内存。' }
@@ -399,11 +426,10 @@ export class KeyServiceLinux {
         }
         return { success: false, error: res.result || '未知错误' }
 
-      } catch (err: any) {
-        console.error('[Debug] 执行或解析 Helper 时发生崩溃:', err);
+      } catch {
         return {
           success: false,
-          error: `内存扫描失败: ${err.message}\nstdout: ${err.stdout || '无'}\nstderr: ${err.stderr || '无'}`
+          error: '图片密钥内存扫描失败，请检查原生组件和进程读取权限后重试'
         }
       }
     } catch (err: any) {

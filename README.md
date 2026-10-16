@@ -1,6 +1,22 @@
 ![](docs/media/weport-feature-poster.png)
 
+[V1.2 verification and remaining work](docs/v1.2-verification.md) · [GitHub fix list](docs/v1.2-fix-list.md)
+
 ## 📸 截图
+
+V1.2 保留 Electron，增加本地聊天阅读、跨会话搜索、分享海报与诊断。数据库连接使用已有密钥、手动粘贴或登录捕获；Windows 免登录密钥扫描移至 V1.3 验收。
+
+V1.2 尚未公开发布。Windows 原生初始化、导出、阅读定位、语音转写、朋友圈与界面修复的当前证据和限制见[验收状态](docs/v1.2-verification.md)。Windows 免登录扫描及只读镜像连接不在 V1.2 发布范围内，后续验收计划见 [V1.3](docs/v1.3-plan.md)。
+
+**聊天阅读与搜索** —— 在本机浏览聊天，搜索命中精确定位到原消息；注解按账号保存：
+
+![聊天阅读](docs/screenshots/reader.png)
+![跨会话搜索](docs/screenshots/search.png)
+
+**分享海报与诊断** —— 按内容、样式、隐私检查制作 PNG；在设置中检查数据库、任务和运行状态：
+
+![海报](docs/screenshots/poster.png)
+![诊断](docs/screenshots/diagnostics.png)
 
 **连接微信** —— 三步走：数据目录 → 选择账号 → 解密密钥，每一步都带完成状态：
 
@@ -54,7 +70,7 @@
 
 ![人格克隆](docs/screenshots/weclone.png)
 
-**设置** —— 常规 / 外观 / 数据 / 接口 / 关于五个分类；外观支持自定义背景图、强调色与密度：
+**设置** —— 启动、外观、AI、连接器、数据、接口、诊断与问题反馈；支持调色板、固定紧凑导航和带图片的 GitHub 报告草稿：
 
 ![设置](docs/screenshots/settings.png)
 
@@ -75,6 +91,8 @@
 
 ### macOS 15+（Apple Silicon）
 
+> v1.2.1 仅发布 Windows 版，不提供 macOS 安装包，也不计划补发此版本的 Mac 包。Mac 密钥获取仍需真实 Apple Silicon 设备验证；以下说明适用于既有 Mac 版本。
+
 1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-arm64.dmg`），打开后将 Weport 拖入「应用程序」
 2. 首次打开：右键 Weport →「打开」（未经 Apple 公证的 ad-hoc 签名应用首次需要手动放行）
 3. 打开 Weport，在「连接微信」页选择数据目录（自动检测 `~/Library/Containers/com.tencent.xinWeChat/...`）
@@ -85,7 +103,7 @@
 
 ### 🔑 获取解密密钥（重要）
 
-密钥在**微信登录的瞬间**被捕获，无法从已登录的会话中直接读取：
+已有密钥可直接粘贴并连接；需要重新获取数据库密钥时，使用登录捕获：
 
 1. 打开微信电脑版，在「设置 → 通用」里**关闭「自动登录」**，然后退出当前登录
 2. 点击 Weport 中的**「提取密钥」**，等待出现「已准备就绪」提示
@@ -156,6 +174,7 @@ npm install                       # 安装依赖（Windows 额外同步运行时
 npm run dev                       # 开发模式（vite + electron）
 npm run typecheck                 # 渲染进程 + 主进程类型检查
 npm run build                     # Windows: 构建 NSIS 安装包（release/ 目录）
+npm run build:flash               # Windows: 构建 WeportFlash 便携导出工具
 npm run build:dir                 # 免安装构建（迭代更快）
 npm run build:mac                 # macOS: 构建 DMG + ZIP（arm64）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # Windows UI 冒烟测试（自动截屏 + 内容断言）
@@ -172,9 +191,9 @@ chmod +x resources/key/macos/universal/xkey_helper \
   resources/welive/macos/arm64/welive
 ```
 
-`capture-ui.ps1` 以 `WEPORT_SCREENSHOT_POPUP` 模式启动应用：自动截取 22 个画面（连接 / 导出 / 防撤回 / 消息通知 / WeportAI / 朋友圈 / 分析入口 / 全局分析 / 群聊分析 / 年度报告 / 设置 ×2 / WeBot / WeBot 编辑器 / WeBot 笔记 / 人格克隆 ×3 / 通知弹窗 / 窄窗口 ×2）并逐一断言非空，另外断言：
+`capture-ui.ps1` 使用私有配置与演示数据，离屏截取全部页面、设置分类及通知弹窗，并逐一断言非空。`node scripts/verify-v12-ui.mjs` 另行验证打包后的 XLSX/WASM、搜索定位、阅读器、海报导出及后台任务提示。检查包括：
 
-- 横向不溢出、左侧栏标签不被媒体查询藏起来（986px 与 1426px 两档视口）；
+- 横向不溢出、左侧栏标签不隐藏（1000/1080/1440 DIP 视口）；
 - WeBot 任务卡片与编辑器的实测宽度/列数（防止「列表被挤成 300px、标题每行一两个字」这类回归）；
 - WeportAI 三栏在窄窗口下中间一栏不低于 300px；
 - **屏幕上不出现 `undefined` / `NaN` / `[object Object]`** —— 页面渲染成功、非空白，却把 `undefined` 写给用户看，是断言抓不到的一类缺陷。
@@ -245,9 +264,11 @@ macOS 15+ 还会要求一次「系统设置 → 隐私与安全性 → 仍要打
 |------|------|--------|------|
 | Windows | x64 | `.exe`（NSIS） | 微信 4.x，完整功能 |
 | macOS | Apple Silicon（arm64） | `.dmg` / `.zip` | macOS 15+、微信 4.x；自动获取密钥受 SIP/AMFI 调试权限限制 |
-| Linux | x64 | `.AppImage` / `.tar.gz` | glibc 2.34+、GLIBCXX 3.4.30+、OpenSSL 3、微信 4.x；密钥提取可能需要 sudo |
+| Linux | x64 | `.deb` / `.AppImage` / `.tar.gz` | glibc 2.34+、GLIBCXX 3.4.30+、OpenSSL 3、微信 4.x；密钥提取可能需要 sudo |
 
-> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 提供 x64 AppImage 与 tar.gz 安装包，自动更新采用手动下载新版本。
+> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 自动更新采用手动下载新版本；Ubuntu/Debian 推荐安装 `.deb`，安装时会配置 Chromium 沙箱辅助程序，不需要关闭沙箱或修改系统安全策略。
+
+Ubuntu/Debian 安装：`sudo apt install ./Weport-1.2.1-amd64.deb`，然后从应用菜单启动 Weport；依赖会自动安装 ffmpeg，用于 WXGF 图片转换。便携包需自行安装 ffmpeg，无可用转换器时仅能使用同图缩略图。`.AppImage` 为便携兼容包，其运行时会关闭 Chromium 沙箱；`.tar.gz` 不会自动配置系统沙箱辅助程序，在限制用户命名空间的系统上可能无法直接启动。不要通过关闭系统安全策略解决启动问题。
 
 Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share/xwechat_files` 和 Flatpak 数据目录。若密钥提取失败，请检查 `libcrypto.so.3`、`libcurl.so.4`、helper 可执行权限及 `/proc/sys/kernel/yama/ptrace_scope`；Weport 只报告限制，不会自动降低系统安全策略。AppImage 无法启动时可安装发行版的 FUSE 2 兼容包，或使用 `.tar.gz` 安装包。
 
@@ -256,6 +277,8 @@ Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share
 所有处理都在本机完成。应用只读取你指定的微信数据目录，并在提取密钥时挂接微信进程捕获登录密钥；不会向任何服务器上传聊天内容。
 
 WeportAI 例外：为了让模型回答问题，会把相关**聊天文本**发送到你在设置中配置的模型 API（默认 DeepSeek）。此功能默认关闭，只有当你填写 API 密钥后才启用；密钥仅保存在本机配置中，日志与截图均做脱敏处理。
+
+Weport v1.2.1 不收集安装统计或远程错误报告。诊断结果保存在本机，问题反馈由你自行提交。
 
 ## ⚠️ 免责声明
 

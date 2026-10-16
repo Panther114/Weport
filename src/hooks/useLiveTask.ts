@@ -13,3 +13,10 @@ export function useLiveTask(key: string): LiveTaskState {
   const task = liveTask(key)
   return useSyncExternalStore(task.subscribe, task.getState, task.getState)
 }
+
+/** Subscribe only to transitions; high-frequency progress stays in small children. */
+export function useLiveTaskPhase(key: string): string {
+  const task = liveTask(key)
+  const phase = () => `${task.getState().status}:${task.getState().stage || ''}`
+  return useSyncExternalStore(task.subscribe, phase, phase)
+}

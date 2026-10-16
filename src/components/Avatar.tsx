@@ -1,3 +1,4 @@
+import { isLocalMediaUrl, normalizeLocalMediaUrl } from '../utils/mediaUrl'
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { Loader2, User } from 'lucide-react'
 import { avatarLoadQueue } from '../utils/AvatarLoadQueue'
@@ -33,7 +34,7 @@ interface AvatarProps {
 }
 
 export const Avatar = React.memo(function Avatar({
-    src,
+    src: rawSrc,
     name,
     size = 48,
     shape = 'rounded',
@@ -42,8 +43,11 @@ export const Avatar = React.memo(function Avatar({
     loading = false,
     onClick
 }: AvatarProps) {
-    // 本地协议 URL（weport-media:// 磁盘缓存头像）无需排队，直接即时加载
-    const isLocalSrc = !!src && src.startsWith('weport-media://')
+    // v1.2：本地头像 URL 可能来自缓存（朋友圈时间线 / 分析结果里存着上一版外壳写下的
+    // 组件内所有 `src` 用法就都是可用的形态（实测：修好生成端后朋友圈仍有一批旧前缀头像报错）。
+    const src = normalizeLocalMediaUrl(rawSrc)
+    // 本地协议 URL（磁盘缓存头像）无需排队，直接即时加载
+    const isLocalSrc = isLocalMediaUrl(src)
     // 如果 URL 已在缓存中，则直接标记为已加载，不显示骨架屏和淡入动画
     const isCached = useMemo(() => src ? loadedAvatarCache.has(src) : false, [src])
     const isFailed = useMemo(() => src ? avatarLoadQueue.hasFailed(src) : false, [src])
@@ -94,7 +98,7 @@ export const Avatar = React.memo(function Avatar({
     useEffect(() => {
         const cached = src ? loadedAvatarCache.has(src) : false
         const failed = src ? avatarLoadQueue.hasFailed(src) : false
-        const localSrc = !!src && src.startsWith('weport-media://')
+        const localSrc = isLocalMediaUrl(src)
         setImageLoaded(cached)
         setImageError(failed)
         if (failed) {

@@ -68,10 +68,6 @@ export class MarkdownFormatter {
         ? collected.rows.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const senderUsernames = new Set<string>()
       let senderScanIndex = 0
       for (const msg of collected.rows) {
@@ -167,7 +163,7 @@ export class MarkdownFormatter {
 
       const voiceTranscriptMap = new Map<string, string>()
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 45,
@@ -184,7 +180,7 @@ export class MarkdownFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -345,7 +341,7 @@ export class MarkdownFormatter {
           contentValue = ''
         }
 
-        if (isTransferExportContent(contentValue) && msg.content) {
+        if (!shouldUseTranscript && isTransferExportContent(contentValue) && msg.content) {
           const transferDesc = await resolveTransferDesc(
             msg.content,
             cleanedMyWxid,
@@ -374,7 +370,9 @@ export class MarkdownFormatter {
           myDisplayName: myInfo.displayName || cleanedMyWxid
         })
 
-        const linkCard = quotedReplyDisplay ? null : this.exportService.extractHtmlLinkCard(msg.content, msg.localType)
+        const linkCard = quotedReplyDisplay || shouldUseTranscript
+          ? null
+          : this.exportService.extractHtmlLinkCard(msg.content, msg.localType)
         const parts: string[] = []
         let contentIsMarkdown = false
         if (quotedReplyDisplay) {
@@ -382,7 +380,7 @@ export class MarkdownFormatter {
             ? `${quotedReplyDisplay.quotedSender}: ${quotedReplyDisplay.quotedPreview}`
             : quotedReplyDisplay.quotedPreview
           parts.push(buildMarkdownBlockquote(quotedLabel))
-          contentValue = quotedReplyDisplay.replyText || contentValue
+          if (!shouldUseTranscript) contentValue = quotedReplyDisplay.replyText || contentValue
         } else if (linkCard?.url) {
           contentValue = `[${escapeMarkdownLinkText(linkCard.title || linkCard.url)}](${toMarkdownUrl(linkCard.url)})`
           contentIsMarkdown = true

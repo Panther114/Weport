@@ -44,10 +44,6 @@ export class HtmlFormatter {
         phase: 'preparing'
       })
 
-      if (options.exportVoiceAsText) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const collectParams = this.exportService.resolveCollectParams(options)
       const collectProgressReporter = this.exportService.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
       const collected: any = await this.exportService.collectMessages(
@@ -183,7 +179,7 @@ export class HtmlFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 40,
@@ -200,7 +196,7 @@ export class HtmlFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -374,13 +370,14 @@ export class HtmlFormatter {
           msg.isSend,
           msg.emojiCaption
         )
-        if (msg.localType === 34 && useVoiceTranscript) {
+        const shouldUseTranscript = msg.localType === 34 && useVoiceTranscript
+        if (shouldUseTranscript) {
           textContent = voiceTranscriptMap.get(this.exportService.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
         }
         if (mediaItem && msg.localType === 3) {
           textContent = ''
         }
-        if (isTransferExportContent(textContent) && msg.content) {
+        if (!shouldUseTranscript && isTransferExportContent(textContent) && msg.content) {
           const transferDesc = await resolveTransferDesc(
             msg.content,
             cleanedMyWxid,
@@ -398,7 +395,9 @@ export class HtmlFormatter {
           }
         }
 
-        const linkCard = quotedReplyDisplay ? null : this.exportService.extractHtmlLinkCard(msg.content, msg.localType)
+        const linkCard = quotedReplyDisplay || shouldUseTranscript
+          ? null
+          : this.exportService.extractHtmlLinkCard(msg.content, msg.localType)
 
         let mediaHtml = ''
         if (mediaItem?.kind === 'image') {

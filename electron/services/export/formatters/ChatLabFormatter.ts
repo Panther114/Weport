@@ -72,10 +72,6 @@ export class ChatLabFormatter {
         ? allMessages.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const senderUsernames = new Set<string>()
       let senderScanIndex = 0
       for (const msg of allMessages) {
@@ -194,7 +190,7 @@ export class ChatLabFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 40,
@@ -212,7 +208,7 @@ export class ChatLabFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -282,7 +278,8 @@ export class ChatLabFormatter {
         const mediaItem = mediaCache.has(mediaKey)
           ? mediaCache.get(mediaKey)
           : await this.exportService.resolveWeliveRawMediaItem(msg, mediaRootDir, mediaRelativePrefix, options, control)
-        if (msg.localType === 34 && options.exportVoiceAsText) {
+        const shouldUseTranscript = msg.localType === 34 && options.exportVoiceAsText
+        if (shouldUseTranscript) {
           // 使用预先转写的文字
           content = voiceTranscriptMap.get(this.exportService.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
         } else if (mediaItem) {
@@ -299,12 +296,12 @@ export class ChatLabFormatter {
             msg.emojiCaption
           )
         }
-        if (this.exportService.isReadableSystemMessage(msg.localType, msg.content)) {
+        if (!shouldUseTranscript && this.exportService.isReadableSystemMessage(msg.localType, msg.content)) {
           content = extractReadableSystemMessageText(msg.content) || content
         }
 
         // 转账消息：追加 "谁转账给谁" 信息
-        if (content && isTransferExportContent(content) && msg.content) {
+        if (!shouldUseTranscript && content && isTransferExportContent(content) && msg.content) {
           const transferDesc = await resolveTransferDesc(
             msg.content,
             cleanedMyWxid,
@@ -319,7 +316,9 @@ export class ChatLabFormatter {
           }
         }
 
-        const markdownLinkContent = this.exportService.formatLinkCardExportText(msg.content, msg.localType, 'markdown')
+        const markdownLinkContent = shouldUseTranscript
+          ? null
+          : this.exportService.formatLinkCardExportText(msg.content, msg.localType, 'markdown')
         if (markdownLinkContent) {
           content = markdownLinkContent
         }
@@ -523,11 +522,12 @@ export class ChatLabFormatter {
         }
         this.exportService.throwIfStopRequested(control)
         await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-        await fs.promises.writeFile(outputPath, lines.join('\n'), 'utf-8')
+        // v1.2 §10.1：整体写也要原子（tmp → fsync → os.replace），中断不留半截 JSON
+        await this.exportService.writeArtifactFile(outputPath, lines.join('\n'), 'utf-8')
       } else {
         this.exportService.throwIfStopRequested(control)
         await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-        await fs.promises.writeFile(outputPath, JSON.stringify(chatLabExport, null, 2), 'utf-8')
+        await this.exportService.writeArtifactFile(outputPath, JSON.stringify(chatLabExport, null, 2), 'utf-8')
       }
 
       onProgress?.({

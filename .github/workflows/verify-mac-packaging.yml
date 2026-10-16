@@ -14,6 +14,15 @@ on:
       - 'package.json'
       - 'scripts/after-pack.cjs'
       - 'scripts/verify-mac-pack.sh'
+      - 'scripts/build-mac-image-helper.sh'
+      - 'resources/key/macos/source/**'
+      - 'scripts/verify-mac-positive-native.mjs'
+      - 'scripts/verify-mac-fixture-modules.mjs'
+      - 'scripts/verify-mac-export-artifact.py'
+      - 'scripts/fixtures/mac-native-positive/**'
+      - 'src/components/reader/readerSource.ts'
+      - 'src/components/reader/readerSource.test.ts'
+      - 'src/pages/ReaderPage.tsx'
       - 'scripts/prepare-native-modes.cjs'
       - 'scripts/prepare-host-bundle.cjs'
       - 'electron/entitlements.mac.plist'
@@ -29,7 +38,8 @@ permissions:
 
 jobs:
   verify-mac-pack:
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,7 +55,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -54,10 +64,38 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Verify Reader empty-index fallback
+        run: npx vitest run src/components/reader/readerSource.test.ts
+
       - name: Build macOS installer (arm64, ad-hoc signed, no publish)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # electron-builder otherwise skips even certificate-free ad-hoc signing on PRs.
+          CSC_FOR_PULL_REQUEST: 'true'
         run: npm run build:mac
 
       - name: Verify macOS packaging & signature
         run: bash scripts/verify-mac-pack.sh release
+
+      - name: Verify packaged native host contracts
+        run: node scripts/verify-packaged-native.cjs release
+
+      - name: Read synthetic encrypted fixture through actual packaged app
+        run: node scripts/verify-mac-positive-native.mjs release
+
+      - name: Preserve Mac native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-native-positive-evidence
+          path: .ui-probe/mac-native-positive/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Preserve accepted Mac installer without publishing
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-verified-package
+          path: release/Weport-*.zip
+          if-no-files-found: error
+          retention-days: 7

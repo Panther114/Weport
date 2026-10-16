@@ -63,6 +63,8 @@ export interface ChatLabExport {
 }
 
 export interface ExportOptions {
+  /** Explicit diagnostic verification; normal exports do not rescan a live database. */
+  verifyAfterExport?: boolean
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null

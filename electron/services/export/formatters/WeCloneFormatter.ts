@@ -98,10 +98,6 @@ export class WeCloneFormatter {
         ? sortedMessages.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.exportService.getMediaLayout(outputPath, options)
       const mediaMessages = this.exportService.collectMediaMessagesForExport(sortedMessages, options)
 
@@ -174,7 +170,7 @@ export class WeCloneFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 45,
@@ -191,7 +187,7 @@ export class WeCloneFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -292,7 +288,8 @@ export class WeCloneFormatter {
           )
         }
 
-        let msgText = msg.localType === 34 && options.exportVoiceAsText
+        const shouldUseTranscript = msg.localType === 34 && options.exportVoiceAsText
+        let msgText = shouldUseTranscript
           ? (voiceTranscriptMap.get(this.exportService.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]')
           : (this.exportService.parseMessageContent(
             msg.content,
@@ -314,9 +311,10 @@ export class WeCloneFormatter {
           rawMyWxid,
           myDisplayName: myInfo.displayName || cleanedMyWxid
         })
-        if (quotedReplyDisplay) {
+        if (quotedReplyDisplay && !shouldUseTranscript) {
           msgText = this.exportService.buildQuotedReplyText(quotedReplyDisplay)
         } else if (
+          !shouldUseTranscript &&
           msg.localType === 244813135921 &&
           msgText === '[引用消息]' &&
           typeof msg.content === 'string' &&

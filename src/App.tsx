@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import PrivacySettings from './components/settings/PrivacySettings'
 import {
   Plug,
   PlugZap,
@@ -42,6 +43,7 @@ import {
   Info,
   Rocket,
   Minimize2,
+  SlidersHorizontal,
   ScrollText,
   Sparkles,
   Images,
@@ -59,6 +61,12 @@ import {
   Loader2,
   Server,
   Settings2 as SettingsIcon,
+  Search as SearchIcon,
+  Stethoscope as DiagnosticsIcon,
+  MessagesSquare as ReaderIcon,
+  Palette as PosterIcon,
+  AlertTriangle,
+  Bug,
 } from 'lucide-react'
 
 import type { SetupInfo } from './components/weportAi/aiPanelTypes'
@@ -66,11 +74,17 @@ import type { AnalyticsSection } from './pages/analytics/AnalyticsModule'
 import { Avatar } from './components/Avatar'
 import ExportProgressBar, { type ExportProgressBarHandle } from './components/export/ExportProgressBar'
 import BackgroundTasks from './components/BackgroundTasks'
+import { UpdateDownloadLabel, UpdateDownloadProgress } from './components/settings/UpdateDownloadStatus'
+import { useLiveTaskPhase } from './hooks/useLiveTask'
+import { WEPORT_CANCEL_INDEX_EVENT } from './components/search/IndexState'
 import { LIVE_TASK, liveTask } from './utils/liveTask'
 import { invalidateReferenceCandidates } from './utils/sessionCandidates'
+import { acquireKeyForSelectedAccount } from './utils/accountKeyAcquisition'
 import { summarizeNotifyScope } from './utils/notifyScope'
 import type { NotificationAnimationStyle } from './utils/notificationAnimation'
 import ExportSessionPicker, { type ExportSelectionMode, type ExportSessionPickerItem, type ExportSessionType } from './components/export/ExportSessionPicker'
+import BugReportPanel from './components/settings/BugReportPanel'
+import { getExportSessionFavoriteIds, exportSessionFavoritesFromAnnotations, type ExportSessionFavoritesByWxid } from './utils/exportSessionFavorites'
 
 /**
  * 页面级代码分割。
@@ -107,6 +121,17 @@ const WeClonePage = lazy(() => import('./pages/WeClonePage'))
 const AiMarkdown = lazy(() => import('./components/weportAi/AiMarkdown'))
 const SnsPage = lazy(() => import('./pages/SnsPage'))
 const AnalyticsModule = lazy(() => import('./pages/analytics/AnalyticsModule'))
+// v1.2 §6：跨页搜索 + 标签 / 收藏 / 保存的搜索。lazy —— 索引状态与结果页都只在真的
+// 点进来时才需要（首屏启动图不该为它付费）。
+const SearchPage = lazy(() => import('./pages/SearchPage'))
+// v1.2 §5：诊断页（连接与数据健康自检 + 本地诊断包导出）。同样 lazy。
+const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage'))
+// v1.2 §3：内置聊天阅读器（只读）。lazy —— 它是这套界面里最重的一页。
+const ReaderPage = lazy(() => import('./pages/ReaderPage'))
+import type { ReaderOpenRequest, ReaderPosterRequest } from './pages/ReaderPage'
+// v1.2 §4：分享海报工作室（长图 / 引用卡 / 九宫格 / 小结卡，默认开启自动打码）。
+const PosterPage = lazy(() => import('./pages/PosterPage'))
+// v1.2 §10.4：密钥健康面板（每库状态 / 手工粘贴校验 / 合并写入）。设置页「连接」一节的顶部。
 
 /**
  * 懒加载页面的占位。
@@ -125,7 +150,6 @@ import {
   ACCENT_OPTIONS,
   ACCENT_STRENGTH_OPTIONS,
   BLUR_FORCES_BALANCED_PX,
-  DENSITY_OPTIONS,
   MODE_OPTIONS,
   PRESET_ACCENTS,
   VIDEO_QUALITY_OPTIONS,
@@ -142,7 +166,6 @@ import {
   setBackgroundDim,
   setBackgroundPath,
   setCustomAccent,
-  setDensity,
   setMode,
   setModeAuto,
   setVideoQuality,
@@ -157,8 +180,9 @@ import './styles/v1.scss'
 // 主题令牌（强调色 × 明暗）。必须最后加载：它要在 styles.css 写死的浅蓝家族
 // 和 v1.scss 之后生效。
 import './styles/theme.scss'
+import './styles/interaction.scss'
 
-type Tab = 'connect' | 'export' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'analytics' | 'settings'
+type Tab = 'connect' | 'export' | 'reader' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'poster' | 'analytics' | 'search' | 'diagnostics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -184,12 +208,31 @@ type ExportLogInfo = {
   exists: boolean
 }
 
+/**
+ * v1.2 §10.2 ②：导出正确性自检的界面摘要。
+ * 只留"要不要弹、弹什么"这几个数 —— 完整报告在 `integrity-report.json` 里，
+ * 界面点「打开报告」交给系统默认程序打开。
+ */
+type ExportIntegritySummary = {
+  ok: boolean
+  reportPath: string
+  csvPath: string | null
+  sessions: number
+  messages: number
+  mismatches: number
+  missingMedia: number
+  duplicates: number
+  sourceIdCollisions: number
+  notes: string[]
+}
+
 type AntiRevokeSession = {
   username: string
   displayName?: string
   type?: number
   avatarUrl?: string
 }
+type AntiRevokeStatus = 'installed' | 'uninstalled' | 'unknown'
 
 const DEFAULT_DB_HINT = String.raw`C:\Users\<you>\Documents\xwechat_files`
 let toastSeq = 1
@@ -308,7 +351,6 @@ const EXPORT_DEFAULTS = {
 const NAV_GROUPS: Array<{ id: string; label: string }> = [
   { id: 'wechat', label: '微信' },
   { id: 'intelligence', label: '智能' },
-  { id: 'system', label: '系统' },
 ]
 
 const TABS: Array<{
@@ -321,7 +363,9 @@ const TABS: Array<{
 }> = [
   { id: 'connect', label: '连接微信', icon: PlugZap, group: 'wechat', hint: '数据目录、账号与解密密钥' },
   { id: 'export', label: '导出数据', icon: Download, group: 'wechat', hint: '选择会话与格式，导出到本地' },
+  { id: 'reader', label: '聊天阅读', icon: ReaderIcon, group: 'wechat', hint: '在应用里直接翻阅本地聊天记录（只读）' },
   { id: 'sns', label: '朋友圈', icon: Images, group: 'wechat', hint: '浏览与导出朋友圈动态' },
+  { id: 'poster', label: '海报', icon: PosterIcon, group: 'wechat', hint: '把一段对话或动态做成可分享的图片' },
   { id: 'analytics', label: '分析', icon: LineChart, group: 'wechat', hint: '全局与群聊统计图表' },
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
   { id: 'notifications', label: '消息通知设置', icon: Bell, group: 'wechat', hint: '弹窗外观、玻璃样式与接收范围都在这里（系统「设置」页里没有）' },
@@ -329,6 +373,7 @@ const TABS: Array<{
   { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
   { id: 'weclone', label: 'WeClone', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
+  { id: 'search', label: '搜索', icon: SearchIcon, group: 'wechat', hint: '跨会话搜索消息、标签与收藏' },
   { id: 'settings', label: '设置', icon: SettingsIcon, group: 'system', hint: '启动、外观、AI 服务、数据与接口' },
 ]
 
@@ -364,14 +409,14 @@ export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedWxid, setSelectedWxid] = useState('')
   const [decryptKey, setDecryptKey] = useState('')
+  const [readerOpenRequest, setReaderOpenRequest] = useState<ReaderOpenRequest>()
+  const [posterSource, setPosterSource] = useState<ReaderPosterRequest>()
   const [showKey, setShowKey] = useState(false)
   const [keyStatus, setKeyStatus] = useState('')
   const [keyHookReady, setKeyHookReady] = useState(false)
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [imageKeysOk, setImageKeysOk] = useState(false)
   const loadKeySeqRef = useRef(0)
-  /** 缺图片密钥时"再点一次继续"的一次性确认（见 startExport 中的守卫） */
-  const imageKeyAckRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('')
   /**
@@ -383,6 +428,8 @@ export default function App() {
    */
   const exportProgressRef = useRef<ExportProgressBarHandle | null>(null)
   const [exportLog, setExportLog] = useState<ExportLogInfo | null>(null)
+  /** v1.2 §10.2 ②：上一次导出的自检摘要（`ok === false` 时页面上要看得见，不能只在 toast 里一闪）。 */
+  const [exportIntegrity, setExportIntegrity] = useState<ExportIntegritySummary | null>(null)
   const [notificationsEnabled, setNotificationsEnabled] = useState(false)
   const [notificationPosition, setNotificationPosition] = useState<NotificationPosition>('top-right')
   const [notificationDuration, setNotificationDuration] = useState(3000)
@@ -398,9 +445,24 @@ export default function App() {
   const [startupReason, setStartupReason] = useState<string | undefined>()
   const [silentStartup, setSilentStartup] = useState(false)
   const [closeToTray, setCloseToTray] = useState(true)
-  const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null)
-  const [updateBusy, setUpdateBusy] = useState(false)
-  const [updateProgress, setUpdateProgress] = useState<{ percent: number; transferred?: number; total?: number } | null>(null)
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string; forced?: boolean; reason?: string | null; url?: string | null; hasUpdate?: boolean; allowReadOnly?: boolean } | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const updatePhase = useLiveTaskPhase(LIVE_TASK.updateDownload)
+  const updateBusy = updateChecking || updatePhase.startsWith('running:')
+  useEffect(() => {
+    const task = liveTask(LIVE_TASK.updateDownload)
+    let previous = ''
+    const restore = () => {
+      const info = task.getState().detail?.updateInfo as { version?: string; releaseNotes?: string } | undefined
+      if (!info?.version) return
+      const signature = JSON.stringify(info)
+      if (signature === previous) return
+      previous = signature
+      setUpdateInfo({ ...info, version: info.version, body: info.releaseNotes || undefined })
+    }
+    restore()
+    return task.subscribe(restore)
+  }, [])
   const [changelogOpen, setChangelogOpen] = useState(false)
   const [changelogContent, setChangelogContent] = useState<string | null>(null)
   const [changelogLoading, setChangelogLoading] = useState(false)
@@ -412,7 +474,7 @@ export default function App() {
   const [httpApiPort, setHttpApiPort] = useState(5031)
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
-  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'about'>('general')
+  const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'privacy' | 'diagnostics' | 'report' | 'about'>('general')
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
@@ -434,11 +496,17 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastTimers = useRef<Map<number, number>>(new Map())
   const [antiRevokeSessions, setAntiRevokeSessions] = useState<AntiRevokeSession[]>([])
-  const [antiRevokeInstalled, setAntiRevokeInstalled] = useState<Record<string, boolean>>({})
+  const [antiRevokeInstalled, setAntiRevokeInstalled] = useState<Record<string, AntiRevokeStatus>>({})
+  const [antiRevokeStatusError, setAntiRevokeStatusError] = useState('')
   const [antiRevokeBusy, setAntiRevokeBusy] = useState(false)
   const [antiRevokeNewGroupsEnabled, setAntiRevokeNewGroupsEnabled] = useState(false)
   const [antiRevokeQuery, setAntiRevokeQuery] = useState('')
-  const [antiRevokeFilter, setAntiRevokeFilter] = useState<'all' | 'installed' | 'pending'>('all')
+  const [antiRevokeFilter, setAntiRevokeFilter] = useState<'all' | 'installed' | 'pending' | 'unknown'>('all')
+  // v1.2 §7：渐进渲染的行数（会话可到几百个，一次全挂载 = 一个 ~60ms 长任务）
+  const [antiRevokeLimit, setAntiRevokeLimit] = useState(60)
+  useEffect(() => {
+    setAntiRevokeLimit(60)
+  }, [antiRevokeQuery, antiRevokeFilter])
   const [notifyListening, setNotifyListening] = useState(false)
   const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>('hub')
   const appearance = useAppearance()
@@ -538,7 +606,15 @@ export default function App() {
   const [showAdvanced, setShowAdvanced] = useState(true)
   const [exportSessions, setExportSessions] = useState<ExportSessionPickerItem[]>([])
   const [selectedExportSessionIds, setSelectedExportSessionIds] = useState<Set<string>>(new Set())
-  const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('all')
+  const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('selected')
+  const [exportFavoritesByWxid, setExportFavoritesByWxid] = useState<ExportSessionFavoritesByWxid>({})
+  const exportFavoritesByWxidRef = useRef<ExportSessionFavoritesByWxid>({})
+  const exportFavoritesLoadedRef = useRef(false)
+  const exportFavoritesEpochRef = useRef(0)
+  const exportFavoritesAccountRef = useRef(selectedWxid)
+  exportFavoritesAccountRef.current = selectedWxid
+  const [exportFavoritesLoaded, setExportFavoritesLoaded] = useState(false)
+  const [exportFavoritesReloadToken, setExportFavoritesReloadToken] = useState(0)
   const [exportSessionSearch, setExportSessionSearch] = useState('')
   const [exportSessionType, setExportSessionType] = useState<ExportSessionType>('all')
   const [exportSessionsLoading, setExportSessionsLoading] = useState(false)
@@ -557,11 +633,7 @@ export default function App() {
   const api = window.electronAPI
   const imageKeyRequired = api.process.platform === 'win32'    || api.process.platform === 'darwin'
     || api.process.platform === 'linux'
-  // issue #15：macOS/Linux 的图片密钥是从微信 kvcomm 缓存推导的（不附加进程），
-  // Windows 走 wx_key.dll。把差异写在按钮旁边，用户失败时才看得到下一步。
-  const imageKeyHint = api.process.platform === 'win32'
-    ? '未配置：导出图片前必须先获取（微信 4.x 图片为加密 .dat）'
-    : '未配置：导出图片前必须先获取，密钥从微信缓存推导（无需附加微信进程）。若失败：先在微信中打开几张图片大图，并在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许 Weport，再重试。'
+  const imageKeyHint = '连接或导出时自动从微信缓存获取。若缓存不可用，可在微信中打开几张图片后重试，或手动获取。'
 
   useEffect(() => {
     setDurationInput(String(Math.round(notificationDuration / 1000)))
@@ -590,6 +662,33 @@ export default function App() {
     }, ms)
     toastTimers.current.set(id, t)
   }, [dismissToast])
+
+  useEffect(() => {
+    let active = true
+    const wxid = selectedWxid
+    ++exportFavoritesEpochRef.current
+    exportFavoritesLoadedRef.current = false
+    setExportFavoritesLoaded(false)
+    setExportFavoritesByWxid({})
+    if (tab !== 'export' || !wxid) return
+    void api.annotations.list({ accountId: wxid }).then((value) => {
+      if (!active) return
+      if (value.error) throw new Error(value.error)
+      const normalized = exportSessionFavoritesFromAnnotations(value, wxid)
+      exportFavoritesByWxidRef.current = normalized
+      exportFavoritesLoadedRef.current = true
+      setExportFavoritesByWxid(normalized)
+      setExportFavoritesLoaded(true)
+    }).catch((error) => {
+      if (!active) return
+      exportFavoritesByWxidRef.current = {}
+      exportFavoritesLoadedRef.current = false
+      setExportFavoritesByWxid({})
+      setExportFavoritesLoaded(false)
+      pushToast('err', '读取收藏联系人失败', String(error))
+    })
+    return () => { active = false }
+  }, [api, pushToast, selectedWxid, tab, exportFavoritesReloadToken])
 
   const persist = useCallback((patch: { dbPath?: string; decryptKey?: string; exportPath?: string; wxid?: string; format?: Format }) => {
     if (patch.dbPath !== undefined) void api.config.set('dbPath', patch.dbPath)
@@ -631,7 +730,7 @@ export default function App() {
     setExportConflict(EXPORT_DEFAULTS.conflict)
     setDisplayNamePref(EXPORT_DEFAULTS.namePref)
     setExportConcurrency(EXPORT_DEFAULTS.concurrency)
-    setExportSelectionMode('all')
+    setExportSelectionMode('selected')
     void saveExportOptions({
       format: EXPORT_DEFAULTS.format,
       layout: EXPORT_DEFAULTS.writeLayout,
@@ -655,6 +754,44 @@ export default function App() {
       setExportLog(await api.export.getExportLog(path.trim()))
     } catch {
       setExportLog(null)
+    }
+  }, [api])
+
+  /**
+   * 读回自检报告：失败显示告警，通过但有源 ID 冲突时显示保留源行的信息；
+   * 报告不存在（老版本导出目录、被取消的运行）就当没有，不误报。
+   */
+  const refreshExportIntegrity = useCallback(async (path: string) => {
+    if (!path.trim()) {
+      setExportIntegrity(null)
+      return
+    }
+    try {
+      const result = await api.export.integrityReport(path.trim())
+      const report = result?.report
+      if (!result?.success || !report) {
+        setExportIntegrity(null)
+        return
+      }
+      const sourceIdCollisions = Math.max(0, Math.floor(Number(report.totals?.sourceIdCollisions || 0)))
+      if (report.ok === true && sourceIdCollisions === 0) {
+        setExportIntegrity(null)
+        return
+      }
+      setExportIntegrity({
+        ok: report.ok === true,
+        reportPath: String(result.path || ''),
+        csvPath: typeof result.csvPath === 'string' && result.csvPath ? result.csvPath : null,
+        sessions: Math.max(0, Math.floor(Number(report.totals?.sessions || 0))),
+        messages: Math.max(0, Math.floor(Number(report.totals?.messages || 0))),
+        mismatches: Math.max(0, Math.floor(Number(report.totals?.mismatches || 0))),
+        missingMedia: Math.max(0, Math.floor(Number(report.totals?.missingMedia || 0))),
+        duplicates: Math.max(0, Math.floor(Number(report.totals?.duplicates || 0))),
+        sourceIdCollisions,
+        notes: Array.isArray(report.notes) ? report.notes.slice(0, 20).map((item: unknown) => String(item)) : [],
+      })
+    } catch {
+      setExportIntegrity(null)
     }
   }, [api])
 
@@ -717,7 +854,12 @@ export default function App() {
       const wxidConfigs = (await api.config.get('wxidConfigs')) || {}
       if (seq !== loadKeySeqRef.current) return
       const cfg = wxidConfigs[wxid]
-      const key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      let key = typeof cfg?.decryptKey === 'string' ? cfg.decryptKey : ''
+      // Legacy profiles stored only the active account's global database key.
+      if (!key && await api.config.get('myWxid') === wxid) {
+        const activeKey = await api.config.get('decryptKey')
+        if (typeof activeKey === 'string') key = activeKey
+      }
       if (seq !== loadKeySeqRef.current) return
       setDecryptKey(key)
       // 图片密钥状态（issue #9a）：aesKey 非空视为已配置（xorKey 可合法为 0）。
@@ -789,11 +931,12 @@ export default function App() {
       if (!sessions?.success) {
         return { success: false, error: sessions?.error || '数据库已打开，但会话读取失败' }
       }
+      await loadAccountKey(wxid)
       return { success: true }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-  }, [api, dbPath, saveAccountKey, selectedWxid])
+  }, [api, dbPath, saveAccountKey, selectedWxid, loadAccountKey])
 
   const refreshAccounts = useCallback(async (path: string) => {
     if (!path.trim()) {
@@ -899,7 +1042,7 @@ export default function App() {
     setSelectedWxid(wxid)
     setExportSessions([])
     setSelectedExportSessionIds(new Set())
-    setExportSelectionMode('all')
+    setExportSelectionMode('selected')
     setExportSessionsLoaded(false)
     void persist({ wxid })
     void loadAccountKey(wxid)
@@ -911,7 +1054,8 @@ export default function App() {
     ;(async () => {
       try {
         const last = await api.config.get('lastTab')
-        if (TABS.some((t) => t.id === last)) setTab(last)
+        if (last === 'diagnostics') { setTab('settings'); setSettingsSection('diagnostics') }
+        else if (TABS.some((t) => t.id === last)) setTab(last)
       } catch { /* noop */ }
       try {
         const db = await api.config.get('dbPath')
@@ -1029,17 +1173,9 @@ export default function App() {
         setImageKeyStatus(payload.message)
       }),
       api.app.onUpdateAvailable((info) => {
-        setUpdateInfo({ version: info.version, body: info.releaseNotes || undefined })
+        setUpdateInfo({ ...info, version: info.version, body: info.releaseNotes || undefined })
         pushToast('info', `发现新版本 v${info.version}`, '可在顶部横幅更新')
       }),
-      api.app.onDownloadProgress((p) => {
-        setUpdateProgress({ percent: Number(p?.percent) || 0, transferred: p?.transferred, total: p?.total })
-      }),
-      api.app.onUpdateDownloaded(() => {
-        // 下载完成：应用即将退出安装并自动重启，禁用更新按钮
-        setUpdateBusy(true)
-        setUpdateProgress({ percent: 100, total: 1, transferred: 1 })
-      })
     ]
 
     void api.app.getLaunchAtStartupStatus().then((s) => {
@@ -1058,7 +1194,7 @@ export default function App() {
     void refreshExportLog(exportPath)
   }, [exportPath, refreshExportLog])
 
-  const keyOk = decryptKey.trim().length === 64
+  const keyOk = isValidDecryptKey(decryptKey.trim())
   const dbReady = dbPath.trim().length > 0
   const accountReady = selectedWxid.length > 0
   const allReady = dbReady && accountReady && keyOk
@@ -1069,11 +1205,43 @@ export default function App() {
     void loadExportSessions()
   }, [tab, keyOk, exportSessionsLoaded, exportSessionsLoading, loadExportSessions])
 
+  const exportFavoriteIds = useMemo(
+    () => getExportSessionFavoriteIds(exportFavoritesByWxid, selectedWxid),
+    [exportFavoritesByWxid, selectedWxid]
+  )
+
+  const handleToggleExportFavorite = useCallback((sessionId: string) => {
+    const wxid = String(selectedWxid || '').trim()
+    if (!wxid || !exportFavoritesLoadedRef.current) return
+    const epoch = exportFavoritesEpochRef.current
+    const isFavorite = getExportSessionFavoriteIds(exportFavoritesByWxidRef.current, wxid).has(sessionId)
+    exportFavoritesLoadedRef.current = false
+    setExportFavoritesLoaded(false)
+    const mutation: AnnotationsMutation = isFavorite
+      ? { op: 'fav.remove', payload: { sessionId, localId: '' } }
+      : { op: 'fav.add', payload: { sessionId, localId: '', ts: 0 } }
+    void api.annotations.mutate(mutation, { accountId: wxid })
+      .then((result) => {
+        if (epoch !== exportFavoritesEpochRef.current || wxid !== exportFavoritesAccountRef.current) return
+        if (result.error) throw new Error(result.error)
+        const next = exportSessionFavoritesFromAnnotations(result, wxid)
+        exportFavoritesByWxidRef.current = next
+        setExportFavoritesByWxid(next)
+      })
+      .catch((error) => pushToast('err', '收藏保存失败', String(error)))
+      .finally(() => {
+        if (epoch !== exportFavoritesEpochRef.current || wxid !== exportFavoritesAccountRef.current) return
+        exportFavoritesLoadedRef.current = true
+        setExportFavoritesLoaded(true)
+      })
+  }, [api, pushToast, selectedWxid])
+
   const filteredExportSessions = useMemo(() => {
     const keyword = exportSessionSearch.trim().toLowerCase()
     return exportSessions.filter((session) => {
       const isGroup = session.username.endsWith('@chatroom')
       const isOfficial = session.username.startsWith('gh_')
+      if (exportSessionType === 'favorites' && !exportFavoriteIds.has(session.username)) return false
       if (exportSessionType === 'group' && !isGroup) return false
       if (exportSessionType === 'private' && (isGroup || isOfficial)) return false
       if (exportSessionType === 'official' && !isOfficial) return false
@@ -1083,7 +1251,7 @@ export default function App() {
       const summary = String(session.summary || '').toLowerCase()
       return name.includes(keyword) || id.includes(keyword) || summary.includes(keyword)
     })
-  }, [exportSessionSearch, exportSessionType, exportSessions])
+  }, [exportSessionSearch, exportSessionType, exportSessions, exportFavoriteIds])
 
   const allVisibleExportSessionsSelected = filteredExportSessions.length > 0 &&
     filteredExportSessions.every((session) => selectedExportSessionIds.has(session.username))
@@ -1140,10 +1308,18 @@ export default function App() {
     setBusy(true)
     setKeyHookReady(false)
     setBusyLabel('正在连接微信进程…')
-    pushToast('info', '开始提取密钥', '密钥在登录瞬间捕获。请关闭微信「自动登录」，等待「已准备就绪」后重新登录。', 7000)
+    pushToast('info', '开始提取密钥', '先检查已有密钥；需要重新获取时，请等待就绪提示后登录微信。', 7000)
     try {
-      const result = await api.key.autoGetDbKey()
-      if (result.success && result.key) {
+      const result = await acquireKeyForSelectedAccount(
+        api.config,
+        { dbPath, wxid: selectedWxid },
+        () => api.key.autoGetDbKey(),
+      )
+      if (result.success) {
+        if (!result.key) {
+          pushToast('err', '密钥获取失败', '未返回有效数据库密钥，请重新获取或粘贴已有密钥。', 10000)
+          return
+        }
         const key = result.key.trim()
         setDecryptKey(key)
         setKeyHookReady(false)
@@ -1205,8 +1381,9 @@ export default function App() {
    * 它在哪个标签下 —— 这个按钮把那一步省掉。取消则直接复用各功能已有的取消
    * 通道（导出按 taskId、克隆走 weclone.cancel）。
    */
-  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'weclone' | 'settings') => {
-    setTab(target)
+  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'weclone' | 'settings' | 'search' | 'diagnostics') => {
+    setTab(target === 'diagnostics' ? 'settings' : target)
+    if (target === 'diagnostics') setSettingsSection('diagnostics')
   }, [])
 
   const handleCancelTask = useCallback(
@@ -1219,9 +1396,20 @@ export default function App() {
       if (key === LIVE_TASK.wecloneGenerate) {
         void api.weclone.cancel()
       }
+      if (key === LIVE_TASK.searchIndex) {
+        void api.search.cancelIndex().catch((error: unknown) => {
+          pushToast('err', '取消索引失败', error instanceof Error ? error.message : String(error))
+        })
+      }
     },
-    [api]
+    [api, pushToast]
   )
+
+  useEffect(() => {
+    const cancelIndex = () => handleCancelTask(LIVE_TASK.searchIndex)
+    window.addEventListener(WEPORT_CANCEL_INDEX_EVENT, cancelIndex)
+    return () => window.removeEventListener(WEPORT_CANCEL_INDEX_EVENT, cancelIndex)
+  }, [handleCancelTask])
 
   async function runExport() {    if (!dbPath.trim()) {
       pushToast('err', '请选择微信数据目录')
@@ -1243,30 +1431,12 @@ export default function App() {
       pushToast('err', '请选择要导出的会话', '可使用“全选当前”快速选择筛选结果')
       return
     }
-    // issue #15：微信 4.x 在 Windows/macOS/Linux 均可能使用加密 .dat 图片，
-    // 缺失图片密钥时导出只会得到 [图片] 占位符。
-    //
-    // 但**不能直接拒绝导出**：在 macOS 上图片密钥经常拿不到（WeChat 是
-    // 加固签名 + 沙盒进程，task_for_pid 会被系统拒绝），硬拦截会把用户彻底
-    // 卡死 —— 连文字记录都导不出去，比导出占位符糟糕得多。
-    // 因此改为「先警告、再确认」：第一次点击只说明后果，第二次点击照常导出；
-    // 缺密钥的图片会以 [图片] 占位，并在完成提示里给出具体数量。
-    if (exportMedia.images && imageKeyRequired && !imageKeysOk) {
-      if (!imageKeyAckRef.current) {
-        imageKeyAckRef.current = true
-        pushToast(
-          'err',
-          '尚未配置图片密钥',
-          '导出的图片将全部显示为 [图片] 占位符。再次点击「开始导出」仍会继续；建议先点击「获取图片密钥」。',
-          12000
-        )
-        return
-      }
-      imageKeyAckRef.current = false
-    }
+    // Main-process export acquires verified account image keys from cache before
+    // media resolution. Missing cache keys never block ordinary text/history exports.
 
     setBusy(true)
     exportProgressRef.current?.reset()
+    setExportIntegrity(null)
     setBusyLabel(exportSelectionMode === 'all'
       ? '开始导出全部会话…'
       : `开始导出 ${selectedExportSessionIds.size} 个会话…`)
@@ -1297,15 +1467,24 @@ export default function App() {
 
     try {
       const result = await api.export.exportSessions(exportPath.trim(), options)
+      await loadAccountKey(selectedWxid)
       await refreshExportLog(exportPath.trim())
+      // 读回自检结果；源 ID 冲突与实际导出缺陷分别呈现。
+      // Deep verification belongs to explicit diagnostics, not normal export completion.
+      setExportIntegrity(null)
       // issue #15/#5b：缺图片密钥不再是静默占位 —— 计数随导出结果返回，这里必须可见。
       const imageKeyMissing = Math.max(0, Math.floor(Number(result.imageKeyMissingFiles || 0)))
       const imageKeyWarning = imageKeyMissing > 0 ? ` · ${imageKeyMissing} 张图片缺密钥显示为[图片]，请获取图片密钥后重新导出` : ''
       // issue #22：语音拿不到数据时以前是静默丢文件，用户只看到"导出的语音没有文件"。
       const voiceFailed = Math.max(0, Math.floor(Number(result.voiceFailedFiles || 0)))
       const voiceWarning = voiceFailed > 0 ? ` · ${voiceFailed} 条语音未能导出（微信里没有完整语音文件，先在微信里播放一次再导）` : ''
-      if (result.success) {
-        pushToast('ok', '导出完成', `成功 ${result.successCount ?? 0} 个会话 → ${result.formatFolder}/（已覆盖同名文件）${imageKeyWarning}${voiceWarning}`, (imageKeyMissing > 0 || voiceFailed > 0) ? 12000 : 7000)
+      const emptySkipped = Array.isArray(result.emptySkippedSessionIds) ? result.emptySkippedSessionIds.length : 0
+      const emptyNote = emptySkipped > 0 ? `（已跳过 ${emptySkipped} 个确认无消息的会话）` : ''
+      if (result.stopped) {
+        pushToast(result.success ? 'info' : 'err', '导出已取消',
+          result.error || '本次导出已停止，未完成的会话可以重新导出', 7000)
+      } else if (result.success) {
+        pushToast('ok', '导出完成', `完成 ${result.successCount ?? 0} 个会话${emptyNote} → ${result.formatFolder}/${imageKeyWarning}${voiceWarning}`, (imageKeyMissing > 0 || voiceFailed > 0) ? 12000 : 7000)
         // 让进度条定格到完成态（并**换掉会话名**）：原来只把 phase 改掉，面板上会
         // 留着 `准备中…  189 / 189` —— 数字满了、文字还停在准备阶段。
         exportProgressRef.current?.complete()
@@ -1362,9 +1541,20 @@ export default function App() {
   }
 
   async function checkForUpdates(fromAbout = false) {
-    setUpdateBusy(true)
+    setUpdateChecking(true)
     try {
       const result = await api.app.checkForUpdates()
+      if (result.forced) {
+        setUpdateInfo({ ...result, version: result.version || result.minimumSupportedVersion || version, body: result.releaseNotes || undefined })
+        pushToast('err', '需要兼容性更新', result.reason || '当前版本不再支持此微信协议', 10000)
+        return
+      }
+      // 检查失败 ≠ 已是最新。引擎会把原因带回来（断网 / 没有 latest.yml / 签名不对…），
+      // 这里必须先看 error：以前一律回"已是最新版本"，更新通道整个坏了都没人知道。
+      if (result.error) {
+        pushToast('err', '没查到更新', `${result.error}（当前 v${version}）`)
+        return
+      }
       if (!result.hasUpdate) {
         pushToast('ok', '已是最新版本', `当前 v${version}`)
         setUpdateInfo(null)
@@ -1377,36 +1567,27 @@ export default function App() {
     } catch (e) {
       pushToast('err', '检查更新失败', String(e))
     } finally {
-      setUpdateBusy(false)
+      setUpdateChecking(false)
     }
   }
 
   async function installUpdate() {
-    setUpdateBusy(true)
-    setUpdateProgress({ percent: 0 })
-    let restarting = false
+    if (updateBusy) return
+    if (updateInfo?.forced && !updateInfo.hasUpdate && updateInfo.url) {
+      await api.shell.openExternal(updateInfo.url)
+      return
+    }
     try {
       const result = await api.app.downloadAndInstall()
       if (result.success) {
-        if (result.restarting) {
-          // 主进程已触发 quitAndInstall：应用即将退出 → 静默安装 → 自动重启，
-          // 保持「正在安装并重启…」状态直到进程退出
-          restarting = true
-          setUpdateBusy(true)
-          setUpdateProgress(null)
-        } else {
-          setUpdateProgress(null)
+        if (!result.restarting) {
           pushToast('ok', '更新已下载', '重启应用完成安装')
         }
       } else {
-        setUpdateProgress(null)
         pushToast('err', '更新失败', result.error || '未知错误', 10000)
       }
     } catch (e) {
-      setUpdateProgress(null)
       pushToast('err', '更新失败', String(e), 10000)
-    } finally {
-      if (!restarting) setUpdateBusy(false)
     }
   }
 
@@ -1717,23 +1898,44 @@ export default function App() {
     setAntiRevokeBusy(true)
     try {
       const sessionsResult = await api.chat.getAntiRevokeSessions()
-      const sessions: AntiRevokeSession[] = sessionsResult.sessions || []
+      if (!sessionsResult?.success || !Array.isArray(sessionsResult.sessions)) {
+        throw new Error(sessionsResult?.error || '获取防撤回会话失败')
+      }
+      const sessions: AntiRevokeSession[] = sessionsResult.sessions
       setAntiRevokeSessions(sessions)
+      setAntiRevokeInstalled(Object.fromEntries(sessions.map((session) => [session.username, 'unknown' as const])))
+      setAntiRevokeStatusError('')
       // 头像/昵称补全不阻塞列表：`getSessions()` 只回缓存里的联系人信息，未读过的
       // 会话没有头像，先渲染列表再补齐，避免"打开这一页先白等一秒"。
       void enrichAntiRevokeContacts(sessions)
       if (sessions.length > 0) {
         const ids = sessions.map((s) => s.username)
         const check = await api.chat.checkAntiRevokeTriggers(ids)
-        const installed: Record<string, boolean> = {}
+        const checkedRows = new Map((check.rows || []).map((row) => [row.sessionId, row]))
+        const installed: Record<string, AntiRevokeStatus> = {}
+        const errors: string[] = []
         for (const row of check.rows || []) {
-          if (row.success) installed[row.sessionId] = row.installed === true
+          if (!row.success && row.error) errors.push(row.error)
+        }
+        for (const session of sessions) {
+          const row = checkedRows.get(session.username)
+          installed[session.username] = row?.success && typeof row.installed === 'boolean'
+            ? row.installed ? 'installed' : 'uninstalled'
+            : 'unknown'
         }
         setAntiRevokeInstalled(installed)
+        const statusError = check.error || errors[0] || ''
+        setAntiRevokeStatusError(statusError)
+        if (statusError) pushToast('err', '部分会话状态无法确认', statusError)
       } else {
         setAntiRevokeInstalled({})
+        setAntiRevokeStatusError('')
       }
     } catch (e) {
+      setAntiRevokeInstalled((current) => Object.fromEntries(
+        Object.keys(current).map((sessionId) => [sessionId, 'unknown' as const])
+      ))
+      setAntiRevokeStatusError(String(e))
       pushToast('err', '防撤回状态刷新失败', String(e))
     } finally {
       setAntiRevokeBusy(false)
@@ -1764,30 +1966,57 @@ export default function App() {
   }
 
   async function installAntiRevoke(ids: string[]) {
-    if (!ids.length) return
+    const requestedIds = Array.from(new Set(ids.filter((id) => antiRevokeInstalled[id] === 'uninstalled')))
+    if (!requestedIds.length) return
     setAntiRevokeBusy(true)
     try {
-      const result = await api.chat.installAntiRevokeTriggers(ids)
-      const ok = result.rows?.filter((r) => r.success).length || 0
-      const failed = result.rows?.filter((r) => !r.success).length || 0
-      pushToast(ok > 0 ? 'ok' : 'err', `防撤回安装完成`, `成功 ${ok}${failed ? ` / 失败 ${failed}` : ''}`)
+      const result = await api.chat.installAntiRevokeTriggers(requestedIds)
+      const rows = result?.rows || []
+      const successful = new Set(rows.filter((row) => row.success).map((row) => row.sessionId))
+      setAntiRevokeInstalled((current) => ({
+        ...current,
+        ...Object.fromEntries(requestedIds.map((id) => [id, successful.has(id) ? 'installed' : 'unknown'])),
+      }))
+      const failedRows = rows.filter((row) => !row.success)
+      const missingRows = Math.max(0, requestedIds.length - rows.length)
+      const failed = Math.max(failedRows.length + missingRows, result?.success === false && failedRows.length + missingRows === 0 ? 1 : 0)
+      const detail = failedRows.slice(0, 3).map((row) => `${row.sessionId}：${row.error || '安装失败'}`)
+      if (missingRows > 0 && result?.error) detail.push(result.error)
+      if (failed > 0 && detail.length === 0) detail.push(result?.error || '未返回逐会话安装结果')
+      const summary = `成功 ${successful.size} / 失败 ${failed}${detail.length ? `；${detail.join('；')}` : ''}`
+      pushToast(failed === 0 ? 'ok' : 'err', failed === 0 ? '防撤回安装完成' : successful.size > 0 ? '防撤回安装部分完成' : '防撤回安装失败', summary, failed > 0 ? 10000 : 5200)
       await refreshAntiRevoke()
     } catch (e) {
       pushToast('err', '防撤回安装失败', String(e))
+      setAntiRevokeInstalled((current) => ({ ...current, ...Object.fromEntries(requestedIds.map((id) => [id, 'unknown'])) }))
       setAntiRevokeBusy(false)
     }
   }
 
   async function uninstallAntiRevoke(ids: string[]) {
-    if (!ids.length) return
+    const requestedIds = Array.from(new Set(ids.filter((id) => antiRevokeInstalled[id] === 'installed')))
+    if (!requestedIds.length) return
     setAntiRevokeBusy(true)
     try {
-      const result = await api.chat.uninstallAntiRevokeTriggers(ids)
-      const ok = result.rows?.filter((r) => r.success).length || 0
-      pushToast(ok > 0 ? 'ok' : 'err', `防撤回已还原`, `成功 ${ok}`)
+      const result = await api.chat.uninstallAntiRevokeTriggers(requestedIds)
+      const rows = result?.rows || []
+      const successful = new Set(rows.filter((row) => row.success).map((row) => row.sessionId))
+      setAntiRevokeInstalled((current) => ({
+        ...current,
+        ...Object.fromEntries(requestedIds.map((id) => [id, successful.has(id) ? 'uninstalled' : 'unknown'])),
+      }))
+      const failedRows = rows.filter((row) => !row.success)
+      const missingRows = Math.max(0, requestedIds.length - rows.length)
+      const failed = Math.max(failedRows.length + missingRows, result?.success === false && failedRows.length + missingRows === 0 ? 1 : 0)
+      const detail = failedRows.slice(0, 3).map((row) => `${row.sessionId}：${row.error || '还原失败'}`)
+      if (missingRows > 0 && result?.error) detail.push(result.error)
+      if (failed > 0 && detail.length === 0) detail.push(result?.error || '未返回逐会话还原结果')
+      const summary = `成功 ${successful.size} / 失败 ${failed}${detail.length ? `；${detail.join('；')}` : ''}`
+      pushToast(failed === 0 ? 'ok' : 'err', failed === 0 ? '防撤回已还原' : successful.size > 0 ? '防撤回还原部分完成' : '防撤回还原失败', summary, failed > 0 ? 10000 : 5200)
       await refreshAntiRevoke()
     } catch (e) {
       pushToast('err', '防撤回还原失败', String(e))
+      setAntiRevokeInstalled((current) => ({ ...current, ...Object.fromEntries(requestedIds.map((id) => [id, 'unknown'])) }))
       setAntiRevokeBusy(false)
     }
   }
@@ -1805,15 +2034,21 @@ export default function App() {
   }
 
   const formatFolder = FORMAT_FOLDERS[format] || 'TXT'
-  const installedCount = Object.values(antiRevokeInstalled).filter(Boolean).length
+  const installedCount = antiRevokeSessions.filter((session) => antiRevokeInstalled[session.username] === 'installed').length
+  const pendingCount = antiRevokeSessions.filter((session) => antiRevokeInstalled[session.username] === 'uninstalled').length
+  const unknownCount = antiRevokeSessions.filter((session) => {
+    const status = antiRevokeInstalled[session.username]
+    return status !== 'installed' && status !== 'uninstalled'
+  }).length
 
   // 会话一多，防撤回列表就没法用了 —— 没有搜索，也没法只看「还没装的」。
   const filteredAntiRevokeSessions = useMemo(() => {
     const kw = antiRevokeQuery.trim().toLowerCase()
     return antiRevokeSessions.filter((s) => {
-      const installed = antiRevokeInstalled[s.username] === true
-      if (antiRevokeFilter === 'installed' && !installed) return false
-      if (antiRevokeFilter === 'pending' && installed) return false
+      const status = antiRevokeInstalled[s.username] || 'unknown'
+      if (antiRevokeFilter === 'installed' && status !== 'installed') return false
+      if (antiRevokeFilter === 'pending' && status !== 'uninstalled') return false
+      if (antiRevokeFilter === 'unknown' && status !== 'unknown') return false
       if (!kw) return true
       return (s.displayName || '').toLowerCase().includes(kw) || s.username.toLowerCase().includes(kw)
     })
@@ -1828,17 +2063,17 @@ export default function App() {
         <button
           className="secondary-btn"
           type="button"
-          disabled={!allReady || antiRevokeBusy || antiRevokeSessions.length === 0}
-          onClick={() => void installAntiRevoke(antiRevokeSessions.map((s) => s.username))}
+          disabled={!allReady || antiRevokeBusy || pendingCount === 0}
+          onClick={() => void installAntiRevoke(antiRevokeSessions.filter((s) => antiRevokeInstalled[s.username] === 'uninstalled').map((s) => s.username))}
         >
           <ShieldPlus size={14} />
-          全部安装
+          安装未安装项 {pendingCount > 0 ? `(${pendingCount})` : ''}
         </button>
         <button
           className="danger-btn"
           type="button"
           disabled={!allReady || antiRevokeBusy || installedCount === 0}
-          onClick={() => void uninstallAntiRevoke(Object.keys(antiRevokeInstalled).filter((id) => antiRevokeInstalled[id]))}
+          onClick={() => void uninstallAntiRevoke(antiRevokeSessions.filter((s) => antiRevokeInstalled[s.username] === 'installed').map((s) => s.username))}
         >
           <Undo2 size={14} />
           全部还原
@@ -1848,8 +2083,39 @@ export default function App() {
   )
 
   function switchTab(next: Tab) {
-    setTab(next)
-    void api.config.set('lastTab', next)
+    const route = next === 'diagnostics' ? 'settings' : next
+    setTab(route)
+    if (next === 'diagnostics') setSettingsSection('diagnostics')
+    void api.config.set('lastTab', route)
+  }
+
+  function renderRailItem(t: (typeof TABS)[number], label = t.label) {
+    const Icon = t.icon
+    // Setup and diagnostics must remain available when connection prerequisites fail.
+    const needsDatabase = ['export', 'reader', 'sns', 'poster', 'analytics', 'antirecall', 'search'].includes(t.id)
+    const locked = needsDatabase && (!allReady || (updateInfo?.forced === true && updateInfo.allowReadOnly === false))
+    const button = (
+      <button
+        key={t.id}
+        type="button"
+        aria-current={tab === t.id ? 'page' : undefined}
+        className="rail-item"
+        data-tab={t.id}
+        data-nav-label={t.label}
+        data-active={tab === t.id}
+        disabled={locked}
+        onClick={() => switchTab(t.id)}
+      >
+        <Icon size={16} strokeWidth={tab === t.id ? 2 : 1.6} />
+        <span>{label}</span>
+      </button>
+    )
+    // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
+    return locked ? (
+      <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
+        {button}
+      </span>
+    ) : button
   }
 
   function sessionTypeOf(username: string): Exclude<SessionType, 'all'> {
@@ -2034,6 +2300,15 @@ export default function App() {
 
   return (
     <div className="shell">
+      <svg aria-hidden="true" className="navigation-gradient-defs" width="0" height="0">
+        <defs>
+          <linearGradient id="weport-navigation-gradient" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="var(--accent-3)" />
+            <stop offset="48%" stopColor="var(--accent)" />
+            <stop offset="100%" stopColor="var(--accent-deep)" />
+          </linearGradient>
+        </defs>
+      </svg>
       {/* 背景层：图片与视频共用同一个合成层（见 theme.scss 的 `.app-bg`）。
           视频必须是真实的 <video>（而且要 muted + playsInline 才允许自动播放），
           窗口在前台时循环播放，切到后台就暂停 —— 一个一直在解码的视频会持续吃
@@ -2094,42 +2369,24 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="rail-nav" role="tablist" aria-label="功能">
-          {NAV_GROUPS.map((group) => (
-            <div className="rail-group" key={group.id}>
-              <div className="rail-group-label">{group.label}</div>
-              {TABS.filter((t) => t.group === group.id).map((t) => {
-                const Icon = t.icon
-                // 与其余功能一致：未完成数据目录/账号/密钥准备前不可用
-                const locked = t.id !== 'connect' && !allReady
-                const button = (
-                  <button
-                    key={t.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={tab === t.id}
-                    className="rail-item"
-                    data-active={tab === t.id}
-                    disabled={locked}
-                    onClick={() => switchTab(t.id)}
-                  >
-                    {/* 描边跟着文字重量走：选中态文字更重，图标也加粗一档 */}
-                    <Icon size={16} strokeWidth={tab === t.id ? 2 : 1.6} />
-                    <span>{t.label}</span>
-                  </button>
-                )
-                // disabled 按钮不触发原生 title 提示，用外层包裹实现悬停提示
-                return locked ? (
-                  <span key={t.id} className="tab-tip" title={FEATURE_LOCK_TIP} aria-disabled="true">
-                    {button}
-                  </span>
-                ) : (
-                  button
-                )
-              })}
-            </div>
-          ))}
+        <nav className="rail-nav" aria-label="功能">
+          {NAV_GROUPS.map((group) => {
+            const groupItemsId = `rail-group-items-${group.id}`
+            return (
+              <div className="rail-group" key={group.id}>
+                <div className="rail-group-label">{group.label}</div>
+                <div className="rail-group-items" id={groupItemsId}>
+                  {TABS.filter((item) => item.group === group.id).map((item) =>
+                    renderRailItem(item),
+                  )}
+                </div>
+              </div>
+            )
+          })}
         </nav>
+        <div className="rail-settings-group">
+          {TABS.filter((item) => item.id === 'settings').map((item) => renderRailItem(item))}
+        </div>
 
         {/* 全局状态：旧版把「已连接 / 已就绪 / 1 个」分别写在连接页、通知页和
             导出页里，用户永远不确定哪一个才是当前真实状态。这里合并成唯一
@@ -2149,7 +2406,7 @@ export default function App() {
         <div className="top-actions">
           {busy && busyLabel ? (
             <span className="status-busy" role="status">
-              {busyLabel}
+              <span className="status-busy-label">{busyLabel}</span>
             </span>
           ) : null}
         </div>
@@ -2158,7 +2415,8 @@ export default function App() {
       {updateInfo && (
         <div className="update-banner">
           <div className="update-banner-body">
-            <h2>发现新版本 v{updateInfo.version}</h2>
+            <h2>{updateInfo.forced ? '需要兼容性更新' : `发现新版本 v${updateInfo.version}`}</h2>
+            {updateInfo.forced && <p role="alert">{updateInfo.reason}。{updateInfo.allowReadOnly ? '现有档案的阅读、导出与备份仍可使用。' : '请先更新，再连接微信数据。'}</p>}
             {updateInfo.body ? (
               <div className="update-banner-notes">
                 <Suspense fallback={null}>
@@ -2172,20 +2430,10 @@ export default function App() {
               <ScrollText size={13} />
               查看完整更新日志
             </button>
-            {updateBusy && updateProgress && (
-              <div className="update-progress" aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${Math.max(0, Math.min(100, updateProgress.percent))}%` }}
-                  />
-                </div>
-                <span>{Math.round(updateProgress.percent)}%</span>
-              </div>
-            )}
+            <UpdateDownloadProgress />
           </div>
           <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-            {updateBusy ? (updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : '正在安装并重启…') : '立即更新'}
+            <UpdateDownloadLabel checking={updateChecking} idleLabel={updateInfo.forced && !updateInfo.hasUpdate ? '下载兼容版本' : '立即更新'} />
           </button>
         </div>
       )}
@@ -2353,12 +2601,12 @@ export default function App() {
                 </div>
 
                 <div className="btn-row">
-                  <button className="primary-btn" type="button" onClick={() => void extractKey()} disabled={busy}>
+                  <button className={keyOk && dbReady && accountReady ? 'secondary-btn' : 'primary-btn'} type="button" onClick={() => void extractKey()} disabled={busy}>
                     <KeyRound size={14} />
                     {busy ? '提取中…' : '提取密钥'}
                   </button>
                   <button
-                    className="secondary-btn"
+                    className={keyOk && dbReady && accountReady ? 'primary-btn' : 'secondary-btn'}
                     type="button"
                     onClick={() => void confirmKeyAndConnect()}
                     disabled={busy || !dbReady || !accountReady || !keyOk}
@@ -2521,6 +2769,66 @@ export default function App() {
               </div>
             </div>
             </div>
+
+            {/* 自检失败时显示告警；通过但存在源 server_id 冲突时显示信息提示。 */}
+            {exportIntegrity ? (
+              <div
+                role={exportIntegrity.ok ? 'status' : 'alert'}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  flexWrap: 'wrap',
+                  margin: '0 0 10px',
+                  padding: '9px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  border: exportIntegrity.ok ? '1px solid var(--line)' : '1px solid rgba(229, 72, 77, 0.35)',
+                  background: exportIntegrity.ok ? 'var(--bg)' : 'rgba(229, 72, 77, 0.08)',
+                  color: 'var(--text-dim)',
+                  fontSize: 12.5,
+                }}
+              >
+                {exportIntegrity.ok
+                  ? <Info size={15} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                  : <AlertTriangle size={15} style={{ color: 'var(--danger)', flexShrink: 0 }} />}
+                <strong style={{ color: 'var(--text)', fontWeight: 600 }}>
+                  {exportIntegrity.ok ? '导出数据自检通过' : '导出数据自检未通过'}
+                </strong>
+                <span>
+                  {exportIntegrity.sourceIdCollisions > 0
+                    ? `源 server_id 冲突 ${exportIntegrity.sourceIdCollisions} 组（不同源行均已保留）`
+                    : null}
+                  {!exportIntegrity.ok
+                    ? `${exportIntegrity.sourceIdCollisions > 0 ? ' · ' : ''}总数不符 ${exportIntegrity.mismatches} · 缺失媒体 ${exportIntegrity.missingMedia} · 重复 ${exportIntegrity.duplicates}`
+                    : null}
+                  {' '}（{exportIntegrity.sessions} 个会话 / {exportIntegrity.messages} 条消息）
+                </span>
+                <span style={{ flex: 1 }} />
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  onClick={() => {
+                    if (exportIntegrity.reportPath) void api.shell.openPath(exportIntegrity.reportPath)
+                  }}
+                >
+                  打开报告
+                </button>
+                {exportIntegrity.csvPath ? (
+                  <button
+                    className="ghost-btn"
+                    type="button"
+                    onClick={() => {
+                      if (exportIntegrity.csvPath) void api.shell.openPath(exportIntegrity.csvPath)
+                    }}
+                  >
+                    缺失媒体清单
+                  </button>
+                ) : null}
+                <button className="ghost-btn" type="button" onClick={() => setExportIntegrity(null)}>
+                  知道了
+                </button>
+              </div>
+            ) : null}
 
             {/* 两栏：左边是「怎么导 / 导哪些」这几步，右边是常驻的动作与状态。
                 原来五段纵向堆叠，页面有三屏高，主按钮够不到；现在主按钮和进度
@@ -2721,6 +3029,8 @@ export default function App() {
                     sessions={filteredExportSessions}
                     totalSessions={exportSessions.length}
                     selectedIds={selectedExportSessionIds}
+                    favoriteIds={exportFavoriteIds}
+                    favoritesReady={exportFavoritesLoaded}
                     selectionMode={exportSelectionMode}
                     search={exportSessionSearch}
                     type={exportSessionType}
@@ -2729,8 +3039,9 @@ export default function App() {
                     onTypeChange={setExportSessionType}
                     onSelectionModeChange={setExportSelectionMode}
                     onToggle={toggleExportSession}
+                    onToggleFavorite={handleToggleExportFavorite}
                     onToggleVisible={toggleVisibleExportSessions}
-                    onRefresh={() => void loadExportSessions()}
+                    onRefresh={() => { void loadExportSessions(); setExportFavoritesReloadToken(token => token + 1) }}
                     allVisibleSelected={allVisibleExportSessionsSelected}
                     disabled={busy}
                   />
@@ -2776,7 +3087,7 @@ export default function App() {
                             }}
                             disabled={busy}
                           />
-                          <span>语音转文字（若已转换）</span>
+                          <span>包含已有语音文字（本地消息或转写缓存）</span>
                         </label>
                       </div>
                       <div className="opt-row">
@@ -2889,6 +3200,24 @@ export default function App() {
             />
           </Suspense>
         )}
+        {tab === 'poster' && (
+          <Suspense fallback={<LazyFallback label="海报" />}>
+            <PosterPage sourceRequest={posterSource} />
+          </Suspense>
+        )}
+        {tab === 'reader' && (
+          <Suspense fallback={<LazyFallback label="聊天阅读" />}>
+            <ReaderPage key={selectedWxid} accountId={selectedWxid} openRequest={readerOpenRequest?.accountId === selectedWxid ? readerOpenRequest : undefined} onCreatePoster={request => { setPosterSource(request); setTab('poster') }} />
+          </Suspense>
+        )}
+        {tab === 'search' && (
+          <Suspense fallback={<LazyFallback label="搜索" />}>
+            <SearchPage key={selectedWxid} accountId={selectedWxid} onOpen={(hit, query) => { setReaderOpenRequest({ ...hit, accountId: selectedWxid, requestId: Date.now(), query }); setTab('reader') }} onCreatePoster={request => {
+              setPosterSource(request)
+              setTab('poster')
+            }} />
+          </Suspense>
+        )}
         {tab === 'weclone' && (
           <Suspense fallback={<LazyFallback label="WeClone" />}>
             <WeClonePage />
@@ -2921,7 +3250,7 @@ export default function App() {
                 <strong>
                   {antiRevokeSessions.length === 0
                     ? '尚未读取会话'
-                    : `已安装 ${installedCount} / ${antiRevokeSessions.length} 个会话`}
+                    : `已安装 ${installedCount} / ${antiRevokeSessions.length} 个会话 · 未安装 ${pendingCount} · 待确认 ${unknownCount}`}
                 </strong>
                 <span className="hint">触发器装在微信侧，装好后不必保持 Weport 运行</span>
               </div>
@@ -2934,6 +3263,14 @@ export default function App() {
                 {antiRevokeBusy ? '刷新中…' : '刷新状态'}
               </button>
             </div>
+
+            {antiRevokeStatusError && (
+              <div className="status-warn anti-revoke-status-error" role="alert">
+                <AlertTriangle size={14} />
+                <span>有会话的触发器状态无法确认。请刷新状态后再安装或还原。</span>
+                <span className="anti-revoke-status-detail">{antiRevokeStatusError}</span>
+              </div>
+            )}
 
             {!allReady && (
               <div className="status-warn">
@@ -2962,6 +3299,7 @@ export default function App() {
                         { id: 'all', label: '全部' },
                         { id: 'installed', label: '已安装' },
                         { id: 'pending', label: '未安装' },
+                        { id: 'unknown', label: `待确认 ${unknownCount}` },
                       ] as const
                     ).map((option) => (
                       <button
@@ -2996,10 +3334,12 @@ export default function App() {
 
               {filteredAntiRevokeSessions.length > 0 && (
                 <div className="account-list anti-revoke-list" role="listbox" aria-label="防撤回会话">
-                  {filteredAntiRevokeSessions.map((s) => {
-                    const installed = antiRevokeInstalled[s.username] === true
+                  {filteredAntiRevokeSessions.slice(0, antiRevokeLimit).map((s) => {
+                    const status = antiRevokeInstalled[s.username] || 'unknown'
+                    const installed = status === 'installed'
+                    const stateLabel = installed ? '已安装' : status === 'uninstalled' ? '未安装' : '状态未知'
                     return (
-                      <div key={s.username} className="account-item static anti-revoke" data-active={installed}>
+                      <div key={s.username} className="account-item static anti-revoke" data-active={installed} data-revoke-state={status}>
                         {/* 群/私聊一眼可分：列表里大多是群，混着几个联系人时
                             光看名字判断不出这是群还是个人。能拿到头像就显示头像
                             （形状本身也区分群/人），拿不到再退回类型图标。 */}
@@ -3017,17 +3357,35 @@ export default function App() {
                         )}
                         <span className="ar-name" title={s.username}>{s.displayName || s.username}</span>
                         <span className="ar-id" title={s.username}>{s.username}</span>
+                        <span className={`badge ${installed ? 'ok' : status === 'unknown' ? 'unknown' : ''}`}>{stateLabel}</span>
                         <button
-                          className={installed ? 'ghost-btn' : 'secondary-btn'}
+                          className={installed ? 'danger-btn' : 'secondary-btn'}
                           type="button"
-                          disabled={antiRevokeBusy}
+                          disabled={antiRevokeBusy || status === 'unknown'}
                           onClick={() => (installed ? void uninstallAntiRevoke([s.username]) : void installAntiRevoke([s.username]))}
                         >
-                          {installed ? '还原' : '安装'}
+                          {antiRevokeBusy ? <Loader2 size={12} className="spin" /> : null}
+                          {installed ? '还原' : status === 'uninstalled' ? '安装' : '状态未知'}
                         </button>
                       </div>
                     )
                   })}
+                </div>
+              )}
+
+              {/* v1.2 §7：会话一次性全挂载就是这一页在热切时剩下的那个 ~60ms 长任务
+                  （实测 265 行 × 每行一个 Avatar）。改成渐进渲染：先给 60 行，多的按需再加。
+                  换筛选/搜索时回到 60 行，长列表依然是完整可达的。 */}
+              {filteredAntiRevokeSessions.length > antiRevokeLimit && (
+                <div className="list-more">
+                  <button
+                    className="secondary-btn"
+                    type="button"
+                    disabled={!allReady || antiRevokeBusy}
+                    onClick={() => setAntiRevokeLimit((prev) => prev + 60)}
+                  >
+                    再显示 60 个（还有 {filteredAntiRevokeSessions.length - antiRevokeLimit} 个）
+                  </button>
                 </div>
               )}
             </section>
@@ -3346,6 +3704,9 @@ export default function App() {
                   { id: 'connectors', label: '连接器', hint: 'Todoist 等第三方工具', icon: Plug },
                   { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
                   { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
+                  { id: 'privacy', label: '隐私', hint: '本机处理 · 数据使用说明', icon: Info },
+                  { id: 'diagnostics', label: '诊断', hint: '连接 · 数据健康 · 运行自检', icon: DiagnosticsIcon },
+                  { id: 'report', label: '问题反馈', hint: '本机编辑 · GitHub 手动提交', icon: Bug },
                   { id: 'about', label: '关于', hint: '版本与更新', icon: Info },
                 ] as const
               ).map((item) => {
@@ -3370,6 +3731,14 @@ export default function App() {
             </nav>
 
             <div className="settings-pane">
+              {settingsSection === 'privacy' && <PrivacySettings />}
+              {settingsSection === 'diagnostics' && (
+                <>
+                  <Suspense fallback={<LazyFallback label="诊断" />}>
+                    <DiagnosticsPage />
+                  </Suspense>
+                </>
+              )}
               {settingsSection === 'general' && (
                 <section className="panel">
                   <div className="panel-head">
@@ -3440,7 +3809,7 @@ export default function App() {
                       <Images size={15} />
                       外观
                     </h2>
-                    <span>明暗 · 强调色 · 背景 · 密度</span>
+                    <span>明暗 · 强调色 · 背景</span>
                   </div>
 
               {/* 主题 = 明暗 × 强调色，但**两个轴分别可选**。
@@ -3823,30 +4192,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="setting-row">
-                <div className="setting-label">
-                  <div>
-                    <strong>界面密度</strong>
-                    <span className="hint">紧凑模式收紧间距，字号保持不变</span>
-                  </div>
-                </div>
-                <div className="segmented" role="radiogroup" aria-label="界面密度">
-                  {DENSITY_OPTIONS.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={appearance.density === option.id}
-                      className="segmented-item"
-                      data-active={appearance.density === option.id}
-                      onClick={() => setDensity(option.id)}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-                </section>
+              </section>
               )}
 
               {settingsSection === 'ai' && (
@@ -4110,6 +4456,8 @@ export default function App() {
                 </>
               )}
 
+              {settingsSection === 'report' && <BugReportPanel />}
+
               {settingsSection === 'about' && (
                 <section className="panel">
                   <div className="panel-head">
@@ -4151,14 +4499,14 @@ export default function App() {
                       <GitPullRequest size={13} />                      GitHub
                     </button>
                     <button className="ghost-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                      {updateBusy ? '检查中…' : '检查更新'}
+                      {updateChecking ? '检查中…' : '检查更新'}
                     </button>
                     <button className="ghost-btn" type="button" onClick={() => void openChangelog()}>
                       更新日志
                     </button>
                     {updateInfo && (
                       <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                        {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                        <UpdateDownloadLabel checking={updateChecking} idleLabel={`安装 v${updateInfo.version}`} />
                       </button>
                     )}
                   </div>
@@ -4511,11 +4859,11 @@ export default function App() {
             <p style={{ marginTop: 8, fontSize: 12, color: 'var(--text-faint)' }}>更新源：GitHub Releases (Panther114/Weport)</p>
             <div className="modal-actions">
               <button className="secondary-btn" type="button" disabled={updateBusy} onClick={() => void checkForUpdates(true)}>
-                {updateBusy ? '检查中…' : '检查更新'}
+                {updateChecking ? '检查中…' : '检查更新'}
               </button>
               {updateInfo && (
                 <button className="primary-btn" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>
-                  {updateBusy && updateProgress ? `下载中 ${Math.round(updateProgress.percent)}%` : updateBusy ? '正在安装并重启…' : `安装 v${updateInfo.version}`}
+                  <UpdateDownloadLabel checking={updateChecking} idleLabel={`安装 v${updateInfo.version}`} />
                 </button>
               )}
               <button className="secondary-btn" type="button" onClick={() => setAboutOpen(false)}>

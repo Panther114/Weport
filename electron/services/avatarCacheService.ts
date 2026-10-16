@@ -18,20 +18,22 @@ import { writeFile } from 'fs/promises'
 import { createHash } from 'crypto'
 import { ConfigService } from './config'
 
+import { isLocalMediaUrl, toLocalMediaUrl } from './localMediaUrl'
 const AVATAR_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090719) XWEB/8351'
 
 const isCdnUrl = (url: string): boolean => /^https?:\/\/([a-z0-9-]+\.)?(qlogo|qpic)\.cn\//i.test(url)
 const isDataUrl = (url: string): boolean => /^data:image\//i.test(url)
-const isLocalUrl = (url: string): boolean => url.startsWith('weport-media://')
+const isLocalUrl = (url: string): boolean => isLocalMediaUrl(url)
 
 /**
- * 本地协议 URL 格式：weport-media://local/<encodeURIComponent(绝对路径)>
+ * 本地 URL 形态与到磁盘路径的互转统一在 `localMediaUrl.ts`：
+ * Electron 是 `weport-media://local/<encodeURIComponent(绝对路径)>`，
+ * Older preview cache URLs are normalized when rendering.
  * 注意：不能把盘符放进 host（weport-media://C:/...）—— Chromium 会把 `C:`
  * 规范化为 host `c`（冒号被当作端口分隔符），路径解析会丢盘符冒号。
  */
-export const toProtocolUrl = (filePath: string): string =>
-  `weport-media://local/${encodeURIComponent(filePath.replace(/\\/g, '/'))}`
+export const toProtocolUrl = (filePath: string): string => toLocalMediaUrl(filePath)
 
 export const protocolUrlToPath = (url: string): string | null => {
   try {

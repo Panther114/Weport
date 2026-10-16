@@ -2675,6 +2675,14 @@
   font-weight: 600;
 }
 
+.sns-anti-delete-feedback {
+  padding: 0 16px 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  &.is-error { color: var(--danger); }
+}
+
 /* 侧栏三段之间加分隔线：搜索 / 日期 / 发布者原本只是靠间距分开，
    连在一起看像一大坨输入框。 */
 .sns-sidebar > * + * {

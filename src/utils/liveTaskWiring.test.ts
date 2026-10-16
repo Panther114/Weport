@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { hydrateFromSnapshots } from './liveTaskWiring'
+import { applyUpdateDownloadProgress, hydrateFromSnapshots } from './liveTaskWiring'
 import { LIVE_TASK, liveTask, resetAllLiveTasks } from './liveTask'
 
 /**
@@ -15,7 +15,30 @@ beforeEach(() => {
   resetAllLiveTasks()
 })
 
+describe('updater window recreation', () => {
+  it('restores active download metadata and retains it through subsequent progress events', () => {
+    const updateInfo = { version: '2.0.0', releaseNotes: 'Fixture notes' }
+    hydrateFromSnapshots({ [LIVE_TASK.updateDownload]: { status: 'running', stage: 'downloading', progress: 23, detail: { updateInfo } } })
+    applyUpdateDownloadProgress({ percent: 37, transferred: 220, total: 600 })
+    expect(liveTask(LIVE_TASK.updateDownload).getState()).toMatchObject({ status: 'running', progress: 37,
+      detail: { updateInfo, transferred: 220, total: 600 } })
+  })
+  it('restores a recent download failure with the same release and retry details', () => {
+    const now = Date.now()
+    hydrateFromSnapshots({ [LIVE_TASK.updateDownload]: { status: 'failed', stage: 'downloading', progress: 53,
+      finishedAt: now, error: 'checksum mismatch', detail: { updateInfo: { version: '2.0.0' } } } }, now)
+    expect(liveTask(LIVE_TASK.updateDownload).getState()).toMatchObject({ status: 'failed', error: 'checksum mismatch',
+      detail: { updateInfo: { version: '2.0.0' } } })
+  })
+})
+
 describe('运行中的快照总是被采纳', () => {
+  it('rehydrates index and database maintenance jobs after the renderer is rebuilt', () => {
+    for (const key of [LIVE_TASK.searchIndex, LIVE_TASK.databaseMaintenance]) {
+      hydrateFromSnapshots({ [key]: { status: 'running', stage: 'work', progress: 25, message: '后台任务', startedAt: 1000 } })
+      expect(liveTask(key).getState()).toMatchObject({ status: 'running', message: '后台任务', startedAt: 1000 })
+    }
+  })
   it('空 store 会被填成运行中（这正是窗口重建的场景）', () => {
     hydrateFromSnapshots({
       [LIVE_TASK.wecloneGenerate]: {

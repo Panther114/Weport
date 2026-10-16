@@ -76,10 +76,6 @@ export class JsonFormatter {
         ? collected.rows.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const senderUsernames = new Set<string>()
       let senderScanIndex = 0
       for (const msg of collected.rows) {
@@ -170,7 +166,7 @@ export class JsonFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 35,
@@ -187,7 +183,7 @@ export class JsonFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -250,7 +246,8 @@ export class JsonFormatter {
           ? mediaCache.get(mediaKey)
           : await this.exportService.resolveWeliveRawMediaItem(msg, mediaRootDir, mediaRelativePrefix, options, control)
 
-        if (msg.localType === 34 && options.exportVoiceAsText) {
+        const shouldUseTranscript = msg.localType === 34 && options.exportVoiceAsText
+        if (shouldUseTranscript) {
           content = voiceTranscriptMap.get(this.exportService.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
         } else if (mediaItem) {
           content = this.exportService.formatExportMediaPath(mediaItem.relativePath, options, 'text')
@@ -266,7 +263,7 @@ export class JsonFormatter {
             msg.emojiCaption
           )
         }
-        if (this.exportService.isReadableSystemMessage(msg.localType, msg.content)) {
+        if (!shouldUseTranscript && this.exportService.isReadableSystemMessage(msg.localType, msg.content)) {
           content = extractReadableSystemMessageText(msg.content) || content
         }
 
@@ -281,11 +278,11 @@ export class JsonFormatter {
           myDisplayName: myInfo.displayName || cleanedMyWxid
         })
         // 对于媒体消息，不要让引用信息覆盖媒体路径
-        if (quotedReplyDisplay && !mediaItem) {
+        if (quotedReplyDisplay && !mediaItem && !shouldUseTranscript) {
           content = this.exportService.buildQuotedReplyText(quotedReplyDisplay)
         }
 
-        const appendedLinkContent = quotedReplyDisplay
+        const appendedLinkContent = quotedReplyDisplay || shouldUseTranscript
           ? null
           : this.exportService.formatLinkCardExportText(msg.content, msg.localType, 'append-url')
         if (appendedLinkContent) {
@@ -343,6 +340,8 @@ export class JsonFormatter {
 
         const platformMessageId = this.exportService.getExportPlatformMessageId(msg)
         if (platformMessageId) msgObj.platformMessageId = platformMessageId
+        const sourceIdentityHash = this.exportService.getSourceMessageIdentityHash(msg)
+        if (sourceIdentityHash) msgObj.sourceIdentityHash = sourceIdentityHash
 
         const replyToMessageId = this.exportService.getExportReplyToMessageId(msg.content)
         if (replyToMessageId) msgObj.replyToMessageId = replyToMessageId
@@ -558,6 +557,7 @@ export class JsonFormatter {
             source: message.source
           }
           if (message.platformMessageId) compactMessage.platformMessageId = message.platformMessageId
+          if (message.sourceIdentityHash) compactMessage.sourceIdentityHash = message.sourceIdentityHash
           if (message.replyToMessageId) compactMessage.replyToMessageId = message.replyToMessageId
           if (message.locationLat != null) compactMessage.locationLat = message.locationLat
           if (message.locationLng != null) compactMessage.locationLng = message.locationLng
@@ -701,7 +701,8 @@ export class JsonFormatter {
 
         this.exportService.throwIfStopRequested(control)
         await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-        await fs.promises.writeFile(outputPath, JSON.stringify(arkmeExport, null, 2), 'utf-8')
+        // v1.2 §10.1：整体写也要原子（tmp → fsync → os.replace），中断不留半截 JSON
+        await this.exportService.writeArtifactFile(outputPath, JSON.stringify(arkmeExport, null, 2), 'utf-8')
       } else {
         const detailedExport: any = {
           weflow,
@@ -725,7 +726,7 @@ export class JsonFormatter {
 
         this.exportService.throwIfStopRequested(control)
         await this.exportService.recordCreatedFileBeforeWrite(outputPath, control)
-        await fs.promises.writeFile(outputPath, JSON.stringify(detailedExport, null, 2), 'utf-8')
+        await this.exportService.writeArtifactFile(outputPath, JSON.stringify(detailedExport, null, 2), 'utf-8')
       }
 
       onProgress?.({

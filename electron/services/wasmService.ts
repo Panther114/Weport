@@ -40,6 +40,8 @@ export class WasmService {
 
     private cachePut(cacheKey: string, buffer: Buffer): void {
         if (buffer.length > this.keystreamCacheMaxBytes) return
+        const replaced = this.keystreamCache.get(cacheKey)
+        if (replaced) this.keystreamCacheBytes -= replaced.length
         this.keystreamCache.delete(cacheKey)
         this.keystreamCache.set(cacheKey, buffer)
         this.keystreamCacheBytes += buffer.length
@@ -184,6 +186,8 @@ export class WasmService {
     }
 
     public async getKeystream(key: string, size: number = 131072): Promise<Buffer> {
+        if (!Number.isSafeInteger(size) || size < 0) throw new RangeError('Invalid keystream size')
+        if (size === 0) return Buffer.alloc(0)
         // ISAAC-64 uses 8-byte blocks. If size is not a multiple of 8,
         // the global reverse() will cause a shift in alignment.
         const alignSize = Math.ceil(size / 8) * 8;
@@ -201,9 +205,9 @@ export class WasmService {
 
         // Return exactly the requested size from the beginning of the reversed stream.
         // Since we reversed the 'aligned' buffer, index 0 is the last byte of the last block.
-        const result = Buffer.from(reversed).subarray(0, size);
+        const result = Buffer.from(reversed);
         this.cachePut(cacheKey, result);
-        return result;
+        return Buffer.from(result.subarray(0, size));
     }
 
     public async getRawKeystream(key: string, size: number = 131072): Promise<Buffer> {

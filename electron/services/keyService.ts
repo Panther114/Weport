@@ -6,6 +6,23 @@ import { promisify } from 'util'
 import os from 'os'
 import crypto from 'crypto'
 import { stripAccountSuffix } from './weChatLoginOracle'
+import {
+  scanWindowsWeChatDbKeys,
+  getProcessImagePath,
+  canReadProcessMemory,
+  readFileVersionString,
+} from './keyScanService'
+import type {
+  AcquiredKey,
+  KeyAcquisitionMode,
+  KeyAcquisitionResult,
+  PlatformObservation,
+} from './keyAcquisition'
+import type { KeySource } from './keyHealthService'
+import {
+  WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+  isNoLoginDbKeyScanEnabled,
+} from './v12StablePolicy'
 
 const execFileAsync = promisify(execFile)
 
@@ -34,11 +51,9 @@ export type ImageKeyCachePayload = { accounts?: ImageKeyCacheAccount[] }
  *
  * 密钥码根本不用扫内存：它就躺在本机 MMKV 的**文件名**里
  * （`%APPDATA%\Tencent\xwechat\net*\kvcomm\key_<code>_<...>.statistic`），
- * 拿到 code 后 `md5(String(code) + 清洗过后缀的 wxid)` 的前 16 个十六进制字符就是
+ * 拿到 code 后 `md5(String(code) + canonicalWxid)` 的前 16 个十六进制字符就是
  * AES 密钥、`code & 0xFF` 就是 XOR 密钥（见 {@link deriveImageKeysForWxid}）。
- * 派生是纯离线计算，本机实测一把命中：`code=52494578` +
- * `wxid_gsnpwh6vh2z012`（原始 wxid 带 `_64b5` 后缀，必须去掉）→
- * 解出的第一块是 `FF D8 FF E0`（JPEG）。
+ * 派生是纯离线计算；归属仍由模板校验（{@link selectVerifiedImageKey}）判定。
  *
  * 只返回候选码，**不**决定用哪个 —— 归属仍由模板校验（{@link selectVerifiedImageKey}）
  * 判定，多几个候选的代价只是几次 md5。
@@ -85,8 +100,8 @@ function imageKeyPayloadFromMmkv(codes: number[]): ImageKeyCachePayload {
 /**
  * 一个 wxid 可能对应的几种写法。
  *
- * issue #20 的核心教训：图像 AES 密钥是 `md5(String(code) + canonicalWxid)` 的前
- * 16 个十六进制字符（本机 400/400 个真实 `*_t.dat` 模板实测）。而 UI 传下来的
+ * 图像 AES 密钥是 `md5(String(code) + canonicalWxid)` 的前
+ * 16 个十六进制字符。而 UI 传下来的
  * "wxid" 其实是**磁盘目录名**，可能带微信改号后缀（`wxid_X_64b5`），自定义微信号
  * 还可能是 `别名_4f2a`。三种清洗规则各有盲区，因此这里把「原样 / 去掉改号后缀 /
  * 去下划线段」的写法全部列为候选，由模板校验决定谁是对的 —— 多试几个字符串的
@@ -335,7 +350,7 @@ export function selectVerifiedImageKey(options: ImageKeySelectionInput): ImageKe
         attempts++
         if (!verifyDerivedAesKey(aesKey, ciphertext)) continue
         onProgress?.(`密钥获取成功（wxid: ${candidateWxid}, code: ${code}）`)
-        console.log('[ImageKey] 校验命中: wxid=', candidateWxid, 'code=', code, 'dirs=', templates.dirs)
+        console.log('[ImageKey] 账号图片模板校验通过')
         return { success: true, xorKey, aesKey, verified: true, accountDir: templates.dirs[0] }
       }
     }
@@ -416,6 +431,10 @@ export class KeyService {
       candidates.push(join(process.resourcesPath, 'resources', 'key', 'win32', 'wx_key.dll'))
       candidates.push(join(process.resourcesPath, 'resources', 'wx_key.dll'))
       candidates.push(join(process.resourcesPath, 'wx_key.dll'))
+      // Also accept a flat resources root for development and custom resource overrides.
+      candidates.push(join(process.resourcesPath, 'key', 'win32', archDir, 'wx_key.dll'))
+      candidates.push(join(process.resourcesPath, 'key', 'win32', 'x64', 'wx_key.dll'))
+      candidates.push(join(process.resourcesPath, 'key', 'win32', 'wx_key.dll'))
     } else {
       const cwd = process.cwd()
       candidates.push(join(cwd, 'resources', 'key', 'win32', archDir, 'wx_key.dll'))
@@ -1272,7 +1291,7 @@ export class KeyService {
       if (mmkvCodes.length > 0) {
         parsed = imageKeyPayloadFromMmkv(mmkvCodes)
         onProgress?.(`缓存目录里读到 ${mmkvCodes.length} 个候选密钥码，正在用本账号图片模板校验…`)
-        console.log('[ImageKey] wx_key.dll 没给出密钥码，改用 MMKV 文件名派生候选:', mmkvCodes)
+        console.log('[ImageKey] 使用 MMKV 缓存候选，数量:', mmkvCodes.length)
       }
     }
     if (!parsed.accounts?.length || !parsed.accounts.some((account) => (account.keys || []).length)) {
@@ -1803,5 +1822,304 @@ export class KeyService {
       } catch { /* 这个模板试不出来就换下一个 */ }
     }
     return -1
+  }
+
+  // === Windows 免登录扫描实现（稳定版门禁关闭，留给 V1.3） ===
+  //
+  // 旧实现只有一条路：等 Hook 在微信进程启动瞬间抓到口令，因此文案被迫要求
+  // 「关自动登录 → 退出 → 扫码重登」。那是**过度要求** —— Hook 真正的触发点是
+  // "进程启动"（reference-projects/WeChat-Export-Tool/scripts/get_key.js:2），
+  // 而 4.1.10.31+ 之后还有一条更省事的路：只读扫描内存里的 WCDB `Config.Cipher`，
+  // 直接拿到**每库 page key**（无需登录/退出，也不需要管理员，K5）。
+  //
+  // 扫描、逐库密钥存储和只读镜像仍保留完整实现；V1.2 稳定版只走已有账号级密钥
+  // 与 Hook，扫描路径统一由 v12StablePolicy.ts 关闭，不能通过环境变量或用户设置开启。
+
+  /**
+   * 平台观测：给自检矩阵（`keyPrerequisite.ts`）填输入。
+   *
+   * 每一项都对应 V12 §1.5 的一行；探测不到一律返回 `null`（"未探测"）而不是猜一个
+   * false —— 自检里 `null` 显示"尚未确认"，猜错的值却会给出错误的下一步指引。
+   */
+  async observePlatform(): Promise<PlatformObservation> {
+    const observation: PlatformObservation = {
+      wechatInstalled: false,
+      wechatExePath: null,
+      wechatPids: [],
+      wechatVersion: null,
+      wechatLoggedIn: null,
+      sameUser: null,
+      memoryReadable: null,
+      hookHelperAvailable: null,
+    }
+
+    try {
+      observation.wechatPids = await this.findWeChatPids()
+    } catch { /* noop */ }
+
+    try {
+      const exePath = await this.findWeChatInstallPath()
+      observation.wechatExePath = exePath
+      observation.wechatInstalled = !!exePath
+      if (exePath) observation.wechatVersion = readFileVersionString(exePath)
+    } catch { /* noop */ }
+
+    // 版本资源读不到时，退而求其次读运行中进程的 exe（同一条只读路径）
+    if (!observation.wechatVersion && observation.wechatPids.length > 0) {
+      const exe = getProcessImagePath(observation.wechatPids[0])
+      if (exe) observation.wechatVersion = readFileVersionString(exe)
+    }
+
+    const pid = observation.wechatPids[0]
+    if (pid) {
+      const readable = canReadProcessMemory(pid)
+      observation.memoryReadable = readable
+      if (readable) {
+        // 能只读打开 ⇒ 同用户且没被杀软拦（K5 的非提权实测也是这条判据）
+        observation.sameUser = true
+      } else {
+        // 读不了内存时再区分"跨用户/跨提权边界"与"安全软件拦截"：
+        // PROCESS_QUERY_LIMITED_INFORMATION 成功 ⇒ 看得见进程只是拿不到 VM_READ，
+        // 更像杀软的过程防护（自检第 6 项）；连它都失败 ⇒ 更像跨用户（第 5 项）。
+        // 已知近似：这里比较的是"访问级别"，没有做进程令牌 SID 的精确比较。
+        try {
+          const limited = this.OpenProcess(0x1000, false, pid)
+          if (limited) {
+            this.CloseHandle(limited)
+            observation.sameUser = true
+          } else {
+            observation.sameUser = false
+          }
+        } catch {
+          observation.sameUser = null
+        }
+      }
+    }
+
+    // 登录判定（自检第 3 项）：账号目录里 session.db 存在且近期写过。
+    try {
+      const configuredDbPath = this.observeConfiguredDbPath()
+      if (configuredDbPath) {
+        const accountDir = this.observeAccountDir(configuredDbPath)
+        if (accountDir) {
+          const nested = join(accountDir, 'db_storage', 'session', 'session.db')
+          const flat = join(accountDir, 'db_storage', 'session.db')
+          const target = existsSync(nested) ? nested : existsSync(flat) ? flat : null
+          if (target) {
+            observation.wechatLoggedIn = Date.now() - statSync(target).mtimeMs < 7 * 24 * 3600 * 1000
+          } else {
+            observation.wechatLoggedIn = false
+          }
+        }
+      }
+    } catch { /* noop */ }
+
+    try {
+      const dllPath = this.getDllPath()
+      observation.hookHelperAvailable = !!dllPath && existsSync(dllPath)
+    } catch {
+      observation.hookHelperAvailable = false
+    }
+
+    return observation
+  }
+
+  /** 配置里的数据根目录（观测用；没有配置时返回空串）。 */
+  private observeConfiguredDbPath(): string {
+    try {
+      // ConfigService 是单例；这里惰性取，避免 keyService 顶层依赖 config.ts
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require('./config')
+      return String(mod.ConfigService.getInstance().get('dbPath') || '')
+    } catch {
+      return ''
+    }
+  }
+
+  /** 由数据根目录解析账号目录（观测用）。 */
+  private observeAccountDir(dbPath: string): string | null {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require('./config')
+      const wxid = String(mod.ConfigService.getInstance().get('myWxid') || '')
+      const dir = mod.ConfigService.getInstance().getAccountDir(dbPath, wxid)
+      return dir ? String(dir) : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 免登录只读扫描（Windows）。返回**每库** page key，且每把都过了 page 1 HMAC。
+   *
+   * Scanning returns independently verified raw page keys, not the account
+   * passphrase consumed by `wcdb_open_account`. `ChatService` uses those keys
+   * only after complete text-history coverage is available, by building a
+   * disposable read-only mirror for the existing account connection API.
+   */
+  async scanDbKeys(options: {
+    accountDir: string
+    onProgress?: (message: string, ratio?: number | null) => void
+    cancel?: { cancelled: boolean }
+  }): Promise<{ success: boolean; keys: AcquiredKey[]; error?: string; diagnostics?: unknown; logs?: string[] }> {
+    const result = await scanWindowsWeChatDbKeys({
+      accountDir: options.accountDir,
+      cancel: options.cancel,
+      onProgress: (progress) => {
+        try { options.onProgress?.(progress.message, progress.ratio) } catch { /* noop */ }
+      },
+    })
+    const keys: AcquiredKey[] = result.keys.map((k) => ({
+      id: k.id,
+      kind: k.kind,
+      path: k.path,
+      keyHex: k.keyHex,
+      saltHex: k.saltHex,
+      mode: k.mode,
+      fingerprint: k.fingerprint,
+      source: 'scan' as KeySource,
+    }))
+    return {
+      success: result.success && keys.length > 0,
+      keys,
+      error: result.error,
+      diagnostics: result.diagnostics,
+      logs: result.logs,
+    }
+  }
+
+  /** 登录捕获（Hook）：沿用既有 `autoGetDbKey` 实现，只做形态适配。 */
+  async hookAcquireKey(options: {
+    timeoutMs: number
+    onStatus?: (message: string, level: number) => void
+  }): Promise<{ success: boolean; key?: string; error?: string; logs?: string[] }> {
+    return this.autoGetDbKey(options.timeoutMs, options.onStatus)
+  }
+
+  /**
+   * 双模式编排（Windows 侧）。扫描门禁关闭时 `auto` 直接走 Hook，`scan` 返回延期说明。
+   *
+   * 扫描重开时，此处仍保留原来的扫描与回落实现；V1.2 发布版不会到达扫描分支。
+   */
+  async acquireDbKey(options: {
+    mode?: KeyAcquisitionMode
+    accountDir?: string
+    timeoutMs?: number
+    onStatus?: (message: string, level: number) => void
+    onScanProgress?: (message: string, ratio?: number | null) => void
+    cancel?: { cancelled: boolean }
+  } = {}): Promise<KeyAcquisitionResult> {
+    const mode = options.mode ?? 'auto'
+    const logs: string[] = []
+    const reasons: NonNullable<KeyAcquisitionResult['reasons']> = {}
+    const accountDir = String(options.accountDir || '').trim()
+    const started = Date.now()
+
+    let observation: PlatformObservation = { wechatInstalled: false, wechatPids: [] }
+    try {
+      observation = await this.observePlatform()
+    } catch { /* noop */ }
+    logs.push(
+      `[observe] installed=${observation.wechatInstalled} version=${observation.wechatVersion ?? '-'} ` +
+      `pids=${observation.wechatPids.join(',')} memoryReadable=${observation.memoryReadable} hookHelper=${observation.hookHelperAvailable}`
+    )
+
+    let scanKeys: AcquiredKey[] = []
+    let scanDiagnostics: unknown
+    let scanError: string | undefined
+
+    const scanEnabled = isNoLoginDbKeyScanEnabled('win32')
+    if (mode !== 'hook' && scanEnabled) {
+      if (!accountDir) {
+        reasons.scan = '没有选定微信数据目录，扫描无法定位要校验的数据库。'
+      } else if (observation.wechatPids.length === 0) {
+        reasons.scan = '微信没有在运行 —— 免登录扫描要读它的进程内存，密钥只在微信启动后才存在。'
+      } else {
+        try {
+          options.onStatus?.('正在免登录扫描微信进程（只读，不需要登录/退出）…', 0)
+          const scan = await this.scanDbKeys({
+            accountDir,
+            onProgress: options.onScanProgress,
+            cancel: options.cancel,
+          })
+          logs.push(...(scan.logs ?? []))
+          scanKeys = scan.keys
+          scanDiagnostics = scan.diagnostics
+          if (scan.success && scan.keys.length > 0) {
+            return {
+              success: true,
+              keys: scan.keys,
+              mode: 'scan',
+              logs,
+              diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scan.diagnostics },
+            }
+          }
+          scanError = scan.error
+          reasons.scan = scan.error || '扫描没有找到匹配的密钥。'
+        } catch (e) {
+          scanError = e instanceof Error ? e.message : String(e)
+          reasons.scan = scanError
+        }
+      }
+      logs.push(`[scan] keys=${scanKeys.length}${scanError ? ` error=${scanError}` : ''}`)
+    } else if (mode === 'scan') {
+      reasons.scan = WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE
+      logs.push(`[scan] disabled: ${WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE}`)
+    }
+
+    if (mode === 'scan' && !scanEnabled) {
+      return {
+        success: false,
+        error: WINDOWS_NO_LOGIN_DB_KEY_SCAN_DEFERRED_MESSAGE,
+        keys: [],
+        logs,
+        reasons,
+        diagnostics: { platform: 'win32', scanSupported: false, elapsedMs: Date.now() - started },
+      }
+    }
+
+    if (mode === 'scan' && scanEnabled) {
+      return {
+        success: false,
+        keys: scanKeys,
+        error: reasons.scan || '免登录扫描没有取到密钥。',
+        logs,
+        reasons,
+        diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scanDiagnostics },
+      }
+    }
+
+    // 回落 Hook（既有路径，行为不变）
+    options.onStatus?.(
+      scanEnabled
+        ? '免登录扫描未命中，切换到登录捕获模式…'
+        : '正在用登录捕获模式获取账号密钥…',
+      1,
+    )
+    const hook = await this.hookAcquireKey({
+      timeoutMs: options.timeoutMs ?? 120_000,
+      onStatus: options.onStatus,
+    })
+    logs.push(...(hook.logs ?? []))
+    if (hook.success && hook.key) {
+      return {
+        success: true,
+        key: hook.key,
+        keys: scanKeys,
+        mode: 'hook',
+        logs,
+        reasons: Object.keys(reasons).length ? reasons : undefined,
+        diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scanDiagnostics },
+      }
+    }
+    reasons.hook = hook.error || '登录捕获没有拿到密钥。'
+    return {
+      success: false,
+      keys: scanKeys,
+      error: reasons.hook,
+      logs,
+      reasons,
+      diagnostics: { platform: 'win32', scanSupported: scanEnabled, elapsedMs: Date.now() - started, scan: scanDiagnostics },
+    }
   }
 }

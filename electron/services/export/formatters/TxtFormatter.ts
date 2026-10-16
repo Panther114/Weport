@@ -74,10 +74,6 @@ export class TxtFormatter {
         ? collected.rows.filter((msg: any) => msg.localType === 34)
         : []
 
-      if (options.exportVoiceAsText && voiceMessages.length > 0) {
-        await this.exportService.ensureVoiceModel(onProgress)
-      }
-
       const senderUsernames = new Set<string>()
       let senderScanIndex = 0
       for (const msg of collected.rows) {
@@ -176,7 +172,7 @@ export class TxtFormatter {
       const voiceTranscriptMap = new Map<string, string>()
 
       if (voiceMessages.length > 0) {
-        await this.exportService.preloadVoiceWavCache(sessionId, voiceMessages, control)
+        // Existing voice text does not require decoding WAV data.
 
         onProgress?.({
           current: 45,
@@ -193,7 +189,7 @@ export class TxtFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId, msg.rawContent || msg.content, msg)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
@@ -277,7 +273,7 @@ export class TxtFormatter {
 
         // 转账消息：追加 "谁转账给谁" 信息
         let enrichedContentValue = contentValue
-        if (isTransferExportContent(contentValue) && msg.content) {
+        if (!shouldUseTranscript && isTransferExportContent(contentValue) && msg.content) {
           const transferDesc = await resolveTransferDesc(
             msg.content,
             cleanedMyWxid,
@@ -305,11 +301,11 @@ export class TxtFormatter {
           rawMyWxid,
           myDisplayName: myInfo.displayName || cleanedMyWxid
         })
-        if (quotedReplyDisplay) {
+        if (quotedReplyDisplay && !shouldUseTranscript) {
           enrichedContentValue = this.exportService.buildQuotedReplyText(quotedReplyDisplay)
         }
 
-        const appendedLinkContent = quotedReplyDisplay
+        const appendedLinkContent = quotedReplyDisplay || shouldUseTranscript
           ? null
           : this.exportService.formatLinkCardExportText(msg.content, msg.localType, 'append-url')
         if (appendedLinkContent) {

@@ -1,0 +1,7 @@
+{
+  "minimumSupportedVersion": "1.1.0",
+  "blockedVersions": [],
+  "reason": "微信数据协议发生变化，请更新 Weport 后重新获取密钥。",
+  "url": "https://github.com/Panther114/Weport/releases/latest",
+  "allowReadOnly": true
+}

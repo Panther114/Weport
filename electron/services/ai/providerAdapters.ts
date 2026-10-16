@@ -32,7 +32,7 @@ function imageDataUrl(image: { mimeType: string; data: string }): string {
 /**
  * 工具消息带图片时的 OpenAI 兼容转换。
  *
- * **图片放在紧跟其后的 user 消息里，不放进 tool 消息的 content 数组**（v1.1）。
+ * 图片放在整批 tool 回复之后的 user 消息里，不放进 tool 的 content 数组。
  *
  * 旧实现是把 `content` 换成 `[{type:'text'},{type:'image_url'}]`：结构上完全合规，
  * 但实测网关（opencode-go → deepseek-v4.1-flash）会直接 422
@@ -45,8 +45,13 @@ function imageDataUrl(image: { mimeType: string; data: string }): string {
  */
 export function openAIChatMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
+  const pendingImages: Array<Record<string, unknown>> = []
   for (const message of messages) {
     if (message.role !== 'tool') {
+      // Strict providers require all replies to a parallel tool batch before
+      // any user turn. An image from the first tool must not split that batch.
+      out.push(...pendingImages)
+      pendingImages.length = 0
       out.push(message)
       continue
     }
@@ -57,7 +62,7 @@ export function openAIChatMessages(messages: Array<Record<string, unknown>>): Ar
     }
     // 纯文本的 tool 结果原样透传（多一次改写就多一次前缀缓存失效），图片另起一条
     out.push({ role: 'tool', tool_call_id: message.tool_call_id, content: String(message.content || '') })
-    out.push({
+    pendingImages.push({
       role: 'user',
       content: [
         { type: 'text', text: '（工具返回的图片，见下）' },
@@ -65,6 +70,7 @@ export function openAIChatMessages(messages: Array<Record<string, unknown>>): Ar
       ],
     })
   }
+  out.push(...pendingImages)
   return out
 }
 
@@ -283,6 +289,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
       tools: input.tools.map((tool) => ({ type: 'function', name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })),
     }
     if (input.maxOutputTokens !== undefined) body.max_output_tokens = input.maxOutputTokens
+    if (input.toolChoice) body.tool_choice = input.toolChoice
     if (instructions) body.instructions = instructions
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/responses'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
@@ -335,7 +342,7 @@ export function openAIChatBody(input: ProviderStreamInput): Record<string, unkno
   if (input.maxOutputTokens !== undefined) body.max_tokens = input.maxOutputTokens
   if (input.tools.length > 0) {
     body.tools = toolDefinitions(input)
-    body.tool_choice = 'auto'
+    body.tool_choice = input.toolChoice || 'auto'
   }
   // Unconditional: on the chat-completions wire, OpenAI (and any gateway that
   // follows it strictly) returns NO usage at all without `include_usage` — no
@@ -452,6 +459,7 @@ const anthropicAdapter: ProviderAdapter = {
     body.max_tokens = input.maxOutputTokens ?? 32768
     if (converted.system) body.system = converted.system
     if (input.tools.length > 0) body.tools = input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }))
+    if (input.toolChoice === 'none') body.tool_choice = { type: 'none' }
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/messages'), {
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
@@ -574,6 +582,7 @@ const googleAdapter: ProviderAdapter = {
     if (converted.system) body.systemInstruction = { parts: [{ text: converted.system }] }
     if (input.maxOutputTokens !== undefined) body.generationConfig = { maxOutputTokens: input.maxOutputTokens }
     if (input.tools.length > 0) body.tools = [{ functionDeclarations: input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }]
+    if (input.toolChoice === 'none') body.toolConfig = { functionCallingConfig: { mode: 'NONE' } }
     const url = endpoint(input.profile.baseUrl, `/models/${encodeURIComponent(input.profile.model)}:streamGenerateContent?alt=sse`)
     const response = await providerFetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
     if (!response.ok) return readError(response)

@@ -1,3 +1,4 @@
+import { normalizeLocalMediaUrl } from '../../utils/mediaUrl'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Maximize2, X, ZoomIn, ZoomOut } from 'lucide-react'
@@ -219,7 +220,7 @@ export const SnsPreviewLightbox: React.FC<SnsPreviewLightboxProps> = ({ items, i
           ) : (
             <video
               key={item.src}
-              src={item.src}
+              src={normalizeLocalMediaUrl(item.src)}
               className="lightbox-media"
               controls
               autoPlay
@@ -231,7 +232,7 @@ export const SnsPreviewLightbox: React.FC<SnsPreviewLightboxProps> = ({ items, i
           <img
             key={item.src}
             ref={imgRef}
-            src={item?.src}
+            src={normalizeLocalMediaUrl(item?.src)}
             alt=""
             className="lightbox-media"
             draggable={false}

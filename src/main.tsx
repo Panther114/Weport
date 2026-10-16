@@ -13,6 +13,17 @@ import { installLiveTaskWiring } from './utils/liveTaskWiring'
  */
 installLiveTaskWiring()
 
+/** Preload notification controls after first paint; feature pages load on demand. */
+function warmLazyPages(): void {
+  const warm = () => {
+    const swallow = () => undefined
+    void import('./components/settings/NotificationGlassPanel').catch(swallow)
+  }
+  const idle = (window as { requestIdleCallback?: (cb: () => void, options?: { timeout: number }) => void }).requestIdleCallback
+  if (typeof idle === 'function') idle(warm, { timeout: 2500 })
+  else warm()
+}
+
 const hash = window.location.hash
 const rootEl = document.getElementById('root')!
 
@@ -26,11 +37,17 @@ if (hash.startsWith('#/notification-window')) {
    * （含 LiquidGlass 玻璃管线，实测 230KB）塞进主窗口的启动图**，主窗口每次启动都
    * 要白解析一遍。改成动态导入之后两条路径都还在，代价只在真的用这条路径时才付。
    */
-  void import('./pages/NotificationWindow').then(({ default: NotificationWindow }) => {
-    document.documentElement.style.background = 'transparent'
-    document.body.style.background = 'transparent'
-    createRoot(rootEl).render(<NotificationWindow />)
-  })
+  void import('./pages/NotificationWindow')
+    .then(({ default: NotificationWindow }) => {
+      document.documentElement.style.background = 'transparent'
+      document.body.style.background = 'transparent'
+      createRoot(rootEl).render(<NotificationWindow />)
+    })
+    .catch((error: unknown) => {
+      // 弹窗起不来时至少在控制台留一句：否则这个窗口只剩一片透明，什么都看不出来
+      console.error('[main] notification window failed to load', error)
+    })
 } else {
   createRoot(rootEl).render(<App />)
+  setTimeout(warmLazyPages, 1200)
 }

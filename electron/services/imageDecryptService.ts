@@ -668,7 +668,38 @@ export class ImageDecryptService {
       const wxgfResult = await this.unwrapWxgf(decrypted)
       decrypted = wxgfResult.data
 
-      const detectedExt = this.detectImageExtension(decrypted)
+      let detectedExt = this.detectImageExtension(decrypted)
+
+      // WXGF decrypted successfully but its HEVC conversion did not. A sibling
+      // thumbnail belongs to the same image; arbitrary nearby images do not.
+      if (!detectedExt && wxgfResult.isWxgf && !this.isThumbnailPath(datPath)) {
+        const imageBase = basename(datPath).replace(/(?:[_.](?:h|hd|b))?\.dat$/i, '')
+        if (/^[a-f0-9]{16,64}$/i.test(imageBase)) {
+          for (const suffix of ['_t.dat', '.t.dat', '_thumb.dat']) {
+            const thumbnailPath = join(dirname(datPath), `${imageBase}${suffix}`)
+            if (!existsSync(thumbnailPath)) continue
+            const thumbnail = await this.tryDecryptDatWithNative(thumbnailPath, xorKey, aesKeyForNative)
+            if (!thumbnail) continue
+            const unwrapped = await this.unwrapWxgf(thumbnail.data)
+            const thumbnailExt = this.detectImageExtension(unwrapped.data)
+            if (!thumbnailExt) continue
+            datPath = thumbnailPath
+            decrypted = unwrapped.data
+            detectedExt = thumbnailExt
+            break
+          }
+        }
+      }
+
+      if (!detectedExt && wxgfResult.isWxgf) {
+        this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', 'WXGF 图片转换失败')
+        return {
+          success: false,
+          error: 'WXGF 图片已解密，但 HEVC 转换失败。请安装或检查 ffmpeg 后重试',
+          failureKind: 'decrypt_failed',
+          isThumb: this.isThumbnailPath(datPath)
+        }
+      }
 
       // 如果解密产物无法识别为图片，归类为“解密失败”。
       if (!detectedExt) {

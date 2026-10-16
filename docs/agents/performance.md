@@ -21,8 +21,10 @@ Two failure modes, both seen in the export page:
   `min-height` are what keep the sticky block from resizing the page underneath it.
 - **A terminal state must be written explicitly.** Reporting completion by setting only a
   phase leaves stale content on screen: the final `export:progress` payload carries
-  `currentSession: ''`, so the bar read `准备中…  189 / 189`. Recognise completion from
-  *either* `phase === 'complete'` *or* `current >= total`, and replace the session label.
+  `currentSession: ''`, so the bar read `准备中…  189 / 189`. Completion requires the
+  successful export IPC result or an authoritative terminal task snapshot. Per-session
+  `complete` and 100% counters are still running; show `verifying` until manifest and
+  integrity checks finish, then replace the session label. Always reserve the cancel slot.
   Same class of bug in WeClone: a failed generation used to leave the panel spinning on
   the last mid-flight step (now `failed` / `aborted` terminal stages).
 - **Never put `aria-live` on a container whose text changes every frame.** Screen readers

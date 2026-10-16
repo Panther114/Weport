@@ -11,16 +11,18 @@
  *   3. no frame is blank, and the sidebar/title actually appear,
  *   4. the table-heavy views (sessions, messages) contain real rows.
  *
- * It drives the *installed* engine when `--exe` is omitted, so the run also proves the
- * packaged app exposes the CLI surface.
+ * It drives the unpacked engine when `--exe` is omitted, using an isolated
+ * empty profile. `--profile <directory>` copies an existing configuration and
+ * Local State for read-only account checks; private account frames are removed.
  *
- * Usage: node scripts/qa-tui.mjs [--exe <Weport.exe>] [--session <wxid>] [--width 140]
+ * Usage: node scripts/qa-tui.mjs [--exe <Weport.exe>] [--session <wxid>] [--width 140] [--profile <directory>]
  */
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { displayWidth, stripAnsi } from '../packages/weport-tui/dist/terminal.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -44,27 +46,45 @@ const step = (label, ok, detail = '') => {
 }
 
 const dumpDir = mkdtempSync(join(tmpdir(), 'weport-tui-qa-'))
+const profile = mkdtempSync(join(tmpdir(), 'weport-tui-profile-'))
+const sourceProfile = flag('profile', '')
+const profileConfig = sourceProfile ? JSON.parse(readFileSync(join(sourceProfile, 'Weport-config.json'), 'utf8')) : { dbPath: '', myWxid: '' }
+writeFileSync(join(profile, 'Weport-config.json'), JSON.stringify({ ...profileConfig,
+  logEnabled: false, mcpEnabled: false, httpApiEnabled: false,
+  messagePushEnabled: false, notificationEnabled: false, launchAtStartup: false,
+  antiRevokeEnabled: false, antiRevokeAutoApplyNewGroups: false,
+}))
+if (sourceProfile && existsSync(join(sourceProfile, 'Local State'))) copyFileSync(join(sourceProfile, 'Local State'), join(profile, 'Local State'))
 const cli = join(root, 'packages', 'weport-tui', 'bin', 'weport.mjs')
 const session = flag('session', '')
 const run = spawnSync(
   process.execPath,
   [cli, '--exe', exe, '--dump', dumpDir, '--width', String(width), '--height', String(height), ...(session ? ['--session', session] : [])],
-  { encoding: 'utf8', timeout: 600000 },
+  { encoding: 'utf8', timeout: 600000, windowsHide: true,
+    env: { ...process.env, WEPORT_CLI_USER_DATA_DIR: profile, WEPORT_PROBE_OFFSCREEN: '1' } },
 )
+// The Electron engine can retain Windows file handles briefly after its IPC
+// owner exits; retry cleanup without touching the user's desktop profile.
+rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 })
 const log = `${run.stdout || ''}${run.stderr || ''}`
 console.log(log.trim().split('\n').slice(0, 20).map((line) => `   ${line}`).join('\n'))
 
-step('dump exits 0', run.status === 0, `status=${run.status}`)
+const index = existsSync(join(dumpDir, 'index.txt')) ? readFileSync(join(dumpDir, 'index.txt'), 'utf8') : ''
+const expectedDisconnectedErrors = ['sessions ERROR 请先在设置页面配置微信ID', 'moments ERROR WCDB 未连接', 'analytics ERROR 未配置微信ID']
+const disconnectedAccepted = !sourceProfile && run.status === 1 &&
+  index.split(/\r?\n/).filter(line => line.includes('ERROR')).length === expectedDisconnectedErrors.length &&
+  expectedDisconnectedErrors.every(line => index.split(/\r?\n/).includes(line))
+step(sourceProfile ? 'connected dump exits 0' : 'disconnected dump reports only expected account errors', sourceProfile ? run.status === 0 : disconnectedAccepted, `status=${run.status}`)
 const files = readdirSync(dumpDir).filter((name) => name.endsWith('.txt') && name !== 'index.txt')
 step('every section wrote a frame', files.length >= 9, `${files.length} files`)
 
 for (const file of files) {
   const raw = readFileSync(join(dumpDir, file), 'utf8')
   // composeFrame writes "\r\n" between rows and ends each with ESC[K.
-  const lines = raw.replace(new RegExp('\\u001B\\[K', 'g'), '').split(/\r?\n/).filter((line, index, all) => index < all.length - 1 || line.length > 0)
-  const oversized = lines.find((line) => line.length > width)
+  const lines = stripAnsi(raw).split(/\r?\n/).filter((line, index, all) => index < all.length - 1 || line.length > 0)
+  const oversized = lines.find((line) => displayWidth(line) > width)
   const blank = lines.every((line) => line.trim().length === 0)
-  step(`${file} fits ${width} columns`, !oversized, oversized ? `${oversized.length} cols` : '')
+  step(`${file} fits ${width} columns`, !oversized, oversized ? `${displayWidth(oversized)} cols` : '')
   step(`${file} is not blank`, !blank, blank ? 'all lines empty' : `${lines.length} rows`)
   // The sidebar holds one section per row, so "总览" and "帮助" never share a line —
   // check each is present in the first column band instead.
@@ -83,5 +103,8 @@ for (const [file, needle] of [
   step(`${file} mentions ${needle || 'messages'}`, needle ? raw.includes(needle) : /我|对方|消息/.test(raw), '')
 }
 
-console.log(`\nframes kept at ${dumpDir}`)
+if (sourceProfile) {
+  rmSync(dumpDir, { recursive: true, force: true, maxRetries: 5 })
+  console.log('Private account frames removed after validation')
+} else console.log(`\nframes kept at ${dumpDir}`)
 process.exit(failed ? 1 : 0)

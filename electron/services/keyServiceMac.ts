@@ -5,6 +5,7 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
 import { homedir } from 'os'
+import { redactSecretsInText } from './diagnosticsRedaction'
 
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
 type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
@@ -233,7 +234,7 @@ export class KeyServiceMac {
       try {
         const elevatedResult = await this.getDbKeyByHelperElevated(timeoutMs, onStatus)
         parsed = this.parseDbKeyResult(elevatedResult)
-        console.log('[KeyServiceMac] GetDbKey elevated returned:', parsed.raw)
+        console.log('[KeyServiceMac] GetDbKey elevated result:', { success: parsed.success, code: parsed.code })
       } catch (e: any) {
         const msg = `${e?.message || e}`
         if (msg.includes('(-128)') || msg.includes('User canceled')) {
@@ -447,6 +448,33 @@ export class KeyServiceMac {
     return `${baseMessage}\n${this.getMacRecoveryHint(false)}`
   }
 
+  /**
+   * 平台观测（v1.2 双模式编排的自检输入）。
+   *
+   * macOS **没有**免登录扫描路径：微信是加固签名 + 沙盒进程，`task_for_pid` 会被
+   * 系统拒绝（V12 §1.3 / D2 / K8）。这里只如实报告"微信在不在 / helper 在不在"，
+   * 不假装支持扫描。
+   */
+  async observePlatform(): Promise<{
+    wechatInstalled: boolean
+    wechatPids: number[]
+    hookHelperAvailable: boolean | null
+    wechatVersion: string | null
+  }> {
+    let pid: number | null = null
+    try {
+      const found = await this.getWeChatPid()
+      pid = found && found > 0 ? found : null
+    } catch { /* noop */ }
+    let helper: boolean | null = null
+    try {
+      helper = existsSync(this.getHelperPath())
+    } catch {
+      helper = false
+    }
+    return { wechatInstalled: true, wechatPids: pid ? [pid] : [], hookHelperAvailable: helper, wechatVersion: null }
+  }
+
   private async getWeChatPid(): Promise<number> {
     try {
       // 优先使用 pgrep -x 精确匹配进程名
@@ -544,7 +572,7 @@ export class KeyServiceMac {
 
       const processHelperLine = (line: string) => {
         if (!line) return
-        console.log('[KeyServiceMac][helper][stderr]', line)
+        console.log('[KeyServiceMac][helper][stderr]', redactSecretsInText(line))
         const pidMatch = line.match(/Selected PID=(\d+)/)
         if (pidMatch && !pidNotified) {
           pidNotified = true

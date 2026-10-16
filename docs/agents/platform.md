@@ -1,14 +1,53 @@
 # 平台打包、TUI、连接器与参考仓库
 
+## Explicit Windows-first releases
+
+When the user explicitly requests a Windows-first release, manually dispatch
+`release.yml` on the committed build branch with the package-matching `tag` and
+`windows_only=true`. That mode builds the selected SHA, skips Mac/Linux jobs,
+and publishes Windows only after unit/type/native/UI/anti-delete/MCP/CLI gates.
+Its CI publisher creates the version tag at that SHA; do not push the tag ahead
+of it, because tag pushes use the normal three-platform release path. Default
+releases retain the three-platform gate. Windows-first releases still require
+`latest.yml`, a non-draft/non-prerelease latest release, and per-version notes.
+
 > 从 `AGENTS.md` 拆出：这里是模块与历史说明，不是动手前必读的不变量。
+
+## Windows NSIS reinstall (v1.2)
+
+- Windows packaging uses the checked-in `assets/icons/icon.ico` generated from the canonical PNG. This avoids electron-builder's PNG-to-ICO WASM converter failing under memory pressure; refresh both assets together when changing branding. Linux still uses PNG and macOS ICNS.
+
+- The per-user NSIS installer (`perMachine:false`, `oneClick:false`) targets
+  `%LOCALAPPDATA%\Programs\Weport`. Its uninstall registry key is **derived from
+  `appId`**, so every build of every version writes the same key — a probe
+  install (e.g. one unpacked under `.ui-probe/`) silently becomes "the previous
+  installation", and the next `Setup.exe /S` then installs **into that probe
+  directory** while the real install directory keeps the old files. Exit code is
+  still 0 and the installer prints nothing.
+- Therefore never trust the installer's exit code alone: assert the registered
+  `InstallLocation`/written directory, assert the uninstall inventory has exactly
+  one entry, and compare installed `Weport.exe` / `resources/app.asar` /
+  `resources/host/wcdbHost.js` hashes against `release/win-unpacked`.
+  `.ui-probe/install-repair.ps1` does all of that (backup → silent install →
+  hash/profile verification); `reinstall-repair.cjs` backs up and hashes the
+  protected profile files/directories.
+- Before installing over an existing copy, remove both old copies with their own
+  uninstallers (not `rm -rf`) so the registry key is deregistered, and delete any
+  dangling entry pointing at a directory that no longer exists.
+- `Uninstall Weport.exe` must stay out of the source tree; a stray copy plus the
+  shared key is exactly how the hijack above starts.
 
 ## Linux Packaging (v0.9.10)
 
-- `npm run build:linux` → AppImage + tar.gz x64 (`build.linux` in
+- `npm run build:linux` → DEB + AppImage + tar.gz x64 (`build.linux` in
   package.json; artifactName `Weport-${version}-${arch}.${ext}` — do NOT let
   it inherit the top-level `-Setup.` name). CI: `release.yml` `build-linux`
   job on ubuntu-latest; must `chmod +x resources/key/linux/x64/xkey_helper_linux`
   before packaging (Git-on-Windows loses the exec bit).
+- Ubuntu/Debian DEB dependencies include ffmpeg for WXGF HEVC image conversion.
+  Keep electron-builder's default desktop dependencies when overriding `deb.depends`.
+  Archive/AppImage users install ffmpeg separately; without a working converter,
+  only a decryptable thumbnail of the same image may be substituted.
 - Native artifacts ship from `resources/{wcdb,key,wedecrypt}/linux/x64/`
   via per-platform `extraResources`. `welive` is NOT shipped on Linux
   (no runtime consumer). koffi's platform binary comes from the optional dep
@@ -16,13 +55,15 @@
   `asarUnpack` includes `node_modules/@koromix/**/*`.
 - Read-only install dirs (AppImage squashfs, `/opt`, `/usr/bin`): hardlink
   creation next to the exe fails, so `wcdbHostClient.resolveHostExe()` falls
-  back to COPYING the Electron binary to `{userData}/wcdb-host/WeFlow`
-  (mtime-aligned for reuse detection) and adds both the copy dir and the real
-  Electron dist dir to `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
-- The `-1006` name check for `libwcdb_api.so` under a host named `WeFlow` is
-  unverified on real Linux hardware (upstream ships its own exe as lowercase
-  `weflow`, suggesting the check may be looser there); treat first-boot DB
-  connect on Linux as the acceptance test.
+  back to copying the Electron binary to `{userData}/wcdb-host/WeFlow` and
+  `icudtl.dat`, `snapshot_blob.bin`, and `v8_context_snapshot.bin` beside it.
+  Even with `ELECTRON_RUN_AS_NODE=1`, Electron loads ICU and V8 snapshot data
+  beside the copied executable; without them the process traps before WCDB
+  loads. Both the copy dir and real Electron dist dir are added to
+  `LD_LIBRARY_PATH`. Escape hatch: `WEPORT_WCDB_HOST_EXE`.
+- Linux x64 CI verifies native protection/init/shutdown under `WeFlow` and
+  confirms the original Weport executable is rejected with `-1006`. Real-account
+  key capture and first database connection still require a Linux-device check.
 - safeStorage on headless Linux often has no backend: config falls back to
   plaintext secrets (existing graceful degradation, unchanged).
 

@@ -1,0 +1,115 @@
+name: Verify v1.2.1 macOS and Linux
+
+# Verification only: read-only token, no tags, no release publishing/backfill.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # Only ad-hoc signing; no certificates/secrets are exposed to PR jobs.
+      CSC_FOR_PULL_REQUEST: 'true'
+      WEPORT_PROBE_OFFSCREEN: '1'
+      WEPORT_NATIVE_GLASS: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Linux desktop test dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          if [[ '${{ matrix.os }}' == 'ubuntu-22.04' ]]; then
+            libs='libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libgtk-3-0'
+          else
+            libs='libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libcups2t64 libgtk-3-0t64'
+          fi
+          sudo apt-get install --yes --no-install-recommends xvfb xauth dbus-x11 libnotify-bin ffmpeg \
+            $libs libatspi2.0-0 libdrm2 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 \
+            libxfixes3 libxkbcommon0 libxrandr2 libxss1 libgbm1
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Full unit and native regression suites
+        run: npm run test:unit
+      - name: Strict version and release notes verification
+        run: |
+          node -e "if(require('./package.json').version !== '1.2.1') throw Error('Expected v1.2.1')"
+          node scripts/extract-release-notes.mjs 1.2.1
+      - name: Build macOS packages without publishing
+        if: runner.os == 'macOS'
+        run: npm run build:mac
+      - name: Build Linux packages without publishing
+        id: linux-build
+        if: runner.os == 'Linux'
+        run: npm run build:linux
+      - name: Comprehensive packaged macOS acceptance
+        if: runner.os == 'macOS'
+        run: node scripts/verify-cross-platform.mjs
+      - name: Install Linux DEB and verify sandbox permissions
+        if: runner.os == 'Linux' && !cancelled() && steps.linux-build.outcome == 'success'
+        shell: bash
+        run: |
+          sudo apt-get install --no-install-recommends -y ./release/Weport-1.2.1-amd64.deb
+          test "$(stat -c '%U:%G:%a' /opt/Weport/chrome-sandbox)" = 'root:root:4755'
+          test -z "$(find /opt/Weport -type d -perm /022 -print -quit)"
+          xvfb-run --auto-servernum dbus-run-session -- node scripts/verify-mcp-http.mjs .ui-probe/installed-linux /opt/Weport/weport
+      - name: Comprehensive packaged Linux acceptance
+        if: runner.os == 'Linux' && !cancelled() && steps.linux-build.outcome == 'success'
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" dbus-run-session -- node scripts/verify-cross-platform.mjs
+      - name: Preserve verification evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            .ui-probe/cross-platform/
+            .ui-probe/mac-native-positive/
+            .ui-probe/linux-native-positive/
+            .ui-probe/linux-native-positive-installed/
+            .ui-probe/v12-interactions/
+            .ui-probe/bug-report-ui/
+            .ui-probe/sns-anti-delete-ui/
+            .ui-probe/mcp-http/
+            .ui-probe/cli-protocol/
+            .ui-probe/installed-linux/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve verification packages as CI artifacts only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-packages-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            release/Weport-*.dmg
+            release/Weport-*.zip
+            release/Weport-*.deb
+            release/Weport-*.AppImage
+            release/Weport-*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

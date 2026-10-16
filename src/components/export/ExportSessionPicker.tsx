@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, RefreshCw, Search, Users, UserRound, X } from 'lucide-react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { Check, ChevronDown, RefreshCw, Search, Star, Users, UserRound, X } from 'lucide-react'
 import { Virtuoso } from 'react-virtuoso'
+import FloatingLayer from '../ui/FloatingLayer'
 
-export type ExportSessionType = 'all' | 'private' | 'group' | 'official'
+export type ExportSessionType = 'all' | 'private' | 'group' | 'official' | 'favorites'
 export type ExportSelectionMode = 'all' | 'selected'
+type ExportSessionKind = 'private' | 'group' | 'official'
 
 export interface ExportSessionPickerItem {
   username: string
@@ -17,6 +19,8 @@ interface ExportSessionPickerProps {
   sessions: ExportSessionPickerItem[]
   totalSessions?: number
   selectedIds: Set<string>
+  favoriteIds: Set<string>
+  favoritesReady: boolean
   selectionMode: ExportSelectionMode
   search: string
   type: ExportSessionType
@@ -25,13 +29,14 @@ interface ExportSessionPickerProps {
   onTypeChange: (value: ExportSessionType) => void
   onSelectionModeChange: (value: ExportSelectionMode) => void
   onToggle: (username: string) => void
+  onToggleFavorite: (username: string) => void
   onToggleVisible: () => void
   onRefresh: () => void
   allVisibleSelected: boolean
   disabled?: boolean
 }
 
-function getSessionType(username: string): Exclude<ExportSessionType, 'all'> {
+function getSessionType(username: string): ExportSessionKind {
   if (username.startsWith('gh_')) return 'official'
   if (username.endsWith('@chatroom')) return 'group'
   return 'private'
@@ -46,6 +51,8 @@ export default function ExportSessionPicker({
   sessions,
   totalSessions = sessions.length,
   selectedIds,
+  favoriteIds,
+  favoritesReady,
   selectionMode,
   search,
   type,
@@ -54,19 +61,24 @@ export default function ExportSessionPicker({
   onTypeChange,
   onSelectionModeChange,
   onToggle,
+  onToggleFavorite,
   onToggleVisible,
   onRefresh,
   allVisibleSelected,
   disabled = false,
 }: ExportSessionPickerProps) {
   const [open, setOpen] = useState(false)
-  const pickerRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const dialogId = useId()
   const selectionCountLabel = selectionMode === 'all' ? `全部 ${totalSessions}` : `已选 ${selectedIds.size}`
 
   useEffect(() => {
     if (!open) return undefined
     const handlePointerDown = (event: PointerEvent) => {
-      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false)
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target) || popoverRef.current?.contains(target)) return
+      setOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setOpen(false)
@@ -80,12 +92,14 @@ export default function ExportSessionPicker({
   }, [open])
 
   return (
-    <div ref={pickerRef} className={`export-session-picker${open ? ' is-open' : ''}`}>
+    <div className={`export-session-picker${open ? ' is-open' : ''}`}>
       <button
+        ref={triggerRef}
         type="button"
         className="export-scope-trigger"
         aria-haspopup="dialog"
         aria-expanded={open}
+        aria-controls={open ? dialogId : undefined}
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
       >
@@ -98,8 +112,15 @@ export default function ExportSessionPicker({
         <ChevronDown size={14} className="export-scope-trigger-chevron" />
       </button>
 
-      {open && (
-        <div className="export-session-popover" role="dialog" aria-label="选择导出会话">
+      <FloatingLayer
+        anchor={triggerRef}
+        open={open}
+        placement="bottom-start"
+        gap={6}
+        minHeight={180}
+        className="export-session-popover-layer"
+      >
+        <div ref={popoverRef} id={dialogId} className="export-session-popover" role="dialog" aria-label="选择导出会话">
           <div className="export-session-picker-head">
             <div>
               <div className="export-session-picker-title">
@@ -109,8 +130,8 @@ export default function ExportSessionPicker({
               </div>
               <p className="hint">
                 {selectionMode === 'all'
-                  ? '默认导出全部会话；切换为“仅选中”后，下面的勾选才会限制范围。'
-                  : '只导出勾选的联系人或群聊；筛选不会清除隐藏的已选项。'}
+                  ? '当前会导出全部会话；切换为“仅选中”后，只导出下面勾选的会话。'
+                  : '默认只导出勾选的会话；筛选不会清除隐藏的已选项。可收藏常用联系人，之后按收藏筛选。'}
               </p>
             </div>
             <div className="export-session-picker-actions">
@@ -161,6 +182,7 @@ export default function ExportSessionPicker({
                 ['private', '私聊'],
                 ['group', '群聊'],
                 ['official', '公众号'],
+                ['favorites', '收藏'],
               ] as Array<[ExportSessionType, string]>).map(([value, label]) => (
                 <button
                   key={value}
@@ -212,41 +234,59 @@ export default function ExportSessionPicker({
                   const selected = selectedIds.has(session.username)
                   const sessionType = getSessionType(session.username)
                   const count = Number(session.messageCountHint)
+                  const favorite = favoriteIds.has(session.username)
                   return (
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      className="export-session-row"
-                      data-selected={selected}
-                      disabled={disabled}
-                      onClick={() => onToggle(session.username)}
-                    >
-                      <span className="export-session-check" aria-hidden="true">
-                        {selected && <Check size={11} strokeWidth={2.5} />}
-                      </span>
-                      {session.avatarUrl ? (
-                        <img className="export-session-avatar" src={session.avatarUrl} alt="" />
-                      ) : (
-                        <span className={`export-session-avatar fallback ${sessionType}`}>
-                          {sessionType === 'group' ? <Users size={13} /> : sessionType === 'private' ? getInitial(session) : <UserRound size={13} />}
+                    <div key={session.username} className="export-session-row-wrap">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className="export-session-row"
+                        data-selected={selected}
+                        disabled={disabled}
+                        onClick={() => onToggle(session.username)}
+                      >
+                        <span className="export-session-check" aria-hidden="true">
+                          {selected && <Check size={11} strokeWidth={2.5} />}
                         </span>
-                      )}
-                      <span className="export-session-copy">
-                        <strong>{session.displayName || session.username}</strong>
-                        <span>{session.summary || session.username}</span>
-                      </span>
-                      <span className="export-session-count">
-                        {Number.isFinite(count) && count >= 0 ? count.toLocaleString() : ''}
-                      </span>
-                    </button>
+                        {session.avatarUrl ? (
+                          <img className="export-session-avatar" src={session.avatarUrl} alt="" />
+                        ) : (
+                          <span className={`export-session-avatar fallback ${sessionType}`}>
+                            {sessionType === 'group' ? <Users size={13} /> : sessionType === 'private' ? getInitial(session) : <UserRound size={13} />}
+                          </span>
+                        )}
+                        <span className="export-session-copy">
+                          <strong>{session.displayName || session.username}</strong>
+                          <span>{session.summary || session.username}</span>
+                        </span>
+                        <span className="export-session-count">
+                          {Number.isFinite(count) && count >= 0 ? count.toLocaleString() : ''}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="export-session-favorite"
+                        data-favorite={favorite}
+                        aria-label={favorite ? `取消收藏 ${session.displayName || session.username}` : `收藏 ${session.displayName || session.username}`}
+                        aria-pressed={favorite}
+                        title={favorite ? '取消收藏' : '收藏联系人'}
+                        disabled={disabled || !favoritesReady}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onToggleFavorite(session.username)
+                        }}
+                      >
+                        <Star size={14} fill={favorite ? 'currentColor' : 'none'} />
+                      </button>
+                    </div>
                   )
                 }}
               />
             )}
           </div>
         </div>
-      )}
+      </FloatingLayer>
     </div>
   )
 }

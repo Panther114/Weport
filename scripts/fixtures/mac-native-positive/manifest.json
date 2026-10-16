@@ -1,0 +1,12 @@
+{
+  "synthetic": true,
+  "cipherVersion": 4,
+  "keyHex": "6161616161616161616161616161616161616161616161616161616161616161",
+  "account": "qa_account",
+  "files": [
+    { "source": "qa_account/db_storage/session/session.sqlcipher", "target": "qa_account/db_storage/session/session.db", "sha256": "669c50a82979c20fadca5f83b5d125e70877bbc450293dbdddf6d9551f183e56" },
+    { "source": "qa_account/db_storage/message/message_0.sqlcipher", "target": "qa_account/db_storage/message/message_0.db", "sha256": "54093955b90460e3013cfd91ae413f9e8a2523952e3cf4ce5a43f2af4e96ad5a" }
+  ],
+  "contact": "qa_contact",
+  "messages": [[1, 1001, 0, "Synthetic incoming message"], [2, 1002, 1, "Synthetic outgoing message"]]
+}
