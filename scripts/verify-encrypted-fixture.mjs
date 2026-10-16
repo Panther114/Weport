@@ -87,6 +87,12 @@ try {
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   assert(ready, 'Application must register its activation handler within 60 seconds')
+  // Resolve profile identity before activate starts background native warmup.
+  // Interleaving a second inspector evaluation with that startup can invalidate
+  // its remote promise in Electron 43 on macOS; renderer IPC is used afterwards.
+  result.startupPhase = 'reading-private-profile-path'
+  const actualProfile = await app.evaluate(({ app }) => app.getPath('userData'))
+  assert.equal(realpathSync(actualProfile), realpathSync(profile), 'Actual app must use the private profile')
   result.startupPhase = 'installing-hidden-window-guard-and-activating'
   await app.evaluate(({ app: electronApp, BrowserWindow }) => {
     const hide = BrowserWindow.prototype.hide
@@ -96,9 +102,6 @@ try {
     BrowserWindow.prototype.focus = function () {}
     electronApp.emit('activate')
   })
-  result.startupPhase = 'reading-private-profile-path'
-  const actualProfile = await app.evaluate(({ app }) => app.getPath('userData'))
-  assert.equal(realpathSync(actualProfile), realpathSync(profile), 'Actual app must use the private profile')
   result.startupPhase = 'waiting-for-renderer'
   page = await app.firstWindow()
   await page.locator('.rail-item').first().waitFor({ timeout: 180000 }); result.rendererReady = true
