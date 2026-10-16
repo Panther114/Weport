@@ -38,7 +38,7 @@ const seal = () => {
 }
 const result = { candidate: process.env.GITHUB_SHA || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   fixtureOnly: true, positiveNativeAccepted: false, platform: process.platform, architecture: process.arch }
-let app
+let app, page
 try {
   result.productVersion = process.platform === 'darwin'
     ? execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim()
@@ -58,7 +58,14 @@ try {
     mkdirSync(dirname(target), { recursive: true }); copyFileSync(join(source, file.source), target)
   }
   seal(); result.bundleSealBefore = true
-  writeFileSync(join(profile, 'Weport-config.json'), JSON.stringify({ dbPath: '', myWxid: '', messagePushEnabled: false, mcpEnabled: false, httpApiEnabled: false, launchAtStartup: false }))
+  // Seed a coherent saved-account profile before the real renderer bootstraps.
+  // Mutating an empty profile while its initial account scan is running races
+  // the renderer's asynchronous key/account hydration after reload.
+  writeFileSync(join(profile, 'Weport-config.json'), JSON.stringify({
+    dbPath: fixture, myWxid: manifest.account, decryptKey: manifest.keyHex,
+    wxidConfigs: { [manifest.account]: { decryptKey: manifest.keyHex, updatedAt: Date.now() } },
+    messagePushEnabled: false, mcpEnabled: false, httpApiEnabled: false, launchAtStartup: false,
+  }))
   const env = { ...process.env, WEPORT_PROBE_OFFSCREEN: '1' }
   for (const name of Object.keys(env)) if (name === 'ELECTRON_RUN_AS_NODE' || name === 'WEPORT_UI_DEMO' || name.startsWith('WEPORT_SCREENSHOT_')) delete env[name]
   app = await _electron.launch({ executablePath: layout.appExe, chromiumSandbox: process.platform === 'darwin' || Boolean(installedExe),
@@ -75,7 +82,7 @@ try {
   })
   const actualProfile = await app.evaluate(({ app }) => app.getPath('userData'))
   assert.equal(realpathSync(actualProfile), realpathSync(profile), 'Actual app must use the private profile')
-  const page = await app.firstWindow()
+  page = await app.firstWindow()
   await page.locator('.rail-item').first().waitFor({ timeout: 180000 }); result.rendererReady = true
   result.native = await page.evaluate(async ({ fixture, manifest }) => {
     const api = window.electronAPI
@@ -116,6 +123,11 @@ try {
   seal(); result.bundleSealAfter = true; result.positiveNativeAccepted = true
 } catch (error) {
   result.error = { name: error.name, message: error.message }; process.exitCode = 1
+  result.rendererFailure = await page?.evaluate(() => ({
+    text: document.body.innerText.slice(0, 6000),
+    routes: [...document.querySelectorAll('.rail-item')].map(button => ({ tab: button.dataset.tab, disabled: button.disabled })),
+  })).catch(() => null)
+  await page?.screenshot({ path: join(output, 'failure.png') }).catch(() => {})
 } finally {
   await app?.close().catch(() => {})
   writeFileSync(join(output, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result))

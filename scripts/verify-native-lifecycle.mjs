@@ -40,6 +40,11 @@ try {
   const started = Date.now()
   for (let cycle = 0; cycle < 3; cycle++) {
     for (const tab of tabs) {
+      // The rail mounts before the renderer's async connection/config bootstrap.
+      await page.waitForFunction(tab => {
+        const button = document.querySelector(`.rail-item[data-tab="${tab}"]`)
+        return button && !button.disabled
+      }, tab, { timeout: 30000 })
       // Navigation hit targets are covered by verify-v12-ui. Here drive DOM
       // activation so hidden macOS windows do not depend on compositor frames.
       await page.locator(`.rail-item[data-tab="${tab}"]`).evaluate(button => {
