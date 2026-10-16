@@ -91,6 +91,8 @@ V1.2 尚未公开发布。Windows 原生初始化、导出、阅读定位、语�
 
 ### macOS 15+（Apple Silicon）
 
+> v1.2.1 仅发布 Windows 版，不提供 macOS 安装包，也不计划补发此版本的 Mac 包。Mac 密钥获取仍需真实 Apple Silicon 设备验证；以下说明适用于既有 Mac 版本。
+
 1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-arm64.dmg`），打开后将 Weport 拖入「应用程序」
 2. 首次打开：右键 Weport →「打开」（未经 Apple 公证的 ad-hoc 签名应用首次需要手动放行）
 3. 打开 Weport，在「连接微信」页选择数据目录（自动检测 `~/Library/Containers/com.tencent.xinWeChat/...`）
