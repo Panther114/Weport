@@ -92,7 +92,9 @@ try {
   const hostPaths = bundle
     ? [actualProfile, realpathSync(actualProfile)].map(root => join(root, 'wcdb-host/Contents/MacOS/WeFlow'))
     : [join(dirname(layout.appExe), 'WeFlow'), join(actualProfile, 'wcdb-host/WeFlow')]
-  result.hostProcessEvidence = execFileSync('/bin/ps', ['-ww', '-axo', 'pid=,ppid=,comm='], { encoding: 'utf8' }).split('\n')
+  // macOS comm includes the executable path; Linux comm is only a short basename.
+  const processColumns = process.platform === 'darwin' ? 'pid=,ppid=,comm=' : 'pid=,ppid=,args='
+  result.hostProcessEvidence = execFileSync('/bin/ps', ['-ww', '-axo', processColumns], { encoding: 'utf8' }).split('\n')
     .filter(line => Number(line.trim().split(/\s+/)[1]) === app.process().pid && hostPaths.some(path => line.includes(path)))
   assert(result.hostProcessEvidence.length > 0, 'Actual deployed WeFlow host must be alive during the read')
   await verifyFixtureModules(page, scratch, manifest, result, output)
