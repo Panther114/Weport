@@ -23,6 +23,8 @@ const gates = [
   ...(platform() === 'darwin' ? [['macos-seal-linkage', 'bash', ['scripts/verify-mac-pack.sh', 'release']]] : []),
   ['native-host-and-wrong-name-rejection', process.execPath, ['scripts/verify-packaged-native.cjs', 'release']],
   ['encrypted-fixture-ten-formats-and-recovery', process.execPath, ['scripts/verify-encrypted-fixture.mjs', 'release']],
+  ...(platform() === 'linux' ? [['installed-encrypted-fixture-readonly-host-fallback', process.execPath,
+    ['scripts/verify-encrypted-fixture.mjs', 'release', '/opt/Weport/weport']]] : []),
   ['packaged-ui-responsive-navigation', process.execPath, ['scripts/verify-v12-ui.mjs']],
   ['feedback-dialog-clipboard-browser-interception', process.execPath, ['scripts/verify-bug-report-ui.mjs']],
   ['moments-anti-delete-success-and-failures', process.execPath, ['scripts/verify-sns-anti-delete-ui.mjs']],

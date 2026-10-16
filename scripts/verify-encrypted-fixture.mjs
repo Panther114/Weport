@@ -13,8 +13,15 @@ assert(['darwin', 'linux'].includes(process.platform))
 assert.equal(process.arch, process.platform === 'darwin' ? 'arm64' : 'x64')
 const { resolveLayout } = createRequire(import.meta.url)('./verify-packaged-native.cjs')
 const layout = resolveLayout(resolve(process.argv[2] || 'release'))
+const installedExe = process.argv[3]
+if (installedExe) {
+  assert.equal(process.platform, 'linux')
+  assert.equal(realpathSync(installedExe), '/opt/Weport/weport')
+  layout.appExe = installedExe
+  layout.appResources = join(dirname(installedExe), 'resources')
+}
 const bundle = process.platform === 'darwin' ? dirname(layout.appContents) : null
-const output = resolve(`.ui-probe/${process.platform === 'darwin' ? 'mac' : 'linux'}-native-positive`)
+const output = resolve(`.ui-probe/${process.platform === 'darwin' ? 'mac' : 'linux'}-native-positive${installedExe ? '-installed' : ''}`)
 mkdirSync(output, { recursive: true })
 const scratch = mkdtempSync(join(tmpdir(), 'weport-mac-positive-'))
 const profile = join(scratch, 'profile'), fixture = join(scratch, 'fixture')
@@ -54,7 +61,7 @@ try {
   writeFileSync(join(profile, 'Weport-config.json'), JSON.stringify({ dbPath: '', myWxid: '', messagePushEnabled: false, mcpEnabled: false, httpApiEnabled: false, launchAtStartup: false }))
   const env = { ...process.env, WEPORT_PROBE_OFFSCREEN: '1' }
   for (const name of Object.keys(env)) if (name === 'ELECTRON_RUN_AS_NODE' || name === 'WEPORT_UI_DEMO' || name.startsWith('WEPORT_SCREENSHOT_')) delete env[name]
-  app = await _electron.launch({ executablePath: layout.appExe, chromiumSandbox: process.platform === 'darwin',
+  app = await _electron.launch({ executablePath: layout.appExe, chromiumSandbox: process.platform === 'darwin' || Boolean(installedExe),
     args: ['--background', `--user-data-dir=${profile}`], env, timeout: 180000 })
   await app.evaluate(async ({ app: electronApp, BrowserWindow }) => {
     await electronApp.whenReady()

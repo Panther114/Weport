@@ -27,7 +27,9 @@ then runs independent packaged gates and records every outcome, including failur
 - macOS signatures/linkage/minimum OS, ZIP round trip, read-only DMG mount and seal,
   and bundle seal before/after the encrypted fixture run.
 - Linux DEB installation, root-owned sandbox permissions, sandbox-enabled installed
-  MCP acceptance, and matching app.asar bytes in DEB, tar.gz and AppImage payloads.
+  MCP acceptance, encrypted-fixture/export acceptance through the installed app's
+  read-only host deployment fallback, and matching app.asar bytes in DEB, tar.gz
+  and AppImage payloads.
 - Linux startup/page/filter/idle performance sampling without a cross-machine
   baseline or desktop capture. macOS route-cycle process metrics are descriptive.
 

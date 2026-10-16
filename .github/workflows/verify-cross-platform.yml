@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: native-verification-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   verify:
@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 90
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # Only ad-hoc signing; no certificates/secrets are exposed to PR jobs.
+      CSC_FOR_PULL_REQUEST: 'true'
       WEPORT_PROBE_OFFSCREEN: '1'
       WEPORT_NATIVE_GLASS: '0'
     steps:
@@ -88,6 +90,7 @@ jobs:
             .ui-probe/cross-platform/
             .ui-probe/mac-native-positive/
             .ui-probe/linux-native-positive/
+            .ui-probe/linux-native-positive-installed/
             .ui-probe/v12-interactions/
             .ui-probe/bug-report-ui/
             .ui-probe/sns-anti-delete-ui/

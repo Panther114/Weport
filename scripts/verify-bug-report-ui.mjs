@@ -29,6 +29,12 @@ try {
     shell.openExternal = async url => { globalThis.__bugReportQa.urls.push(url) }
     clipboard.writeText = text => { globalThis.__bugReportQa.texts.push(text) }
     clipboard.writeImage = image => { globalThis.__bugReportQa.images.push(image.getSize()) }
+    const proto = BrowserWindow.prototype, hide = proto.hide, inactive = proto.showInactive, position = proto.setPosition
+    proto.show = proto.showInactive = function () {
+      if (process.platform === 'darwin') return hide.call(this)
+      position.call(this, -4000, 0); return inactive.call(this)
+    }
+    proto.focus = function () {}
     app.emit('activate')
   }, fixtureImage)
   const page = await app.firstWindow()
