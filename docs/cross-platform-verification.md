@@ -37,6 +37,21 @@ Each runner retains JSON receipts, per-gate logs and synthetic screenshots for
 14 days. Successful package artifacts are retained for seven days. The receipt
 identifies the exact checked-out SHA; a branch or version label alone is not proof.
 
+## Harness constraints established on 2026-10-16
+
+- PR builds explicitly enable certificate-free ad-hoc signing with
+  `CSC_FOR_PULL_REQUEST=true`; electron-builder otherwise skips it and leaves an
+  invalid bundle seal. Verification jobs receive no signing secrets.
+- A synthetic saved-account profile is internally consistent before renderer
+  startup. Profile identity is checked before activation starts native warmup,
+  avoiding an Electron 43 inspector evaluation race on macOS.
+- Lifecycle stress follows real close-to-tray reclamation and waits for account
+  readiness after recreation. Forced `destroy()` has different shutdown semantics.
+- Wheel tests await actual workspace movement rather than assuming dispatch
+  acknowledgement means compositor scrolling finished.
+- Browser plugin unavailable: rendered acceptance uses the repository's packaged
+  Electron/Playwright harness, isolated profiles and offscreen/hidden windows.
+
 ## Limits
 
 These checks do not establish live WeChat key acquisition, real-account permission
