@@ -20,8 +20,11 @@ try {
   await app.evaluate(async ({ app: electronApp, BrowserWindow, ipcMain }) => {
     await electronApp.whenReady()
     while (!electronApp.listenerCount('activate')) await new Promise(resolve => setTimeout(resolve, 25))
-    const position = BrowserWindow.prototype.setPosition, inactive = BrowserWindow.prototype.showInactive
-    BrowserWindow.prototype.show = BrowserWindow.prototype.showInactive = function () { position.call(this, -4000, 0); inactive.call(this) }
+    const position = BrowserWindow.prototype.setPosition, inactive = BrowserWindow.prototype.showInactive, hide = BrowserWindow.prototype.hide
+    BrowserWindow.prototype.show = BrowserWindow.prototype.showInactive = function () {
+      if (process.platform === 'darwin') return hide.call(this)
+      position.call(this, -4000, 0); inactive.call(this)
+    }
     BrowserWindow.prototype.focus = function () {}
     electronApp.emit('activate')
     globalThis.antiDeleteFixture = { installed: false, failCheck: true, failMutation: false, throwMutation: false, ignoreMutation: false, calls: [] }

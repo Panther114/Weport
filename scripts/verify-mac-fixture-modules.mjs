@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
-export async function verifyFixtureModules(page, scratch, manifest, result) {
+export async function verifyFixtureModules(page, scratch, manifest, result, output = '.ui-probe/mac-native-positive') {
   result.exports = []
   for (const format of ['txt','json','html','excel','markdown','chatlab','chatlab-jsonl','arkme-json','weclone','sql']) {
     const out = join(scratch, 'exports', format)
@@ -19,6 +19,13 @@ export async function verifyFixtureModules(page, scratch, manifest, result) {
     record.repeat = await page.evaluate(({ out, options }) => window.electronAPI.export.exportSessions(out, options), { out, options })
     assert.equal(record.repeat.success, true); assert.equal(digest(), before)
     record.repeatArtifactUnchanged = true
+    // A ledger match must never skip a damaged export. Parse the repaired bytes
+    // independently; XLSX timestamps may differ, so byte equality is not required.
+    writeFileSync(artifact, 'Deliberately damaged synthetic export')
+    record.repair = await page.evaluate(({ out, options }) => window.electronAPI.export.exportSessions(out, options), { out, options })
+    assert.equal(record.repair.success, true)
+    assert.equal(record.repair.failCount, 0)
+    record.repairedArtifact = JSON.parse(execFileSync('python3', ['scripts/verify-mac-export-artifact.py', format, artifact], { encoding: 'utf8' }))
   }
   result.readerSearch = await page.evaluate(async contact => {
     const api = window.electronAPI
@@ -61,8 +68,19 @@ export async function verifyFixtureModules(page, scratch, manifest, result) {
   result.readerSearchUI = { hits: await page.locator('.reader-hit-row').count(),
     note: await page.locator('.reader-hits-note').textContent(),
     excerpt: await page.locator('.reader-hit-excerpt').allTextContents() }
-  await page.screenshot({ path: '.ui-probe/mac-native-positive/reader-search.png' })
+  await page.screenshot({ path: join(output, 'reader-search.png') })
   assert.equal(result.readerSearchUI.hits, 1, 'Reader must retain a loaded matching message when optional FTS search returns empty')
   assert.equal(result.readerSearchUI.excerpt[0], manifest.messages[0][3])
+  result.persistedIndex = await page.evaluate(() => window.electronAPI.search.query({ text: 'outgoing', limit: 10 }))
+  assert.equal(result.persistedIndex.hits.length, 1, 'Search index must remain usable after renderer reload')
+  result.paging = await page.evaluate(async contact => {
+    const api = window.electronAPI
+    return { first: await api.chat.getMessages(contact, 0, 1), second: await api.chat.getMessages(contact, 1, 1),
+      absent: await api.chat.getMessages(contact, 10, 1) }
+  }, manifest.contact)
+  assert.equal(result.paging.first.messages.length, 1)
+  assert.equal(result.paging.second.messages.length, 1)
+  assert.notEqual(result.paging.first.messages[0].localId, result.paging.second.messages[0].localId)
+  assert.equal(result.paging.absent.messages.length, 0)
   result.fixtureModulesAccepted = true
 }
