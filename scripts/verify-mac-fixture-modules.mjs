@@ -57,7 +57,10 @@ export async function verifyFixtureModules(page, scratch, manifest, result, outp
   // Reload normally so the renderer reads the real private profile persisted above.
   await page.reload()
   await page.locator('.rail-item').first().waitFor({ timeout: 30000 })
-  await page.waitForFunction(() => document.querySelector('.rail-item[data-tab="reader"]')?.disabled === false, null, { timeout: 30000 })
+  // Hidden/offscreen Chromium windows can stop requestAnimationFrame polling.
+  // Readiness is a DOM state assertion, so keep the same deadline with a timer.
+  await page.waitForFunction(() => document.querySelector('.rail-item[data-tab="reader"]')?.disabled === false,
+    null, { timeout: 30000, polling: 100 })
   await page.locator('.rail-item[data-tab="reader"]').click()
   await page.locator('.reader-session').first().click()
   await page.locator('.reader-row').first().waitFor({ timeout: 30000 })
@@ -65,7 +68,7 @@ export async function verifyFixtureModules(page, scratch, manifest, result, outp
   await page.waitForFunction(() => {
     const note = document.querySelector('.reader-hits-note')?.textContent || ''
     return note && !note.includes('正在搜索')
-  }, { timeout: 30000 })
+  }, null, { timeout: 30000, polling: 100 })
   result.readerSearchUI = { hits: await page.locator('.reader-hit-row').count(),
     note: await page.locator('.reader-hits-note').textContent(),
     excerpt: await page.locator('.reader-hit-excerpt').allTextContents() }

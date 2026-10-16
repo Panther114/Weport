@@ -44,14 +44,15 @@ try {
       await page.waitForFunction(tab => {
         const button = document.querySelector(`.rail-item[data-tab="${tab}"]`)
         return button && !button.disabled
-      }, tab, { timeout: 30000 })
+      }, tab, { timeout: 30000, polling: 100 })
       // Navigation hit targets are covered by verify-v12-ui. Here drive DOM
       // activation so hidden macOS windows do not depend on compositor frames.
       await page.locator(`.rail-item[data-tab="${tab}"]`).evaluate(button => {
         if (button.disabled) throw Error('Unexpected locked demo route')
         button.click()
       })
-      await page.waitForFunction(tab => document.querySelector(`.rail-item[data-tab="${tab}"]`)?.dataset.active === 'true', tab)
+      await page.waitForFunction(tab => document.querySelector(`.rail-item[data-tab="${tab}"]`)?.dataset.active === 'true',
+        tab, { timeout: 30000, polling: 100 })
       assert((await page.locator('body').innerText()).length > 50, `Route ${tab} must render meaningful content`)
       result.routes.push({ cycle, tab })
     }

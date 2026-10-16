@@ -88,7 +88,8 @@ try {
     await app.evaluate(({ BrowserWindow }, height) => BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('index.html')).setBounds({ x: -4000, y: 0, width: 1080, height }), height)
     await tab('导出数据')
     await page.evaluate(() => { document.querySelector('.workspace').scrollTop = 0 })
-    await page.waitForFunction(() => document.querySelector('.workspace').scrollTop === 0)
+    await page.waitForFunction(() => document.querySelector('.workspace').scrollTop === 0,
+      null, { timeout: 30000, polling: 100 })
     await page.mouse.move(30, 100)
     await page.waitForTimeout(350)
     const geometry = await page.evaluate(() => {
@@ -111,7 +112,7 @@ try {
     // mouse.wheel acknowledges dispatch, not completed compositor scrolling.
     // On macOS 26 the movement can arrive after the former fixed 350ms delay.
     await page.waitForFunction(before => document.querySelector('.workspace').scrollTop > before,
-      before.workspace, { timeout: 5000 })
+      before.workspace, { timeout: 5000, polling: 100 })
     await capture('nav-fixed-' + height)
   }
   await tab('连接微信')
