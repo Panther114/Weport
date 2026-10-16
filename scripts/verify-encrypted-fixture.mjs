@@ -66,10 +66,16 @@ try {
     wxidConfigs: { [manifest.account]: { decryptKey: manifest.keyHex, updatedAt: Date.now() } },
     messagePushEnabled: false, mcpEnabled: false, httpApiEnabled: false, launchAtStartup: false,
   }))
-  const env = { ...process.env, WEPORT_PROBE_OFFSCREEN: '1' }
+  const env = { ...process.env, WEPORT_PROBE_OFFSCREEN: '1', WEPORT_FATAL_LOG: join(output, 'fatal.log') }
   for (const name of Object.keys(env)) if (name === 'ELECTRON_RUN_AS_NODE' || name === 'WEPORT_UI_DEMO' || name.startsWith('WEPORT_SCREENSHOT_')) delete env[name]
   app = await _electron.launch({ executablePath: layout.appExe, chromiumSandbox: process.platform === 'darwin' || Boolean(installedExe),
     args: ['--background', `--user-data-dir=${profile}`], env, timeout: 180000 })
+  const outputTail = []
+  for (const stream of [app.process().stdout, app.process().stderr]) stream?.on('data', data => {
+    outputTail.push(data.toString()); if (outputTail.length > 80) outputTail.shift()
+  })
+  app.process().on('exit', (code, signal) => { result.processExit = { code, signal } })
+  result.processOutput = outputTail
   await app.evaluate(async ({ app: electronApp, BrowserWindow }) => {
     await electronApp.whenReady()
     while (!electronApp.listenerCount('activate')) await new Promise(resolve => setTimeout(resolve, 25))
