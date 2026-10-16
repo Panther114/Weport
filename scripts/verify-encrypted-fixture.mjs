@@ -76,9 +76,17 @@ try {
   })
   app.process().on('exit', (code, signal) => { result.processExit = { code, signal } })
   result.processOutput = outputTail
-  await app.evaluate(async ({ app: electronApp, BrowserWindow }) => {
-    await electronApp.whenReady()
-    while (!electronApp.listenerCount('activate')) await new Promise(resolve => setTimeout(resolve, 25))
+  // Poll from the test process instead of leaving an unresolved CDP promise in
+  // Electron during startup. V8 can collect that promise before app readiness.
+  const readyDeadline = Date.now() + 60000
+  let ready = false
+  while (Date.now() < readyDeadline) {
+    ready = await app.evaluate(({ app }) => app.isReady() && app.listenerCount('activate') > 0)
+    if (ready) break
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  assert(ready, 'Application must register its activation handler within 60 seconds')
+  await app.evaluate(({ app: electronApp, BrowserWindow }) => {
     const hide = BrowserWindow.prototype.hide
     BrowserWindow.prototype.show = function () { hide.call(this) }
     BrowserWindow.prototype.showInactive = function () { hide.call(this) }
