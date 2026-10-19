@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { AiRunGuard, toolRoundLimit } from './runGuard'
+import { AiRunGuard, toolRoundLimit, toolResultBudget } from './runGuard'
 
 describe('long productive AI runs', () => {
   it('continues beyond the former 48-step default with distinct evidence', () => {
     const guard = new AiRunGuard()
-    for (let round = 1; round <= 150; round++) {
+    for (let round = 1; round <= 512; round++) {
       guard.observeBatch([{ name: 'read_session_messages', args: { offset: round }, result: `page ${round}` }])
       expect(guard.shouldFinalize(round, toolRoundLimit(48), 1000, 128000)).toBe(false)
     }
     expect(toolRoundLimit(0)).toBe(Infinity)
     expect(toolRoundLimit(undefined)).toBe(Infinity)
+  })
+  it('increases the legacy evidence budget while reserving context on smaller models', () => {
+    expect(toolResultBudget(12000, 1000000, 10000)).toBe(240000)
+    expect(toolResultBudget(4000, 128000, 10000)).toBe(4000)
+    expect(toolResultBudget(240000, 32000, 20000)).toBe(10000)
   })
   it('finalizes repeated unchanged evidence but resets on new evidence', () => {
     const guard = new AiRunGuard()

@@ -628,8 +628,7 @@
   }
 }
 
-// 逐条删除：右上角的 ✕。常驻可见（不做 hover 才出现）—— 隐藏起来的删除入口
-// 会让"想删一条"变成一次找按钮的猜谜。
+// Both minimize and confirmed trash actions stay visible.
 .webot-note-close {
   display: inline-flex;
   align-items: center;
@@ -661,3 +660,7 @@
   gap: 4px;
   margin-left: auto;
 }
+
+.webot-note-body[hidden] { display: none; }
+.webot-note h4 .ghost-btn { padding: 0; border: 0; background: none; box-shadow: none; text-align: left; color: inherit; font: inherit; }
+.webot-note-close:not(.webot-danger):hover { color: var(--text); border-color: var(--border); }

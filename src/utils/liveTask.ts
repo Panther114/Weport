@@ -196,19 +196,25 @@ export class LiveTask {
   /** 主进程汇报的当前状态（窗口重建后恢复用）—— 整体替换，不叠加 */
   hydrate(snapshot: Partial<LiveTaskState>): void {
     const prev = this.state
-    // 本地更新的更"新"时不要被旧快照盖回去：快照只在一个方向上补信息 ——
-    // 本地还是 idle，或者快照的终态比本地更明确。
-    if (prev.status !== 'idle' && snapshot.status === 'running') return
+    const newRun = Boolean(snapshot.startedAt && prev.startedAt && snapshot.startedAt > prev.startedAt)
+    if (snapshot.startedAt && prev.startedAt && snapshot.startedAt < prev.startedAt) return
+    // Polling is the progress channel for index/maintenance jobs. Accept updates
+    // throughout a run, but never resurrect a terminal run with a stale poll.
+    if (!newRun && snapshot.status === 'running') {
+      if (prev.status !== 'idle' && prev.status !== 'running') return
+      if ((snapshot.progress ?? prev.progress) < prev.progress) return
+    }
+    const base = newRun ? IDLE : prev
     this.state = {
-      status: snapshot.status ?? prev.status,
-      stage: snapshot.stage ?? prev.stage,
-      progress: Math.max(prev.progress, Math.max(0, Math.min(100, Number(snapshot.progress) || 0))),
-      message: snapshot.message ?? prev.message,
-      logs: snapshot.logs && snapshot.logs.length > 0 ? snapshot.logs.slice(-this.maxLogs) : prev.logs,
-      startedAt: snapshot.startedAt ?? prev.startedAt,
-      finishedAt: snapshot.finishedAt ?? prev.finishedAt,
-      error: snapshot.error ?? prev.error,
-      detail: snapshot.detail ?? prev.detail,
+      status: snapshot.status ?? base.status,
+      stage: snapshot.stage ?? base.stage,
+      progress: Math.max(base.progress, Math.max(0, Math.min(100, Number(snapshot.progress) || 0))),
+      message: snapshot.message ?? base.message,
+      logs: snapshot.logs && snapshot.logs.length > 0 ? snapshot.logs.slice(-this.maxLogs) : base.logs,
+      startedAt: snapshot.startedAt ?? base.startedAt,
+      finishedAt: snapshot.finishedAt ?? base.finishedAt,
+      error: snapshot.error ?? base.error,
+      detail: snapshot.detail ?? base.detail,
     }
     this.emit()
   }

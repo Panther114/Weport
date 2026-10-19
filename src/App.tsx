@@ -1,3 +1,4 @@
+import { exportDateRange } from './utils/exportDateRange'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PrivacySettings from './components/settings/PrivacySettings'
 import {
@@ -595,6 +596,8 @@ export default function App() {
   }, [])
 
   // 导出选项（WeFlow 对齐）
+  const [exportStartDate, setExportStartDate] = useState('')
+  const [exportEndDate, setExportEndDate] = useState('')
   const [exportMedia, setExportMedia] = useState({ images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 })
   const [exportAvatars, setExportAvatars] = useState(false)
   const [exportVoiceAsText, setExportVoiceAsText] = useState(false)
@@ -723,6 +726,8 @@ export default function App() {
   function resetExportDefaults() {
     setFormat(EXPORT_DEFAULTS.format)
     setWriteLayout(EXPORT_DEFAULTS.writeLayout)
+    setExportStartDate('')
+    setExportEndDate('')
     setExportMedia(EXPORT_DEFAULTS.media)
     setExportAvatars(EXPORT_DEFAULTS.avatars)
     setExportVoiceAsText(EXPORT_DEFAULTS.voiceAsText)
@@ -1434,6 +1439,9 @@ export default function App() {
     // Main-process export acquires verified account image keys from cache before
     // media resolution. Missing cache keys never block ordinary text/history exports.
 
+    let dateRange: ExportRequest['dateRange']
+    try { dateRange = exportDateRange(exportStartDate, exportEndDate) }
+    catch (error) { pushToast('err', '日期范围无效', error instanceof Error ? error.message : String(error)); return }
     setBusy(true)
     exportProgressRef.current?.reset()
     setExportIntegrity(null)
@@ -1447,6 +1455,7 @@ export default function App() {
       // this explicit selection before calling exportService.exportSessions.
       sessionIds: exportSelectionMode === 'selected' ? Array.from(selectedExportSessionIds) : undefined,
       format,
+      dateRange,
       exportImages: exportMedia.images,
       exportVideos: exportMedia.videos,
       exportVoices: exportMedia.voices,
@@ -2942,6 +2951,17 @@ export default function App() {
                       )
                     })}
                   </div>
+                </div>
+
+                <div className="exp-section">
+                  <div className="exp-sec-head">日期范围</div>
+                  <div className="export-date-range">
+                    <label>开始日期<input type="date" aria-label="导出开始日期" value={exportStartDate} max={exportEndDate || undefined} disabled={busy} onChange={(event) => setExportStartDate(event.target.value)} /></label>
+                    <span>至</span>
+                    <label>结束日期<input type="date" aria-label="导出结束日期" value={exportEndDate} min={exportStartDate || undefined} disabled={busy} onChange={(event) => setExportEndDate(event.target.value)} /></label>
+                    <button type="button" className="ghost-btn" disabled={busy || (!exportStartDate && !exportEndDate)} onClick={() => { setExportStartDate(''); setExportEndDate('') }}>全部时间</button>
+                  </div>
+                  <p className="hint">留空表示不限，包含开始与结束当天。</p>
                 </div>
 
                 {/* 3. 内容 */}

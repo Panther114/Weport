@@ -6,6 +6,7 @@ import { findActiveMention, referenceKindLabel, rewriteMentionQuery, stripMentio
 import { loadReferenceCandidates } from '../../utils/sessionCandidates'
 import {
   Sparkles,
+  Clock,
   Plus,
   Settings2,
   Trash2,
@@ -38,7 +39,7 @@ import {
 import AiMarkdown from './AiMarkdown'
 import './providerProfiles.css'
 
-type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number }
+type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
 // `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
 // ToolChip 渲染转圈而不是把它标成失败。
 type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string; imageCount?: number }
@@ -1021,8 +1022,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                     onClick={() => void openChat(c.id)}
                     title={c.title}
                   >
-                    <MessageSquareText size={13} strokeWidth={1.8} />
-                    <span>{c.title}</span>
+                    <>{c.invocation?.kind === 'automation' ? <Clock size={13} /> : <MessageSquareText size={13} strokeWidth={1.8} />}</>
+                    <span>{c.invocation?.kind === 'automation' ? `自动任务 · ${c.title}` : c.title}</span>
                   </button>
                   <button
                     type="button"

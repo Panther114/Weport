@@ -473,7 +473,7 @@ export class ConfigService {
           prompt: '查看指定日期的跨聊天全景（把当天所有聊天合并成按时间排序的完整时间线），重建当天全貌（学业/工作/社交/生活各线），把值得记录的事件更新到 memory/events.md。',
         },
       ],
-      weportAiMaxToolChars: 12000,
+      weportAiMaxToolChars: 240000,
       // 并行工具并发：4 而不是 DSH 默认 10 —— 这里的工具打的是同一个 WCDB FFI
       // 宿主，消息游标是有限资源（工具内部本身也按 4 分批翻页）。
       weportAiMaxParallelToolCalls: 4,

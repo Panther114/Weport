@@ -4401,3 +4401,12 @@ button:disabled {
    媒体查询与 v1.scss 里的 .ai-shell 同优先级，被后者整体覆盖 —— 也就是说
    1100px / 940px 两个断点实际上从未生效过，986px 视口下右栏仍然是 288px，
    中间一栏只剩约 270px。断点必须和它要改的那条规则写在同一个文件里。 */
+
+.export-date-range { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.export-date-range label { display: grid; gap: 6px; color: var(--text-muted); font-size: 12px; }
+.export-date-range input {
+  min-width: 0; min-height: 36px; color-scheme: dark;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px);
+  background: var(--panel); color: var(--text); font: inherit;
+}
+[data-mode="light"] .export-date-range input { color-scheme: light; }

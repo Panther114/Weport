@@ -86,6 +86,22 @@ describe('终态与时间戳', () => {
 })
 
 describe('hydrate：窗口重建后的恢复', () => {
+  it('keeps advancing a running index without a page remount and resets on a new run', () => {
+    const task = new LiveTask()
+    task.hydrate({ status: 'running', progress: 2, message: 'preparing', startedAt: 1000 })
+    task.hydrate({ status: 'running', progress: 56, message: 'scanned 5000', startedAt: 1000 })
+    expect(task.getState().message).toBe('scanned 5000')
+    expect(task.getState().progress).toBe(56)
+    task.hydrate({ status: 'running', progress: 2, message: 'stale', startedAt: 1000 })
+    expect(task.getState().progress).toBe(56)
+    task.hydrate({ status: 'done', progress: 100, startedAt: 1000, finishedAt: 2000 })
+    task.hydrate({ status: 'running', progress: 0, startedAt: 3000 })
+    expect(task.getState().status).toBe('running')
+    expect(task.getState().progress).toBe(0)
+    expect(task.getState().finishedAt).toBeUndefined()
+    task.hydrate({ status: 'done', startedAt: 1000 })
+    expect(task.getState().status).toBe('running')
+  })
   it('本地还是 idle 时，主进程的运行中快照会被完整灌进来', () => {
     const task = new LiveTask()
     task.hydrate({

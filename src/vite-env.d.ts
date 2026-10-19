@@ -521,8 +521,8 @@ interface ElectronApi {
     }>
     assignConsumer: (consumer: string, profileId: string) => Promise<{ success: boolean; error?: string }>
     testProfile: (input: { providerId: string; protocol?: string; baseUrl?: string; apiKey?: string }) => Promise<{ success: boolean; models?: string[]; status?: number; error?: string }>
-    listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number }> }>
-    createChat: (title?: string) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number } }>
+    listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }> }>
+    createChat: (title?: string) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } } }>
     renameChat: (chatId: string, title: string) => Promise<{ success: boolean }>
     reorderChats: (orderedIds: string[]) => Promise<{ success: boolean }>
     deleteChat: (chatId: string) => Promise<{ success: boolean }>
@@ -537,7 +537,7 @@ interface ElectronApi {
       error?: string
     }>
     getChat: (chatId: string) => Promise<{
-      chat: { id: string; title: string; createdAt: number; updatedAt: number }
+      chat: { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
       running: boolean
       workspaceDir: string
       memoryDir: string

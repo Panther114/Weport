@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {

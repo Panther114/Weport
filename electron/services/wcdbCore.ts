@@ -1,3 +1,4 @@
+import { needsGroupDisplayName, resolveDefaultGroupNames } from './groupDisplayName'
 import { join, dirname, basename, resolve } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, symlinkSync, rmdirSync, realpathSync } from 'fs'
 import { appendFile } from 'fs/promises'
@@ -3315,7 +3316,7 @@ export class WcdbCore {
         if (!normalizedUsername || seen.has(normalizedUsername)) continue
         seen.add(normalizedUsername)
         const cached = this.displayNameCache.get(normalizedUsername)
-        if (cached && now - cached.updatedAt < this.displayNameCacheTtlMs) {
+        if (cached && !needsGroupDisplayName(normalizedUsername, cached.displayName) && now - cached.updatedAt < this.displayNameCacheTtlMs) {
           resultMap[normalizedUsername] = cached.displayName
           continue
         }
@@ -3352,6 +3353,7 @@ export class WcdbCore {
             this.writeDisplayNameCache(u, u, now)
           }
         }
+        await this.fillDefaultGroupNames(toFetch, resultMap, now)
         return { success: true, map: resultMap }
       }
 
@@ -3396,9 +3398,17 @@ export class WcdbCore {
         resultMap[username] = username
         this.writeDisplayNameCache(username, username, now)
       }
+      await this.fillDefaultGroupNames(toFetch, resultMap, now)
       return { success: true, map: resultMap }
     } catch (e) {
       return { success: false, error: String(e) }
+    }
+  }
+
+  private async fillDefaultGroupNames(ids: string[], names: Record<string, string>, now: number): Promise<void> {
+    await resolveDefaultGroupNames(ids, names, (id) => this.getGroupMembers(id), (members) => this.getDisplayNames(members))
+    for (const id of ids) {
+      if (id.endsWith('@chatroom') && !needsGroupDisplayName(id, names[id])) this.writeDisplayNameCache(id, names[id], now)
     }
   }
 

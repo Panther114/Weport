@@ -886,6 +886,12 @@ async function withWriteSnapshotBody<T>(reason: string, run: () => Promise<T>): 
       if (configService?.getAccountDir() !== accountDir) return { success: false, error: '当前账号已改变，已中止数据库写入' }
       if ((await observer.observePlatform()).wechatPids.length) return { success: false, error: '微信已启动，已中止数据库写入' }
     } finally { releaseCapture() }
+    // Snapshot capture closes the host. Reconnect before dispatching wrappers
+    // such as SNS trigger operations, which require an already-open handle.
+    const connection = await chatService.connect()
+    if (!connection.success) return { success: false, error: connection.error || '快照完成后重新连接数据库失败' }
+    if (configService?.getAccountDir() !== accountDir) return { success: false, error: '当前账号已改变，已中止数据库写入' }
+    if ((await observer.observePlatform()).wechatPids.length) return { success: false, error: '微信已启动，已中止数据库写入' }
     taskStatusService.progress(TASK_KEY.databaseMaintenance, { stage: '执行写入', message: '快照完成，正在修改数据库' })
     return await run()
   } catch (e) {
@@ -2188,7 +2194,7 @@ let weBotSchedulerStarted = false
 async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSignal): Promise<WeBotDispatchResult> {
   if (signal.aborted) throw new Error('已中止')
 
-  const chat = weportAiService.createChat(request.task.title)
+  const chat = weportAiService.createChat(request.task.title, { kind: 'automation', taskId: request.task.id })
   const sections: string[] = []
   if (request.task.description.trim()) sections.push(request.task.description.trim())
 

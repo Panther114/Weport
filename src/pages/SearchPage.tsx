@@ -19,7 +19,7 @@ import {
 } from '../components/search/searchQuery'
 import { loadRecentSessions, loadSessionCandidates, rememberRecentSession, type SessionCandidate } from '../components/search/searchData'
 import { useAnnotations, useAnnotationsExport } from '../hooks/useAnnotations'
-import { useLiveTask } from '../hooks/useLiveTask'
+import { useLiveTaskPhase } from '../hooks/useLiveTask'
 import { LIVE_TASK } from '../utils/liveTask'
 import { useDebouncedValue, useHitsStore, useSearchQuery, type HitsStore } from '../hooks/useSearchQuery'
 import { loadMessageByIdentity } from '../components/reader/readerSource'
@@ -161,10 +161,11 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
   }, [refreshIndex])
 
   // Result metadata must refresh even when an existing index hides the empty panel.
-  const indexTask = useLiveTask(LIVE_TASK.searchIndex)
+  const indexTaskPhase = useLiveTaskPhase(LIVE_TASK.searchIndex)
   useEffect(() => {
-    if (indexTask.status === 'done' || indexTask.status === 'failed' || indexTask.status === 'aborted') refreshIndex()
-  }, [indexTask.status, indexTask.finishedAt, refreshIndex])
+    const status = indexTaskPhase.split(':')[0]
+    if (status === 'done' || status === 'failed' || status === 'aborted') refreshIndex()
+  }, [indexTaskPhase, refreshIndex])
 
   // ---- 注解（标签 / 收藏 / 保存搜索） ------------------------------------
   const annotations = useAnnotations(accountId)

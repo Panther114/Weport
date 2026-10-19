@@ -372,6 +372,9 @@ export default function LiquidGlass({
         position: 'absolute',
         inset: 0,
         borderRadius: cornerRadius,
+        // SVG filter output can paint beyond border-radius/overflow. Clip each
+        // optical layer after filtering; keep the host's rounded box-shadow free.
+        clipPath: `inset(0 round ${cornerRadius}px)`,
         pointerEvents: 'none'
     }
 

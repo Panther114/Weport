@@ -832,6 +832,9 @@ export default function NotificationWindow() {
                     width: '100%',
                     height: 'auto',
                     background: 'transparent',
+                    // The outer clip also clips the faint shadow tail. A square
+                    // clip leaves a rectangular shade below the rounded card.
+                    borderRadius: glass.radius + notificationCardPadding(glass.shadow),
                     position: 'relative', // Context for absolute children
                     overflow: 'hidden', // Prevent scrollbars during transition
                     ...rootSlideStyle

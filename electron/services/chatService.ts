@@ -1,3 +1,4 @@
+import { needsGroupDisplayName } from './groupDisplayName'
 import { join, dirname, basename, extname } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, watch, promises as fsPromises } from 'fs'
 import { createRequire } from 'module'
@@ -2234,7 +2235,7 @@ class ChatService {
         }
         // 如果缓存有效且有头像，直接使用；如果没有头像，也需要重新尝试获取
         // 额外检查：如果头像是无效的 hex 格式（以 ffd8 开头），也需要重新获取
-        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs && cachedAvatarUrl) {
+        if (cached && (skipDisplayName || !needsGroupDisplayName(username, cached.displayName)) && now - cached.updatedAt < this.avatarCacheTtlMs && cachedAvatarUrl) {
           // 本地协议 URL 需验证文件仍存在（缓存目录变更 → 重新解析）
           if (!avatarCacheService.isResolvable(cachedAvatarUrl)) {
             missing.push(username)

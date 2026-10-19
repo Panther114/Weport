@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Clock, History, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
 import AiMarkdown from '../components/weportAi/AiMarkdown'
@@ -28,6 +29,8 @@ interface Props {
   section: WeBotSection
 }
 
+const minimizedNoteIds = new Set<string>()
+
 const emptyDraft = () => ({
   title: '',
   description: '',
@@ -55,6 +58,20 @@ export default function WeBotModule({ section }: Props) {
   const api = window.electronAPI
   const [tasks, setTasks] = useState<WeBotTask[]>([])
   const [notes, setNotes] = useState<WeBotNote[]>([])
+  const [minimized, setMinimized] = useState(() => new Set(minimizedNoteIds))
+  const [deleteTarget, setDeleteTarget] = useState<WeBotNote | 'all' | null>(null)
+  const [deletingNote, setDeletingNote] = useState(false)
+  const toggleNote = (id: string) => {
+    if (minimizedNoteIds.has(id)) minimizedNoteIds.delete(id)
+    else minimizedNoteIds.add(id)
+    setMinimized(new Set(minimizedNoteIds))
+  }
+  useEffect(() => {
+    if (!deleteTarget) return
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !deletingNote) setDeleteTarget(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [deleteTarget, deletingNote])
   const [runs, setRuns] = useState<WeBotRun[]>([])
   const [candidates, setCandidates] = useState<ReferenceCandidate[]>([])
   const [candidatesState, setCandidatesState] = useState<{ loading: boolean; ok: boolean; error?: string }>({
@@ -377,15 +394,12 @@ export default function WeBotModule({ section }: Props) {
           ) : (
             <>
               {/* 「只看未读」整块删除（v1.0.1）：未读/已读在 WeBot 里没有意义 ——
-                  笔记是任务的结论，不是待办收件箱。要丢掉一条就点它右上角的 ✕。 */}
+                  笔记是任务的结论，不是待办收件箱。删除与收起是独立操作。 */}
               {notes.length > 0 ? (
                 <button
                   type="button"
                   className="ghost-btn webot-danger"
-                  onClick={async () => {
-                    await api.weBot.clearNotes()
-                    await refresh()
-                  }}
+                  onClick={() => setDeleteTarget('all')}
                 >
                   <Trash2 size={13} /> 清空
                 </button>
@@ -790,27 +804,23 @@ export default function WeBotModule({ section }: Props) {
             {notes.map((note) => (
               <article className="webot-note" key={note.id}>
                 <header>
-                  <h4>{note.title}</h4>
+                  <h4><button type="button" className="ghost-btn" aria-expanded={!minimized.has(note.id)} onClick={() => toggleNote(note.id)}>{minimized.has(note.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}{note.title}</button></h4>
                   <span className="webot-note-time">{describeRelativeTime(note.createdAt)}</span>
-                  {/* 逐条删除（v1.0.1）：右上角的 ✕。以前只有「清空全部」，
-                      想丢掉一条过期结论只能把整块板子清掉。 */}
                   <button
                     type="button"
                     className="webot-note-close"
-                    aria-label={`删除笔记 ${note.title}`}
-                    title="删除这条笔记"
-                    onClick={async () => {
-                      await api.weBot.deleteNote(note.id)
-                      await refresh()
-                    }}
+                    aria-label={`${minimized.has(note.id) ? '展开' : '收起'}笔记 ${note.title}`}
+                    title={minimized.has(note.id) ? '展开笔记' : '收起笔记'}
+                    onClick={() => toggleNote(note.id)}
                   >
-                    <X size={13} />
+                    {minimized.has(note.id) ? <ChevronDown size={13} /> : <X size={13} />}
                   </button>
+                  <button type="button" className="webot-note-close webot-danger" title="删除笔记" aria-label={`删除笔记 ${note.title}`} onClick={() => setDeleteTarget(note)}><Trash2 size={13} /></button>
                 </header>
                 {/* 笔记正文按 **Markdown** 渲染（v1.0.1）。模型本来就输出 md
                     （`- 第 3 题`、`**周三小测**`），旧版按纯文本渲染，用户看到的
                     是裸露的星号和短横线。 */}
-                <div className="webot-note-body">
+                <div className="webot-note-body" hidden={minimized.has(note.id)}>
                   <AiMarkdown text={note.summary} />
                 </div>
                 <footer>
@@ -839,6 +849,27 @@ export default function WeBotModule({ section }: Props) {
             ))}
           </div>
         </div>
+      )}
+      {deleteTarget && createPortal(
+        <div className="modal-backdrop" onClick={() => { if (!deletingNote) setDeleteTarget(null) }}>
+          <div className="modal danger" role="dialog" aria-modal="true" aria-labelledby="webot-delete-title" onClick={(event) => event.stopPropagation()}>
+            <h3 id="webot-delete-title"><Trash2 size={15} />{deleteTarget === 'all' ? '清空所有笔记？' : '删除这条笔记？'}</h3>
+            <p>{deleteTarget === 'all' ? '所有笔记' : deleteTarget.title}将被永久删除，此操作无法恢复。</p>
+            <div className="modal-actions">
+              <button type="button" className="secondary-btn" autoFocus disabled={deletingNote} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button type="button" className="danger-btn" disabled={deletingNote} onClick={async () => {
+                setDeletingNote(true)
+                try {
+                  if (deleteTarget === 'all') await api.weBot.clearNotes()
+                  else if (!await api.weBot.deleteNote(deleteTarget.id)) throw new Error('笔记已不存在或删除失败')
+                  setDeleteTarget(null)
+                  await refresh()
+                } catch (error) { setMessage(`删除笔记失败：${String(error)}`) }
+                finally { setDeletingNote(false) }
+              }}>{deletingNote ? '删除中…' : '永久删除'}</button>
+            </div>
+          </div>
+        </div>, document.body
       )}
     </div>
   )

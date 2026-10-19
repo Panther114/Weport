@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto'
 
+export function toolResultBudget(configured: unknown, contextWindow: number, promptTokens: number): number {
+  const value = Number(configured)
+  const requested = value > 0 && value !== 12000 ? value : 240000
+  // Reserve room for the next answer and stop tool results overrunning a small
+  // model's context. 12000 was the former default, not an explicit preference.
+  const available = Math.floor(Math.max(0, contextWindow * 0.75 - promptTokens) * 2.5)
+  return Math.max(1000, Math.min(requested, available))
+}
+
 export function toolRoundLimit(value: unknown): number {
   const limit = Number(value)
   // 48 was the old default, rather than a user-selected budget.
