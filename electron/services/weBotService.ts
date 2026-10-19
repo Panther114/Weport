@@ -384,6 +384,7 @@ export class WeBotService {
 
     try {
       const result = await this.dispatchFn({ task, run }, controller.signal)
+      if (controller.signal.aborted) throw new Error('已中止')
       run.status = 'ok'
       run.finishedAt = this.nowFn()
       run.durationMs = run.finishedAt - startedAt
@@ -406,7 +407,7 @@ export class WeBotService {
        * 分开 —— 失败看在运行记录里（有完整错误、时刻与耗时），笔记板只放结论。
        * 失败仍然弹窗：那是用户唯一会立刻注意到的通道。
        */
-      this.notifyFn?.({
+      if (!controller.signal.aborted) this.notifyFn?.({
         status: 'error',
         taskId: task.id,
         taskTitle: task.title,

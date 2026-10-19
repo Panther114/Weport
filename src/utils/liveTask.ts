@@ -116,6 +116,8 @@ export function appendLog(logs: string[], message: string, maxLogs = DEFAULT_MAX
 
 export class LiveTask {
   private state: LiveTaskState = IDLE
+  private snapshotStartedAt?: number
+  private awaitingNewRun = false
   private listeners = new Set<() => void>()
   private maxLogs: number
 
@@ -144,7 +146,9 @@ export class LiveTask {
 
   update(patch: LiveTaskPatch): void {
     const prev = this.state
-    let logs = prev.logs
+    const base = patch.reset ? IDLE : prev
+    if (patch.reset) this.awaitingNewRun = true
+    let logs = base.logs
     if (patch.reset) logs = []
     if (patch.log) logs = appendLog(logs, patch.log, this.maxLogs)
 
@@ -154,22 +158,22 @@ export class LiveTask {
       rawProgress === undefined
         ? patch.reset
           ? 0
-          : prev.progress
+          : base.progress
         : Math.max(0, Math.min(100, Math.round(rawProgress)))
 
-    const status = patch.status ?? prev.status
+    const status = patch.status ?? base.status
     const next: LiveTaskState = {
       status,
-      stage: patch.stage ?? prev.stage,
-      progress: patch.resetProgress ? progress : Math.max(prev.progress, progress),
-      message: patch.message ?? prev.message,
+      stage: patch.stage ?? base.stage,
+      progress: patch.resetProgress ? progress : Math.max(base.progress, progress),
+      message: patch.message ?? base.message,
       logs,
-      startedAt: patch.startedAt ?? (status === 'running' && !prev.startedAt ? Date.now() : prev.startedAt),
+      startedAt: patch.startedAt ?? (status === 'running' && !base.startedAt ? Date.now() : base.startedAt),
       finishedAt:
         patch.finishedAt ??
-        (status === 'done' || status === 'failed' || status === 'aborted' ? prev.finishedAt ?? Date.now() : undefined),
-      error: patch.error ?? (status === 'running' ? undefined : prev.error),
-      detail: patch.detail ?? prev.detail,
+        (status === 'done' || status === 'failed' || status === 'aborted' ? base.finishedAt ?? Date.now() : undefined),
+      error: patch.error ?? (status === 'running' ? undefined : base.error),
+      detail: patch.detail ?? base.detail,
     }
     if (
       next.status === prev.status &&
@@ -196,14 +200,27 @@ export class LiveTask {
   /** 主进程汇报的当前状态（窗口重建后恢复用）—— 整体替换，不叠加 */
   hydrate(snapshot: Partial<LiveTaskState>): void {
     const prev = this.state
-    const newRun = Boolean(snapshot.startedAt && prev.startedAt && snapshot.startedAt > prev.startedAt)
-    if (snapshot.startedAt && prev.startedAt && snapshot.startedAt < prev.startedAt) return
+    // Renderer event timestamps record reception time, not the server run's
+    // start. Compare generations only against previously accepted snapshots.
+    const knownStart = this.snapshotStartedAt
+    if (snapshot.startedAt && knownStart && (snapshot.startedAt < knownStart || (this.awaitingNewRun && snapshot.startedAt === knownStart))) return
+    const newRun = Boolean(snapshot.startedAt && knownStart && snapshot.startedAt > knownStart && !this.awaitingNewRun)
     // Polling is the progress channel for index/maintenance jobs. Accept updates
     // throughout a run, but never resurrect a terminal run with a stale poll.
     if (!newRun && snapshot.status === 'running') {
       if (prev.status !== 'idle' && prev.status !== 'running') return
-      if ((snapshot.progress ?? prev.progress) < prev.progress) return
+      if ((snapshot.progress ?? prev.progress) < prev.progress) {
+        if (snapshot.startedAt && (!knownStart || this.awaitingNewRun)) {
+          this.snapshotStartedAt = snapshot.startedAt
+          this.awaitingNewRun = false
+          this.state = { ...prev, startedAt: snapshot.startedAt }
+          this.emit()
+        }
+        return
+      }
     }
+    if (snapshot.startedAt) this.snapshotStartedAt = snapshot.startedAt
+    this.awaitingNewRun = false
     const base = newRun ? IDLE : prev
     this.state = {
       status: snapshot.status ?? base.status,
@@ -220,6 +237,8 @@ export class LiveTask {
   }
 
   reset(): void {
+    this.snapshotStartedAt = undefined
+    this.awaitingNewRun = false
     this.state = IDLE
     this.emit()
   }

@@ -1682,7 +1682,11 @@ class WeportAiService {
           const countsResult = await chatService.getSessionMessageCounts([sessionId], { preferHintCache: true })
           this.appendDebugLog({ kind: 'history_sample', chatId: ctx.chatId, stage: 'count_done', sessionId, success: countsResult.success, count: countsResult.counts?.[sessionId] || 0 })
           if (!countsResult.success || !countsResult.counts) return `读取消息总数失败：${countsResult.error || '未知错误'}`
-          const totalMessages = Math.max(0, Number(countsResult.counts[sessionId]) || 0)
+          const rawCount = countsResult.counts[sessionId]
+          if (rawCount == null || !Number.isFinite(Number(rawCount)) || Number(rawCount) < 0) {
+            return '读取消息总数失败：该会话没有返回有效数量，无法确认历史范围；不能视为没有消息。'
+          }
+          const totalMessages = Math.floor(Number(rawCount))
           if (totalMessages === 0) return '该会话没有可抽样的消息。'
           const probeLimit = Math.min(500, Math.max(messagesPerPeriod * 2, 100))
           const offsets: number[] = []
@@ -1699,7 +1703,11 @@ class WeportAiService {
             this.appendDebugLog({ kind: 'history_sample', chatId: ctx.chatId, stage: 'page_start', sessionId, offset, probeLimit })
             const result = await chatService.getMessages(sessionId, offset, probeLimit, 0, 0, false)
             this.appendDebugLog({ kind: 'history_sample', chatId: ctx.chatId, stage: 'page_done', sessionId, offset, success: result.success, messages: result.messages?.length || 0, error: result.error })
-            const all = result.success ? result.messages || [] : []
+            if (!result.success) {
+              sections.push(`\n[覆盖不完整 offset=${offset}] 读取失败：${result.error || '未知错误'}；此窗口未取得证据，不能视为没有消息，需重试后再下结论。`)
+              continue
+            }
+            const all = result.messages || []
             const sample: Message[] = []
             // Preserve every historical stratum under the aggregate tool budget;
             // truncating the final string would silently discard the oldest ones.

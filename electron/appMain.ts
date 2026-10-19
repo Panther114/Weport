@@ -76,6 +76,7 @@ import { weCloneService } from './services/weCloneService'
 import { TASK_KEY, taskStatusService } from './services/taskStatusService'
 import { AnnotationsService } from './services/annotationsService'
 import { SearchIndexService, createExportContextDecoder } from './services/searchIndexService'
+import { runWithAbortSignal } from './services/ai/abortRun'
 import { connectorsService } from './services/connectors/connectorsService'
 import { registerCliCommands } from './services/cliCommands'
 import { runCommand } from './services/weportCommands'
@@ -2217,7 +2218,9 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
 
   // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
   // 任务可以独立指向一个便宜/快的模型，而不影响 WeportAI 的手动对话。
-  const result = await weportAiService.runChat(chat.id, sections.join('\n\n'), { consumer: 'webot' })
+  const result = await runWithAbortSignal(signal,
+    () => weportAiService.runChat(chat.id, sections.join('\n\n'), { consumer: 'webot' }),
+    () => weportAiService.abort(chat.id))
   if (!result.success) throw new Error(result.error || '任务执行失败')
 
   const finished = weportAiService.getChat(chat.id)

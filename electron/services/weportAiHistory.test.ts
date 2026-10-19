@@ -11,6 +11,28 @@ import { weportAiService } from './weportAiService'
 import { chatService } from './chatService'
 
 describe('AI history investigation', () => {
+  it('does not report an unknown message count as an empty history', async () => {
+    vi.mocked(chatService.getSessionMessageCounts).mockResolvedValue({ success: true, counts: {} })
+    const service = weportAiService as any
+    const log = vi.spyOn(service, 'appendDebugLog').mockImplementation(() => undefined)
+    const tool = service.buildTools().find((item: any) => item.name === 'sample_session_history')
+    const result = await tool.handler({ sessionId: 'room' }, { chatId: 'fixture', getSessionName: () => 'Room' })
+    expect(result).toContain('没有返回有效数量')
+    expect(result).not.toContain('该会话没有可抽样的消息')
+    log.mockRestore()
+  })
+  it('exposes failed historical windows instead of claiming empty coverage', async () => {
+    vi.mocked(chatService.getSessionMessageCounts).mockResolvedValue({ success: true, counts: { room: 1000 } })
+    vi.mocked(chatService.getMessages).mockResolvedValue({ success: false, error: 'native cursor timeout' })
+    const service = weportAiService as any
+    const log = vi.spyOn(service, 'appendDebugLog').mockImplementation(() => undefined)
+    const tool = service.buildTools().find((item: any) => item.name === 'sample_session_history')
+    const result = await tool.handler({ sessionId: 'room' }, { chatId: 'fixture', getSessionName: () => 'Room' })
+    expect(result).toContain('native cursor timeout')
+    expect(result).toContain('覆盖不完整')
+    expect(result).not.toContain('读取=0')
+    log.mockRestore()
+  })
   it('reads five substantial historical windows and preserves the oldest stratum under a shared result budget', async () => {
     vi.mocked(chatService.getSessionMessageCounts).mockResolvedValue({ success: true, counts: { room: 10000 } })
     vi.mocked(chatService.getMessages).mockImplementation(async (_id, offset = 0, limit = 50) => ({

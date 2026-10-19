@@ -85,7 +85,11 @@ export function hydrateFromSnapshots(all: Record<string, RawSnapshot> | null | u
     const terminal = state.status === 'done' || state.status === 'failed' || state.status === 'aborted'
     if (terminal) {
       const finishedAt = Number(state.finishedAt) || 0
-      if (!finishedAt || now - finishedAt > TERMINAL_SNAPSHOT_TTL_MS) continue
+      const current = liveTask(key).getState()
+      const finishesActiveRun = current.status === 'running' && Boolean(state.startedAt) && current.startedAt === state.startedAt
+      // Expiry prevents resurrecting old notifications, not completing an
+      // already-visible run after sleep or a suspended renderer.
+      if (!finishedAt || (now - finishedAt > TERMINAL_SNAPSHOT_TTL_MS && !finishesActiveRun)) continue
     }
     if (state.status === 'idle') continue
     liveTask(key).hydrate(state)

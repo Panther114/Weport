@@ -67,6 +67,11 @@ describe('运行中的快照总是被采纳', () => {
 
 describe('终态快照有有效期', () => {
   const now = 10_000_000
+  it('finishes the same active run after suspension even when its terminal snapshot has aged out', () => {
+    hydrateFromSnapshots({ [LIVE_TASK.searchIndex]: { status: 'running', startedAt: 1000, progress: 20 } }, now)
+    hydrateFromSnapshots({ [LIVE_TASK.searchIndex]: { status: 'done', startedAt: 1000, finishedAt: now - 600000, progress: 100 } }, now)
+    expect(liveTask(LIVE_TASK.searchIndex).getState().status).toBe('done')
+  })
 
   it('刚结束的终态会被采纳（用户刚点完取消，马上切回来）', () => {
     hydrateFromSnapshots(

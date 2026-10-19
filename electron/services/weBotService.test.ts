@@ -430,6 +430,19 @@ describe('WeBotService — 笔记', () => {
 })
 
 describe('WeBotService — 状态文件', () => {
+  it('does not publish a note or an error notification when a stopped run resolves late', async () => {
+    let finish!: (value: WeBotDispatchResult) => void
+    const notices: unknown[] = []
+    const { service } = makeService({ dispatch: () => new Promise(resolve => { finish = resolve }), notify: notice => notices.push(notice) })
+    const task = service.createTask({ title: 'stopped task', schedule: daily(8, 0) })
+    const running = service.runNow(task.id)
+    service.stop()
+    finish({ summary: 'late answer' })
+    await running
+    expect(service.listRuns(task.id)[0].status).toBe('skipped')
+    expect(service.listNotes()).toEqual([])
+    expect(notices).toEqual([])
+  })
   it('写入是原子的（存在 .tmp 中转，最终文件始终是合法 JSON）', async () => {
     const clock = makeClock()
     const { service, dir } = makeService({ clock })

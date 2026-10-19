@@ -44,6 +44,13 @@ describe('进度单调不减', () => {
 })
 
 describe('终态与时间戳', () => {
+  it('starts a new task without retaining the old stage or cancellation handle', () => {
+    const task = new LiveTask()
+    task.update({ status: 'done', stage: 'writing', progress: 100, detail: { taskId: 'old-export' } })
+    task.start('new run')
+    expect(task.getState().stage).toBeUndefined()
+    expect(task.getState().detail).toBeUndefined()
+  })
   it('start() 清空日志与进度、状态置 running、记录开始时间', () => {
     const task = new LiveTask()
     task.update({ status: 'running', progress: 90, log: '旧的一行' })
@@ -86,6 +93,36 @@ describe('终态与时间戳', () => {
 })
 
 describe('hydrate：窗口重建后的恢复', () => {
+  it('accepts main-process start times earlier than the first local progress event', () => {
+    const task = new LiveTask()
+    task.update({ status: 'running', progress: 10, startedAt: 1010 })
+    task.hydrate({ status: 'running', startedAt: 1000, progress: 50 })
+    expect(task.getState().progress).toBe(50)
+    task.hydrate({ status: 'done', startedAt: 1000, finishedAt: 2000, progress: 100 })
+    expect(task.getState().status).toBe('done')
+  })
+  it('does not restore the previous run while a locally started retry awaits its snapshot', () => {
+    const task = new LiveTask()
+    task.hydrate({ status: 'done', startedAt: 1000, progress: 100 })
+    task.start('retry')
+    task.hydrate({ status: 'done', startedAt: 1000, progress: 100 })
+    expect(task.getState().status).toBe('running')
+    task.hydrate({ status: 'running', startedAt: 2000, progress: 10 })
+    expect(task.getState().progress).toBe(10)
+    task.hydrate({ status: 'done', startedAt: 2000, progress: 100 })
+    expect(task.getState().status).toBe('done')
+  })
+  it('adopts the retry generation without regressing newer event progress', () => {
+    const task = new LiveTask()
+    task.hydrate({ status: 'done', startedAt: 1000, progress: 100 })
+    task.start('retry')
+    task.update({ progress: 60 })
+    task.hydrate({ status: 'running', startedAt: 2000, progress: 30, message: 'older event' })
+    expect(task.getState().progress).toBe(60)
+    expect(task.getState().startedAt).toBe(2000)
+    task.hydrate({ status: 'done', startedAt: 1000 })
+    expect(task.getState().status).toBe('running')
+  })
   it('keeps advancing a running index without a page remount and resets on a new run', () => {
     const task = new LiveTask()
     task.hydrate({ status: 'running', progress: 2, message: 'preparing', startedAt: 1000 })
