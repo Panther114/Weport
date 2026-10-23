@@ -12,7 +12,11 @@ import type { ArchiveRequest } from './types'
 import { resolveRelocatedStoragePath, resolveStorageLocation } from '../storageLocations'
 
 export function registerArchiveIpc(deps: { config: () => ConfigService; annotations: () => AnnotationsService; resources: () => string; guardExport: () => Promise<void> }): ArchiveLibrary {
-  const account = () => deps.config().getMyWxidCleaned()
+  // Archive scope must use the same account identifier the renderer submits.
+  // The cleaned value is a directory-lookup prefix; it may discard a selected
+  // suffix (for example wxid_abc123_a1b2 becomes wxid_abc123), causing the same
+  // selection to fail the account check.
+  const account = () => String(deps.config().get('myWxid') || '').trim()
   const library = new ArchiveLibrary({
     root: resolveStorageLocation(app.getPath('userData'), 'archive-library', join(app.getPath('userData'), 'archive-library')), currentAccount: account,
     resolvePath: value => resolveRelocatedStoragePath(app.getPath('userData'), value),
