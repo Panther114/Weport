@@ -60,7 +60,8 @@ export function resolveRelocatedStoragePath(profile: string, path: string): stri
     if (inside(move.source, current)) current = join(move.target, relative(move.source, current))
     else {
       // Windows may persist an 8.3 TEMP path while preparation stores realpath's
-      // long spelling. Compare physical ancestors, including missing file tails.
+      // long spelling. Use the same native normalization as fs/promises.realpath,
+      // including existing ancestors of missing file tails.
       const source = canonicalReference(move.source), candidate = canonicalReference(current)
       if (inside(source, candidate)) current = join(move.target, relative(source, candidate))
     }
@@ -69,7 +70,7 @@ export function resolveRelocatedStoragePath(profile: string, path: string): stri
 }
 function canonicalReference(path: string): string {
   const absolute = resolve(path)
-  try { return realpathSync(absolute) } catch (error) {
+  try { return realpathSync.native(absolute) } catch (error) {
     if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code || '')) return absolute
     const parent = dirname(absolute)
     return parent === absolute ? absolute : join(canonicalReference(parent), relative(parent, absolute))
