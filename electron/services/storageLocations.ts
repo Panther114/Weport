@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto'
-import { createReadStream, existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs'
+import { createReadStream, existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'fs'
 import * as fs from 'fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep, parse } from 'path'
 
@@ -56,9 +56,24 @@ export function resetStorageLocation(profile: string, kind: StorageKind): void {
 export function resolveRelocatedStoragePath(profile: string, path: string): string {
   let current = path
   for (const move of locations(profile).moves || []) {
-    if (isAbsolute(move.source) && isAbsolute(move.target) && inside(move.source, current)) current = join(move.target, relative(move.source, current))
+    if (!isAbsolute(move.source) || !isAbsolute(move.target) || !isAbsolute(current)) continue
+    if (inside(move.source, current)) current = join(move.target, relative(move.source, current))
+    else {
+      // Windows may persist an 8.3 TEMP path while preparation stores realpath's
+      // long spelling. Compare physical ancestors, including missing file tails.
+      const source = canonicalReference(move.source), candidate = canonicalReference(current)
+      if (inside(source, candidate)) current = join(move.target, relative(source, candidate))
+    }
   }
   return current
+}
+function canonicalReference(path: string): string {
+  const absolute = resolve(path)
+  try { return realpathSync(absolute) } catch (error) {
+    if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code || '')) return absolute
+    const parent = dirname(absolute)
+    return parent === absolute ? absolute : join(canonicalReference(parent), relative(parent, absolute))
+  }
 }
 async function atomic(file: string, data: unknown): Promise<void> {
   await fs.mkdir(dirname(file), { recursive: true })

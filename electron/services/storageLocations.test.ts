@@ -63,6 +63,18 @@ describe('transactional storage relocation', () => {
     await prepareStorageRelocation(x.profile, 'media', x.source, join(x.root, 'media-destination'))
     expect((await applyPreparedStorageRelocation(x.profile))?.kind).toBe('media')
   })
+  it('resolves aliased persisted references before and after original cleanup', async () => {
+    const x = await fixture(), alias = join(x.root, 'profile-alias')
+    await symlink(x.source, alias, 'junction')
+    const job = await prepareStorageRelocation(x.profile, 'exports', x.source, x.destination)
+    await applyPreparedStorageRelocation(x.profile)
+    const reference = join(alias, 'nested', 'memory.md')
+    expect(resolveRelocatedStoragePath(x.profile, reference)).toBe(join(job.target, 'nested', 'memory.md'))
+    await cleanupStorageRelocation(x.profile, 'original')
+    expect(resolveRelocatedStoragePath(x.profile, reference)).toBe(join(job.target, 'nested', 'memory.md'))
+    const unrelated = join(x.root, 'source-other', 'missing.md')
+    expect(resolveRelocatedStoragePath(x.profile, unrelated)).toBe(unrelated)
+  })
   it('cleans only verified duplicate originals and leaves the active unique memory intact', async () => {
     const x = await fixture(), job = await prepareStorageRelocation(x.profile, 'ai-workspace', x.source, x.destination)
     await applyPreparedStorageRelocation(x.profile)
