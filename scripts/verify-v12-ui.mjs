@@ -262,8 +262,8 @@ try {
   if (!(await page.getByRole('button', { name: '已开启', exact: true }).isVisible())) throw new Error('Poster redaction confirmation did not preserve the safe default')
   await capture('poster-privacy-step')
 
-  // PNG export uses the same action from the persistent top bar and final step.
-  await page.locator('.annual-actions').getByRole('button', { name: /导出 PNG/ }).click()
+  // PNG export follows the final privacy step; the duplicate header action was removed.
+  await page.locator('.poster-step-footer').getByRole('button', { name: /导出 PNG/ }).click()
   let payloads = []
   for (let i = 0; i < 100 && !payloads.length; i++) {
     await page.waitForTimeout(300)
