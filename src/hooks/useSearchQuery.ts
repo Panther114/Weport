@@ -27,6 +27,7 @@ export const PAGE_SIZE = 50
 export const DEFAULT_DEBOUNCE_MS = 120
 
 export interface SearchRequestState {
+  coverage?: SearchCoverage
   /** 引擎通道是否可用。缺失时是 false，界面显示"搜索通道不可用"而不是空结果 */
   available: boolean
   /** 首屏加载中（界面用骨架屏，不用转圈） */
@@ -140,6 +141,7 @@ const INITIAL_STATE: SearchRequestState = {
 }
 
 export interface UseSearchQueryOptions {
+  refreshKey?: string | number
   debounceMs?: number
   /**
    * 是否允许查询。
@@ -205,6 +207,7 @@ export function useSearchQuery(params: QueryParams, options?: UseSearchQueryOpti
   const [state, setState] = useState<SearchRequestState>(INITIAL_STATE)
 
   const engineQuery = useMemo(() => buildEngineQuery(params, { limit: PAGE_SIZE }), [
+    params.retrieval,
     params.text,
     params.scope.tags,
     params.scope.sessionIds,
@@ -214,7 +217,7 @@ export function useSearchQuery(params: QueryParams, options?: UseSearchQueryOpti
     params.scope.kinds,
   ])
   const queryKey = useMemo(
-    () => (engineQuery ? JSON.stringify({ text: engineQuery.text, scope: engineQuery.scope }) : ''),
+    () => (engineQuery ? JSON.stringify({ text: engineQuery.text, scope: engineQuery.scope, retrieval: engineQuery.retrieval }) : ''),
     [engineQuery],
   )
 
@@ -307,6 +310,7 @@ export function useSearchQuery(params: QueryParams, options?: UseSearchQueryOpti
             error: page.error ?? null,
             total: page.total,
             elapsedMs: page.elapsedMs,
+            coverage: page.coverage,
             truncated: page.truncated,
             hasMore: Boolean(page.cursor),
             searched: true,
@@ -332,7 +336,7 @@ export function useSearchQuery(params: QueryParams, options?: UseSearchQueryOpti
 
     return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryKey, debounceMs, enabled, replace, localFilter])
+  }, [queryKey, debounceMs, enabled, replace, localFilter, options?.refreshKey])
 
   const loadMore = useCallback(() => {
     const sess = session.current
@@ -354,6 +358,7 @@ export function useSearchQuery(params: QueryParams, options?: UseSearchQueryOpti
           ...prev,
           loadingMore: false,
           total: page.total || prev.total,
+          coverage: page.coverage || prev.coverage,
           truncated: prev.truncated || page.truncated,
           hasMore: Boolean(page.cursor),
           // 翻页时的引擎错误同样要显示（游标对不上这类），已到的结果保留

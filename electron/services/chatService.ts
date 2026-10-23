@@ -16,6 +16,7 @@ import { isNoLoginDbKeyScanEnabled } from './v12StablePolicy'
 import { isAntiRevokeSessionEligible, mergeAntiRevokeBatchResult } from './antiRevokeResults'
 import { runGuardedAntiRevokeWrite } from './antiRevokeLease'
 import { wcdbService } from './wcdbService'
+import { exactLocalIdToken, sourceMessageIdentityHash } from './export/sourceMessageIdentity'
 import { sourceFingerprint } from './export/sourceFingerprint'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
@@ -486,7 +487,7 @@ export function describeInitFailure(rawMessage?: string | null, fallbackCode = -
         : ''
   // 哨兵值没有自查价值，必须给出下一步；具体错误码（-3001/-2301…）本身已经
   // 由 wcdbCore.formatInitProtectionError 写好解决步骤，不再重复堆文案。
-  const nextStep = isSentinel ? `；下一步：确认数据目录选的是 xwechat_files 根目录、账号与 64 位密钥属于同一账号后重试；仍失败请把日志 ${wcdbLogPathHint()} 一起反馈` : ''
+  const nextStep = isSentinel ? `；下一步：打开设置 → 诊断，检查宿主、初始化、数据目录、账号、密钥编码与分片覆盖；确认目录与密钥属于所选账号。需要反馈时使用「复制脱敏连接结论」；详细日志仅在本机查看：${wcdbLogPathHint()}` : ''
   // 原始原因本身就是「错误码: -1234」时不重复拼接；否则附在破折号后面。
   const isBareCodeOnly = /^错误码\s*[:：]\s*-?\d+$/.test(detail)
   const alreadyCarriesCode = detail.includes(`错误码: ${code}`) || detail.includes(`错误码：${code}`)
@@ -525,7 +526,7 @@ function wcdbLogPathHint(): string {
 class ChatService {
   private recoveredHistoryCache: { signature: string; at: number; sessions: RecoveredHistorySession[] } | null = null
   private configService: ConfigService
-  private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
+  private runtimeConfig?: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }
   private connected = false
   private connectionIdentity = ''
   private connectionMode: 'legacy' | 'scanned-snapshot' | null = null
@@ -543,10 +544,11 @@ class ChatService {
   private groupNicknameCache = new Map<string, { nicknames: Map<string, string>; updatedAt: number }>()
   private readonly groupNicknameCacheTtlMs = 3 * 60 * 1000
   private readonly defaultV1AesKey = 'cfcd208495d565ef'
-  private readonly contactCacheService: ContactCacheService
-  private readonly messageCacheService: MessageCacheService
-  private readonly sessionStatsCacheService: SessionStatsCacheService
-  private readonly groupMyMessageCountCacheService: GroupMyMessageCountCacheService
+  private contactCacheService: ContactCacheService
+  private messageCacheService: MessageCacheService
+  private sessionStatsCacheService: SessionStatsCacheService
+  private groupMyMessageCountCacheService: GroupMyMessageCountCacheService
+  private cacheStorageBasePath = ''
   private readonly imageDecryptService: ImageDecryptService
   private voiceWavCache: LRUCache<string, Buffer>
   private voiceTranscriptCache: LRUCache<string, string>
@@ -640,6 +642,7 @@ class ChatService {
 
   constructor() {
     this.configService = new ConfigService()
+    this.cacheStorageBasePath = this.configService.getCacheBasePath()
     this.contactCacheService = new ContactCacheService(this.configService.getCacheBasePath())
     const persisted = this.contactCacheService.getAllEntries()
     this.avatarCache = new Map(Object.entries(persisted))
@@ -652,9 +655,26 @@ class ChatService {
     this.voiceTranscriptCache = new LRUCache(1000) // 最多缓存1000条转写记录
   }
 
-  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }): void {
+  /** Startup only: module constructors precede application storage recovery. */
+  initializeStorageAfterRestart(): void {
+    const next = this.configService.getCacheBasePath()
+    if (next === this.cacheStorageBasePath) return
+    if (this.connected) throw Error('Storage can only be rebound before opening a database connection.')
+    this.contactCacheService = new ContactCacheService(next)
+    this.avatarCache = new Map(Object.entries(this.contactCacheService.getAllEntries()))
+    this.messageCacheService = new MessageCacheService(next)
+    this.sessionStatsCacheService = new SessionStatsCacheService(next)
+    this.groupMyMessageCountCacheService = new GroupMyMessageCountCacheService(next)
+    this.cacheStorageBasePath = next
+  }
+
+  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }): void {
     const previousIdentity = this.resolveConnectSnapshot().identity
     this.runtimeConfig = config
+    this.imageDecryptService.setRuntimeConfig({
+      dbPath: config.dbPath, myWxid: config.myWxid,
+      imageXorKey: config.imageXorKey, imageAesKey: config.imageAesKey,
+    })
     const nextIdentity = this.resolveConnectSnapshot().identity
     if (previousIdentity !== nextIdentity && (this.connected || this.connectInFlight)) {
       this.close()
@@ -8886,8 +8906,7 @@ class ChatService {
       return join(cachePath, 'Voices')
     }
     // 回退到默认目录
-    const documentsPath = app.getPath('documents')
-    return join(documentsPath, 'WeFlow', 'Voices')
+    return join(this.configService.getCacheBasePath(), 'media', 'Voices')
   }
 
   private getEmojiCacheDir(): string {
@@ -8896,8 +8915,7 @@ class ChatService {
       return join(cachePath, 'Emojis')
     }
     // 回退到默认目录
-    const documentsPath = app.getPath('documents')
-    return join(documentsPath, 'WeFlow', 'Emojis')
+    return join(this.configService.getCacheBasePath(), 'media', 'Emojis')
   }
 
   clearCaches(options?: { includeMessages?: boolean; includeContacts?: boolean; includeEmojis?: boolean }): { success: boolean; error?: string } {
@@ -9714,7 +9732,8 @@ class ChatService {
   /**
    * getVoiceData（主用批量专属接口读取语音数据）
    */
-  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string, source?: { db: string; table: string }): Promise<{ success: boolean; data?: string; error?: string; failureKind?: 'unsupported' | 'missing-locally' }> {
+    if (source) return this.getExactVoiceData(sessionId, msgId, createTime, source)
     const startTime = Date.now()
     const verboseVoiceTrace = process.env.WEFLOW_VOICE_TRACE === '1'
     const msgCreateTimeLabel = (value?: number): string => {
@@ -9939,6 +9958,68 @@ class ChatService {
       logLookupPath('fail', String(e))
       console.error('ChatService: getVoiceData 失败:', e)
       return { success: false, error: String(e) }
+    }
+  }
+
+  /** Exact exports never use timestamp/index-based voice fallback or an unscoped WAV cache. */
+  private async getExactVoiceData(sessionId: string, msgId: string, createTime: number | undefined, source: { db: string; table: string }): Promise<{ success: boolean; data?: string; error?: string; failureKind?: 'unsupported' | 'missing-locally' }> {
+    try {
+      const token = exactLocalIdToken(msgId)
+      if (!token || token === '0') return { success: false, error: '无效的精确语音消息 ID', failureKind: 'unsupported' }
+      const detail = await this.getMessageByIdentity({ sessionId, localId: token, ts: createTime || 0, db: source.db, table: source.table, idKind: 'local' })
+      if (!detail.success || !detail.message || detail.message.localType !== 34) return { success: false, error: detail.error || '精确来源不是语音消息', failureKind: 'unsupported' }
+      const message = detail.message
+      const rawServer = message.serverIdRaw ?? message.serverId
+      const serverText = String(rawServer ?? '').trim()
+      const server = /^-[1-9]\d*$/.test(serverText) && BigInt(serverText) >= -9223372036854775808n
+        ? (BigInt(serverText) + 18446744073709551616n).toString() : this.normalizeUnsignedIntegerToken(rawServer)
+      // Without a server mapping, selecting one same-second BLOB would be a guess.
+      if (!server || server === '0') return { success: false, error: '语音缺少可验证的媒体映射', failureKind: 'unsupported' }
+      const serverValue = BigInt(server)
+      if (serverValue > 18446744073709551615n) return { success: false, error: '语音媒体 ID 超出支持范围', failureKind: 'unsupported' }
+      const signed = serverValue > 9223372036854775807n ? serverValue - 18446744073709551616n : serverValue
+      const ids = [...new Set([serverValue.toString(), signed.toString()])].map(value => `'${value}'`).join(',')
+      const matches: Buffer[] = []
+      let supported = false
+      for (const db of await this.listVoiceMediaDbs()) {
+        const tables = await wcdbService.execQuery('media', db, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'VoiceInfo%' ORDER BY name ASC")
+        if (!tables.success || !Array.isArray(tables.rows)) return { success: false, error: '无法完整验证语音媒体库', failureKind: 'unsupported' }
+        for (const item of tables.rows) {
+          const table = String((item as any).name || '')
+          const schema = await wcdbService.execQuery('media', db, `PRAGMA table_info(${this.quoteSqlIdentifier(table)})`)
+          if (!schema.success || !Array.isArray(schema.rows)) return { success: false, error: '无法验证语音媒体结构', failureKind: 'unsupported' }
+          const columns = new Map(schema.rows.map(row => [String((row as any).name).toLowerCase(), String((row as any).name)]))
+          const pick = (names: string[]) => names.map(name => columns.get(name)).find(Boolean)
+          const data = pick(['voice_data', 'buf', 'voicebuf', 'data']), id = pick(['msg_svr_id', 'msgsvrid', 'svr_id', 'svrid', 'server_id', 'serverid'])
+          const time = pick(['create_time', 'createtime', 'time'])
+          if (!data || !id) continue
+          supported = true
+          const sql = `SELECT hex(${this.quoteSqlIdentifier(data)}) AS data FROM ${this.quoteSqlIdentifier(table)} WHERE CAST(${this.quoteSqlIdentifier(id)} AS TEXT) IN (${ids})${time ? ` AND ${this.quoteSqlIdentifier(time)} = ${Math.floor(message.createTime)}` : ''} LIMIT 2`
+          const found = await wcdbService.execQuery('media', db, sql)
+          if (!found.success || !Array.isArray(found.rows)) return { success: false, error: '无法完整验证语音媒体匹配', failureKind: 'unsupported' }
+          for (const row of found.rows) {
+            const bytes = this.decodeVoiceBlob((row as any).data)
+            if (!bytes?.length) return { success: false, error: '语音媒体内容无法读取', failureKind: 'unsupported' }
+            matches.push(bytes)
+          }
+          if (matches.length > 1) return { success: false, error: '语音媒体映射不唯一，已拒绝替代文件', failureKind: 'unsupported' }
+        }
+      }
+      if (!matches.length) return { success: false, error: supported ? '本地未找到精确语音媒体' : '本地语音结构不支持精确定位', failureKind: supported ? 'missing-locally' : 'unsupported' }
+      const identity = sourceMessageIdentityHash({ localId: token, dbPath: source.db, tableName: source.table })
+      if (!identity) return { success: false, error: '精确语音来源无效', failureKind: 'unsupported' }
+      const account = this.configService.getMyWxidCleaned()
+      const cacheKey = 'exact_' + crypto.createHash('sha256').update(`${account}\0${sessionId}\0${identity}\0${server}\0`).update(matches[0]).digest('hex')
+      const cached = this.voiceWavCache.get(cacheKey)
+      if (cached) return { success: true, data: cached.toString('base64') }
+      const pcm = await this.decodeSilkToPcm(matches[0], 24000)
+      if (!pcm?.length) return { success: false, error: '本地语音格式解码失败', failureKind: 'unsupported' }
+      const wav = this.createWavBuffer(pcm, 24000)
+      this.cacheVoiceWav(cacheKey, wav)
+      await this.cacheVoiceWavToFile(cacheKey, wav)
+      return { success: true, data: wav.toString('base64') }
+    } catch {
+      return { success: false, error: '精确语音读取失败', failureKind: 'unsupported' }
     }
   }
 
@@ -10644,7 +10725,7 @@ class ChatService {
   /** 获取持久化转写缓存文件路径 */
   getTranscriptCachePath(): string {
     const cachePath = this.configService.get('cachePath')
-    const base = cachePath || join(app.getPath('documents'), 'WeFlow')
+    const base = cachePath || join(this.configService.getCacheBasePath(), 'media')
     const account = String(this.configService.getMyWxidCleaned() || '')
     const scope = crypto.createHash('sha256').update(account).digest('hex').slice(0, 24)
     return join(base, 'Voices', `transcripts-${scope}.json`)

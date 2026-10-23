@@ -14,6 +14,7 @@ import bundledSnapshot from '../../assets/models/models-dev-snapshot.json'
 import { ModelRegistry } from './modelRegistry'
 import type { ModelRegistryPayload, ModelRegistryStorage, RegistryFetch, ResolvedModel } from './modelRegistry'
 import type { ProviderProfile, ProviderProtocol } from './providerTypes'
+import { resolveStorageLocation } from '../storageLocations'
 
 const nodeStorage: ModelRegistryStorage = {
   readFile(path) {
@@ -55,9 +56,10 @@ let instance: ModelRegistry | null = null
 export function getModelRegistry(): ModelRegistry {
   if (instance) return instance
   const userData = app.getPath('userData')
+  const modelCache = resolveStorageLocation(userData, 'model-cache', join(userData, 'model-cache'))
   instance = new ModelRegistry({
-    cachePath: join(userData, 'models-cache.json'),
-    metaPath: join(userData, 'models-cache.meta.json'),
+    cachePath: join(modelCache, 'models-cache.json'),
+    metaPath: join(modelCache, 'models-cache.meta.json'),
     storage: nodeStorage,
     fetch: globalThis.fetch as unknown as RegistryFetch,
     bundledSnapshot: bundledSnapshot as unknown as ModelRegistryPayload,

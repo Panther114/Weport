@@ -61,7 +61,7 @@ export class MessagePushService {
   private readonly recentlyRevokedOriginalTokens = new Map<string, number>()
   private readonly seenPrimedSessions = new Set<string>()
   private readonly groupNicknameCache = new Map<string, { nicknames: Record<string, string>; updatedAt: number }>()
-  private readonly pushAvatarCacheDir: string
+  private get pushAvatarCacheDir(): string { return path.join(this.configService.getCacheBasePath(), 'push-avatar-files') }
   private readonly pushAvatarDataCache = new Map<string, string>()
   private readonly debounceMs = 350
   private readonly lookbackSeconds = 2
@@ -102,7 +102,6 @@ export class MessagePushService {
 
   constructor() {
     this.configService = ConfigService.getInstance()
-    this.pushAvatarCacheDir = path.join(this.configService.getCacheBasePath(), 'push-avatar-files')
   }
 
   start(): void {

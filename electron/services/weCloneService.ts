@@ -87,6 +87,8 @@ import {
   type VoiceExchange,
 } from './ai/voiceExemplars'
 import { profileFromVoice, shapeReply, type VoiceRow, type VoiceShapeProfile } from './ai/voiceShape'
+import { readerCloneGuardError, readerDraftLanguageText, type ReaderCloneGuard } from '../../src/utils/readerCloneGuard'
+export type { ReaderCloneGuard } from '../../src/utils/readerCloneGuard'
 
 export type { WeCloneRefusalMode } from './weClonePrompts'
 
@@ -2177,9 +2179,11 @@ export class WeCloneService {
     message: string
     history?: Array<{ role: string; content: string }>
     signal?: AbortSignal
+    readerGuard?: ReaderCloneGuard
   }): Promise<LocalChatResult> {
     const message = String(input.message || '').trim()
     if (!message) return { success: false, error: '消息不能为空' }
+    if (input.readerGuard !== undefined && message.length > 12_000) return { success: false, error: '回复草稿的选取片段超过 12,000 字符，请缩小范围。' }
 
     const listed = this.listLocalClones()
     if (listed.length === 0) {
@@ -2192,6 +2196,12 @@ export class WeCloneService {
     // An explicit selection must never silently send a different persona to the provider.
     const requestedId = String(input.cloneId || '').trim()
     const meta = requestedId ? listed.find((m) => m.id === requestedId) : listed[0]
+    const checkReaderGuard = (): string | undefined => input.readerGuard === undefined ? undefined : readerCloneGuardError(
+      input.readerGuard, String(this.configService.get('myWxid') || ''), requestedId,
+      this.listLocalClones().find((clone) => clone.id === requestedId),
+    )
+    const readerGuardFailure = checkReaderGuard()
+    if (readerGuardFailure) return { success: false, error: readerGuardFailure, hint: '请重新选择当前账号的分身和消息片段。' }
     if (!meta) return { success: false, error: '所选 WeClone 不存在', hint: '请刷新列表并重新选择分身。' }
     const dir = this.findCloneDir(meta.id)
     if (!dir) return { success: false, error: '克隆目录已丢失，请重新生成' }
@@ -2284,14 +2294,14 @@ export class WeCloneService {
       ],
     })
 
-    const history = Array.isArray(input.history)
+    const history = !input.readerGuard && Array.isArray(input.history)
       ? input.history.filter((h) => h && typeof h.content === 'string' && h.content.trim()).slice(-CHAT_HISTORY_LIMIT)
       : []
     /**
      * 转写里的说话人标签跟着语言走：对方用英文时把 `对方：`/`名字：` 换成 `Them:`/`Me:`，
      * 否则光是标签就足以把模型拉回中文（这是实测过的一种"越改越中文"的来源）。
      */
-    const replyLanguage = detectLanguage(message)
+    const replyLanguage = detectLanguage(input.readerGuard ? readerDraftLanguageText(message) : message)
     const english = replyLanguage === 'en'
     const selfLabel = english ? 'Me' : meta.displayName || meta.wxid
     const otherLabel = english ? 'Them' : '对方'
@@ -2397,7 +2407,11 @@ export class WeCloneService {
 
     let lastError = ''
     let attemptsRun = 0
+    // Reader drafts never share the ordinary clone chat's gateway routing/history scope.
+    const gatewaySession = input.readerGuard ? newGatewaySession('reader-draft') : gatewaySessionForChat(meta.id)
     for (const [index, attempt] of attempts.entries()) {
+      const guardError = checkReaderGuard()
+      if (guardError) return { success: false, error: guardError, hint: '请重新选择消息后再生成草稿。' }
       attemptsRun += 1
       try {
         const reply = String(
@@ -2406,7 +2420,7 @@ export class WeCloneService {
             systemPrompt,
             transcript,
             input.signal,
-            gatewaySessionForChat(meta.id)
+            gatewaySession
           )
         ).trim()
         if (!reply) {
@@ -2425,6 +2439,8 @@ export class WeCloneService {
         if (exemplarBlock) {
           const copied = replyCopiesExemplars(finalReply, exemplarBlock, EXEMPLAR_COPY_MIN_CHARS)
           if (copied) {
+            const retryGuardError = checkReaderGuard()
+            if (retryGuardError) return { success: false, error: retryGuardError, hint: '请重新选择消息后再生成草稿。' }
             console.warn(`[WeClone] 回复照抄了示范（${copied.slice(0, 24)}…），重生成一次`)
             try {
               const second = String(
@@ -2433,7 +2449,7 @@ export class WeCloneService {
                   systemPrompt,
                   `${transcript}\n\n（提醒：上面示范里的话不要照搬，用你自己的说法重新说一遍。）`,
                   input.signal,
-                  gatewaySessionForChat(meta.id)
+                  gatewaySession
                 )
               ).trim()
               if (second && !replyCopiesExemplars(second, exemplarBlock, EXEMPLAR_COPY_MIN_CHARS)) {
@@ -2461,6 +2477,8 @@ export class WeCloneService {
             console.warn('[WeClone] 形态整形失败（保留原回复）:', e)
           }
         }
+        const completedGuardError = checkReaderGuard()
+        if (completedGuardError) return { success: false, error: completedGuardError, hint: '请重新选择当前账号的消息后再生成草稿。' }
         return {
           success: true,
           reply: shapedReply,

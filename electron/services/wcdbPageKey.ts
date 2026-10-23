@@ -121,15 +121,15 @@ export function deriveEncKeyFromPassphrase(passphrase: Buffer, salt: Buffer, ite
 }
 
 /** Shared persisted-key contract for KeyHealth and Diagnostics. No secrets leave the caller. */
-export function verifyHexKeyForPage(page1: Buffer, keyHex: string): { mode: PageKeyMode; pageKey: Buffer } | null {
+export function verifyHexKeyForPage(page1: Buffer, keyHex: string): { mode: PageKeyMode; representation: 'raw' | 'decoded-hex-passphrase' | 'utf8-passphrase'; pageKey: Buffer } | null {
   const normalized = String(keyHex || '').trim().toLowerCase()
   if (!/^[0-9a-f]{64}$/.test(normalized)) return null
   const raw = Buffer.from(normalized, 'hex')
-  if (verifyPageKey(page1, raw, ['raw']).mode === 'raw') return { mode: 'raw', pageKey: raw }
+  if (verifyPageKey(page1, raw, ['raw']).mode === 'raw') return { mode: 'raw', representation: 'raw', pageKey: raw }
   // Windows account APIs decode hex before PBKDF2; legacy text passphrases remain supported.
-  for (const passphrase of [raw, Buffer.from(normalized, 'utf8')]) {
+  for (const [index, passphrase] of [raw, Buffer.from(normalized, 'utf8')].entries()) {
     const pageKey = deriveEncKeyFromPassphrase(passphrase, page1.subarray(0, SALT_BYTES))
-    if (verifyPageKey(page1, pageKey, ['raw']).mode === 'raw') return { mode: 'passphrase', pageKey }
+    if (verifyPageKey(page1, pageKey, ['raw']).mode === 'raw') return { mode: 'passphrase', representation: index === 0 ? 'decoded-hex-passphrase' : 'utf8-passphrase', pageKey }
   }
   return null
 }

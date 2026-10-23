@@ -90,8 +90,8 @@ export default function WeCloneCard({ clone, onDeleteRequest, onChat, onSettings
         <div className="weclone-badges">
           {/* 只有一个徽标，而且说的是**边界**而不是"上传状态"：v1.0 的承诺就是
               这个克隆只活在这台机器上，把这句话放在最显眼处比放"本机档案"更有用。 */}
-          <span className="badge" title="人格档案与语料只保存在本机，对话也在本机完成">
-            <ShieldCheck size={10} strokeWidth={2} /> 仅本机
+          <span className="badge" title="人格档案与语料保存在本机；对话时相关材料会交给所配置的模型服务">
+            <ShieldCheck size={10} strokeWidth={2} /> 本机档案
           </span>
         </div>
       </div>
@@ -158,7 +158,7 @@ export default function WeCloneCard({ clone, onDeleteRequest, onChat, onSettings
         <button
           className="primary-btn weclone-card-chat"
           type="button"
-          title="和这个 WeClone 对话（人格档案 + 本地检索，全程不上传）"
+          title="使用此人格档案与检索片段调用你配置的模型服务"
           onClick={() => onChat(clone)}
         >
           <MessageSquareText size={13} />
@@ -175,8 +175,8 @@ export default function WeCloneCard({ clone, onDeleteRequest, onChat, onSettings
         </button>
       </div>
 
-      <div className="chip-group">
-        <button className="ghost-btn compact" type="button" onClick={() => void toggleMds()}>
+      <div className="weclone-card-utilities">
+        <button className="ghost-btn compact" type="button" aria-expanded={mdOpen} onClick={() => void toggleMds()}>
           {mdLoading ? <Loader2 size={13} className="spin" /> : <FileText size={13} />}
           {mdOpen ? '收起档案' : '查看档案'}
           <ChevronDown size={12} className={mdOpen ? 'chevron open' : 'chevron'} />

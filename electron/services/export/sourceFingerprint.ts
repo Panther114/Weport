@@ -50,7 +50,7 @@ export function optionsFingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex').slice(0, 20)
 }
 
-/** Rebuild older artifacts whose valid file hashes can still hide lost references. */
+/** Rebuild older artifacts that predate reference preservation and image-policy enforcement. */
 export function exportArtifactFingerprint(account: string | undefined, options: unknown): string {
-  return optionsFingerprint({ contractVersion: 2, account, options })
+  return optionsFingerprint({ contractVersion: 3, account, options })
 }

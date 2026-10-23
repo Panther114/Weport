@@ -1,5 +1,6 @@
 import { basename, join } from 'path'
 import { existsSync } from 'fs'
+import { connectionCapabilities } from './connectionCapabilities'
 import {
   verifyHexKeyForPage,
   listDbFiles,
@@ -910,6 +911,7 @@ export interface KeyHealthContractEntry {
 
 /** 共享契约（`src/vite-env.d.ts` 的 `KeyHealthReport`）。 */
 export interface KeyHealthContractReport {
+  capabilities?: ReturnType<typeof connectionCapabilities>
   success: boolean
   mode?: 'scan' | 'hook' | 'manual' | 'none'
   blockers?: Array<{ id: string; message: string; actionable: string }>
@@ -944,6 +946,7 @@ export function toKeyHealthReport(
         : 'none'
   return {
     success: report.success,
+    capabilities: connectionCapabilities(report),
     mode,
     connectionReady: report.connectionReady,
     connectionCoverage: report.connectionCoverage,

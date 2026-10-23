@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
+import { digestCommitId, digestRelevantEvidence, normalizeDigest, type DigestConfig, type DigestState, type DigestBatch } from './weBotDigest'
 import {
   collectDueRuns,
   nextRunAfter,
@@ -16,6 +17,8 @@ export interface WeBotReference {
 }
 
 export interface WeBotTask {
+  digest?: DigestConfig
+  digestState?: DigestState
   id: string
   title: string
   description: string
@@ -35,6 +38,9 @@ export interface WeBotTask {
 export type WeBotRunStatus = 'running' | 'ok' | 'error' | 'skipped'
 
 export interface WeBotRun {
+  outcome?: 'committed' | 'no-change' | 'duplicate'
+  accountId?: string
+  commitId?: string
   id: string
   taskId: string
   taskTitle: string
@@ -61,6 +67,8 @@ export interface WeBotRun {
  *   `status` 保留是因为旧的状态文件里可能有 `error` 笔记，载入时会据此清理。
  */
 export interface WeBotNote {
+  accountId?: string
+  commitId?: string
   version: 1
   id: string
   taskId: string
@@ -96,6 +104,7 @@ export interface WeBotRunNotice {
 export interface WeBotDispatchRequest {
   task: WeBotTask
   run: WeBotRun
+  digestBatch?: DigestBatch
 }
 
 export interface WeBotDispatchResult {
@@ -107,6 +116,8 @@ export interface WeBotDispatchResult {
 }
 
 export interface WeBotServiceOptions {
+  currentAccountId?: () => string
+  collectDigest?: (task: WeBotTask, signal: AbortSignal) => Promise<DigestBatch>
   /** 数据目录（通常 {userData}/webot）。 */
   dataDir: string
   /** 派发一次运行。由 appMain 注入，避免本模块直接依赖 agent harness。 */
@@ -184,6 +195,8 @@ function normalizeNote(raw: unknown): WeBotNote | null {
           }))
       : [],
     pinned: note.pinned === true,
+    accountId: typeof note.accountId === 'string' ? note.accountId : undefined,
+    commitId: typeof note.commitId === 'string' ? note.commitId : undefined,
   }
 }
 
@@ -210,6 +223,9 @@ export class WeBotService {
   private readonly maxRuns: number
   private readonly maxNotes: number
   private readonly nowFn: () => number
+  private readonly currentAccountId?: () => string
+  private readonly collectDigest?: WeBotServiceOptions['collectDigest']
+  private readonly activeTasks = new Set<string>()
 
   private state: PersistedState = { ...EMPTY_STATE, tasks: [], runs: [], notes: [] }
   private loaded = false
@@ -227,6 +243,8 @@ export class WeBotService {
     this.maxRuns = Math.max(1, options.maxRuns ?? MAX_RUNS)
     this.maxNotes = Math.max(1, options.maxNotes ?? MAX_NOTES)
     this.nowFn = options.now ?? (() => Date.now())
+    this.currentAccountId = options.currentAccountId
+    this.collectDigest = options.collectDigest
   }
 
   // -------------------------------------------------------------------------
@@ -253,6 +271,9 @@ export class WeBotService {
           : [],
       }
       let repairedDisabledSchedule = false
+      for (const run of this.state.runs) {
+        if (run.status === 'running') { run.status = 'skipped'; run.error = '应用重启，未提交的运行已取消。'; run.finishedAt = this.nowFn(); repairedDisabledSchedule = true }
+      }
       for (const task of this.state.tasks) {
         if (task?.enabled === false && task.nextRunAt !== null) {
           task.nextRunAt = null
@@ -267,13 +288,14 @@ export class WeBotService {
     }
   }
 
-  private persist(): void {
+  private persist(strict = false): void {
     try {
       mkdirSync(dirname(this.statePath()), { recursive: true })
       const tmp = `${this.statePath()}.tmp`
       writeFileSync(tmp, JSON.stringify(this.state, null, 2), 'utf8')
       renameSync(tmp, this.statePath())
     } catch (error) {
+      if (strict) throw error
       console.warn('[WeBot] 状态写入失败:', error)
     }
   }
@@ -355,11 +377,15 @@ export class WeBotService {
     this.load()
     const task = this.state.tasks.find((item) => item.id === taskId)
     if (!task) return { success: false, error: '任务不存在' }
+    if (this.activeTasks.has(task.id)) return { success: false, error: '任务正在运行' }
     await this.runTask(task, this.nowFn())
     return { success: true }
   }
 
   private async runTask(task: WeBotTask, scheduledAt: number): Promise<void> {
+    if (this.activeTasks.has(task.id)) return
+    this.activeTasks.add(task.id)
+    const taskSnapshot = JSON.parse(JSON.stringify(task)) as WeBotTask
     const startedAt = this.nowFn()
     const run: WeBotRun = {
       id: `run-${randomUUID()}`,
@@ -381,10 +407,43 @@ export class WeBotService {
 
     const controller = new AbortController()
     this.running.set(run.id, controller)
+    let timeout: NodeJS.Timeout | undefined
 
     try {
-      const result = await this.dispatchFn({ task, run }, controller.signal)
+      const digest = taskSnapshot.digest
+      const assertScope = () => {
+        if (!digest) return
+        if (this.currentAccountId?.() !== digest.scope.accountId) throw new Error('摘要绑定的账号与当前账号不一致。')
+        const current = this.state.tasks.find(item => item.id === task.id)
+        if (!current || JSON.stringify(current.digest) !== JSON.stringify(digest)) throw new Error('摘要范围已变更，本次结果已取消。')
+        if (controller.signal.aborted) throw new Error('已中止')
+      }
+      assertScope()
+      let digestBatch: DigestBatch | undefined
+      let commitId: string | undefined
+      if (digest) {
+        if (!this.collectDigest) throw new Error('摘要证据收集不可用。')
+        run.accountId = digest.scope.accountId
+        timeout = setTimeout(() => controller.abort(), digest.limits.timeoutMs)
+        digestBatch = await this.collectDigest(taskSnapshot, controller.signal)
+        assertScope()
+        if (digestBatch.evidence.some(row => !digest.scope.sessionIds.includes(row.sessionId))) throw new Error('摘要证据超出任务会话范围。')
+        if (digestBatch.evidence.length > digest.limits.maxMessages || digestBatch.evidence.reduce((n, row) => n + row.text.length, 0) > digest.limits.maxInputChars) throw new Error('摘要证据超出费用限制。')
+        commitId = digestCommitId(task.id, digest, digestBatch)
+        run.commitId = commitId
+        if ((task.digestState?.commits || []).includes(commitId)) { run.outcome = 'duplicate'; run.status = 'ok'; return }
+        if (!digestBatch.evidence.some(row => digestRelevantEvidence(digest.template, row.text))) {
+          const previous = task.digestState
+          task.digestState = { cursors: digestBatch.cursors, lastSuccessAt: this.nowFn(), commits: [...(previous?.commits || []), commitId].slice(-1000) }
+          run.outcome = 'no-change'; run.status = 'ok'
+          try { this.persist(true) } catch (error) { task.digestState = previous; delete run.outcome; throw error }
+          return
+        }
+      }
+      const result = await this.dispatchFn({ task: taskSnapshot, run: { ...run }, digestBatch }, controller.signal)
+      assertScope()
       if (controller.signal.aborted) throw new Error('已中止')
+      if (digest && !String(result.summary || '').trim()) throw new Error('摘要没有返回有效结论。')
       run.status = 'ok'
       run.finishedAt = this.nowFn()
       run.durationMs = run.finishedAt - startedAt
@@ -393,7 +452,22 @@ export class WeBotService {
         summary: String(result.summary || '').trim() || '（本次运行没有产出内容）',
       })
       run.noteId = note.id
-      this.notifyFn?.({ status: 'ok', taskId: task.id, taskTitle: task.title, createdAt: note.createdAt, summary: note.summary, note })
+      const previousDigestState = task.digestState
+      if (digest && digestBatch && commitId) {
+        note.accountId = digest.scope.accountId
+        note.commitId = commitId
+        task.digestState = { cursors: digestBatch.cursors, lastSuccessAt: this.nowFn(), commits: [...(previousDigestState?.commits || []), commitId].slice(-1000) }
+        run.outcome = 'committed'
+      }
+      try { this.persist(true) } catch (error) {
+        this.state.notes = this.state.notes.filter(item => item.id !== note.id)
+        task.digestState = previousDigestState
+        delete run.noteId
+        delete run.outcome
+        throw error
+      }
+      // Notification delivery cannot roll back a successfully committed result.
+      try { this.notifyFn?.({ status: 'ok', taskId: task.id, taskTitle: task.title, createdAt: note.createdAt, summary: note.summary, note }) } catch { /* note is durable */ }
     } catch (error) {
       run.status = controller.signal.aborted ? 'skipped' : 'error'
       run.finishedAt = this.nowFn()
@@ -415,7 +489,10 @@ export class WeBotService {
         summary: run.error || '运行失败',
       })
     } finally {
+      if (timeout) clearTimeout(timeout)
+      if (!run.finishedAt) { run.finishedAt = this.nowFn(); run.durationMs = run.finishedAt - startedAt }
       this.running.delete(run.id)
+      this.activeTasks.delete(task.id)
       this.trim()
       this.persist()
       // 结束回调放在最后：此时这条 run 已经是终态，渲染层拿到就能直接替换掉
@@ -466,7 +543,7 @@ export class WeBotService {
 
   listTasks(): WeBotTask[] {
     this.load()
-    return this.state.tasks.map((task) => ({ ...task, references: task.references.map((r) => ({ ...r })) }))
+    return JSON.parse(JSON.stringify(this.state.tasks)) as WeBotTask[]
   }
 
   createTask(input: Partial<WeBotTask> & { title: string; schedule: WeBotSchedule }): WeBotTask {
@@ -485,23 +562,30 @@ export class WeBotService {
       updatedAt: now,
       nextRunAt: input.enabled === false ? null : nextRunAfter(input.schedule, now),
       lastRunAt: null,
+      digest: input.digest ? normalizeDigest(input.digest, this.currentAccountId?.() || '', (input.references || []).map(r => r.id)) : undefined,
     }
     this.state.tasks.push(task)
     this.persist()
-    return { ...task }
+    return JSON.parse(JSON.stringify(task)) as WeBotTask
   }
 
   updateTask(id: string, patch: Partial<WeBotTask>): WeBotTask | null {
     this.load()
     const task = this.state.tasks.find((item) => item.id === id)
     if (!task) return null
+    if (patch.digestState !== undefined) throw new Error('摘要水位由成功提交维护。')
+    if (task.digest && patch.digest && JSON.stringify(patch.digest.scope) !== JSON.stringify(task.digest.scope)) throw new Error('摘要来源范围不可修改，请新建任务。')
+    if (task.digest && patch.digest && patch.digest.template !== task.digest.template) throw new Error('摘要模板不可修改，请新建任务。')
+    if (task.digest && patch.references && JSON.stringify([...new Set(patch.references.map(r => r.id))].sort()) !== JSON.stringify(task.digest.scope.sessionIds)) throw new Error('摘要会话范围不可修改，请新建任务。')
+    if (task.digest && patch.digest === undefined && Object.hasOwn(patch, 'digest')) throw new Error('不能移除摘要的账号绑定。')
+    if (patch.digest) patch = { ...patch, digest: normalizeDigest(patch.digest, task.digest?.scope.accountId || this.currentAccountId?.() || '', (patch.references || task.references).map(r => r.id)) }
     const scheduleChanged = patch.schedule !== undefined
     Object.assign(task, patch, { id: task.id, updatedAt: this.nowFn() })
     if (scheduleChanged) task.nextRunAt = nextRunAfter(task.schedule, this.nowFn())
     if (!task.enabled) task.nextRunAt = null
     else if (task.nextRunAt === null) task.nextRunAt = nextRunAfter(task.schedule, this.nowFn())
     this.persist()
-    return { ...task }
+    return JSON.parse(JSON.stringify(task)) as WeBotTask
   }
 
   deleteTask(id: string): boolean {

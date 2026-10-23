@@ -149,122 +149,129 @@ export function ReaderToolbar({
       </div>
 
       <div className="reader-toolbar-tools">
-        {/* 收藏（会话级：localId 为空的那种收藏） */}
-        <button
-          type="button"
-          className="reader-tool"
-          data-active={favorite ? 'true' : undefined}
-          disabled={!annotationsReady}
-          title={annotationsReady ? (favorite ? '取消收藏这个会话' : '收藏这个会话') : '注解通道不可用（annotations:mutate 未接线）'}
-          onClick={onToggleFavorite}
-        >
-          <Star size={14} fill={favorite ? 'currentColor' : 'none'} />
-          <span>{favorite ? '已收藏' : '收藏'}</span>
-        </button>
+        <div className="reader-tool-group" role="group" aria-label="会话标注与操作">
+          {/* 收藏（会话级：localId 为空的那种收藏） */}
+          <button
+            type="button"
+            className="reader-tool"
+            data-active={favorite ? 'true' : undefined}
+            disabled={!annotationsReady}
+            title={annotationsReady ? (favorite ? '取消收藏这个会话' : '收藏这个会话') : '注解通道不可用（annotations:mutate 未接线）'}
+            onClick={onToggleFavorite}
+          >
+            <Star size={14} fill={favorite ? 'currentColor' : 'none'} />
+            <span>{favorite ? '已收藏' : '收藏'}</span>
+          </button>
 
-        {/* 标签 */}
-        <button
-          type="button"
-          className="reader-tool"
-          ref={tagAnchor}
-          data-active={tagOpen ? 'true' : undefined}
-          disabled={!annotationsReady}
-          title={annotationsReady ? '给这个会话打标签' : '注解通道不可用（annotations:mutate 未接线）'}
-          aria-expanded={tagOpen}
-          onClick={() => setTagOpen((value) => !value)}
-        >
-          <Tag size={14} />
-          <span>标签{tags.length ? ` ${tags.length}` : ''}</span>
-        </button>
+          {/* 标签 */}
+          <button
+            type="button"
+            className="reader-tool"
+            ref={tagAnchor}
+            data-active={tagOpen ? 'true' : undefined}
+            disabled={!annotationsReady}
+            title={annotationsReady ? '给这个会话打标签' : '注解通道不可用（annotations:mutate 未接线）'}
+            aria-expanded={tagOpen}
+            onClick={() => setTagOpen((value) => !value)}
+          >
+            <Tag size={14} />
+            <span>标签{tags.length ? ` ${tags.length}` : ''}</span>
+          </button>
 
-        {/* 导出本会话：走既有的导出流程，进度由主进程推到全局进度条 */}
-        <button
-          type="button"
-          className="reader-tool"
-          disabled={exporting.busy}
-          title="把这个会话交给导出流程（格式与目录沿用导出页的设置）"
-          onClick={onExport}
-        >
-          <Download size={14} />
-          <span>{exporting.busy ? '导出中…' : '导出本会话'}</span>
-        </button>
+          {/* 导出本会话：走既有的导出流程，进度由主进程推到全局进度条 */}
+          <button
+            type="button"
+            className="reader-tool"
+            disabled={exporting.busy}
+            title="把这个会话交给导出流程（格式与目录沿用导出页的设置）"
+            onClick={onExport}
+          >
+            <Download size={14} />
+            <span>{exporting.busy ? '导出中…' : '导出本会话'}</span>
+          </button>
 
-        {/* 复制一段消息 */}
-        <button
-          type="button"
-          className="reader-tool"
-          data-active={pickMode ? 'true' : undefined}
-          title="进入多选，点消息选取一段后复制为文本"
-          onClick={onTogglePickMode}
-        >
-          <Copy size={14} />
-          <span>{pickMode ? `已选 ${pickedCount}` : '复制范围'}</span>
-        </button>
-        {pickMode && (
-          <>
-            <button type="button" className="ghost-btn" disabled={!posterEnabled} onClick={onCreatePoster} title="把选中的消息送到海报工作室">
-              <ImagePlus size={13} />制作海报
-            </button>
-            <button type="button" className="ghost-btn" disabled={pickedCount === 0} onClick={onCopyPicked}>
-              复制为文本
-            </button>
-            <button type="button" className="ghost-btn" onClick={onClearPicked}>
-              清空
-            </button>
-          </>
-        )}
+          {/* 复制一段消息 */}
+          <button
+            type="button"
+            className="reader-tool"
+            data-active={pickMode ? 'true' : undefined}
+            title="进入多选，点消息选取一段后复制为文本"
+            onClick={onTogglePickMode}
+          >
+            <Copy size={14} />
+            <span>{pickMode ? `结束多选 · ${pickedCount}` : '复制范围'}</span>
+          </button>
+        </div>
 
-        {/* 跳到某一天 */}
-        <label className="reader-jump" title="跳到某一天（按日期重新取窗口）">
-          <CalendarClock size={14} />
-          <input
-            type="date"
-            className="reader-jump-input"
-            value={jumpDate}
+        <div className="reader-tool-group reader-navigation-tools" role="group" aria-label="消息定位">
+          {/* 跳到某一天 */}
+          <label className="reader-jump" title="跳到某一天（按日期重新取窗口）">
+            <CalendarClock size={14} />
+            <input
+              type="date"
+              className="reader-jump-input"
+              aria-label="跳转到日期"
+              value={jumpDate}
+              disabled={!channels.messages}
+              onChange={(event) => onJumpDate(event.target.value)}
+            />
+          </label>
+          {loadingWindow && <span className="reader-toolbar-note">正在跳转…</span>}
+          <button
+            type="button"
+            className="ghost-btn"
             disabled={!channels.messages}
-            onChange={(event) => onJumpDate(event.target.value)}
-          />
-        </label>
-        {loadingWindow && <span className="reader-toolbar-note">正在跳转…</span>}
-        <button
-          type="button"
-          className="ghost-btn"
-          disabled={!channels.messages}
-          title="回到最新消息"
-          onClick={onResetWindow}
-        >
-          回到最新
-        </button>
+            title="回到最新消息"
+            onClick={onResetWindow}
+          >
+            回到最新
+          </button>
 
-        {/* 会话内搜索 */}
-        <div className="reader-search" ref={searchAnchor}>
-          <Search size={14} />
-          <input
-            className="reader-search-input"
-            value={keyword}
-            placeholder="在这个会话里搜索"
-            aria-label="会话内搜索"
-            onChange={(event) => {
-              onKeyword(event.target.value)
-              setHitsOpen(true)
-            }}
-            onFocus={() => setHitsOpen(true)}
-          />
-          {keyword && (
-            <button
-              type="button"
-              className="reader-search-clear"
-              title="清空搜索"
-              onClick={() => {
-                onKeyword('')
-                setHitsOpen(false)
+          {/* 会话内搜索 */}
+          <div className="reader-search" ref={searchAnchor}>
+            <Search size={14} />
+            <input
+              className="reader-search-input"
+              value={keyword}
+              placeholder="在这个会话里搜索"
+              aria-label="会话内搜索"
+              onChange={(event) => {
+                onKeyword(event.target.value)
+                setHitsOpen(true)
               }}
-            >
-              <X size={13} />
-            </button>
-          )}
+              onFocus={() => setHitsOpen(true)}
+            />
+            {keyword && (
+              <button
+                type="button"
+                className="reader-search-clear"
+                aria-label="清空会话内搜索"
+                title="清空搜索"
+                onClick={() => {
+                  onKeyword('')
+                  setHitsOpen(false)
+                }}
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
+
+      {pickMode && (
+        <div className="reader-selection-tools" role="group" aria-label="所选消息操作">
+          <button type="button" className="ghost-btn" disabled={!posterEnabled} onClick={onCreatePoster} title="把选中的消息送到海报工作室">
+            <ImagePlus size={13} />制作海报
+          </button>
+          <button type="button" className="ghost-btn" disabled={pickedCount === 0} onClick={onCopyPicked}>
+            复制为文本
+          </button>
+          <button type="button" className="ghost-btn" onClick={onClearPicked}>
+            清空
+          </button>
+        </div>
+      )}
 
       {(exporting.message || exporting.error) && (
         <div className="reader-toolbar-result" data-error={exporting.error ? 'true' : undefined} role="status">

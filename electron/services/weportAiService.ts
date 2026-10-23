@@ -49,6 +49,12 @@ import { describeNetworkFailure } from './ai/netError'
 import { imagePartFromBase64, type AiImagePart } from './ai/imageParts'
 import { runToolBatch } from './ai/toolSchedule'
 import { AiRunGuard, toolRoundLimit, toolResultBudget } from './ai/runGuard'
+import { accountNamespace, assertRunAccount, type AiRunOptions } from './ai/dataScope'
+import { evidenceReference, evidenceId, evidenceContentHash, validateClaim, type EvidenceReference, type MemoryClaim } from './ai/evidence'
+import { assertDataScope, restrictSearchResult, validateDataScope, type DataAccessScope } from './dataAccessService'
+import { retrieveIndexedMessages } from './searchRetrieval'
+import { migrateLegacyAi } from './ai/accountMigration'
+import { resolveStorageLocation } from './storageLocations'
 export type { AiImagePart } from './ai/imageParts'
 
 /**
@@ -122,6 +128,9 @@ export interface AiMessage {
 }
 
 export interface AiChatMeta {
+  accessScopeHash?: string
+  accessScope?: DataAccessScope
+  processing?: 'local-only' | 'cloud-enabled'
   id: string
   title: string
   createdAt: number
@@ -208,6 +217,7 @@ interface ModelRequestShape {
 
 interface ToolHandlerContext {
   chatId: string
+  sourceLinks?: (sessionId: string, messages: Message[]) => string[]
   resultCharBudget?: number
   sessionsByName: Map<string, ChatSession>
   myWxid: string
@@ -388,13 +398,14 @@ function countMatchesInRange(
   return total
 }
 
-class WeportAiService {
+export class WeportAiService {
   private configService: ConfigService
   private providerProfiles: ProviderProfileService
   private chats: AiChatMeta[] = []
   private chatsLoaded = false
   private dataDir = ''
   private sessionsDir = ''
+  private storageAccount: string | null = null
   private running = new Map<string, AbortController>()
   /**
    * Previous serialized model input per running chat. Kept in memory only and
@@ -504,10 +515,28 @@ class WeportAiService {
   }
 
   private ensureDirs(): void {
-    if (this.dataDir) return
-    this.dataDir = join(app.getPath('userData'), 'weport-ai')
+    const account = this.currentAccount()
+    if (this.dataDir && this.storageAccount === account) return
+    if (this.running.size) {
+      for (const controller of this.running.values()) controller.abort()
+      throw new Error('Account changed; waiting for the previous AI run to stop.')
+    }
+    this.storageAccount = account
+    this.chats = []
+    this.chatsLoaded = false
+    this.previousApiInput.clear()
+    this.prefixProbe.clear()
+    this.prefixProbeDisk = null
+    this.sessionListCache = { at: 0, sessions: [] }
+    const dataRoot = resolveStorageLocation(app.getPath('userData'), 'ai-data', join(app.getPath('userData'), 'weport-ai'))
+    migrateLegacyAi(dataRoot, this.getWorkspaceRoot(), account)
+    this.dataDir = join(dataRoot, 'accounts', accountNamespace(account))
     this.sessionsDir = join(this.dataDir, 'sessions')
     mkdirSync(this.sessionsDir, { recursive: true })
+  }
+
+  private currentAccount(): string {
+    return String(this.configService.getMyWxidCleaned?.() || this.configService.get('myWxid') || '').trim()
   }
 
   private loadChats(): AiChatMeta[] {
@@ -767,20 +796,124 @@ class WeportAiService {
   }
 
   private getWorkspaceRoot(): string {
+    const profile = app.getPath('userData')
     const configured = String(this.configService.get('weportAiWorkspaceRoot') || '').trim()
-    if (configured) return configured
+    if (configured) return resolveStorageLocation(profile, 'ai-workspace', configured)
     const exportPath = String(this.configService.get('exportPath') || '').trim()
-    if (exportPath) return join(exportPath, 'WeportAI')
-    return join(app.getPath('userData'), 'WeportAI')
+    if (exportPath) return resolveStorageLocation(profile, 'ai-workspace', join(exportPath, 'WeportAI'))
+    return resolveStorageLocation(profile, 'ai-workspace', join(profile, 'WeportAI'))
   }
 
+  workspaceRootForStorage(): string { return this.getWorkspaceRoot() }
+  hasActiveRuns(): boolean { return this.running.size > 0 }
+
   private chatWorkspaceDir(chatId: string): string {
-    return join(this.getWorkspaceRoot(), 'chats', chatId)
+    return join(this.getWorkspaceRoot(), 'accounts', accountNamespace(this.storageAccount ?? this.currentAccount()), 'chats', chatId)
   }
 
   /** 跨对话共享的长期记忆目录 */
   private memoryDir(): string {
-    return join(this.getWorkspaceRoot(), 'memory')
+    this.ensureDirs()
+    return join(this.getWorkspaceRoot(), 'accounts', accountNamespace(this.storageAccount || ''), 'memory')
+  }
+
+  private evidenceFile(): string {
+    this.ensureDirs()
+    return join(this.dataDir, 'evidence.json')
+  }
+
+  private readEvidence(): Record<string, EvidenceReference> {
+    const file = this.evidenceFile()
+    if (!existsSync(file)) return {}
+    return JSON.parse(readFileSync(file, 'utf8'))
+  }
+
+  private atomicJson(file: string, data: unknown): void {
+    mkdirSync(dirname(file), { recursive: true })
+    const tmp = `${file}.${randomUUID()}.tmp`
+    writeFileSync(tmp, JSON.stringify(data), 'utf8')
+    renameSync(tmp, file)
+  }
+
+  private citeMessages(sessionId: string, messages: Message[]): string {
+    const links = this.registerEvidence(this.currentAccount(), sessionId, messages)
+    return messages.map((message, index) => links[index]
+      ? `[${formatTime(message.createTime)} source](${links[index]})`
+      : 'Source unavailable: exact physical message identity was not returned.').join('\n')
+  }
+
+  registerEvidence(accountId: string, sessionId: string, messages: Message[]): string[] {
+    assertRunAccount(accountId, this.currentAccount())
+    const references = this.readEvidence()
+    const lines: string[] = []
+    for (const message of messages) {
+      const ref = evidenceReference(accountId, sessionId, message)
+      if (!ref) { lines.push(''); continue }
+      const id = evidenceId(ref)
+      references[id] = ref
+      lines.push(`weport-evidence:${id}`)
+    }
+    this.atomicJson(this.evidenceFile(), references)
+    return lines
+  }
+
+  async resolveEvidence(id: string): Promise<{ success: boolean; reference?: EvidenceReference; error?: string }> {
+    if (!/^[a-f0-9]{64}$/.test(id)) return { success: false, error: 'Invalid evidence reference.' }
+    const account = this.currentAccount()
+    const reference = this.readEvidence()[id]
+    if (!reference || reference.accountId !== account) return { success: false, error: 'Evidence is unavailable for this account.' }
+    const result = await chatService.getMessageByIdentity(reference)
+    if (this.currentAccount() !== account) return { success: false, error: 'The selected account changed.' }
+    if (!result.success || !result.message) return { success: false, error: result.error || 'The source is unavailable.' }
+    if (evidenceContentHash(result.message) !== reference.contentHash) return { success: false, error: 'The source changed since this evidence was captured.' }
+    return { success: true, reference }
+  }
+
+  listMemoryClaims(): MemoryClaim[] {
+    const file = join(this.memoryDir(), 'claims.json')
+    return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : []
+  }
+
+  async previewContext(scope: DataAccessScope): Promise<{ scope: DataAccessScope; text: string; snapshotAt: number; truncated: boolean }> {
+    validateDataScope(scope)
+    const account = this.currentAccount()
+    assertDataScope(scope, account)
+    if (scope.sessionIds.length > 10) throw Error('Preview supports up to 10 selected chats.')
+    const lines: string[] = [], snapshotAt = Date.now()
+    let remaining = 100, chars = 0, truncated = false
+    for (const sessionId of scope.sessionIds) {
+      if (remaining <= 0 || chars >= 16000) { truncated = true; break }
+      assertRunAccount(account, this.currentAccount())
+      const page = await chatService.getMessages(sessionId, 0, Math.min(30, remaining), scope.from, scope.to)
+      assertRunAccount(account, this.currentAccount())
+      if (!page.success) throw Error(page.error || 'Unable to read the selected context.')
+      const messages = (page.messages || []).filter(message => message.createTime * 1000 >= scope.from && message.createTime * 1000 <= scope.to)
+      const links = this.registerEvidence(account, sessionId, messages)
+      for (let index = 0; index < messages.length; index++) {
+        const message = messages[index], fullText = String(message.parsedContent || message.rawContent || '')
+        const text = fullText.slice(0, Math.max(0, 16000 - chars))
+        chars += text.length; remaining--
+        lines.push(`[${formatTime(message.createTime)}] ${sessionId}: ${text}\n${links[index] ? `[source](${links[index]})` : 'Exact source unavailable.'}`)
+        if (text.length < fullText.length) truncated = true
+        if (!remaining || chars >= 16000) { truncated = true; break }
+      }
+      if (page.hasMore) truncated = true
+    }
+    return { scope: structuredClone(scope), text: `Selected context snapshot: ${new Date(snapshotAt).toISOString()}. Requested dates: ${new Date(scope.from).toISOString()} to ${new Date(scope.to).toISOString()}. Partial coverage: ${truncated}. This is a bounded sample, not complete history.\n` + lines.join('\n'), snapshotAt, truncated }
+  }
+
+  saveMemoryClaim(input: Omit<MemoryClaim, 'id' | 'createdAt'>): MemoryClaim {
+    const claims = this.listMemoryClaims()
+    const claim: MemoryClaim = { ...input, id: randomUUID(), createdAt: Date.now() }
+    validateClaim(claim, new Set(Object.keys(this.readEvidence())))
+    if (claim.supersedes) {
+      const previous = claims.find(row => row.id === claim.supersedes)
+      if (!previous) throw new Error('The claim to correct is unavailable.')
+      previous.status = 'superseded'
+    }
+    claims.push(claim)
+    this.atomicJson(join(this.memoryDir(), 'claims.json'), claims)
+    return claim
   }
 
   private noteDir(chatId: string): string {
@@ -1382,7 +1515,8 @@ class WeportAiService {
 
   private async loadSessionsFresh(): Promise<ChatSession[]> {
     const result = await chatService.getSessions()
-    return result.success && Array.isArray(result.sessions) ? result.sessions : []
+    if (!result.success || !Array.isArray(result.sessions)) throw Error(result.error || 'Session list unavailable; history coverage is unknown.')
+    return result.sessions
   }
 
   private async getSessionMap(): Promise<Map<string, ChatSession>> {
@@ -1698,12 +1832,15 @@ class WeportAiService {
           const sections: string[] = [
             `「${name}」全历史分层抽样：总消息=${totalMessages}，按分页位置覆盖近期→中期→早期。抽样用于发现模式，不代表完整事实。`,
           ]
+          const failedWindows: number[] = []
+          let returned = 0
           for (let periodIndex = 0; periodIndex < offsets.length; periodIndex += 1) {
             const offset = offsets[periodIndex]
             this.appendDebugLog({ kind: 'history_sample', chatId: ctx.chatId, stage: 'page_start', sessionId, offset, probeLimit })
             const result = await chatService.getMessages(sessionId, offset, probeLimit, 0, 0, false)
             this.appendDebugLog({ kind: 'history_sample', chatId: ctx.chatId, stage: 'page_done', sessionId, offset, success: result.success, messages: result.messages?.length || 0, error: result.error })
             if (!result.success) {
+              failedWindows.push(offset)
               sections.push(`\n[覆盖不完整 offset=${offset}] 读取失败：${result.error || '未知错误'}；此窗口未取得证据，不能视为没有消息，需重试后再下结论。`)
               continue
             }
@@ -1711,7 +1848,7 @@ class WeportAiService {
             const sample: Message[] = []
             // Preserve every historical stratum under the aggregate tool budget;
             // truncating the final string would silently discard the oldest ones.
-            const perPeriod = Math.max(1, Math.floor(((ctx.resultCharBudget || 240000) - 2000) / periods / (maxChars + 84)))
+            const perPeriod = Math.max(1, Math.floor(((ctx.resultCharBudget || 240000) - 2000) / periods / (maxChars + 180)))
             const wanted = Math.min(messagesPerPeriod, perPeriod, all.length)
             for (let i = 0; i < wanted; i += 1) {
               const index = wanted === 1 ? 0 : Math.round((i * (all.length - 1)) / (wanted - 1))
@@ -1724,12 +1861,16 @@ class WeportAiService {
             const times = all.map((m) => Number(m.createTime) || 0).filter((time) => time > 0)
             const range = times.length > 0 ? `${formatTime(Math.min(...times))} ~ ${formatTime(Math.max(...times))}` : '未知时间'
             sections.push(`\n[${label} offset=${offset}] 覆盖=${range}；读取=${all.length}（我发=${sent}/对方发=${received}）；均匀样本=${sample.length}`)
-            sections.push(...sample.map((m) => {
+            const links = ctx.sourceLinks?.(sessionId, sample) || []
+            returned += sample.length
+            sections.push(...sample.map((m, index) => {
               const raw = formatMessageLine(m, name, ctx.myWxid, sessionId)
-              return `- ${raw.slice(0, maxChars + 80)}`
+              return `- ${raw.slice(0, maxChars + 80)}${links[index] ? ` [source](${links[index]})` : ''}`
             }))
           }
           sections.push('\n必须用 focused read/search 复核关键判断；不要把抽样缺失当作事件不存在。')
+          sections.push('\nCoverage: ' + JSON.stringify({ mode: 'sample', sessionId, totalMessages, offsets, returned,
+            failedWindows, complete: false, snapshotTime: Date.now() }))
           return sections.join('\n')
         },
       },
@@ -1783,14 +1924,14 @@ class WeportAiService {
       {
         name: 'read_session_messages',
         description:
-          'Read a focused page of ONE chat in a known time window (newest first by default). Returns sender, time and parsed text plus nextOffset. For broad/long-term analysis use sample_session_history first, then use this tool only to verify a specific period or claim; read successive 300-500-message pages across extended time ranges when depth is needed, avoiding duplicate pages.',
+          'Read a substantial contiguous page of ONE chat (newest first by default), with sender, time, parsed text and nextOffset. This is a primary evidence tool for broad analysis: after surveying representative chats and historical strata, read successive 300-500-message pages across early, middle and recent periods to discover themes in context. It also verifies specific claims. Follow nextOffset without overlapping pages; a keyword hit list is not a substitute for conversation history.',
         parameters: {
           type: 'object',
           properties: {
             sessionId: { type: 'string', description: 'The chat username/id from list_sessions' },
             startTime: { type: 'string', description: 'Optional window start: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (default: beginning)' },
             endTime: { type: 'string', description: 'Optional window end: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (default: now)' },
-            limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Max messages (default 200)' },
+            limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Max messages (default 400); substantial contiguous reading for general analysis' },
             offset: { type: 'integer', minimum: 0, description: 'Pagination offset (default 0); use nextOffset from the previous result' },
             oldestFirst: { type: 'boolean', description: 'Return oldest first when true (default false = newest first)' },
           },
@@ -1798,23 +1939,25 @@ class WeportAiService {
         },
         friendly: (args, ctx) => {
           const name = ctx.getSessionName(String(args.sessionId || ''))
-          const n = clampInt(args.limit, 1, 500, 200)
-          return `查看了「${name}」的聊天记录（${n} 条内）`
+          const n = clampInt(args.limit, 1, 500, 400)
+          return `连续阅读「${name}」的聊天记录（最多 ${n} 条，起点 ${Math.max(0, Math.floor(Number(args.offset) || 0))}）`
         },
         handler: async (args, ctx) => {
           const sessionId = String(args.sessionId || '').trim()
           if (!sessionId) return '错误：缺少 sessionId。'
-          const limit = clampInt(args.limit, 1, 500, 200)
+          const limit = clampInt(args.limit, 1, 500, 400)
           const offset = Math.max(0, Math.floor(Number(args.offset) || 0))
-          const startSec = normalizeTimeSec(args.startTime)
-          const endSec = normalizeTimeSec(args.endTime)
+          const startSec = Number.isFinite(Number(args.__scopeFrom)) ? Math.ceil(Number(args.__scopeFrom) / 1000) : normalizeTimeSec(args.startTime)
+          const endSec = Number.isFinite(Number(args.__scopeTo)) ? Math.floor(Number(args.__scopeTo) / 1000) : normalizeTimeSec(args.endTime)
           const ascending = args.oldestFirst === true
           const startMs = startSec > 0 ? startSec * 1000 : 0
           const endMs = endSec > 0 ? endSec * 1000 : 0
           const result = await chatService.getMessages(sessionId, offset, limit, startMs, endMs, ascending)
-          if (!result.success) return `读取失败：${result.error || '未知错误'}`
-          const messages = result.messages || []
-          if (messages.length === 0) return '该时间窗口内没有消息。'
+          if (!result.success) return `读取失败：${result.error || '未知错误'}；不能据此判断没有消息。\nCoverage: ` + JSON.stringify({ requestedStart: startSec || null, requestedEnd: endSec || null, offset, returned: 0, complete: false, error: 'read-failed', snapshotTime: Date.now() })
+          const messages = (result.messages || []).filter(message =>
+            (!Number.isFinite(Number(args.__scopeFrom)) || message.createTime * 1000 >= Number(args.__scopeFrom)) &&
+            (!Number.isFinite(Number(args.__scopeTo)) || message.createTime * 1000 <= Number(args.__scopeTo)))
+          if (messages.length === 0) return '该页没有返回消息；这不证明其他分页或时间段没有消息。\nCoverage: ' + JSON.stringify({ requestedStart: startSec || null, requestedEnd: endSec || null, offset, returned: 0, hasMore: Boolean(result.hasMore), completeWindow: offset === 0 && !result.hasMore, snapshotTime: Date.now() })
           const name = ctx.getSessionName(sessionId)
           const lines = messages.map((m) => formatMessageLine(m, name, ctx.myWxid, sessionId))
           const rangeNote =
@@ -1823,7 +1966,7 @@ class WeportAiService {
               : ''
           const nextOffset = Number(result.nextOffset ?? offset + messages.length)
           const truncNote = result.hasMore ? `（还有更多；nextOffset=${nextOffset}）` : '（已到该窗口末尾）'
-          return `「${name}」（${sessionTypeLabel(sessionId)}）${rangeNote}offset=${offset}，返回 ${messages.length} 条${truncNote}：\n` + lines.join('\n')
+          return `「${name}」（${sessionTypeLabel(sessionId)}）${rangeNote}offset=${offset}，返回 ${messages.length} 条${truncNote}：\n` + lines.join('\n') + '\nEvidence (same row order; cite these links):\n' + this.citeMessages(sessionId, messages) + '\nCoverage: ' + JSON.stringify({ requestedStart: startSec || null, requestedEnd: endSec || null, inspectedStart: Math.min(...messages.map(m => m.createTime)), inspectedEnd: Math.max(...messages.map(m => m.createTime)), snapshotTime: Date.now(), offset, returned: messages.length, hasMore: Boolean(result.hasMore), completeWindow: offset === 0 && !result.hasMore, completeHistory: !startSec && !endSec && offset === 0 && !result.hasMore })
         },
       },
       {
@@ -1868,7 +2011,9 @@ class WeportAiService {
             // 有完整窗口时按时间正序扫，取窗口内**最近**的（下面的 slice(-limit)）。
             hasWindow
           )
-          if (!listed.success) return `读取失败：${listed.error || '未知错误'}`
+          const imageCoverage = (extra: Record<string, unknown>) => '\nCoverage: ' + JSON.stringify({ mode: 'images',
+            requestedStart: startSec || null, requestedEnd: endSec || null, snapshotTime: Date.now(), ...extra })
+          if (!listed.success) return `读取失败：${listed.error || '未知错误'}；图片覆盖未知。` + imageCoverage({ complete: false, error: 'read-failed', returned: 0 })
           const scanned = listed.messages || []
           const images = scanned.filter(
             (m) => Number((m as { localType?: number }).localType) === 3 || Boolean(m.imageMd5) || Boolean(m.imageDatName)
@@ -1877,10 +2022,10 @@ class WeportAiService {
             const range = startSec > 0 || endSec > 0
               ? `${startSec ? formatTime(startSec) : '起点'} ~ ${endSec ? formatTime(endSec) : '现在'}`
               : '全部历史'
-            return `「${name}」在 ${range} 内没有图片消息（已扫描 ${scanned.length} 条）。`
+            return `「${name}」在 ${range} 的本次 ${scanned.length} 条消息扫描中没有找到图片；不代表未扫描历史没有图片。` + imageCoverage({ scanned: scanned.length, returned: 0, hasMore: Boolean(listed.hasMore), complete: !listed.hasMore })
           }
 
-          const picked = images.slice(-limit)
+          const picked = [...images].sort((a, b) => b.createTime - a.createTime).slice(0, limit)
           const lines: string[] = []
           let attached = 0
           for (const message of picked) {
@@ -1888,12 +2033,13 @@ class WeportAiService {
             const sender = message.isSend === 1
               ? '我'
               : String(message.senderDisplayName || message.senderUsername || name || '')
-            const localId = Number((message as { localId?: number }).localId)
-            if (!Number.isFinite(localId)) {
-              lines.push(`- [${when}] ${sender}：图片（缺少 localId，无法解密）`)
+            const reference = evidenceReference(ctx.myWxid || 'unavailable', sessionId, message)
+            if (!reference) {
+              lines.push(`- [${when}] ${sender}：图片（缺少精确物理来源，无法安全读取）`)
               continue
             }
-            const decoded = await chatService.getImageData(sessionId, String(localId))
+            const decoded = await chatService.getImageDataByIdentity({ sessionId, localId: reference.localId,
+              idKind: reference.idKind, db: reference.db, table: reference.table, ts: reference.ts })
             if (!decoded.success || !decoded.data) {
               // 失败原因是可执行的指引：多半是图片密钥没取。原样说出来，
               // 不要让模型猜（"看不了"和"没有这张图"是两件事）。
@@ -1915,12 +2061,15 @@ class WeportAiService {
           }
 
           const header = attached > 0
-            ? `「${name}」（${sessionTypeLabel(sessionId)}）窗口内共 ${images.length} 张图片，已附上最近 ${attached} 张给你看：`
-            : `「${name}」（${sessionTypeLabel(sessionId)}）窗口内共 ${images.length} 张图片，但一张都没能附上：`
+            ? `「${name}」（${sessionTypeLabel(sessionId)}）本次扫描发现 ${images.length} 张图片，已附上选中范围内最近 ${attached} 张：`
+            : `「${name}」（${sessionTypeLabel(sessionId)}）本次扫描发现 ${images.length} 张图片，但一张都没能附上：`
           const hint = attached > 0
             ? '\n\n请基于你看到的画面回答。若附件对你的模型不可用（返回了图片相关错误），请说明并改用文字线索。'
             : '\n\n请把无法读取的原因如实告诉用户（常见原因：图片密钥未获取、原图已被清理），不要凭猜测描述图片内容。'
-          return `${header}\n${lines.join('\n')}${hint}`
+          return `${header}\n${lines.join('\n')}${hint}\nEvidence (selected image messages, including unavailable images):\n${this.citeMessages(sessionId, picked)}` + imageCoverage({
+            scanned: scanned.length, found: images.length, returned: picked.length, attached, hasMore: Boolean(listed.hasMore),
+            complete: !listed.hasMore, inspectedStart: scanned.length ? Math.min(...scanned.map(row => row.createTime)) : null,
+            inspectedEnd: scanned.length ? Math.max(...scanned.map(row => row.createTime)) : null })
         },
       },
       {
@@ -1976,7 +2125,7 @@ class WeportAiService {
       {
         name: 'search_messages',
         description:
-          'Search message content across all chats or one chat by keyword (supports Chinese). Useful for finding names, topics, decisions, plans mentioned in any chat.',
+          'Find a specified phrase, identifier or concrete hypothesis across chats by keyword (supports Chinese). Use directly for explicit lookup tasks, or after chronological history reading to check a specific emerging claim. This is NOT a representative history sample: guessed theme words bias broad profile/relationship/topic analysis, and no hits never prove absence. Prefer sample_session_history and substantial read_session_messages pages for general analysis.',
         parameters: {
           type: 'object',
           properties: {
@@ -2001,22 +2150,25 @@ class WeportAiService {
           const sessionId = String(args.sessionId || '').trim() || undefined
           const beginSec = normalizeTimeSec(args.startTime) || undefined
           const endSec = normalizeTimeSec(args.endTime) || undefined
-          const result = await chatService.searchMessages(keyword, sessionId, limit + 1, offset, beginSec, endSec)
-          if (!result.success) return `搜索失败：${result.error || '未知错误'}`
-          const allMessages = result.messages || []
-          const hasMore = allMessages.length > limit
-          const messages = allMessages.slice(0, limit)
-          if (messages.length === 0) return `没有找到包含「${keyword}」的消息。`
-          const names = new Map<string, string>()
-          const lines = messages.map((m) => {
-            const sid = String((m as Message & { sessionId?: string }).sessionId || sessionId || '')
-            let name = ctx.getSessionName(sid)
-            if (sid && !name) name = sid
-            const sender = m.isSend === 1 ? '我' : String(m.senderDisplayName || m.senderUsername || name || '')
-            return `- [${formatTime(Number(m.createTime) || 0)}] ${name} · ${sender}: ${String(m.parsedContent || m.rawContent || '').slice(0, 300)}`
-          })
-          void names
-          return `「${keyword}」命中 ${messages.length} 条（offset=${offset}${hasMore ? `，nextOffset=${offset + messages.length}` : '，已到末尾'}）：\n` + lines.join('\n')
+          const account = this.currentAccount()
+          const retrieved = await retrieveIndexedMessages({ text: keyword, limit, cursor: offset,
+            scope: { sessionIds: sessionId ? [sessionId] : Array.isArray(args.__sessionIds) ? args.__sessionIds.map(String) : undefined,
+              from: Number.isFinite(Number(args.__scopeFrom)) ? Number(args.__scopeFrom) : beginSec ? beginSec * 1000 : undefined,
+              to: Number.isFinite(Number(args.__scopeTo)) ? Number(args.__scopeTo) : endSec ? endSec * 1000 : undefined } })
+          const result = Number.isFinite(Number(args.__scopeFrom)) && Number.isFinite(Number(args.__scopeTo))
+            ? restrictSearchResult(retrieved, { accountId: account, sessionIds: Array.isArray(args.__sessionIds) ? args.__sessionIds.map(String) : [],
+              from: Number(args.__scopeFrom), to: Number(args.__scopeTo) }) : retrieved
+          assertRunAccount(account, this.currentAccount())
+          if (result.error) return `Search failed: ${result.error}`
+          const lines: string[] = []
+          for (const hit of result.hits) {
+            const exact = await chatService.getMessageByIdentity(hit)
+            assertRunAccount(account, this.currentAccount())
+            const citation = exact.success && exact.message ? this.citeMessages(hit.sessionId, [exact.message]) : 'Source unavailable: ' + (exact.error || 'message not found')
+            lines.push(`- ${ctx.getSessionName(hit.sessionId)} · ${hit.senderName}: ${hit.snippet}\n${citation}`)
+          }
+          return JSON.stringify({ keyword, returned: result.hits.length, total: result.total, nextCursor: result.cursor,
+            truncated: result.truncated, coverage: result.coverage }) + '\n' + lines.join('\n')
         },
       },
       {
@@ -2060,7 +2212,10 @@ class WeportAiService {
               `首条=${s.firstTimestamp ? formatTime(Number(s.firstTimestamp)) : '—'} 末条=${s.lastTimestamp ? formatTime(Number(s.lastTimestamp)) : '—'}`
             )
           })
-          return `统计（${ids.length} 个会话）：\n` + lines.join('\n')
+          return `统计（${ids.length} 个会话；派生统计可能使用缓存，不是消息原文证据）：\n` + lines.join('\n') + '\nCoverage: ' + JSON.stringify({
+            mode: 'aggregate', requestedStart: beginSec || null, requestedEnd: endSec || null, sessionIds: ids,
+            returned: lines.length, complete: false, mayUseStaleCache: true, snapshotTime: Date.now(),
+            missingSessions: ids.filter(id => !Object.hasOwn(result.data!, id)) })
         },
       },
       {
@@ -2097,6 +2252,7 @@ class WeportAiService {
           const sessionMap = await this.getSessionMap()
           const ids = Array.from(sessionMap.values()).map((s) => s.username)
           const batch = await wcdbService.getSessionMessageDateCountsBatch(ids)
+          if (!batch.success || !batch.data) return '活跃日期统计读取失败；不能据此判断没有消息日期。\nCoverage: ' + JSON.stringify({ mode: 'aggregate', complete: false, error: 'date-counts-unavailable', snapshotTime: Date.now() })
           const dayTotals = new Map<string, { count: number; chats: number }>()
           if (batch.success && batch.data) {
             for (const [sid, counts] of Object.entries(batch.data)) {
@@ -2110,9 +2266,12 @@ class WeportAiService {
             }
           }
           const sorted = Array.from(dayTotals.entries()).sort((a, b) => b[0].localeCompare(a[0])).slice(0, limit)
-          if (sorted.length === 0) return '没有消息日期记录。'
+          const coverage = '\nCoverage: ' + JSON.stringify({ mode: 'aggregate', complete: false,
+            sessionIds: ids, missingSessions: ids.filter(id => !Object.hasOwn(batch.data!, id)), returned: sorted.length,
+            limit, year: year || null, snapshotTime: Date.now() })
+          if (sorted.length === 0) return '本次返回的统计中没有消息日期记录；未取得统计的会话覆盖未知。' + coverage
           return `跨会话活跃日历（最近 ${sorted.length} 天）：\n` +
-            sorted.map(([d, v]) => `- ${d}: ${v.count} 条消息 / ${v.chats} 个会话`).join('\n')
+            sorted.map(([d, v]) => `- ${d}: ${v.count} 条消息 / ${v.chats} 个会话`).join('\n') + coverage
         },
       },
       {
@@ -2273,6 +2432,36 @@ class WeportAiService {
             }
           } catch { /* noop */ }
           return `账号：${myWxid || '（未配置，请在连接页选择）'}\n数据目录：${dbPath || '—'}\n会话构成：${countsText || '未知'}`
+        },
+      },
+      {
+        name: 'list_memory_claims',
+        description: 'Read dated, account-scoped memory claims with source evidence, uncertainty and correction history. Prior claims are fallible leads, not current evidence.',
+        parameters: { type: 'object', properties: {} },
+        friendly: () => '查看了带证据的记忆与更正记录',
+        handler: async () => JSON.stringify(this.listMemoryClaims()),
+      },
+      {
+        name: 'save_memory_claim',
+        description: 'Store a dated observation or uncertain interpretation. Use source IDs from weport-evidence links. Corrections retain prior claims using supersedes, plus counterEvidenceIds and correction. Never store an interpretation as an established fact.',
+        parameters: { type: 'object', properties: {
+          statement: { type: 'string' }, kind: { type: 'string', enum: ['observation', 'interpretation'] },
+          asOf: { type: 'number', description: 'Unix milliseconds at which this claim was checked' },
+          evidenceIds: { type: 'array', items: { type: 'string' } }, counterEvidenceIds: { type: 'array', items: { type: 'string' } },
+          supersedes: { type: 'string' }, correction: { type: 'string' },
+        }, required: ['statement', 'kind', 'asOf', 'evidenceIds'] },
+        friendly: () => '保存了带日期、证据与更正关系的记忆',
+        handler: async args => {
+          const ids = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : []
+          const counters = Array.isArray(args.counterEvidenceIds) ? args.counterEvidenceIds.map(String) : []
+          for (const id of [...ids, ...counters]) {
+            const result = await this.resolveEvidence(id)
+            if (!result.success) throw Error(result.error || 'Evidence unavailable')
+          }
+          return JSON.stringify(this.saveMemoryClaim({ statement: String(args.statement || '').slice(0, 8000),
+            kind: args.kind === 'observation' ? 'observation' : 'interpretation', status: args.kind === 'observation' ? 'active' : 'uncertain',
+            asOf: Number(args.asOf), evidenceIds: ids, counterEvidenceIds: counters,
+            supersedes: args.supersedes ? String(args.supersedes) : undefined, correction: args.correction ? String(args.correction).slice(0, 8000) : undefined }))
         },
       },
       {
@@ -2514,11 +2703,14 @@ class WeportAiService {
     if (ids.length === 0) return '没有符合条件的会话。'
 
     const batch = await wcdbService.getSessionMessageDateCountsBatch(ids)
+    if (!batch.success || !batch.data) return `无法确定时间线覆盖范围：会话日期统计读取失败。不能据此判断没有消息。\nCoverage: ${JSON.stringify({ mode: 'sample', requestedStart: startSec, requestedEnd: endSec, returned: 0, complete: false, failedWindows: ['date-counts-unavailable'], snapshotTime: Date.now() })}`
     const activeIds: string[] = []
+    const unknownCountSessions: string[] = []
     if (batch.success && batch.data) {
       for (const sid of ids) {
         const counts = batch.data[sid]
-        if (counts && countMatchesInRange(counts, startSec, endSec) > 0) activeIds.push(sid)
+        if (!counts) { activeIds.push(sid); unknownCountSessions.push(sid) }
+        else if (countMatchesInRange(counts, startSec, endSec) > 0) activeIds.push(sid)
       }
     }
     if (activeIds.length === 0) return `时间窗口 ${label} 内没有任何消息。`
@@ -2526,6 +2718,7 @@ class WeportAiService {
     const perSession = Math.max(10, Math.min(120, Math.floor(maxMessages / Math.max(1, activeIds.length))))
     const collected: Array<{ time: number; sid: string; line: string }> = []
     const truncatedSessions: string[] = []
+    const failedWindows: string[] = []
     let totalTruncated = 0
 
     // 分批并发（每批 4 个）：宿主进程消息游标数量有限，避免并行打开过多游标
@@ -2544,9 +2737,11 @@ class WeportAiService {
             const bucketStart = startSec + Math.floor((span * bucket) / 3)
             const bucketEnd = bucket === 2 ? endSec : startSec + Math.floor((span * (bucket + 1)) / 3)
             const result = await chatService.getMessages(sid, 0, bucketLimit, bucketStart * 1000, bucketEnd * 1000, true)
-            if (!result.success || !Array.isArray(result.messages)) continue
-            for (const m of result.messages) {
-              collected.push({ time: Number(m.createTime) || 0, sid, line: formatMessageLine(m, name, ctx.myWxid, sid) })
+            if (!result.success || !Array.isArray(result.messages)) { failedWindows.push(`${sid}:${bucketStart}-${bucketEnd}`); continue }
+            const links = ctx.sourceLinks?.(sid, result.messages) || []
+            for (let index = 0; index < result.messages.length; index++) {
+              const m = result.messages[index]
+              collected.push({ time: Number(m.createTime) || 0, sid, line: formatMessageLine(m, name, ctx.myWxid, sid) + (links[index] ? ` [source](${links[index]})` : '') })
             }
             if (result.hasMore) {
               truncatedSessions.push(name)
@@ -2559,14 +2754,17 @@ class WeportAiService {
 
     collected.sort((a, b) => a.time - b.time)
     const slice = collected.slice(0, maxMessages)
-    const header = `时间线 ${label}：${activeIds.length} 个会话有消息；按早/中/近三段分层读取 ${collected.length} 条，返回 ${slice.length} 条（按时间排序；代表性样本，不宣称全量）：\n`
+    const header = `时间线 ${label}：检查 ${activeIds.length} 个会话；按早/中/近三段分层读取 ${collected.length} 条，返回 ${slice.length} 条（按时间排序；代表性样本，不宣称全量）：\n`
     const truncNote =
       collected.length > slice.length
         ? `\n（输出截断：${collected.length - slice.length} 条未返回${truncatedSessions.length ? '；桶内仍有更多的会话：' + Array.from(new Set(truncatedSessions)).slice(0, 5).join('、') : ''}，可用更小窗口细分）`
         : totalTruncated > 0
           ? `\n（覆盖提示：${totalTruncated} 个会话时间桶仍有更多消息；本结果为分层样本，可缩小窗口复核。）`
           : ''
-    return header + slice.map((x) => x.line).join('\n') + truncNote
+    const failureNote = failedWindows.length ? `\n覆盖不完整：${failedWindows.length} 个会话时间窗口读取失败，不能视为空窗口。` : ''
+    return header + slice.map((x) => x.line).join('\n') + truncNote + failureNote + '\nCoverage: ' + JSON.stringify({ mode: 'sample',
+      requestedStart: startSec, requestedEnd: endSec, returned: slice.length, failedWindows, unknownCountSessions,
+      truncated: totalTruncated > 0 || collected.length > slice.length, complete: false, snapshotTime: Date.now() })
   }
 
   // -------------------------------------------------------------------------
@@ -2587,15 +2785,36 @@ class WeportAiService {
   }
 
   /** 触发一次完整的 agent run（异步，事件流经 emitter 派发） */
-  async runChat(chatId: string, text: string, options?: { consumer?: ProviderConsumer }): Promise<{ success: boolean; error?: string }> {
+  async runChat(chatId: string, text: string, options?: AiRunOptions): Promise<{ success: boolean; error?: string }> {
+    const runAccount = this.currentAccount()
+    if (options?.accountId !== undefined && options.accountId !== runAccount) return { success: false, error: 'Task account does not match the selected account.' }
     if (this.running.has(chatId)) return { success: false, error: '该对话正在执行中' }
     const chat = this.loadChats().find((c) => c.id === chatId)
     if (!chat) return { success: false, error: '对话不存在' }
+    const scope = options?.scope ? structuredClone(options.scope) : undefined
+    if (scope) {
+      try { validateDataScope(scope); assertDataScope(scope, runAccount) }
+      catch (error) { return { success: false, error: readRunError(error) } }
+    }
+    const scopeHash = createHash('sha256').update(JSON.stringify(scope || 'unrestricted')).digest('hex')
+    if (chat.accessScopeHash && chat.accessScopeHash !== scopeHash) return { success: false, error: 'Start a new conversation when changing the data scope.' }
+    if (scope && !chat.accessScopeHash && this.loadMessages(chatId).messages.length) return { success: false, error: 'Create a new conversation for a restricted data scope.' }
+    chat.accessScopeHash = scopeHash
+    chat.accessScope = scope
+    this.persistChats()
     const userText = String(text || '').trim()
     if (!userText) return { success: false, error: '消息为空' }
 
     const consumer = options?.consumer || 'chat'
     const activeProfile = this.providerProfiles.getForConsumer(consumer)
+    const processing = options?.processing || chat.processing || 'cloud-enabled'
+    if (processing === 'local-only') {
+      let local = false
+      try { local = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(activeProfile?.baseUrl || '').hostname) } catch { /* reject invalid endpoint */ }
+      if (!local) return { success: false, error: 'Local-only processing requires a model endpoint on this computer.' }
+    }
+    chat.processing = processing
+    this.persistChats()
     if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在「设置 → AI 服务」中添加服务配置' }
 
     const ctrl = new AbortController()
@@ -2619,10 +2838,10 @@ class WeportAiService {
     if (firstTitle) {
       const fallbackTitle = this.fallbackTitleFromText(userText) || chat.title
       chat.title = fallbackTitle
-      chat.titleVersion = 1
+      chat.titleVersion = processing === 'local-only' ? 2 : 1
       chat.updatedAt = Date.now()
       this.persistChats()
-      void this.generateAITitle(userText).then((t) => {
+      void (processing === 'local-only' ? Promise.resolve(null) : this.generateAITitle(userText)).then((t) => {
         if (!t) return
         const meta = this.loadChats().find((c) => c.id === chatId)
         // 用户未手动改名（titleVersion=2）时才覆盖（避免吞掉用户起的标题）
@@ -2661,17 +2880,31 @@ class WeportAiService {
     let error: string | null = null
 
     try {
-      const maxSteps = toolRoundLimit(this.configService.get('weportAiMaxSteps'))
+      const maxSteps = options?.maxSteps === undefined
+        ? toolRoundLimit(this.configService.get('weportAiMaxSteps'))
+        : toolRoundLimit(options.maxSteps, false)
       const runGuard = new AiRunGuard()
       // Freeze every provider-visible prefix component for this run. Settings
       // or plugin/tool changes take effect on the next user turn, never midway
       // through an append-only cache epoch.
-      const runToolDefinitions = this.buildTools()
+      const availableTools = options?.tools === 'none' ? [] : this.buildTools().filter(tool => processing !== 'local-only' || !['list_connector_targets', 'create_connector_task'].includes(tool.name))
+      const runToolDefinitions = scope ? availableTools.filter(tool => ['read_session_messages', 'search_messages'].includes(tool.name)).map(tool => ({ ...tool,
+        handler: async (args: Record<string, unknown>, toolContext: ToolHandlerContext) => {
+          const sessionId = String(args.sessionId || '').trim()
+          assertDataScope(scope, this.currentAccount(), sessionId || undefined)
+          if (tool.name === 'read_session_messages' && !sessionId) throw new Error('A scoped chat is required.')
+          const result = await tool.handler({ ...args, startTime: new Date(scope.from).toISOString(), endTime: new Date(scope.to).toISOString(),
+            __scopeFrom: scope.from, __scopeTo: scope.to, __sessionIds: scope.sessionIds }, toolContext)
+          assertDataScope(scope, this.currentAccount(), sessionId || undefined)
+          return result
+        },
+      })) : availableTools
       const runToolsByName = new Map(runToolDefinitions.map((tool) => [tool.name, tool]))
       const requestShape = this.createModelRequestShape(runToolDefinitions, consumer === 'webot')
-      const sessionMap = await this.getSessionMap()
+      const sessionMap = runToolDefinitions.length ? await this.getSessionMap() : new Map<string, ChatSession>()
       const ctx: ToolHandlerContext = {
         chatId,
+        sourceLinks: (sessionId, messages) => this.registerEvidence(runAccount, sessionId, messages),
         sessionsByName: sessionMap,
         myWxid: String(this.configService.getMyWxidCleaned() || this.configService.get('myWxid') || ''),
         // 绑定到实例：emit 现在要碰 delta 缓冲区，裸方法引用会在调用时丢 `this`。
@@ -2688,6 +2921,8 @@ class WeportAiService {
       let loopCount = 0
 
       while (true) {
+        assertRunAccount(runAccount, this.currentAccount())
+        if (options?.maxTotalTokens && usage.totalTokens >= options.maxTotalTokens) throw new Error('Run token budget reached before the next request.')
         if (ctrl.signal.aborted) {
           aborted = true
           break
@@ -2695,7 +2930,9 @@ class WeportAiService {
         const finalize = runGuard.shouldFinalize(loopCount, maxSteps, lastRequestTokens, contextWindow)
         loopCount += 1
 
-        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape, consumer, activeProfile, finalize ? 'none' : 'auto')
+        const outputCap = options?.maxTotalTokens ? Math.max(1, Math.floor(options.maxTotalTokens - usage.totalTokens)) : undefined
+        const stepResult = await this.callModel(chatId, messages, ctrl.signal, compressed, requestShape, consumer, activeProfile, finalize ? 'none' : 'auto', outputCap, processing === 'local-only')
+        assertRunAccount(runAccount, this.currentAccount())
         if (!stepResult.ok) {
           if (ctrl.signal.aborted) { aborted = true; break }
           error = stepResult.error || '模型调用失败'
@@ -2802,6 +3039,7 @@ class WeportAiService {
             if (!tool) return { ok: false, result: `错误：未知工具 ${call.name}` }
             const callImages = callImagesByIndex[index]
             try {
+              assertRunAccount(runAccount, this.currentAccount())
               const result = await tool.handler(call.args, {
                 ...ctx,
                 resultCharBudget: Math.floor(stepToolBudget / Math.max(1, toolCalls.length)),
@@ -2812,6 +3050,7 @@ class WeportAiService {
                   }
                 },
               })
+              assertRunAccount(runAccount, this.currentAccount())
               return { ok: true, result }
             } catch (e) {
               return { ok: false, result: `工具执行异常：${String((e as Error)?.message || e)}` }
@@ -3052,7 +3291,8 @@ class WeportAiService {
   }
 
   private debugLogPath(): string {
-    return join(app.getPath('userData'), 'weport-ai', 'debug.log')
+    const profile = app.getPath('userData')
+    return join(resolveStorageLocation(profile, 'ai-data', join(profile, 'weport-ai')), 'debug.log')
   }
 
   /**
@@ -3148,6 +3388,7 @@ class WeportAiService {
     if (this.titleUpgrading.has(chatId)) return
     const chat = this.loadChats().find((c) => c.id === chatId)
     if (!chat) return
+    if (chat.processing === 'local-only') return
     if (chat.titleVersion === 2) return
     const stored = this.loadMessages(chatId)
     const firstUser = stored.messages.find((m) => m.role === 'user')
@@ -3290,7 +3531,9 @@ class WeportAiService {
     requestShape: ModelRequestShape,
     consumer: ProviderConsumer = 'chat',
     resolvedProfile?: ProviderProfile | null,
-    toolChoice: 'auto' | 'none' = 'auto'
+    toolChoice: 'auto' | 'none' = 'auto',
+    outputCap?: number,
+    localOnly = false
   ): Promise<{
     ok: boolean
     content?: string
@@ -3343,6 +3586,7 @@ class WeportAiService {
         if (firstTokenAt === null) firstTokenAt = Date.now()
       }
       const result: ProviderStreamResult = await getProviderAdapter(callProfile).stream({
+        localOnly,
         profile: callProfile,
         messages: apiMessages,
         tools: requestShape.tools,
@@ -3350,7 +3594,7 @@ class WeportAiService {
         // Main path: send the model's own output limit. Before this it was
         // declared on `ProviderStreamInput` but never set here, so the Anthropic
         // adapter fell back to its hard-coded 32768 regardless of the model.
-        maxOutputTokens: profile.modelMaxOutputTokens,
+        maxOutputTokens: outputCap ? Math.min(profile.modelMaxOutputTokens || outputCap, outputCap) : profile.modelMaxOutputTokens,
         reasoningEffort: String(this.configService.get('weportAiReasoningEffort') || 'high'),
         signal,
         onReasoning: (delta) => {

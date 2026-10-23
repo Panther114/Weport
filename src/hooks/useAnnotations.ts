@@ -32,7 +32,7 @@ export interface AnnotationsActions {
   removeFavorite: (ref: AnnotationReference) => void
   addMark: (entry: AnnotationEntry) => void
   removeMark: (ref: AnnotationReference) => void
-  saveSearch: (input: { name: string; text: string; scope: ScopeParams }) => void
+  saveSearch: (input: { name: string; text: string; scope: ScopeParams; retrieval?: 'lexical' | 'hybrid' | 'semantic' }) => void
   removeSearch: (id: string) => void
   renameSearch: (id: string, name: string) => void
   /** 手动重读（引擎侧改了东西，或第一次读失败后重试） */
@@ -133,13 +133,13 @@ export function useAnnotations(accountId: string): UseAnnotationsResult {
       removeFavorite: (ref) => mutate({ op: 'fav.remove', payload: ref }),
       addMark: (entry) => mutate({ op: 'mark.add', payload: entry }),
       removeMark: (ref) => mutate({ op: 'mark.remove', payload: ref }),
-      saveSearch: ({ name, text, scope }) => {
+      saveSearch: ({ name, text, scope, retrieval }) => {
         const label = name.trim() || queryFromParams({ text, scope }) || '未命名搜索'
         mutate({
           op: 'search.save',
           payload: {
             name: label,
-            query: queryFromParams({ text, scope }),
+            query: queryFromParams({ text, scope, retrieval }),
             scope: {
               sessionIds: scope.sessionIds,
               senders: scope.senders,

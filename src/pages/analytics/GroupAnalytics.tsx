@@ -521,10 +521,10 @@ setMembers([])
           <div className="group-sort-row">
             <span className="group-sort-label">排序</span>
             <div className="seg" role="radiogroup" aria-label="群聊排序">
-              <button type="button" data-active={groupSort === 'messages'} onClick={() => setGroupSort('messages')}>
+              <button type="button" role="radio" aria-checked={groupSort === 'messages'} data-active={groupSort === 'messages'} onClick={() => setGroupSort('messages')}>
                 消息数
               </button>
-              <button type="button" data-active={groupSort === 'members'} onClick={() => setGroupSort('members')}>
+              <button type="button" role="radio" aria-checked={groupSort === 'members'} data-active={groupSort === 'members'} onClick={() => setGroupSort('members')}>
                 人数
               </button>
             </div>
@@ -605,7 +605,7 @@ setMembers([])
                   ).map((t) => {
                     const Icon = t.icon
                     return (
-                      <button key={t.id} type="button" className={`chip ${tab === t.id ? 'chip-active' : ''}`} onClick={() => setTab(t.id)}>
+                      <button key={t.id} type="button" aria-pressed={tab === t.id} className={`chip ${tab === t.id ? 'chip-active' : ''}`} onClick={() => setTab(t.id)}>
                         <Icon size={13} />
                         {t.label}
                       </button>
@@ -653,7 +653,7 @@ setMembers([])
                     </div>
                     <div className="ranking-limit-segment" role="group" aria-label="群聊排行榜数量">
                       {[10, 20, 50, 100].map((limit) => (
-                        <button key={limit} type="button" className={rankingLimit === limit ? 'is-active' : ''} onClick={() => setRankingLimit(limit)}>{limit}</button>
+                        <button key={limit} type="button" aria-pressed={rankingLimit === limit} className={rankingLimit === limit ? 'is-active' : ''} onClick={() => setRankingLimit(limit)}>{limit}</button>
                       ))}
                     </div>
                   </div>

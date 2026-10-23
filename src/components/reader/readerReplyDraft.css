@@ -1,0 +1,25 @@
+.reader-reply { flex: 0 0 auto; border-bottom: 1px solid var(--line); background: var(--bg-raised); }
+.reader-reply-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; }
+.reader-reply-heading .reader-tool { color: var(--accent); }
+.reader-reply-body { display: flex; flex-direction: column; gap: 10px; padding: 8px 14px 14px; max-height: 50vh; overflow-y: auto; }
+.reader-reply-body p { margin: 0; line-height: 1.6; }
+.reader-reply-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.reader-reply-controls label, .reader-reply-output label, .reader-reply-preview { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.reader-reply-controls select { max-width: 100%; }
+.reader-reply-body textarea { box-sizing: border-box; width: 100%; resize: vertical; min-height: 70px; padding: 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; line-height: 1.6; }
+.reader-reply-consent { display: flex; align-items: start; gap: 8px; font-size: 12px; line-height: 1.6; }
+.reader-reply-consent input { accent-color: var(--accent); }
+.reader-reply-body > button { align-self: flex-start; }
+.reader-reply-output { display: flex; flex-direction: column; gap: 6px; }
+.reader-reply button { transition: transform 160ms cubic-bezier(.2,.8,.2,1), background-color 160ms ease; }
+.reader-reply button:not(:disabled):hover { transform: translateY(-1px); }
+.reader-reply button:not(:disabled):active { transform: scale(.97); }
+@media (prefers-reduced-motion: reduce) { .reader-reply button { transition: none; } .reader-reply button:not(:disabled):hover, .reader-reply button:not(:disabled):active { transform: none; } }
+
+.reader-reply { border: 1px solid var(--line); border-radius: var(--radius); }
+.reader-reply-trigger { display: inline-flex; align-items: center; gap: 6px; padding: 5px 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; }
+.reader-reply-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.reader-reply-chevron { color: var(--text-faint); transition: transform 160ms ease; }
+.reader-reply-chevron[data-open='true'] { transform: rotate(180deg); }
+.reader-reply-output > button { align-self: flex-start; }
+@media (prefers-reduced-motion: reduce) { .reader-reply-chevron { transition: none; } }

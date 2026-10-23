@@ -19,6 +19,39 @@ function subscribe(channel: string, callback: (...args: any[]) => void): () => v
 
 // 暴露给渲染进程的 API（Weport 精简版，模式与 WeFlow preload 一致）
 contextBridge.exposeInMainWorld('electronAPI', {
+  storage: {
+    status: () => ipcRenderer.invoke('storage:status'),
+    usage: (kind: string) => ipcRenderer.invoke('storage:usage', kind),
+    prepare: (kind: string) => ipcRenderer.invoke('storage:prepare', kind),
+    discard: () => ipcRenderer.invoke('storage:discard'),
+    discardCleanup: () => ipcRenderer.invoke('storage:discardCleanup'),
+    cleanup: (side: 'original' | 'prepared') => ipcRenderer.invoke('storage:cleanup', side),
+    clearDerived: (kind: 'search-index' | 'model-cache') => ipcRenderer.invoke('storage:clearDerived', kind),
+    open: (kind: string) => ipcRenderer.invoke('storage:open', kind),
+    restart: () => ipcRenderer.invoke('storage:restart'),
+  },
+  dataAccess: {
+    currentAccount: () => ipcRenderer.invoke('data-access:currentAccount'),
+    list: () => ipcRenderer.invoke('data-access:list'),
+    create: (scope: unknown) => ipcRenderer.invoke('data-access:create', scope),
+    revoke: (id: string) => ipcRenderer.invoke('data-access:revoke', id),
+  },
+  archive: {
+    status: () => ipcRenderer.invoke('archive:status'),
+    chooseDirectory: () => ipcRenderer.invoke('archive:chooseDirectory'),
+    preflight: (request: unknown) => ipcRenderer.invoke('archive:preflight', request),
+    create: (request: unknown, retryId?: string) => ipcRenderer.invoke('archive:create', request, retryId),
+    cancel: () => ipcRenderer.invoke('archive:cancel'),
+    import: (root: string) => ipcRenderer.invoke('archive:import', root),
+    open: (id: string) => ipcRenderer.invoke('archive:open', id),
+    page: (id: string, sessionId: string, offset = 0, limit = 80, query = '') => ipcRenderer.invoke('archive:page', id, sessionId, offset, limit, query),
+    media: (id: string, sessionId: string, identity: string) => ipcRenderer.invoke('archive:media', id, sessionId, identity),
+    evidence: (id: string, sessionId: string, identity: string) => ipcRenderer.invoke('archive:evidence', id, sessionId, identity),
+    bookmark: (id: string, sessionId: string, identity: string, note: string, remove = false) => ipcRenderer.invoke('archive:bookmark', id, sessionId, identity, note, remove),
+    restore: (id: string, destination: string) => ipcRenderer.invoke('archive:restore', id, destination),
+    saveSchedule: (value: unknown) => ipcRenderer.invoke('archive:saveSchedule', value),
+    removeSchedule: (id: string) => ipcRenderer.invoke('archive:removeSchedule', id),
+  },
   // Bug reports are drafted locally. Images cross IPC only as opaque picker tokens.
   bugReport: {
     chooseImages: () => ipcRenderer.invoke('bug-report:choose-images'),
@@ -324,13 +357,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     compactChat: (chatId: string) => ipcRenderer.invoke('ai:compactChat', chatId),
     listNotes: (chatId: string) => ipcRenderer.invoke('ai:listNotes', chatId),
     readNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:readNoteFile', chatId, path),
+    resolveEvidence: (id: string) => ipcRenderer.invoke('ai:resolveEvidence', id),
+    listMemoryClaims: () => ipcRenderer.invoke('ai:listMemoryClaims'),
+    correctMemoryClaim: (value: { id: string; statement: string; correction: string }) => ipcRenderer.invoke('ai:correctMemoryClaim', value),
+    previewContext: (scope: unknown) => ipcRenderer.invoke('ai:previewContext', scope),
     deleteNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:deleteNoteFile', chatId, path),
     clearMemory: () => ipcRenderer.invoke('ai:clearMemory'),
     getDebugLog: (limit?: number) => ipcRenderer.invoke('ai:getDebugLog', limit),
     clearDebugLog: () => ipcRenderer.invoke('ai:clearDebugLog'),
     listActions: () => ipcRenderer.invoke('ai:listActions'),
     saveActions: (actions: any) => ipcRenderer.invoke('ai:saveActions', actions),
-    send: (chatId: string, text: string) => ipcRenderer.invoke('ai:send', chatId, text),
+    send: (chatId: string, text: string, options?: unknown) => ipcRenderer.invoke('ai:send', chatId, text, options),
     abort: (chatId: string) => ipcRenderer.invoke('ai:abort', chatId),
     onEvent: (callback: (event: any) => void) => subscribe('ai:event', callback)
   },
@@ -391,8 +428,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 纯本地：删除就是删掉本机目录，没有 remote 参数
     delete: (id: string) => ipcRenderer.invoke('weclone:delete', id),
     // on-device 对话：人格档案 + 本地检索都在主进程完成，不上传
-    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
-      ipcRenderer.invoke('weclone:chat', cloneId, message, history),
+    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>, readerGuard?: { accountId: string; sessionId: string }) =>
+      ipcRenderer.invoke('weclone:chat', cloneId, message, history, readerGuard),
     cancel: () => ipcRenderer.invoke('weclone:cancel'),
     // 对话历史（本机文件）：回看 / 改标题 / 删除都走这几个通道
     listChats: (cloneId: string) => ipcRenderer.invoke('weclone:listChats', cloneId),
@@ -424,6 +461,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * （AGENTS.md 第三条铁律：进度不许存在页面 state 里）。
    */
   search: {
+    semanticConfig: () => ipcRenderer.invoke('search:semanticConfig'),
+    saveSemanticConfig: (config: import('./services/semanticIndex').LocalEmbeddingConfig) => ipcRenderer.invoke('search:saveSemanticConfig', config),
+    buildSemantic: (options?: { scope?: import('./services/searchIndexService').SearchScope }) => ipcRenderer.invoke('search:buildSemantic', options),
     indexStatus: () => ipcRenderer.invoke('search:indexStatus'),
     buildIndex: (options?: { force?: boolean; wxid?: string }) => ipcRenderer.invoke('search:buildIndex', options),
     cancelIndex: () => ipcRenderer.invoke('search:cancelIndex'),

@@ -8,11 +8,12 @@
  * （`export/parsers/contentDecoder` 解 blob + `ExportContext.parseMessageContent`
  * 出正文），不另写一份 —— 两套解码器必然分叉，然后"导出能看到的正文，搜索搜不到"。
  *
- * ## 为什么不是 FTS（D17）
+ * ## V1.3 派生倒排索引
  *
- * v1.2 明确不上 FTS5。这里的做法是"持久化的内存筛选"：磁盘只存压缩文本与
- * 位置，查询在内存里做子串匹配。代价说清楚 —— 查询是 O(文档数) 全扫描，10 万条
- * 几十毫秒，100 万条几百毫秒（见 `query()` 的注释）。真上量要换倒排索引（v1.3）。
+ * 压缩消息分片仍是索引的权威快照；lexical-v1-g<世代>.bin 保存带校验的 UTF-16
+ * 双字符倒排表。查询从最稀有的必要双字符候选开始，再做完整子串 AND 校验；不改变
+ * 中文、英文、URL、标识符的子串语义。单字符查询明确回退扫描。派生文件缺失或损坏
+ * 可从已提交分片重建，不读写微信数据库，不使用 FTS5 或远程模型。
  *
  * ## 目录布局（`<userData>/search-index/<wxid>/`）
  *
@@ -32,13 +33,15 @@
  *
  * ## 增量
  *
- * manifest 按**表**记 `maxRowId`。本 schema 里 `local_id` 是 INTEGER PRIMARY KEY
+ * 默认构建完整核对每张表，以修复旧编辑、删行、清空和低 ID 历史补录；只有完整读完
+ * 且未超限的表才能移除未再见到的文档。显式 mode:'append' 保留快速追加和尾部刷新，
+ * 其覆盖状态会说明没有完整核对。manifest 按**表**记 `maxRowId`。`local_id` 是 INTEGER PRIMARY KEY
  * （rowid 别名），所以 `rowid` 与 `local_id` 同值；`rowid` 取不到（WITHOUT ROWID
  * 表）时退回 `local_id`，选了哪个记在 `idColumn` 里。重建只取 `id > maxRowId` 的
  * 行，另外每张表**重新解析最新 tailRefreshRows 行**，用来吸收撤回/编辑（微信原地
  * 改行内容，`id > max` 看不见）。
  *
- * 明确不靠增量处理的变化：**表内删行**（删消息）与整表清空 —— 需要 `force` 重建。
+ * 表内删行、清空和旧消息变更由默认核对处理；追加模式不能保证这些变化。
  * 表本身消失会被记账移除（连同文档）。
  *
  * ## 只读约束
@@ -53,6 +56,8 @@ import { gunzipSync, gzipSync } from 'zlib'
 import * as fzstd from 'fzstd'
 import { cleanupTmpFiles, fileSize, readJsonTolerant, writeFileAtomic, writeJsonAtomic } from './atomicJson'
 import { tokenizeText } from './wordFrequency'
+import { LexicalIndex } from './lexicalIndex'
+import { SemanticIndex, type LocalEmbeddingConfig, type SemanticBuildOptions, type SemanticCoverage, type SemanticMatch } from './semanticIndex'
 
 // ---------------------------------------------------------------------------
 // 对外类型（IPC 契约 §6；通道在 appMain.ts 的 search:* 区块）
@@ -83,6 +88,10 @@ export type SearchHitKind =
 export const SEARCH_FILTERABLE_KINDS: readonly SearchHitKind[] = ['text', 'link', 'file', 'voice', 'image', 'quote']
 
 export interface SearchHit {
+  semanticContext?: Array<{ db: string; table: string; localId: string; idKind: 'local' | 'server'; contentHash: string }>
+  accountId?: string
+  sourceId?: string
+  contentHash?: string
   /** 微信 username / 会话 id（与 chatService 的 sessionId 同义） */
   sessionId: string
   /** 会话显示名；会话名未知时回落 sessionId 或"（已删除的会话）" */
@@ -126,6 +135,8 @@ export interface SearchScope {
 }
 
 export interface SearchQueryRequest {
+  /** Explicit opt-in; omitted preserves exact lexical substring behavior. */
+  retrieval?: 'lexical' | 'hybrid' | 'semantic'
   text: string
   scope?: SearchScope
   limit?: number
@@ -134,6 +145,7 @@ export interface SearchQueryRequest {
 }
 
 export interface SearchQueryResult {
+  coverage?: SearchRetrievalCoverage
   hits: SearchHit[]
   /**
    * **本次查询在已扫描范围内的命中总数**（精确值，不是本页条数）。
@@ -149,6 +161,22 @@ export interface SearchQueryResult {
   error?: string
 }
 
+export interface SearchRetrievalCoverage {
+  accountId: string
+  sourceId: string
+  indexedAt: number
+  indexedDocuments: number
+  stale: boolean
+  complete: boolean
+  failedTables: string[]
+  requestedScope: SearchScope
+  engine: 'bigram-inverted-v1' | 'substring-fallback' | 'local-hybrid-v1' | 'local-semantic-v1'
+  semantic?: SemanticCoverage
+  candidateDocuments: number
+  scannedCandidates: number
+  indexTruncated: boolean
+}
+
 export interface SearchIndexAccountStatus {
   wxid: string
   docs: number
@@ -158,6 +186,9 @@ export interface SearchIndexAccountStatus {
 }
 
 export interface SearchIndexStatus {
+  engine?: 'bigram-inverted-v1'
+  reconciled?: boolean
+  truncated?: boolean
   ready: boolean
   building: boolean
   /** 0..1 */
@@ -240,6 +271,7 @@ export interface DecodedRowText {
 }
 
 export interface SearchIndexServiceOptions {
+  semantic?: () => LocalEmbeddingConfig | undefined
   /** `<userData>/search-index`；每个 wxid 一个子目录 */
   rootDir: string
   source: SearchIndexDocSource
@@ -348,6 +380,8 @@ interface ManifestTableEntry {
 }
 
 interface Manifest {
+  failedTables?: string[]
+  reconciled?: boolean
   v: number
   wxid: string
   builtAt: number
@@ -400,6 +434,7 @@ interface IndexedDoc {
 }
 
 interface Corpus {
+  lexical?: LexicalIndex
   wxid: string
   corpusDir: string
   manifest: Manifest
@@ -470,10 +505,10 @@ function pickField(row: Record<string, unknown>, keys: string[]): unknown {
  * （1e11 秒 = 公元 5138 年，而毫秒时间戳现在已经是 1.7e12），所以按大小判口径
  * 是安全的 —— 比"约定一个单位然后静默返回空结果"强得多。
  */
-function toSecondBound(value: unknown): number {
+function toSecondBound(value: unknown, lower = false): number {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return 0
-  return Math.floor(n < 1e11 ? n : n / 1000)
+  return (lower ? Math.ceil : Math.floor)(n < 1e11 ? n : n / 1000)
 }
 
 /** 分片桶：`<db 文件名>#<表名>` → [0, shardCount) */
@@ -736,6 +771,7 @@ function buildSnippet(text: string, terms: string[]): { snippet: string; highlig
 // ---------------------------------------------------------------------------
 
 export class SearchIndexService {
+  private decodeFailed = false
   private readonly options: SearchIndexServiceOptions & {
     shardCount: number
     tailRefreshRows: number
@@ -817,6 +853,9 @@ export class SearchIndexService {
       error = `索引分片损坏已跳过：${corpus.damagedShards.slice(0, 3).join(', ')}（重新构建可修复）`
     }
     return {
+      engine: 'bigram-inverted-v1',
+      reconciled: Boolean(corpus?.manifest.reconciled),
+      truncated: Boolean(corpus?.manifest.truncated),
       ready,
       building: this.building,
       progress: this.building ? this.buildProgress : ready ? 1 : 0,
@@ -881,10 +920,10 @@ export class SearchIndexService {
 
   private signatureOf(paths: string[]): string {
     const parts: string[] = []
-    for (const dbPath of [...paths].sort()) {
+    for (const dbPath of paths.flatMap(path => [path, `${path}-wal`]).sort()) {
       try {
         const stat = statSync(dbPath)
-        parts.push(`${dbPath}:${stat.size}:${Math.floor(stat.mtimeMs)}`)
+        parts.push(`${dbPath}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`)
       } catch {
         parts.push(`${dbPath}:missing`)
       }
@@ -893,7 +932,7 @@ export class SearchIndexService {
   }
 
   private indexBytes(corpus: Corpus): number {
-    let total = fileSize(join(corpus.corpusDir, MANIFEST_FILE))
+    let total = fileSize(join(corpus.corpusDir, MANIFEST_FILE)) + fileSize(this.lexicalPath(corpus))
     const dir = join(corpus.corpusDir, SHARD_DIR)
     try {
       if (existsSync(dir)) {
@@ -1096,6 +1135,8 @@ export class SearchIndexService {
    */
   async build(options?: {
     force?: boolean
+    /** Full read-only reconciliation is the default; append is an explicit fast snapshot refresh. */
+    mode?: 'reconcile' | 'append'
     wxid?: string
     onProgress?: (progress: SearchIndexProgress) => void
     shouldCancel?: () => boolean
@@ -1131,7 +1172,7 @@ export class SearchIndexService {
         corpus = this.emptyCorpus(wxid)
       } else {
         // manifest 损坏/缺失时 loadCorpus 返回空语料：下面走的就是一次全新构建
-        corpus = await this.ensureLoaded()
+        corpus = await this.loadCorpus(wxid)
         if (corpus.wxid !== wxid) throw new Error(`索引账号不一致：${corpus.wxid} ≠ ${wxid}`)
       }
 
@@ -1142,7 +1183,7 @@ export class SearchIndexService {
         corpus.manifest.generation = Math.max(corpus.manifest.generation, previous.generation)
       }
 
-      const outcome = await this.buildOnce(corpus, emit, shouldCancel)
+      const outcome = await this.buildOnce(corpus, emit, shouldCancel, options?.mode !== 'append')
       const docs = corpus.docs.length
       corpus.manifest.docs = docs
       corpus.manifest.wxid = wxid
@@ -1191,7 +1232,8 @@ export class SearchIndexService {
   private async buildOnce(
     corpus: Corpus,
     emit: (progress: SearchIndexProgress) => void,
-    shouldCancel: () => boolean
+    shouldCancel: () => boolean,
+    reconcile: boolean,
   ): Promise<{ indexed: number; scanned: number; cancelled: boolean; truncated: boolean }> {
     emit({ stage: 'scan', progress: 0.02, message: '正在枚举消息库…', docs: corpus.docs.length })
     await new Promise((resolve) => setImmediate(resolve))
@@ -1215,6 +1257,7 @@ export class SearchIndexService {
     if (dbPaths.length === 0) {
       throw new Error('未找到任何 message_*.db —— 数据库未连接或路径不正确')
     }
+    const sourceAtStart = this.signatureOf(dbPaths)
 
     const transcripts = this.options.loadVoiceTranscripts ? this.options.loadVoiceTranscripts() : {}
 
@@ -1239,6 +1282,7 @@ export class SearchIndexService {
       docs: corpus.docs.length,
     })
     const tasks: TableTask[] = []
+    const failedTables = new Set<string>()
     const aliveKeys = new Set<string>()
     const damagedTables = new Set(corpus.damagedTables)
 
@@ -1248,6 +1292,7 @@ export class SearchIndexService {
       try {
         tables = (await this.options.source.listTables('message', dbPath)).map(String)
       } catch (error) {
+        failedTables.add(`${dbFile}#*`)
         // 列不出表就别记账：这个库的已有索引保持不动（宁可旧，不可丢）
         this.log(`跳过 ${dbFile}：列出消息表失败（${String((error as Error)?.message || error)}）`)
         for (const key of Object.keys(corpus.manifest.perDb)) {
@@ -1260,7 +1305,7 @@ export class SearchIndexService {
         const key = `${dbFile}#${table}`
         aliveKeys.add(key)
         const info = await this.tableInfo(dbPath, table)
-        if (!info) continue // 读不到表信息：保留它的旧索引，不重写
+        if (!info) { failedTables.add(key); continue }
         const previous = corpus.manifest.perDb[key]
         const sameColumn = Boolean(previous && previous.idColumn === info.idColumn)
         const damaged = damagedTables.has(key)
@@ -1275,7 +1320,7 @@ export class SearchIndexService {
          * 写了一个从不触发的开关）。首次索引（fromId=0）自然仍是全量。
          */
         const hasPreviousIndex = Boolean(previous) && sameColumn && !damaged
-        const startFrom = hasPreviousIndex && info.maxRowId > 0
+        const startFrom = reconcile ? 0 : hasPreviousIndex && info.maxRowId > 0
           ? Math.max(0, Math.min(fromId, info.maxRowId - this.options.tailRefreshRows))
           : fromId
         tasks.push({
@@ -1333,6 +1378,9 @@ export class SearchIndexService {
      */
     let textBytes = corpus.docs.reduce((sum, doc) => sum + doc.text.length, 0)
     const senderCache = new Map<string, string | null>()
+    const observed = new Set<string>()
+    const reconciledTables = new Set<string>()
+    corpus.lexical = undefined
 
     for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
       const task = tasks[taskIndex]
@@ -1352,13 +1400,13 @@ export class SearchIndexService {
 
       for (;;) {
         if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
-        if (corpus.docs.length >= this.options.maxDocs) {
+        if (!reconcile && corpus.docs.length >= this.options.maxDocs) {
           truncated = true
           break
         }
         // 字节闸：条数没到但文本已经装不下时也要停（见 maxTotalTextBytes 的说明）。
         // 按已入库文本累计，而不是"攒够再判"—— 一条 2000 字符的文档也要算进去。
-        if (textBytes >= this.options.maxTotalTextBytes) {
+        if (!reconcile && textBytes >= this.options.maxTotalTextBytes) {
           truncated = true
           this.log(`语料文本已达上限 ${this.options.maxTotalTextBytes} 字节，本表剩余消息未索引（force 重建可重新计算）`)
           break
@@ -1393,10 +1441,17 @@ export class SearchIndexService {
               if (sender) row.sender_username = sender
             }
           }
+          this.decodeFailed = false
           const doc = this.decodeRow(row, task, transcripts)
+          if (this.decodeFailed) { failedTables.add(task.key); readFailed = true }
           if (!doc) continue
           const existing = docIndex.get(doc.docKey)
+          observed.add(doc.docKey)
           if (existing === undefined) {
+            if (corpus.docs.length >= this.options.maxDocs || textBytes + doc.text.length > this.options.maxTotalTextBytes) {
+              truncated = true
+              continue
+            }
             docIndex.set(doc.docKey, corpus.docs.length)
             corpus.docs.push(doc)
             textBytes += doc.text.length
@@ -1436,6 +1491,9 @@ export class SearchIndexService {
         })
       }
 
+      if (readFailed) failedTables.add(task.key)
+      else if (reconcile && !truncated) reconciledTables.add(task.key)
+
       corpus.manifest.perDb[task.key] = {
         db: task.dbPath,
         dbFile: task.dbFile,
@@ -1456,6 +1514,21 @@ export class SearchIndexService {
         detail: { table: task.table, db: task.dbFile },
       })
     }
+
+    // Delete only after an entire table was read successfully. Partial/canceled
+    // reads must never erase unseen messages from the committed snapshot.
+    if (reconcile) {
+      corpus.docs = corpus.docs.filter((doc) => {
+        if (!reconciledTables.has(doc.tableKey) || observed.has(doc.docKey)) return true
+        dirty.add(doc.bucket)
+        return false
+      })
+      corpus.manifest.truncated = truncated
+    }
+    corpus.manifest.failedTables = [...failedTables]
+    corpus.manifest.reconciled = reconcile && failedTables.size === 0 && !truncated
+    docIndex.clear()
+    observed.clear()
 
     // ---- 阶段 3：写脏桶 + 提交 ---------------------------------------------
     const generation = toInt(corpus.manifest.generation, 0) + 1
@@ -1568,10 +1641,18 @@ export class SearchIndexService {
       .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
       .slice(0, VOCAB_LIMIT)
       .map(([word]) => word)
-    corpus.manifest.sourceSignature = this.signatureOf(dbPaths)
+    const sourceAtEnd = this.signatureOf(dbPaths)
+    corpus.manifest.sourceSignature = sourceAtStart
+    if (sourceAtEnd !== sourceAtStart) {
+      corpus.manifest.failedTables = [...new Set([...(corpus.manifest.failedTables || []), 'source-changed-during-build'])]
+      corpus.manifest.reconciled = false
+    }
 
     if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
 
+    emit({ stage: 'lexical', progress: 0.985, message: '正在建立子串倒排索引…', docs: corpus.docs.length })
+    this.ensureLexical(corpus, true)
+    if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
     emit({ stage: 'commit', progress: 0.99, message: '正在提交索引…', docs: corpus.docs.length })
     if (shouldCancel()) return { indexed, scanned, cancelled: true, truncated }
     writeJsonAtomic(join(corpus.corpusDir, MANIFEST_FILE), corpus.manifest, { pretty: false })
@@ -1624,6 +1705,14 @@ export class SearchIndexService {
       return
     }
     if (removed > 0) this.log(`清理旧世代分片 ${removed} 个`)
+    try {
+      const current = this.corpus?.manifest.generation
+      // Derived files are safe to regenerate; retain only the newly committed generation.
+      const committed = readJsonTolerant<Manifest>(join(corpusDir, MANIFEST_FILE), { backupOnCorrupt: false }).value?.generation ?? current
+      for (const name of readdirSync(corpusDir)) {
+        if (/^lexical-v1-g\d+\.bin$/.test(name) && name !== `lexical-v1-g${committed}.bin`) rmSync(join(corpusDir, name), { force: true })
+      }
+    } catch { /* Derived cache cleanup is best effort. */ }
   }
 
   /** 某张表的 id 列与最大 id；表结构不认就返回 null（调用方保持旧索引不动） */
@@ -1686,6 +1775,7 @@ export class SearchIndexService {
       decoded = this.options.decodeText(row, ctx)
     } catch (error) {
       this.log(`解码失败 ${task.key} local_id=${localId}：${String((error as Error)?.message || error)}`)
+      this.decodeFailed = true
       return null
     }
     let text = String(decoded?.text || '').trim()
@@ -1731,6 +1821,58 @@ export class SearchIndexService {
    * 两处保护：扫描到 MAX_SCAN_ALLOWED 命中或超时间预算即停（`truncated` 说实话），
    * 候选命中封顶 `maxKept`。
    */
+  private lexicalPath(corpus: Corpus): string {
+    return join(corpus.corpusDir, `lexical-v1-g${corpus.manifest.generation}.bin`)
+  }
+
+  private ensureLexical(corpus: Corpus, rebuild = false): LexicalIndex {
+    if (corpus.lexical && !rebuild) return corpus.lexical
+    // Canonical ordering makes derived postings stable across shard reloads.
+    corpus.docs.sort((a, b) => a.docKey < b.docKey ? -1 : a.docKey > b.docKey ? 1 : 0)
+    corpus.lower = null
+    const path = this.lexicalPath(corpus)
+    const loaded = !rebuild ? LexicalIndex.load(path, corpus.docs) : null
+    corpus.lexical = loaded || LexicalIndex.build(corpus.docs)
+    if (!loaded) {
+      try { corpus.lexical.save(path, corpus.docs.length) } catch (error) {
+        this.log(`倒排缓存持久化失败，保留内存索引：${String((error as Error)?.message || error)}`)
+      }
+    }
+    return corpus.lexical
+  }
+
+  private semanticIndex?: SemanticIndex
+  private semanticService(): SemanticIndex { return this.semanticIndex ||= new SemanticIndex(this.options.rootDir) }
+  private semanticPartition(corpus: Corpus): { accountId: string; sourceId: string; generation: number } {
+    return { accountId: corpus.wxid, generation: corpus.manifest.generation,
+      sourceId: createHash('sha256').update(`${corpus.wxid}:${String(this.options.resolveDbPath?.() || '').trim()}:${corpus.manifest.sourceSignature}`).digest('hex') }
+  }
+  private inScope(doc: IndexedDoc, scope: SearchScope): boolean {
+    return (!scope.sessionIds?.length || scope.sessionIds.includes(doc.sessionId)) &&
+      (!scope.senders?.length || scope.senders.includes(doc.sender)) &&
+      (!scope.kinds?.length || scope.kinds.includes(doc.kind)) &&
+      (!toSecondBound(scope.from, true) || doc.ts >= toSecondBound(scope.from, true)) &&
+      (!toSecondBound(scope.to) || doc.ts <= toSecondBound(scope.to))
+  }
+  /** Explicit bounded job. Caller owns persisted taskStatusService lifecycle, just as lexical builds. */
+  async buildSemantic(options: SemanticBuildOptions & { scope?: SearchScope } = {}): Promise<{ documents: number; windows: number; truncated: boolean }> {
+    const config = this.options.semantic?.()
+    if (!config?.enabled) throw new Error('Local semantic retrieval is disabled')
+    const pinned = { ...config }; const corpus = await this.ensureLoaded()
+    const partition = this.semanticPartition(corpus)
+    const sourceChanged = (): boolean => String(this.options.resolveWxid() || '').trim() !== partition.accountId ||
+      JSON.stringify(this.semanticPartition(corpus)) !== JSON.stringify(partition) || this.corpus !== corpus ||
+      JSON.stringify(this.options.semantic?.()) !== JSON.stringify(pinned)
+    if (!corpus.manifest.builtAt || sourceChanged()) throw new Error('Build the current lexical source snapshot first')
+    return this.semanticService().build(partition, pinned, corpus.docs,
+      doc => this.inScope(doc as IndexedDoc, options.scope || {}),
+      { ...options, shouldCancel: () => sourceChanged() || Boolean(options.shouldCancel?.()) })
+  }
+
+  /** Shared retrieval boundary for Search/AI/WeBot/MCP; no source read side effects. */
+  retrieve(request: SearchQueryRequest): Promise<SearchQueryResult> { return this.query(request) }
+
+
   async query(request: SearchQueryRequest): Promise<SearchQueryResult> {
     const startedAt = Date.now()
     const connectedWxid = String(this.options.resolveWxid() || '').trim()
@@ -1774,18 +1916,61 @@ export class SearchIndexService {
     const senderFilter = scope.senders && scope.senders.length > 0 ? new Set(scope.senders.map(String)) : null
     const kindFilter = scope.kinds && scope.kinds.length > 0 ? new Set<SearchHitKind>(scope.kinds) : null
     // 毫秒 ↔ 秒：单位弄错会让结果"莫名其妙为空"，所以这里认两种口径（见 SearchScope 注释）
-    const from = toSecondBound(scope.from)
+    const from = toSecondBound(scope.from, true)
     const to = toSecondBound(scope.to)
 
-    const lower = terms.some((term) => /[a-z]/.test(term)) ? this.ensureLower(corpus) : null
+    const lexical = this.ensureLexical(corpus)
+    const candidates = lexical.candidates(terms)
+    const retrieval = request.retrieval || 'lexical'
+    let semanticCoverage: SemanticCoverage | undefined
+    const semanticMatches = new Map<string, SemanticMatch>()
+    if (retrieval !== 'lexical') {
+      const config = this.options.semantic?.()
+      try {
+        if (!config?.enabled) throw new Error('Local semantic retrieval is disabled')
+        const result = await this.semanticService().search(this.semanticPartition(corpus), { ...config }, corpus.docs,
+          doc => this.inScope(doc as IndexedDoc, scope), text)
+        semanticCoverage = result.coverage
+        result.matches.forEach(match => semanticMatches.set(match.docKey, match))
+      } catch {
+        semanticCoverage = { model: config?.model || '', revision: config?.revision || '', indexedDocuments: 0,
+          eligibleWindows: 0, scoredWindows: 0, rerankedCandidates: 0, truncated: true,
+          error: 'Local semantic index unavailable; verify the local model and build this source/model partition' }
+        if (retrieval === 'semantic') return { hits: [], total: 0, cursor: null, elapsedMs: Date.now() - startedAt,
+          truncated: true, error: semanticCoverage.error }
+      }
+      if (accountChanged()) return staleResult()
+    }
+    // Scope is applied before semantic candidate selection; union retains exact lexical matches.
+    const semanticRanks = new Map([...semanticMatches.keys()].map((key, i) => [key, i + 1]))
+    let selected: Uint32Array | null = candidates
+    if (retrieval !== 'lexical' && !semanticCoverage?.error) {
+      const indices = new Set<number>()
+      corpus.docs.forEach((doc, i) => { if (semanticMatches.has(doc.docKey)) indices.add(i) })
+      if (retrieval === 'hybrid') {
+        if (candidates) for (const index of candidates) { if (this.inScope(corpus.docs[index], scope)) indices.add(index) }
+        else corpus.docs.forEach((doc, index) => { if (this.inScope(doc, scope)) indices.add(index) })
+      }
+      selected = Uint32Array.from(indices)
+    }
     const keep = Math.min(this.options.maxKept, Math.max(200, cursor.offset + limit * 2))
     const heap = new TopKHeap(keep)
-    const deadline = startedAt + this.options.queryBudgetMs
+    const deadline = Date.now() + this.options.queryBudgetMs
 
     let total = 0
     let truncated = false
+    let scannedCandidates = 0
+    const candidateDocuments = selected?.length ?? corpus.docs.length
 
-    for (let index = 0; index < corpus.docs.length; index += 1) {
+    for (let position = 0; position < candidateDocuments; position += 1) {
+      // The budget limits scanned documents, including misses and filtered rows.
+      // Checking only matches lets an expensive no-result query scan indefinitely.
+      if ((position & 1023) === 0 && Date.now() > deadline) {
+        truncated = true
+        break
+      }
+      const index = selected ? selected[position] : position
+      scannedCandidates += 1
       const doc = corpus.docs[index]
       if (sessionFilter && !sessionFilter.has(doc.sessionId)) continue
       if (senderFilter && !senderFilter.has(doc.sender)) continue
@@ -1793,7 +1978,7 @@ export class SearchIndexService {
       if (from > 0 && doc.ts < from) continue
       if (to > 0 && doc.ts > to) continue
 
-      const haystack = lower ? lower[index] : doc.text
+      const haystack = doc.text.toLowerCase()
       let score = 0
       let matched = true
       for (const term of terms) {
@@ -1810,18 +1995,19 @@ export class SearchIndexService {
         }
         score += 10 + occurrences
       }
-      if (!matched) continue
+      const semanticRank = semanticRanks.get(doc.docKey)
+      if (!matched && !semanticRank) continue
+      if (retrieval === 'semantic' && !semanticRank) continue
+      // Bounded cosine retrieval + deterministic fusion; exact matches keep priority in hybrid mode.
+      if (retrieval !== 'lexical' && !semanticCoverage?.error) score =
+        (retrieval === 'hybrid' && matched ? 100 + score : 0) + (semanticRank ? 20 / (20 + semanticRank) : 0)
 
       total += 1
       if (total > MAX_SCAN_ALLOWED) {
         truncated = true
         break
       }
-      if ((total & 1023) === 0 && Date.now() > deadline) {
-        truncated = true
-        break
-      }
-      heap.push(index, score + this.recencyBonus(doc.ts, corpus))
+      heap.push(index, score + (retrieval === 'lexical' || (retrieval === 'hybrid' && matched) ? this.recencyBonus(doc.ts, corpus) : 0))
     }
 
     const ordered = heap.items.sort((a, b) => {
@@ -1835,6 +2021,7 @@ export class SearchIndexService {
       return left.tableKey < right.tableKey ? -1 : left.tableKey > right.tableKey ? 1 : 0
     })
     if (total > ordered.length) truncated = true
+    if (semanticCoverage?.truncated) truncated = true
 
     const end = cursor.offset + limit
     const pageItems = ordered.slice(cursor.offset, end)
@@ -1843,6 +2030,8 @@ export class SearchIndexService {
     const senderNames = await this.resolveSenderNames(pageItems.map((item) => corpus.docs[item.index]))
     if (accountChanged()) return staleResult()
 
+    const contextKeys = new Set(pageItems.flatMap(item => semanticMatches.get(corpus.docs[item.index].docKey)?.members || []))
+    const semanticDocByKey = new Map(corpus.docs.filter(doc => contextKeys.has(doc.docKey)).map(doc => [doc.docKey, doc]))
     const hits: SearchHit[] = pageItems.map((item) => {
       const doc = corpus.docs[item.index]
       const built = buildSnippet(doc.text, terms)
@@ -1853,6 +2042,14 @@ export class SearchIndexService {
           ? `（已删除的会话 · ${dbFile}）`
           : '（已删除的会话）'
       return {
+        accountId: corpus.wxid,
+        sourceId: createHash('sha256').update(`${corpus.wxid}:${connectedDbPath}:${corpus.manifest.sourceSignature}`).digest('hex'),
+        contentHash: createHash('sha256').update(doc.text).digest('hex'),
+        semanticContext: semanticMatches.get(doc.docKey)?.members.map(key => {
+          const member = semanticDocByKey.get(key)!
+          const [db, table] = member.tableKey.split('#')
+          return { db, table, localId: member.id, idKind: member.idKind, contentHash: createHash('sha256').update(member.text).digest('hex') }
+        }),
         sessionId: doc.sessionId,
         sessionName,
         localId: doc.id,
@@ -1872,7 +2069,22 @@ export class SearchIndexService {
     })
 
     const nextOffset = cursor.offset + hits.length
+    const stale = this.signatureOf([...new Set(Object.values(corpus.manifest.perDb).map(entry => entry.db))]) !== corpus.manifest.sourceSignature
     return {
+      coverage: {
+        accountId: corpus.wxid,
+        sourceId: createHash('sha256').update(`${corpus.wxid}:${connectedDbPath}:${corpus.manifest.sourceSignature}`).digest('hex'),
+        indexedAt: corpus.manifest.builtAt,
+        indexedDocuments: corpus.docs.length,
+        stale,
+        complete: Boolean(corpus.manifest.reconciled) && !stale && !truncated && !semanticCoverage?.truncated && !corpus.manifest.truncated && corpus.damagedShards.length === 0,
+        failedTables: corpus.manifest.failedTables || [],
+        requestedScope: { ...scope },
+        engine: retrieval !== 'lexical' && !semanticCoverage?.error ? (retrieval === 'hybrid' ? 'local-hybrid-v1' : 'local-semantic-v1') : candidates ? 'bigram-inverted-v1' : 'substring-fallback',
+        semantic: semanticCoverage,
+        candidateDocuments, scannedCandidates,
+        indexTruncated: corpus.manifest.truncated,
+      },
       hits,
       total,
       cursor: nextOffset < ordered.length ? this.encodeCursor(fingerprint, nextOffset) : null,
@@ -1969,9 +2181,10 @@ export class SearchIndexService {
     return createHash('sha256').update(JSON.stringify({
       text: String(request.text || '').trim().toLowerCase().replace(/\s+/g, ' '),
       sessions: set(scope.sessionIds), senders: set(scope.senders), kinds: set(scope.kinds),
-      from: Math.max(0, toSecondBound(scope.from)), to: Math.max(0, toSecondBound(scope.to)),
+      from: Math.max(0, toSecondBound(scope.from, true)), to: Math.max(0, toSecondBound(scope.to)),
       wxid: corpus.wxid, generation: corpus.manifest.generation, builtAt: corpus.manifest.builtAt,
       source: corpus.manifest.sourceSignature,
+      retrieval: request.retrieval || 'lexical', semantic: request.retrieval && request.retrieval !== 'lexical' ? this.options.semantic?.() : undefined,
     })).digest('hex')
   }
 

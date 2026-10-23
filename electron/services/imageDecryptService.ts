@@ -778,7 +778,7 @@ export class ImageDecryptService {
   }
 
   private resolveCurrentAccountDir(): string | null {
-    return this.configService.getAccountDir()
+    return this.resolveAccountDir(this.getConfiguredDbPath(), this.getConfiguredMyWxid())
   }
 
   /**
@@ -2159,7 +2159,7 @@ export class ImageDecryptService {
       const configured = this.configService.get('cachePath')
       root = configured
         ? join(configured, 'Images')
-        : join(this.getDocumentsPath(), 'WeFlow', 'Images')
+        : join(this.configService.getCacheBasePath(), 'media', 'Images')
       this.cacheRootPath = root
     }
     this.ensureDir(root)
@@ -2913,7 +2913,7 @@ export class ImageDecryptService {
     const configured = this.configService.get('cachePath')
     const root = configured
       ? join(configured, 'Images')
-      : join(this.getDocumentsPath(), 'WeFlow', 'Images')
+      : join(this.configService.getCacheBasePath(), 'media', 'Images')
 
     try {
       if (!existsSync(root)) {

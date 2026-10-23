@@ -569,7 +569,7 @@ export const GlobalAnalytics: React.FC = () => {
             <div className="ranking-controls">
               <div className="ranking-limit-segment" role="group" aria-label="排行榜数量">
                 {[10, 20, 50, 100].map((limit) => (
-                  <button key={limit} type="button" className={rankingLimit === limit ? 'is-active' : ''} onClick={() => setRankingLimit(limit)}>{limit}</button>
+                  <button key={limit} type="button" aria-pressed={rankingLimit === limit} className={rankingLimit === limit ? 'is-active' : ''} onClick={() => setRankingLimit(limit)}>{limit}</button>
                 ))}
               </div>
               <label className="ranking-toggle">
@@ -624,7 +624,7 @@ export const GlobalAnalytics: React.FC = () => {
               {filteredCandidates.map((c) => {
                 const isExcluded = draftExcluded.includes(c.username)
                 return (
-                  <button key={c.username} type="button" className={`exclude-item ${isExcluded ? 'exclude-item-active' : ''}`} onClick={() => toggleExclude(c.username)}>
+                  <button key={c.username} type="button" aria-pressed={isExcluded} className={`exclude-item ${isExcluded ? 'exclude-item-active' : ''}`} onClick={() => toggleExclude(c.username)}>
                     <Avatar src={c.avatarUrl} name={c.displayName} size={22} shape="circle" />
                     <span>{c.displayName}</span>
                     <span className="exclude-add">{isExcluded ? '已排除' : '排除'}</span>
@@ -635,8 +635,8 @@ export const GlobalAnalytics: React.FC = () => {
             <div className="exclude-dialog-footer">
               <span className="v09-sub">已排除 {draftExcluded.length} 人</span>
               <div className="exclude-dialog-actions">
-                <button type="button" className="chip" onClick={() => setExcludeDialogOpen(false)}>取消</button>
-                <button type="button" className="chip chip-active" onClick={() => void applyExclusions()}>应用</button>
+                <button type="button" className="secondary-btn" onClick={() => setExcludeDialogOpen(false)}>取消</button>
+                <button type="button" className="primary-btn" onClick={() => void applyExclusions()}>应用</button>
               </div>
             </div>
           </div>

@@ -1,0 +1,8 @@
+.export-quality-field { display: grid; gap: 7px; margin-top: 14px; color: var(--text-dim); font-size: 12px; }
+.export-quality-field select { width: 100%; min-width: 0; padding: 8px 10px; color: var(--text); background: var(--bg-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-sm, 8px); font: inherit; transition: border-color .15s ease, box-shadow .15s ease; }
+.export-quality-field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+.export-maintenance-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px; padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
+.export-maintenance-row > div { flex: 1 1 170px; min-width: 0; }
+.export-maintenance-row strong { color: var(--text-dim); font-size: 12px; font-weight: 500; }
+.export-maintenance-row span { display: block; color: var(--text-faint); font-size: 11px; line-height: 1.6; margin-top: 4px; }
+@media (prefers-reduced-motion: reduce) { .export-quality-field select { transition: none; } }

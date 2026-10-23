@@ -40,6 +40,8 @@ describe('describeInitFailure — 哨兵值不再以裸数字示人 (issue #17)'
     expect(message).toContain('未能解析出具体错误码')
     expect(hasNextStep(message)).toBe(true)
     expect(message).toContain('wcdb.log')
+    expect(message).toContain('复制脱敏连接结论')
+    expect(message).toContain('分片覆盖')
   })
 
   it('原始原因本身就是「错误码: -3999」时不再复读，也不丢下一步', () => {

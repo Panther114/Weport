@@ -1,0 +1,7 @@
+.dx-capability .dx-monitor-head > div { flex: 1 1 250px; min-width: 0; }
+.dx-capability .dx-monitor-head h3 { color: var(--accent); }
+.dx-capability .dx-monitor-head > button { flex-shrink: 0; }
+.dx-capability-body { padding: 4px 16px 12px; font-size: 12px; line-height: 1.75; color: var(--text-dim); overflow-wrap: anywhere; }
+.dx-capability-body summary { cursor: pointer; color: var(--accent); border-radius: 4px; padding: 5px 0; }
+.dx-capability-body summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dx-capability-error { padding: 0 16px; color: var(--danger); font-size: 12px; }

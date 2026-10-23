@@ -108,7 +108,26 @@ function coerceMediaHashes(value: unknown): LedgerMediaEntry[] | undefined {
       bytes: Number.isFinite(Number(item.bytes)) ? Math.max(0, Math.floor(Number(item.bytes))) : 0,
     })
   }
-  return out.length > 0 ? out : undefined
+  return out.length === value.length ? out : undefined
+}
+
+/** A valid chat file alone cannot establish that its referenced attachments survive. */
+export async function verifyLedgerMediaArtifacts(root: string, entries: LedgerMediaEntry[] | undefined): Promise<boolean> {
+  if (!Array.isArray(entries)) return false
+  const resolvedRoot = path.resolve(root)
+  for (const entry of entries) {
+    const target = path.resolve(resolvedRoot, entry.path)
+    const relative = path.relative(resolvedRoot, target)
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false
+    // Attachments can be multi-gigabyte videos. Keep verification memory bounded
+    // instead of using the whole-buffer chat-artifact verifier.
+    if (!Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !/^[a-f0-9]{64}$/i.test(entry.sha256)) return false
+    try {
+      const actual = await fingerprintFile(target)
+      if (actual.bytes !== entry.bytes || actual.sha256 !== entry.sha256.toLowerCase()) return false
+    } catch { return false }
+  }
+  return true
 }
 
 function parseLine(line: string): { entry?: LedgerUnit; badJson?: boolean; versionMismatch?: boolean } {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -12,6 +12,7 @@ import {
   toLedgerRelativePath,
   unitKeyOf,
   verifyArtifact,
+  verifyLedgerMediaArtifacts,
 } from './ledger'
 
 /**
@@ -228,5 +229,48 @@ describe('辅助函数', () => {
     const ledger = new ExportLedger(root)
     await expect(ledger.append(unit({ sessionId: '' }))).rejects.toThrow(/sessionId/)
     await expect(ledger.append(unit({ artifact: '' }))).rejects.toThrow(/artifact/)
+  })
+})
+
+
+describe('media artifact recovery verification', () => {
+  it('validates attachments and detects same-size corruption, removal and unsafe paths', async () => {
+    const file = path.join(root, 'attachment.bin')
+    fs.writeFileSync(file, 'original')
+    const entry = { path: 'attachment.bin', ...await fingerprintFile(file) }
+    expect(await verifyLedgerMediaArtifacts(root, [entry])).toBe(true)
+    fs.writeFileSync(file, 'modified')
+    expect(await verifyLedgerMediaArtifacts(root, [entry])).toBe(false)
+    fs.unlinkSync(file)
+    expect(await verifyLedgerMediaArtifacts(root, [entry])).toBe(false)
+    expect(await verifyLedgerMediaArtifacts(root, [{ ...entry, path: '../outside.bin' }])).toBe(false)
+    expect(await verifyLedgerMediaArtifacts(root, undefined)).toBe(false)
+  })
+  it('retains an explicitly empty media inventory across ledger serialization', async () => {
+    const ledger = new ExportLedger(root)
+    await ledger.append(unit({ mediaHashes: [] }))
+    expect((await ledger.read()).entries[0].mediaHashes).toEqual([])
+    expect(await verifyLedgerMediaArtifacts(root, [])).toBe(true)
+  })
+})
+
+
+describe('streaming attachment verification', () => {
+  it('never buffers complete attachment files while checking ledger hashes', async () => {
+    const file = path.join(root, 'large-video.bin')
+    const chunk = Buffer.alloc(256 * 1024, 0x37)
+    const handle = fs.openSync(file, 'wx')
+    const digest = crypto.createHash('sha256')
+    try { for (let i = 0; i < 16; i++) { fs.writeSync(handle, chunk); digest.update(chunk) } }
+    finally { fs.closeSync(handle) }
+    const entry = { path: 'large-video.bin', bytes: chunk.length * 16, sha256: digest.digest('hex') }
+    const bufferedRead = vi.spyOn(fs.promises, 'readFile').mockRejectedValue(new Error('Whole attachment buffering forbidden'))
+    try {
+      expect(await verifyLedgerMediaArtifacts(root, [entry])).toBe(true)
+      expect(bufferedRead).not.toHaveBeenCalled()
+      expect(await verifyLedgerMediaArtifacts(root, [{ ...entry, sha256: 'f'.repeat(64) }])).toBe(false)
+      expect(await verifyLedgerMediaArtifacts(root, [{ ...entry, bytes: entry.bytes + 1 }])).toBe(false)
+      expect(await verifyLedgerMediaArtifacts(root, [{ ...entry, sha256: '' }])).toBe(false)
+    } finally { bufferedRead.mockRestore() }
   })
 })

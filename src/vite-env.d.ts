@@ -24,6 +24,12 @@ interface WeBotReference {
 }
 
 interface WeBotTask {
+  digest?: {
+    template: 'decisions-deadlines' | 'unanswered-questions' | 'weekly-highlights'
+    scope: { accountId: string; sessionIds: string[]; startTime: number }
+    limits: { maxMessages: number; maxInputChars: number; maxTotalTokens: number; timeoutMs: number }
+  }
+  digestState?: { cursors: Record<string, { timestamp: number; identities: string[] }>; lastSuccessAt?: number; commits: string[] }
   id: string
   title: string
   description: string
@@ -41,6 +47,9 @@ interface WeBotTask {
 type WeBotRunStatus = 'running' | 'ok' | 'error' | 'skipped'
 
 interface WeBotRun {
+  outcome?: 'committed' | 'no-change' | 'duplicate'
+  accountId?: string
+  commitId?: string
   id: string
   taskId: string
   taskTitle: string
@@ -54,6 +63,8 @@ interface WeBotRun {
 }
 
 interface WeBotNote {
+  accountId?: string
+  commitId?: string
   version: 1
   id: string
   taskId: string
@@ -198,6 +209,7 @@ interface ConnectorTaskResult {
   targetName?: string
 }
 interface ExportRequest {
+  mediaPolicy?: 'best-available' | 'original-only'
   /** Explicit diagnostic opt-in; normal exports skip the deep live-source rescan. */
   verifyAfterExport?: boolean
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
@@ -228,6 +240,39 @@ interface ExportRequest {
 }
 
 interface ElectronApi {
+  storage: {
+    status: () => Promise<{ entries: Array<{ kind: import('../electron/services/storageLocations').StorageKind; path: string; retention: string }>; relocation: import('../electron/services/storageLocations').StorageRelocation | null; cleanup: ReturnType<typeof import('../electron/services/storageLocations').storageCleanupStatus>; mediaPath: string; exportPath: string }>
+    usage: (kind: string) => Promise<{ files: number; bytes: number }>
+    prepare: (kind: string) => Promise<import('../electron/services/storageLocations').StorageRelocation | null>
+    discard: () => Promise<void>
+    discardCleanup: () => Promise<void>
+    cleanup: (side: 'original' | 'prepared') => Promise<{ files: number; bytes: number } | null>
+    clearDerived: (kind: 'search-index' | 'model-cache') => Promise<ReturnType<typeof import('../electron/services/storageLocations').storageCleanupStatus>>
+    open: (kind: string) => Promise<string>
+    restart: () => Promise<void>
+  }
+  archive: {
+    status: () => Promise<ArchiveReply<{ entries: import('../electron/services/archive/types').ArchiveEntry[]; jobs: import('../electron/services/archive/types').ArchiveJob[]; schedules: import('../electron/services/archive/types').ArchiveSchedule[]; activeJobId?: string }>>
+    chooseDirectory: () => Promise<ArchiveReply<string | null>>
+    preflight: (request: import('../electron/services/archive/types').ArchiveRequest) => Promise<ArchiveReply<import('../electron/services/archive/types').ArchivePreflight>>
+    create: (request: import('../electron/services/archive/types').ArchiveRequest, retryId?: string) => Promise<ArchiveReply<import('../electron/services/archive/types').ArchiveEntry>>
+    cancel: () => Promise<ArchiveReply<boolean>>
+    import: (root: string) => Promise<ArchiveReply<{ entry: import('../electron/services/archive/types').ArchiveEntry; manifest: import('../electron/services/archive/types').ArchiveManifest }>>
+    open: (id: string) => Promise<ArchiveReply<{ entry: import('../electron/services/archive/types').ArchiveEntry; manifest: import('../electron/services/archive/types').ArchiveManifest; annotations: import('../electron/services/archive/types').ArchiveAnnotations }>>
+    page: (id: string, sessionId: string, offset?: number, limit?: number, query?: string) => Promise<ArchiveReply<{ messages: import('../electron/services/archive/types').ArchiveMessage[]; hasMore: boolean; nextOffset: number; total: number }>>
+    media: (id: string, sessionId: string, identity: string) => Promise<ArchiveReply<{ available: boolean; status: string; url?: string }>>
+    evidence: (id: string, sessionId: string, identity: string) => Promise<ArchiveReply<{ uri: string; message: import('../electron/services/archive/types').ArchiveMessage }>>
+    bookmark: (id: string, sessionId: string, identity: string, note: string, remove?: boolean) => Promise<ArchiveReply<import('../electron/services/archive/types').ArchiveAnnotations>>
+    restore: (id: string, destination: string) => Promise<ArchiveReply<{ path: string; verified: boolean }>>
+    saveSchedule: (value: { id?: string; request: import('../electron/services/archive/types').ArchiveRequest; enabled: boolean; everyMinutes: number; keep: number }) => Promise<ArchiveReply<import('../electron/services/archive/types').ArchiveSchedule>>
+    removeSchedule: (id: string) => Promise<ArchiveReply<void>>
+  }
+  dataAccess: {
+    currentAccount: () => Promise<string>
+    list: () => Promise<Array<{ id: string; name: string; accountId: string; sessionIds: string[]; from: number; to: number; expiresAt: number }>>
+    create: (input: { name: string; accountId: string; sessionIds: string[]; from: number; to: number; expiresAt: number }) => Promise<{ token: string; grant: { id: string } }>
+    revoke: (id: string) => Promise<void>
+  }
   config: {
     get: (key: string) => Promise<any>
     set: (key: string, value: any) => Promise<{ success: boolean }>
@@ -558,13 +603,17 @@ interface ElectronApi {
     } | null>
     listNotes: (chatId: string) => Promise<{ notes: Array<{ path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }> }>
     readNoteFile: (chatId: string, path: string) => Promise<{ content: string | null }>
+    resolveEvidence: (id: string) => Promise<{ success: boolean; reference?: { accountId: string; sessionId: string; localId: string; idKind: 'local'; db: string; table: string; ts: number; contentHash: string }; error?: string }>
+    correctMemoryClaim: (value: { id: string; statement: string; correction: string }) => Promise<unknown>
+    previewContext: (scope: { accountId: string; sessionIds: string[]; from: number; to: number }) => Promise<{ scope: { accountId: string; sessionIds: string[]; from: number; to: number }; text: string; snapshotAt: number; truncated: boolean }>
+    listMemoryClaims: () => Promise<Array<{ id: string; statement: string; kind: 'observation' | 'interpretation'; status: 'active' | 'superseded' | 'uncertain'; asOf: number; evidenceIds: string[]; counterEvidenceIds: string[]; supersedes?: string; correction?: string }>>
     deleteNoteFile: (chatId: string, path: string) => Promise<{ success: boolean }>
     clearMemory: () => Promise<{ success: boolean; removed: number; error?: string }>
     getDebugLog: (limit?: number) => Promise<{ lines: string[] }>
     clearDebugLog: () => Promise<{ success: boolean }>
     listActions: () => Promise<{ actions: Array<{ id: string; name: string; prompt: string }> }>
     saveActions: (actions: Array<{ id: string; name: string; prompt: string }>) => Promise<{ success: boolean }>
-    send: (chatId: string, text: string) => Promise<{ success: boolean; error?: string }>
+    send: (chatId: string, text: string, options?: import('../electron/services/ai/dataScope').AiRunOptions) => Promise<{ success: boolean; error?: string }>
     abort: (chatId: string) => Promise<{ success: boolean }>
     onEvent: (callback: (event: any) => void) => () => void
   }
@@ -699,7 +748,7 @@ interface ElectronApi {
      * 和分身对话 —— **完全在本机完成**（人格档案 + 本地检索 + 用户自己的模型 API）。
      * `hint` 是给用户看的下一步指引（还没生成过克隆 / 模型 key 不可用）。
      */
-    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>) => Promise<{
+    chat: (cloneId: string, message: string, history?: Array<{ role: string; content: string }>, readerGuard?: { accountId: string; sessionId: string }) => Promise<{
       success: boolean
       reply?: string
       elapsedMs?: number
@@ -815,6 +864,9 @@ interface ElectronApi {
    * 引擎尚未接线时这几个字段可能不存在，页面必须显示诚实的"通道缺失"而非假结果。
    */
   search: {
+    semanticConfig: () => Promise<import('../electron/services/semanticIndex').LocalEmbeddingConfig>
+    saveSemanticConfig: (config: import('../electron/services/semanticIndex').LocalEmbeddingConfig) => Promise<import('../electron/services/semanticIndex').LocalEmbeddingConfig>
+    buildSemantic: (options?: { scope?: SearchScope }) => Promise<{ taskId: string }>
     indexStatus: () => Promise<SearchIndexStatus>
     buildIndex: (payload?: { force?: boolean; wxid?: string }) => Promise<{ taskId: string }>
     cancelIndex: () => Promise<{ success: boolean }>
@@ -833,6 +885,8 @@ interface ElectronApi {
     export: (payload: { format: AnnotationsExportFormat; path: string }, options?: { accountId: string }) => Promise<{ success: boolean; path?: string; error?: string }>
   }
 }
+
+interface ArchiveReply<T> { success: boolean; data?: T; error?: string }
 
 /** 搜索范围。字段都按"缺省 = 不限"处理，全部可选。 */
 interface SearchScope {
@@ -855,6 +909,9 @@ interface SearchIndexAccountStatus {
 }
 
 interface SearchIndexStatus {
+  engine?: 'bigram-inverted-v1'
+  reconciled?: boolean
+  truncated?: boolean
   ready: boolean
   building: boolean
   /** 0..1 */
@@ -868,6 +925,7 @@ interface SearchIndexStatus {
 
 interface SearchQueryRequest {
   text: string
+  retrieval?: 'lexical' | 'hybrid' | 'semantic'
   scope?: SearchScope
   limit?: number
   /**
@@ -880,6 +938,10 @@ interface SearchQueryRequest {
 }
 
 interface SearchHit {
+  semanticContext?: Array<{ db: string; table: string; localId: string; idKind: 'local' | 'server'; contentHash: string }>
+  accountId?: string
+  sourceId?: string
+  contentHash?: string
   sessionId: string
   sessionName: string
   /** 精确消息 id（按 idKind 表示 local_id 或 server_id）；标注与阅读器都用此字符串定位。 */
@@ -903,6 +965,7 @@ interface SearchHit {
 }
 
 interface SearchResultPage {
+  coverage?: SearchCoverage
   hits: SearchHit[]
   total: number
   /** 还有下一页时非空。不透明值，界面原样回传（见 SearchQueryRequest.cursor） */
@@ -914,6 +977,22 @@ interface SearchResultPage {
    * **不接住它的后果不是报错，而是"0 条结果"** —— 用户会以为是自己关键词打错了。
    */
   error?: string
+}
+
+interface SearchCoverage {
+  accountId: string
+  sourceId: string
+  indexedAt: number
+  indexedDocuments: number
+  stale: boolean
+  complete: boolean
+  failedTables: string[]
+  requestedScope: SearchScope
+  engine: 'bigram-inverted-v1' | 'substring-fallback' | 'local-hybrid-v1' | 'local-semantic-v1'
+  semantic?: import('../electron/services/semanticIndex').SemanticCoverage
+  candidateDocuments: number
+  scannedCandidates: number
+  indexTruncated: boolean
 }
 
 /** 收藏 / 标记一条：sessionId + localId（localId 为空的叫"会话收藏"）。 */
@@ -999,6 +1078,15 @@ interface KeyHealthEntry {
 }
 
 interface KeyHealthReport {
+  capabilities?: {
+    platform: string
+    existingKey: { required: number; verified: number; complete: boolean; missing: Array<{ id: string; status: string }> }
+    scan: { required: number; verified: number; complete: boolean; productionEnabled: boolean; available: boolean; reason: string; missing: Array<{ id: string; status: string }> }
+    history: string
+    media: { required: number; authenticated: number; localFiles: string }
+    liveNotifications: string
+    nativeDeviceAcceptance: string
+  }
   success: boolean
   /** 上一次取到密钥用的模式：scan（内存扫描）/ hook（注入回调）/ manual（手工粘贴） */
   mode?: 'scan' | 'hook' | 'manual' | 'none'

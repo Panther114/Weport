@@ -254,7 +254,7 @@ export const DualReportView: React.FC<{ onBack: () => void; defaultYear: number 
             </div>
             <div className="dual-report-year-row">
               {yearOptions.map((y) => (
-                <button key={y} type="button" className={`chip ${year === y ? 'chip-active' : ''}`} onClick={() => setYear(y)}>
+                <button key={y} type="button" aria-pressed={year === y} className={`chip ${year === y ? 'chip-active' : ''}`} onClick={() => setYear(y)}>
                   {y === 0 ? '全部时间' : `${y} 年`}
                 </button>
               ))}
@@ -262,7 +262,7 @@ export const DualReportView: React.FC<{ onBack: () => void; defaultYear: number 
             <label className="dual-report-search">
               <Search size={14} />
               <input value={keyword} placeholder="搜索好友（昵称 / 微信号）" onChange={(e) => setKeyword(e.target.value)} spellCheck={false} />
-              {keyword && <button type="button" className="dual-report-search-clear" onClick={() => setKeyword('')}>×</button>}
+              {keyword && <button type="button" className="dual-report-search-clear" aria-label="清除好友搜索" onClick={() => setKeyword('')}>×</button>}
             </label>
             {!rankingsLoading && <span className="v09-sub dual-report-count">{filtered.length} 位好友 · 按消息量排序</span>}
           </div>

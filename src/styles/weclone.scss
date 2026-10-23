@@ -199,8 +199,26 @@
    事就是跟它说话，所以它比可见性/档案/删除都更靠前、更重。 */
 .weclone-card-actions {
   display: flex;
+  align-items: center;
+  gap: 8px;
   padding-top: 11px;
   border-top: 1px solid var(--line, #1c1c21);
+}
+
+.weclone-card-utilities {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+
+  .weclone-card-delete { margin-left: auto; }
+}
+
+.weclone-generate-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .weclone-card-chat {

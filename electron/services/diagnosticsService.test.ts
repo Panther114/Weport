@@ -17,6 +17,7 @@ import {
   parseRegQueryValue,
   parseTasklistPid,
   pickErrorLines,
+  renderSummaryText,
   renderChecksMarkdown,
   resolveConfigFilePath,
   resolveLogPath,
@@ -30,8 +31,8 @@ import {
 import { createZipBuffer, readZipBuffer } from './zipWriter'
 import { CONFIG_BUNDLE_ALLOWLIST, redactionFingerprint } from './diagnosticsRedaction'
 
-const savedKey = vi.hoisted(() => ({ value: '' }))
-vi.mock('./config', () => ({ ConfigService: { getInstance: () => ({ get: () => savedKey.value }) } }))
+const savedKey = vi.hoisted(() => ({ value: '', selectedDir: null as string | null, selected: false }))
+vi.mock('./config', () => ({ ConfigService: { getInstance: () => ({ get: (key: string) => key === 'myWxid' ? savedKey.selected ? 'fixture-selected' : '' : savedKey.value, getAccountDir: () => savedKey.selectedDir }) } }))
 
 /**
  * 诊断服务单测。
@@ -291,12 +292,53 @@ describe('collectDiagnostics 记录形状', () => {
         for (const id of ['db.open-status', 'db.key-status', 'db.page1-hmac']) {
           expect(result.checks.find(check => check.id === id)?.state).toBe('ok')
         }
+        expect(result.checks.find(check => check.id === 'connection.representation')?.detail).toContain('decoded-hex-passphrase')
         expect(JSON.stringify(result)).not.toContain(HEX_KEY)
       }
     } finally {
       savedKey.value = ''
       paths.forEach((path, index) => writeFileSync(path, originals[index]))
     }
+  }, 120_000)
+
+  it('copies only sanitized stage conclusions, never detailed local output', () => {
+    expect(report.summary).toContain('连接阶段')
+    expect(report.summary).not.toContain(context.dbPath)
+    expect(report.summary).not.toContain(context.userDataPath)
+    expect(report.summary).not.toContain('wxid_fixture0001')
+    expect(report.summary).not.toContain('--- 原始输出 ---')
+    expect(report.checks.filter(check => check.id.startsWith('connection.'))).toHaveLength(6)
+  })
+
+  it('never falls back to copying raw details from an older report', () => {
+    const text = renderSummaryText([{ id: 'engine.init', label: 'Local', state: 'fail', detail: 'private content', raw: 'C:\\Users\\private\\data' }], { appVersion: '1', platform: 'win32', arch: 'x64', collectedAt: 0 })
+    expect(text).toContain('重新检测')
+    expect(text).not.toContain('private')
+  })
+
+  it('projects support stages through an allowlist instead of copying unexpected strings', () => {
+    const privateText = 'C:\\Users\\private-person\\wxid_secret sk-123456789012345678901234'
+    const text = renderSummaryText([
+      { id: 'connection.host', label: privateText, state: 'fail', detail: privateText, raw: privateText },
+      { id: 'connection.coverage', label: privateText, state: 'warn', detail: `历史必需库 12 个，已检查 2 个，通过 1 个。${privateText}` },
+      { id: 'connection.representation', label: privateText, state: 'ok', detail: `decoded-hex-passphrase ${privateText}` },
+      { id: 'connection.unexpected', label: privateText, state: 'fail', detail: privateText },
+    ], { appVersion: privateText, platform: privateText, arch: privateText, collectedAt: 0 })
+    expect(text).not.toContain('private-person')
+    expect(text).not.toContain('wxid_secret')
+    expect(text).not.toContain('sk-')
+    expect(text).toContain('必需 12 个，检查 2 个，通过 1 个')
+    expect(text).toContain('decoded-hex-passphrase')
+    expect(text).toContain('安全软件隔离记录')
+  })
+
+  it('refuses to validate a different sole account when a selected account is missing', async () => {
+    savedKey.selected = true
+    try {
+      const result = await collectDiagnostics(context, { full: false })
+      expect(result.checks.find(check => check.id === 'connection.account')?.state).toBe('fail')
+      expect(result.checks.find(check => check.id === 'connection.coverage')?.detail).toContain('已检查 0 个')
+    } finally { savedKey.selected = false }
   }, 120_000)
 
   it('每条检查都是 { id, label, state, detail, raw? } 且 id 唯一', () => {

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as crypto from 'crypto'
@@ -186,6 +186,38 @@ describe('createScannedDbMirror', () => {
     expect(result.ok).toBe(false)
     expect(result.error).toContain('every message shard')
     expect(result.mirrorDir).toBeUndefined()
+  })
+
+  it.each(['database', 'WAL'] as const)('rejects a %s change during conversion and removes the partial mirror', async kind => {
+    const fixture = makeAccount()
+    const destinationRoot = join(root, 'mirrors')
+    let changed = false
+    const result = await createScannedDbMirror({
+      accountDir: fixture.accountDir,
+      keys: fixture.keys,
+      destinationRoot,
+      yieldBytes: PAGE_SIZE,
+      onProgress: progress => {
+        if (changed || progress.pagesDone < 1) return
+        changed = true
+        // Change a different source while the first DB is being converted.
+        // The final account fingerprint must reject even a coherent retry.
+        if (kind === 'database') {
+          const bytes = readFileSync(fixture.messagePath)
+          const salt = bytes.subarray(0, 16)
+          writeFileSync(fixture.messagePath, Buffer.concat([bytes, encryptPage(makePlainPage(3, 0x96), KEY, salt, 3, 0x65)]))
+        } else {
+          const salt = readFileSync(fixture.messagePath).subarray(0, 16)
+          writeFileSync(fixture.walPath, Buffer.concat([buildWal(salt, KEY, 0x96), Buffer.alloc(24)]))
+        }
+      },
+    })
+    expect(changed).toBe(true)
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('changed during mirror preparation')
+    expect(result.mirrorDir).toBeUndefined()
+    expect(existsSync(destinationRoot)).toBe(true)
+    expect(readdirSync(destinationRoot)).toEqual([])
   })
 
   it('refuses a mirror when the session database is missing even if message keys exist', async () => {

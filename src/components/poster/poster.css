@@ -1614,3 +1614,8 @@
         animation: none;
     }
 }
+
+/* Export settings belong to the privacy/export step beside its primary footer action. */
+.poster-export-options { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-block: 12px; border-top: 1px solid var(--line); }
+.poster-export-options .ghost-btn { min-height: 34px; }
+@media (max-width: 1180px) { .poster-root .annual-head { display: none; } }

@@ -37,7 +37,11 @@ import {
   Loader2,
 } from 'lucide-react'
 import AiMarkdown from './AiMarkdown'
+import MemoryClaims from './MemoryClaims'
+import ContextBoundary, { type PreparedContext } from './ContextBoundary'
+import InvestigationCoverage from './InvestigationCoverage'
 import './providerProfiles.css'
+import './workspaceControls.css'
 
 type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
 // `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
@@ -316,6 +320,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [running, setRunning] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
   const [input, setInput] = useState('')
+  const [preparedContext, setPreparedContext] = useState<{ chatId: string; context: PreparedContext } | null>(null)
+  const [localOnly, setLocalOnly] = useState(false)
   // `@` 引用：在输入框里打 `@` 会弹出会话选择器，与 WeBot 任务描述共用同一个
   // 组件和同一套纯逻辑（utils/mentionTrigger.ts）。
   const [mention, setMention] = useState<{ start: number; query: string; caret: number } | null>(null)
@@ -354,6 +360,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [actions, setActions] = useState<AiAction[]>([])
   const [actionsOpen, setActionsOpen] = useState(false)
   const [wsCollapsed, setWsCollapsed] = useState(false)
+  const [workspaceView, setWorkspaceView] = useState<'notes' | 'coverage' | 'scope'>('notes')
   const [viewingNote, setViewingNote] = useState<{ note: AiNote; content: string } | null>(null)
   const [debugOpen, setDebugOpen] = useState(false)
   const [debugLines, setDebugLines] = useState<string[]>([])
@@ -784,7 +791,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     const text = (textOverride ?? input).trim()
     if (!text || !activeId || running) return
     setInput('')
-    setReferences([])
+    if (preparedContext?.chatId !== activeId) setReferences([])
     resetInputHeight()
     stickToBottom.current = true
     setError('')
@@ -793,12 +800,14 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     try {
       // 引用以**追加**的一小段提示随这条用户消息一起发出，而不是改写系统提示
       // 或历史 —— 前者会摧毁前缀缓存，而这段提示本身就是本次新增的输入。
-      const payload = references.length > 0
+      const prepared = preparedContext?.chatId === activeId ? preparedContext.context : undefined
+      const payload = prepared ? `${text}\n\n${prepared.text}` : references.length > 0
         ? `${text}\n\n（本次聚焦以下会话，请优先分析它们：${references
             .map((reference) => `${reference.label} = ${reference.id}`)
             .join('；')}）`
         : text
-      const res = await api.ai.send(activeId, payload)
+      const res = await api.ai.send(activeId, payload, { processing: localOnly ? 'local-only' : 'cloud-enabled',
+        ...(prepared ? { tools: 'none', accountId: prepared.scope.accountId, scope: prepared.scope } : {}) })
       if (!res.success && res.error && !running) {
         setError(res.error)
         setLive(null)
@@ -1116,6 +1125,12 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                 <b>{fmtTokens(usage.totalTokens)} tok</b>
               </span>
             ) : null}
+            <button type="button" className="ai-inspector-trigger" aria-label="数据范围与发送预览" aria-pressed={!wsCollapsed && workspaceView === 'scope'}
+              data-active={localOnly || preparedContext?.chatId === activeId || undefined}
+              title={localOnly ? '仅本机模型 · 查看数据范围' : preparedContext?.chatId === activeId ? '已限制为预览范围' : '设置数据范围与发送预览'}
+              onClick={() => { setWsCollapsed(false); setWorkspaceView('scope') }}>
+              <Eye size={13} /><span>{localOnly ? '仅本机' : preparedContext?.chatId === activeId ? '预览范围' : '数据范围'}</span>
+            </button>
             {/* 压缩上下文的显式入口。自动压缩只在用户回合边界且超过 0.8 窗口时
                 触发，长任务中途想主动腾空间没有别的办法。 */}
             <button
@@ -1430,7 +1445,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       <button
         type="button"
         className="ai-ws-toggle"
-        title={wsCollapsed ? '展开记忆面板' : '收起记忆面板'}
+        title={wsCollapsed ? '展开对话侧栏' : '收起对话侧栏'}
+        aria-label={wsCollapsed ? '展开对话侧栏' : '收起对话侧栏'}
+        aria-expanded={!wsCollapsed}
         onClick={() => setWsCollapsed((v) => !v)}
       >
         <ChevronRight size={15} />
@@ -1440,8 +1457,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       <aside className={`ai-workspace${wsCollapsed ? ' collapsed' : ''}`}>
         <div className="ai-ws-body">
           <div className="ai-ws-head">
-            <span>记忆 · 笔记</span>
-            <div className="ai-ws-head-actions">
+            <span>对话资料</span>
+            <div className="ai-ws-head-actions" hidden={workspaceView !== 'notes'}>
               <button type="button" className="ai-ws-refresh" title="刷新文件列表" onClick={() => void refreshNotesList()}>
                 <RefreshCw size={12} />
               </button>
@@ -1450,10 +1467,23 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               </button>
             </div>
           </div>
-          <div className="ai-ws-path" title={workspaceDir}>
+          <div className="ai-inspector-nav" role="group" aria-label="对话资料分类">
+            <button type="button" aria-pressed={workspaceView === 'notes'} onClick={() => setWorkspaceView('notes')}><FileText size={13} />笔记</button>
+            <button type="button" aria-pressed={workspaceView === 'coverage'} onClick={() => setWorkspaceView('coverage')}><BookOpen size={13} />调查</button>
+            <button type="button" aria-pressed={workspaceView === 'scope'} onClick={() => setWorkspaceView('scope')}><Eye size={13} />范围</button>
+          </div>
+          <div className="ai-inspector-panel" hidden={workspaceView !== 'coverage'}>
+            <InvestigationCoverage messages={messages} />
+          </div>
+          <div className="ai-inspector-panel" hidden={workspaceView !== 'scope'}>
+            <ContextBoundary key={activeId || 'new'} sessionIds={references.map(reference => reference.id)} disabled={running} localOnly={localOnly} onLocalOnly={setLocalOnly}
+          onPrepared={context => setPreparedContext(context && activeId ? { chatId: activeId, context } : null)} />
+          </div>
+          <div className="ai-ws-path" title={workspaceDir} hidden={workspaceView !== 'notes'}>
             {workspaceDir || '—'}
           </div>
-          <div className="ai-ws-list">
+          <div className="ai-ws-list" hidden={workspaceView !== 'notes'}>
+            <MemoryClaims chatId={activeId || ''} />
             {notes.length === 0 ? (
               <div className="ai-ws-empty">
                 还没有记忆文件。让 AI「把发现写入 memory/xxx.md」，文件会出现在这里；
@@ -1512,8 +1542,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               </>
             )}
           </div>
-          <div className="ai-ws-usage">
-            <span>上下文窗口 · 缓存命中 · 费用估算</span>
+          <div className="ai-ws-usage" hidden={workspaceView !== 'notes'}>
+            <span>上下文与用量</span>
             <div className="ai-bar-row">
               <div className="ai-bar-label">
                 <span>上下文（最近一次请求）</span>

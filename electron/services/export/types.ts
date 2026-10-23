@@ -63,6 +63,9 @@ export interface ChatLabExport {
 }
 
 export interface ExportOptions {
+  /** Portable archives retain raw source fields and explicit per-message media outcomes. */
+  archiveMode?: boolean
+  mediaPolicy?: 'best-available' | 'original-only'
   /** Explicit diagnostic verification; normal exports do not rescan a live database. */
   verifyAfterExport?: boolean
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'

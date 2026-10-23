@@ -9,9 +9,12 @@ import {
   CIPHER_XOR_MASK,
   CIPHER_XOR_PERIOD,
   CHUNK_OVERLAP,
+  MAX_ENCODED_RECORD_BYTES,
   decodeBlobWithMask,
   decodeCipherBlob,
   extractKeyRecords,
+  extractMemoryCipherRecords,
+  isReadableUserAddress,
   readHexRunAt,
   recoverCipherMaskCandidates,
   resolveDbStorageDir,
@@ -19,6 +22,7 @@ import {
   STRUCT_OFFSET_ATTEMPTS,
   DEFAULT_YIELD_EVERY_MS,
 } from './keyScanService'
+import { verifyPageKey } from './wcdbPageKey'
 
 /**
  * 扫描器的**纯计算部分**单测（K11 的另一半）。
@@ -61,11 +65,29 @@ describe('常量与证据锚点', () => {
     expect(new Set(STRUCT_OFFSET_ATTEMPTS.map((a) => a.label)).size).toBe(STRUCT_OFFSET_ATTEMPTS.length)
   })
 
-  it('分块参数与让出时间片在合理范围（2 MB + 0x80 重叠；≤ 50 ms 的卡顿预算）', () => {
-    expect(CHUNK_OVERLAP).toBe(0x80)
+  it('overlaps enough bytes for the longest record and retains a bounded yield interval', () => {
+    expect(CHUNK_OVERLAP).toBe(MAX_ENCODED_RECORD_BYTES - 1)
     expect(DEFAULT_YIELD_EVERY_MS).toBeLessThanOrEqual(50)
     expect(CIPHER_RECORD_PREFIX.toString('latin1')).toBe("x'")
   })
+})
+
+it('recovers the longest supported cipher record across every chunk boundary position', () => {
+  const chunkBytes = 512
+  const text = `x'${KEY_HEX}${SALT_HEX}${KEY_HEX}${SALT_HEX}'`
+  expect(Buffer.byteLength(text)).toBe(MAX_ENCODED_RECORD_BYTES)
+  for (let beforeBoundary = 1; beforeBoundary < MAX_ENCODED_RECORD_BYTES; beforeBoundary++) {
+    const start = chunkBytes - beforeBoundary
+    const memory = Buffer.alloc(chunkBytes * 2, 0xee)
+    maskText(text, CIPHER_XOR_MASK, 7).copy(memory, start)
+    const expected = extractMemoryCipherRecords(memory)
+    expect(expected.some(row => row.keyHex === KEY_HEX && row.saltHex === SALT_HEX)).toBe(true)
+    const actual = new Map<string, unknown>()
+    for (let offset = 0; offset < memory.length; offset += chunkBytes) {
+      for (const row of extractMemoryCipherRecords(memory.subarray(offset, offset + chunkBytes + CHUNK_OVERLAP))) actual.set(`${row.keyHex}|${row.saltHex}`, row)
+    }
+    expect([...actual.values()]).toEqual(expected)
+  }
 })
 
 describe('记录抽取', () => {
@@ -119,6 +141,49 @@ describe('掩码解码', () => {
     const wrongMask = Buffer.from(CIPHER_XOR_MASK.map((b) => b ^ 0x5a))
     const decoded = decodeCipherBlob(blob, { masks: [wrongMask] })
     expect(decoded.records).toHaveLength(0)
+  })
+})
+
+describe('phase-independent memory record decoding', () => {
+  it('finds records at every blob phase and every unaligned chunk position', () => {
+    for (let phase = 0; phase < CIPHER_XOR_PERIOD; phase++) {
+      const start = 17 + phase
+      const memory = Buffer.alloc(start + RECORD.length + 9, 0xff)
+      maskText(RECORD, CIPHER_XOR_MASK, phase).copy(memory, start)
+      expect(extractMemoryCipherRecords(memory)).toEqual([{ keyHex: KEY_HEX, saltHex: SALT_HEX }])
+    }
+  })
+
+  it('recovers a non-address-aligned key that authenticates an independent known-answer page', () => {
+    const key = 'a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf'
+    const salt = '000102030405060708090a0b0c0d0e0f'
+    const memory = Buffer.alloc(256, 0xff)
+    maskText(`x'${key}${salt}'`, CIPHER_XOR_MASK).copy(memory, 16)
+    const records = extractMemoryCipherRecords(memory)
+    const page = Buffer.alloc(4096)
+    Buffer.from(salt, 'hex').copy(page)
+    for (let i = 16; i < 4032; i++) page[i] = (i * 7 + 3) & 0xff
+    // Independent reference fixture shared with wcdbPageKey.test.ts.
+    Buffer.from('3f19eb8854d0136d511d5d1260e49788d2702480023d93dc17ddd51d32e0683d1522a4026fcfb476d2124df5c8cb9caca04d1a60513d6d63d7c59467a481b9ea', 'hex').copy(page, 4032)
+    expect(records).toHaveLength(1)
+    expect(verifyPageKey(page, Buffer.from(records[0].keyHex, 'hex'), ['raw']).mode).toBe('raw')
+    page[100] ^= 1
+    expect(verifyPageKey(page, Buffer.from(records[0].keyHex, 'hex'), ['raw']).mode).toBeNull()
+  })
+
+  it('rejects truncated records and deduplicates repeated memory copies', () => {
+    const encoded = maskText(RECORD, CIPHER_XOR_MASK)
+    expect(extractMemoryCipherRecords(encoded.subarray(0, encoded.length - 1))).toEqual([])
+    expect(extractMemoryCipherRecords(Buffer.concat([encoded, encoded]))).toEqual([{ keyHex: KEY_HEX, saltHex: SALT_HEX }])
+  })
+
+  it('accepts the full Windows user address range while rejecting crossing and invalid reads', () => {
+    expect(isReadableUserAddress(0x000001f000000000, 1024)).toBe(true)
+    expect(isReadableUserAddress(0x7fffffffffff, 1)).toBe(true)
+    expect(isReadableUserAddress(0x7fffffffffff, 2)).toBe(false)
+    expect(isReadableUserAddress(0)).toBe(false)
+    expect(isReadableUserAddress(1, -1)).toBe(false)
+    expect(isReadableUserAddress(NaN)).toBe(false)
   })
 })
 

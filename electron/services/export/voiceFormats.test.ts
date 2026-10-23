@@ -221,3 +221,43 @@ describe('already-converted voice text survives real formatters (#28)', () => {
     })
   }
 })
+
+
+describe('image policy across export formats', () => {
+  const formats = [
+    ['txt', 'txt', TxtFormatter], ['json', 'json', JsonFormatter], ['html', 'html', HtmlFormatter],
+    ['markdown', 'md', MarkdownFormatter], ['excel', 'xlsx', ExcelFormatter], ['sql', 'sql', SqlFormatter],
+    ['chatlab', 'json', ChatLabFormatter], ['chatlab-jsonl', 'jsonl', ChatLabFormatter], ['weclone', 'csv', WeCloneFormatter],
+  ] as const
+  for (const [format, extension, Formatter] of formats) {
+    it.each(['best-available', 'original-only'] as const)(`${format} enforces %s on imported image bytes`, async mediaPolicy => {
+      const root = mkdtempSync(join(tmpdir(), 'weport-format-image-policy-'))
+      temporary.push(root)
+      const source = join(root, 'imported.png')
+      writeFileSync(source, 'unproven imported image bytes')
+      const context = new ExportContext()
+      const row = { localType: 3, localId: 7, localIdRaw: '7', createTime: 1700000000, content: '<msg><img/></msg>',
+        senderUsername: 'wxid_fixture', isSend: 1, _db_path: 'fixture/message_0.db', _table_name: 'Msg_fixture', localPath: source }
+      Object.assign(context, {
+        ensureConnected: async () => ({ success: true, cleanedWxid: 'wxid_fixture' }),
+        getContactInfo: async (id: string) => ({ wxid: id, displayName: 'Fixture', nickname: 'Fixture', remark: '', alias: '', groupNickname: '' }),
+        collectMessages: async () => ({ rows: [row], memberSet: new Map(), lastTime: row.createTime }),
+        hydrateEmojiCaptionsForMessages: async () => {}, resolveQuotedMessagesForExport: async () => {},
+        preloadMediaLookupCaches: async () => {},
+      })
+      const output = join(root, `chat.${extension}`)
+      const exported = vi.spyOn(context, 'exportMediaForMessage')
+      const result = await new Formatter(context).export('friend', output,
+        { format, exportMedia: true, exportImages: true, exportAvatars: false, mediaPolicy, sessionLayout: 'per-session', exportWriteLayout: 'B' }, undefined, undefined)
+      expect(result, result.error).toMatchObject({ success: true })
+      expect(exported).toHaveBeenCalledOnce()
+      const item = await exported.mock.results[0].value
+      if (mediaPolicy === 'original-only') {
+        expect(item).toBeNull()
+      } else {
+        expect(item?.kind).toBe('image')
+        expect(readFileSync(join(root, item!.relativePath), 'utf8')).toBe('unproven imported image bytes')
+      }
+    })
+  }
+})

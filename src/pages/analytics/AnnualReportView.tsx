@@ -229,7 +229,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
         </div>
         <div className="annual-actions">
           {!dualOpen && report && (
-            <button type="button" className="ghost-btn" disabled={exporting} onClick={() => void exportImages()}>
+            <button type="button" className="secondary-btn" disabled={exporting} onClick={() => void exportImages()}>
               <Camera size={14} />
               {exporting ? '导出中…' : '导出报告图片'}
             </button>
@@ -237,6 +237,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
           <button
             type="button"
             className={`chip ${dualOpen ? 'chip-active' : ''}`}
+            aria-pressed={dualOpen}
             onClick={() => {
               setDualOpen((prev) => !prev)
               setError(null)
@@ -245,7 +246,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
             <Users size={13} />
             {dualOpen ? '返回年度报告' : '双人报告'}
           </button>
-          <button type="button" className="icon-btn-ghost" onClick={onClose}>
+          <button type="button" className="icon-btn-ghost" aria-label="关闭年度报告" onClick={onClose}>
             <X size={16} />
           </button>
         </div>
@@ -270,6 +271,7 @@ export const AnnualReportView: React.FC<{ onClose: () => void }> = ({ onClose })
               key={y}
               type="button"
               className={`chip ${selectedYear === y ? 'chip-active' : ''}`}
+              aria-pressed={selectedYear === y}
               disabled={generating}
               onClick={() => void generate(y)}
             >

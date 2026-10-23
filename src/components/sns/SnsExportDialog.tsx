@@ -151,13 +151,13 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
 
   return createPortal(
     <div className="wp-overlay" onClick={onClose}>
-      <div className="wp-dialog export-dialog" onClick={(e) => e.stopPropagation()}>
+      <div className="wp-dialog export-dialog" role="dialog" aria-modal="true" aria-label="导出朋友圈" onClick={(e) => e.stopPropagation()}>
         <div className="wp-dialog-head">
           <h3>
             <Download size={16} />
             导出朋友圈
           </h3>
-          <button className="icon-btn-ghost" onClick={onClose}>
+          <button type="button" className="icon-btn-ghost" aria-label="关闭导出" onClick={onClose}>
             <X size={16} />
           </button>
         </div>
@@ -189,6 +189,8 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
                     <button
                       key={f.value}
                       type="button"
+                      disabled={running}
+                      aria-pressed={format === f.value}
                       className={`chip ${format === f.value ? 'chip-active' : ''}`}
                       onClick={() => setFormat(f.value)}
                     >
@@ -217,6 +219,8 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
                   <button
                     key={p.value}
                     type="button"
+                    disabled={running}
+                    aria-pressed={preset === p.value}
                     className={`chip ${preset === p.value ? 'chip-active' : ''}`}
                     onClick={() => setPreset(p.value)}
                   >
@@ -226,9 +230,9 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
               </div>
               {preset === 'custom' && (
                 <div className="date-range-inputs">
-                  <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
+                  <input type="date" aria-label="开始日期" disabled={running} value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
                   <span>至</span>
-                  <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
+                  <input type="date" aria-label="结束日期" disabled={running} value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
                 </div>
               )}
             </div>
@@ -236,7 +240,7 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
             <div className="export-section">
               <label>媒体</label>
               <label className="switch-row">
-                <input type="checkbox" checked={exportMedia} onChange={(e) => setExportMedia(e.target.checked)} />
+                <input type="checkbox" disabled={running} checked={exportMedia} onChange={(e) => setExportMedia(e.target.checked)} />
                 <span>导出媒体文件（图片 / 实况 / 视频）</span>
               </label>
               {exportMedia && (
@@ -248,7 +252,7 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
                       { key: 'videos', label: '视频', value: exportVideos, set: setExportVideos },
                     ] as Array<{ key: string; label: string; value: boolean; set: (v: boolean) => void }>
                   ).map((m) => (
-                    <button key={m.key} type="button" className={`chip ${m.value ? 'chip-active' : ''}`} onClick={() => m.set(!m.value)}>
+                    <button key={m.key} type="button" disabled={running} aria-pressed={m.value} className={`chip ${m.value ? 'chip-active' : ''}`} onClick={() => m.set(!m.value)}>
                       {m.label}
                     </button>
                   ))}
@@ -264,9 +268,11 @@ export const SnsExportDialog: React.FC<SnsExportDialogProps> = ({ open, username
                   value={outputDir}
                   placeholder="选择导出目录…"
                   readOnly
+                  disabled={running}
+                  aria-label="输出目录"
                   onClick={pickDir}
                 />
-                <button className="ghost-btn" onClick={pickDir}>
+                <button type="button" className="secondary-btn" disabled={running} onClick={pickDir}>
                   <FolderOpen size={14} />
                   选择
                 </button>

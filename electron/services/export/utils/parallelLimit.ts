@@ -63,17 +63,22 @@ export async function runBoundedPool<T>(
   let nextIndex = 0
   let paused = false
   let stopped = false
+  let failed = false
+  let firstError: unknown
   const pendingIndexes = new Set(items.map((_item, index) => index))
 
   const getStopStatus = (): BoundedPoolStatus | null => {
-    if (options.shouldStop?.()) return 'stopped'
-    if (options.shouldPause?.()) return 'paused'
+    if (stopped || options.shouldStop?.()) return 'stopped'
+    if (paused || options.shouldPause?.()) return 'paused'
     return null
   }
 
   const worker = async () => {
     while (true) {
-      const requestedStatus = getStopStatus()
+      if (failed) return
+      let requestedStatus: BoundedPoolStatus | null
+      try { requestedStatus = getStopStatus() }
+      catch (error) { if (!failed) firstError = error; failed = true; return }
       if (requestedStatus === 'stopped') {
         stopped = true
         return
@@ -87,7 +92,15 @@ export async function runBoundedPool<T>(
       if (index >= items.length) return
       pendingIndexes.delete(index)
 
-      const status = await fn(items[index], index)
+      let status: BoundedPoolStatus | void
+      try {
+        status = await fn(items[index], index)
+      } catch (error) {
+        pendingIndexes.add(index)
+        if (!failed) firstError = error
+        failed = true
+        return
+      }
       if (status === 'stopped') {
         stopped = true
         pendingIndexes.add(index)
@@ -104,6 +117,9 @@ export async function runBoundedPool<T>(
   await Promise.all(
     Array.from({ length: Math.min(normalizedLimit, items.length) }, () => worker())
   )
+  // Keep the task lease until every claimed callback has stopped writing.
+  // A rejected Promise.all would let siblings outlive cleanup and start a new run.
+  if (failed) throw firstError
 
   return {
     pending: items.filter((_item, index) => pendingIndexes.has(index)),

@@ -292,6 +292,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
     if (input.toolChoice) body.tool_choice = input.toolChoice
     if (instructions) body.instructions = instructions
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/responses'), {
+      redirect: input.localOnly ? 'error' : undefined,
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -359,6 +360,7 @@ const openAICompatibleAdapter: ProviderAdapter = {
   async stream(input) {
     const body = openAIChatBody(input)
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/chat/completions'), {
+      redirect: input.localOnly ? 'error' : undefined,
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -461,6 +463,7 @@ const anthropicAdapter: ProviderAdapter = {
     if (input.tools.length > 0) body.tools = input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }))
     if (input.toolChoice === 'none') body.tool_choice = { type: 'none' }
     const response = await providerFetch(endpoint(input.profile.baseUrl, '/messages'), {
+      redirect: input.localOnly ? 'error' : undefined,
       method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal,
     })
     if (!response.ok) return readError(response)
@@ -584,7 +587,7 @@ const googleAdapter: ProviderAdapter = {
     if (input.tools.length > 0) body.tools = [{ functionDeclarations: input.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }]
     if (input.toolChoice === 'none') body.toolConfig = { functionCallingConfig: { mode: 'NONE' } }
     const url = endpoint(input.profile.baseUrl, `/models/${encodeURIComponent(input.profile.model)}:streamGenerateContent?alt=sse`)
-    const response = await providerFetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal })
+    const response = await providerFetch(url, { method: 'POST', headers: authHeaders(input.profile), body: JSON.stringify(body), signal: input.signal, redirect: input.localOnly ? 'error' : undefined })
     if (!response.ok) return readError(response)
     const result = emptyResult()
     for await (const item of sseEvents(response)) {

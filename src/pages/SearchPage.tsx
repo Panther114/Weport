@@ -5,10 +5,12 @@ import FilterChips from '../components/search/FilterChips'
 import ScopePanel from '../components/search/ScopePanel'
 import SearchResults from '../components/search/SearchResults'
 import SearchRail from '../components/search/SearchRail'
+import SemanticSearchControls from '../components/search/SemanticSearchControls'
 import { sessionsForSearchScope, sessionsForTags, tagsBySession as buildTagsBySession } from '../components/search/searchAnnotations'
 import { EmptyIndexState, IndexStatusBar } from '../components/search/IndexState'
 import {
   EMPTY_SCOPE,
+  buildEngineQuery,
   hasAnyCondition,
   entryKey,
   paramsFromQuery,
@@ -86,7 +88,7 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
   useEffect(() => {
     const next = paramsFromQuery(debouncedInput)
     setParams((prev) =>
-      prev.text === next.text && JSON.stringify(prev.scope) === JSON.stringify(next.scope) ? prev : next,
+      prev.text === next.text && prev.retrieval === next.retrieval && JSON.stringify(prev.scope) === JSON.stringify(next.scope) ? prev : next,
     )
   }, [debouncedInput])
 
@@ -211,7 +213,7 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
 
   const engineParams = useMemo<QueryParams>(() => {
     if (!tagFiltersActive) return params
-    return { text: params.text, scope: { ...params.scope, sessionIds: tagScopeMatches } }
+    return { ...params, scope: { ...params.scope, sessionIds: tagScopeMatches } }
   }, [params, tagFiltersActive, tagScopeMatches])
 
   const tagMap = useMemo(() => buildTagsBySession(annotationStore), [annotationStore])
@@ -219,9 +221,10 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
   const tagsBySession = tagMap
 
   const indexReady = Boolean(index?.ready)
+  const [semanticRefresh, setSemanticRefresh] = useState(0)
 
   // ---- 搜索结果 ----------------------------------------------------------
-  const search = useSearchQuery(engineParams, { enabled: indexReady && !tagScopePending && !tagScopeEmpty })
+  const search = useSearchQuery(engineParams, { enabled: indexReady && !tagScopePending && !tagScopeEmpty, refreshKey: `${indexTaskPhase}:${semanticRefresh}` })
   const searchState = tagScopePending
     ? { ...search, loadingFirst: true, searched: false }
     : tagScopeUnavailable
@@ -358,7 +361,7 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
   // ---- 条件编辑 ----------------------------------------------------------
   const applyScope = useCallback((next: ScopeParams) => {
     setParams((prev) => {
-      const merged = { text: prev.text, scope: next }
+      const merged = { ...prev, scope: next }
       setInput(queryFromParams(merged))
       return merged
     })
@@ -366,7 +369,7 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
 
   const patchScope = useCallback((patch: Partial<ScopeParams>) => {
     setParams((prev) => {
-      const merged = { text: prev.text, scope: { ...prev.scope, ...patch } }
+      const merged = { ...prev, scope: { ...prev.scope, ...patch } }
       setInput(queryFromParams(merged))
       return merged
     })
@@ -382,7 +385,7 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
     (tag: string) => {
       setParams((prev) => {
         const tags = prev.scope.tags.includes(tag) ? prev.scope.tags.filter((item) => item !== tag) : [...prev.scope.tags, tag]
-        const merged = { text: prev.text, scope: { ...prev.scope, tags } }
+        const merged = { ...prev, scope: { ...prev.scope, tags } }
         setInput(queryFromParams(merged))
         return merged
       })
@@ -413,7 +416,7 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
   }, [params])
 
   const commitSave = useCallback(() => {
-    annotations.saveSearch({ name: saveName, text: params.text, scope: params.scope })
+    annotations.saveSearch({ name: saveName, text: params.text, scope: params.scope, retrieval: params.retrieval })
     setSaveDialogOpen(false)
   }, [annotations, saveName, params])
 
@@ -531,6 +534,12 @@ export default function SearchPage({ accountId = '', onOpen, onCreatePoster, ini
         />
 
         <IndexStatusBar index={index} indexLoading={indexLoading} indexError={indexError} onRefresh={refreshIndex} />
+        <SemanticSearchControls mode={params.retrieval || 'lexical'} coverage={searchState.coverage}
+          scope={buildEngineQuery(engineParams)?.scope} canBuild={indexReady && !tagScopePending && !tagScopeEmpty}
+          onModeChange={retrieval => {
+            const next = { ...params, retrieval }
+            setParams(next); setInput(queryFromParams(next))
+          }} onChanged={() => { refreshIndex(); setSemanticRefresh(value => value + 1) }} />
       </header>
 
       <div className="sp-body">

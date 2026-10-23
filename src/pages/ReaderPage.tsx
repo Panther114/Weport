@@ -31,8 +31,10 @@ import { copyTextToClipboard } from '../utils/clipboard'
 import { MessageRow } from '../components/reader/MessageRow'
 import { ReaderImageViewer } from '../components/reader/ReaderImageViewer'
 import { ReaderToolbar } from '../components/reader/ReaderToolbar'
+import { ReaderReplyDraft } from '../components/reader/ReaderReplyDraft'
+import { ReaderExportOptions } from '../components/reader/ReaderExportOptions'
 import { SessionRail } from '../components/reader/SessionRail'
-import { exportReaderSession } from '../components/reader/readerExport'
+import { exportReaderSession, type ReaderExportOptions as ExportOptions } from '../components/reader/readerExport'
 import {
   READER_PAGE_SIZE,
   channelGapText,
@@ -169,6 +171,7 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
   const [picked, setPicked] = useState<string[]>([])
   const [viewerIndex, setViewerIndex] = useState(-1)
   const [exportState, setExportState] = useState<{ busy: boolean; message?: string; error?: string }>({ busy: false })
+  const [exportOptionsOpen, setExportOptionsOpen] = useState(false)
 
   const annotations = useAnnotations(accountId)
   const annotationsReady = annotations.error === null
@@ -533,10 +536,10 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
   )
 
   // ---- 导出本会话 ----
-  const runExport = useCallback(() => {
+  const runExport = useCallback((options: ExportOptions) => {
     if (!selected) return
     setExportState({ busy: true })
-    void exportReaderSession(selected).then((result) => {
+    void exportReaderSession(selected, options).then((result) => {
       setExportState(result.ok ? { busy: false, message: result.message } : { busy: false, error: result.error })
     })
   }, [selected])
@@ -572,6 +575,12 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
   )
 
   const gapText = channelGapText(channels)
+  const draftMessages = useMemo(() => {
+    const keys = new Set(picked)
+    return messages.filter((message) => keys.has(message.key))
+  }, [messages, picked])
+  // A changed source/selection gets a fresh consent and cannot display an old response.
+  const draftScopeKey = JSON.stringify([accountId, selectedId, timeWindow, loadingWindow, draftMessages])
 
   return (
     <div className="v09-page reader-page" aria-label="聊天阅读器">
@@ -615,7 +624,7 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
           onResetWindow={handleResetWindow}
           loadingWindow={loadingWindow}
           exporting={exportState}
-          onExport={runExport}
+          onExport={() => setExportOptionsOpen(value => !value)}
           onCreatePoster={createPoster}
           posterEnabled={Boolean(onCreatePoster && picked.length > 0)}
           pickMode={pickMode}
@@ -627,6 +636,16 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
           onCopyPicked={copyPicked}
           onClearPicked={() => setPicked([])}
         />
+
+        {selected && exportOptionsOpen && <ReaderExportOptions key={selected.id} busy={exportState.busy} onExport={runExport} onClose={() => setExportOptionsOpen(false)} />}
+
+        {selected && !channelMissing && <ReaderReplyDraft
+          key={draftScopeKey}
+          accountId={accountId}
+          sessionId={selected.id}
+          messages={draftMessages}
+          disabled={loadingWindow || Boolean(messagesError)}
+        />}
 
         {!selected && (
           <div className="reader-empty">

@@ -9,10 +9,10 @@ export function toolResultBudget(configured: unknown, contextWindow: number, pro
   return Math.max(1000, Math.min(requested, available))
 }
 
-export function toolRoundLimit(value: unknown): number {
+export function toolRoundLimit(value: unknown, legacyDefault = true): number {
   const limit = Number(value)
   // 48 was the old default, rather than a user-selected budget.
-  return Number.isFinite(limit) && limit > 0 && limit !== 48 ? Math.max(1, Math.floor(limit)) : Infinity
+  return Number.isFinite(limit) && limit > 0 && (!legacyDefault || limit !== 48) ? Math.max(1, Math.floor(limit)) : Infinity
 }
 
 function canonical(value: unknown): unknown {

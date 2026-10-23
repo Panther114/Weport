@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { marked, type Tokens } from 'marked'
 
 const escapeHtml = (s: string) =>
@@ -13,6 +13,7 @@ marked.setOptions({
 function safeUrl(raw: unknown): string | null {
   const href = String(raw || '').trim()
   if (!href) return null
+  if (/^weport-evidence:[a-f0-9]{64}$/.test(href)) return href
   if (/^https?:\/\//i.test(href)) return href
   if (/^mailto:/i.test(href)) return href
   if (href.startsWith('//')) return `https:${href}`
@@ -43,6 +44,7 @@ marked.use({
 })
 
 export default function AiMarkdown({ text, className }: { text: string; className?: string }) {
+  const [sourceError, setSourceError] = useState('')
   const html = useMemo(() => {
     try {
       return marked.parse(text || '')
@@ -50,5 +52,19 @@ export default function AiMarkdown({ text, className }: { text: string; classNam
       return escapeHtml(String(text || ''))
     }
   }, [text])
-  return <div className={`ai-md${className ? ` ${className}` : ''}`} dangerouslySetInnerHTML={{ __html: html }} />
+  return <>
+    <div className={`ai-md${className ? ` ${className}` : ''}`} onClick={async event => {
+      const link = (event.target as HTMLElement).closest('a')
+      const href = link?.getAttribute('href') || ''
+      if (!href.startsWith('weport-evidence:')) return
+      event.preventDefault()
+      setSourceError('')
+      try {
+        const result = await window.electronAPI.ai.resolveEvidence(href.slice('weport-evidence:'.length))
+        if (!result.success || !result.reference) { setSourceError(result.error || 'Source unavailable.'); return }
+        window.dispatchEvent(new CustomEvent('weport:verified-evidence', { detail: result.reference }))
+      } catch (error) { setSourceError(String(error instanceof Error ? error.message : error)) }
+    }} dangerouslySetInnerHTML={{ __html: html }} />
+    {sourceError ? <p role="status" className="ai-error">{sourceError}</p> : null}
+  </>
 }

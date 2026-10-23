@@ -939,6 +939,7 @@ export default function SnsPage() {
           )}
         </div>
         <div className="sns-topbar-actions">
+          <div className="sns-protection-control">
           <button
             type="button"
             className={`chip ${antiDelete === 'installed' ? 'chip-active' : ''}`}
@@ -952,6 +953,8 @@ export default function SnsPage() {
             {antiDeleteBusy ? <Loader2 size={13} className="spin" /> : antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
             {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : antiDelete === 'uninstalled' ? '防删除已关闭' : '防删除状态未知 · 重试'}
           </button>
+          </div>
+          <div className="sns-feed-actions" role="group" aria-label="动态操作">
           <button type="button" className="chip" onClick={() => setExportOpen(true)}>
             <Download size={13} />
             导出
@@ -960,6 +963,7 @@ export default function SnsPage() {
             <RefreshCw size={13} className={refreshSpin ? 'spin' : ''} />
             刷新
           </button>
+          </div>
         </div>
       </div>
 

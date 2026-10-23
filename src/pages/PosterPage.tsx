@@ -557,24 +557,7 @@ export default function PosterPage({ sourceRequest }: { sourceRequest?: ReaderPo
                     </h2>
                     <p className="v09-sub">选内容 → 定样式 → 检查隐私 → 导出 PNG。预览与导出保持一致，自动打码默认开启。</p>
                 </div>
-                <div className="annual-actions">
-                    <label className="poster-scale-control" title="导出像素倍率：3× 最清晰，文件也最大">
-                        <span>PNG</span>
-                        <select value={exportScale} disabled={exporting} onChange={(event) => setExportScale(Number(event.target.value) as 1 | 2 | 3)} aria-label="导出像素倍率">
-                            <option value={1}>1×</option>
-                            <option value={2}>2×</option>
-                            <option value={3}>3×</option>
-                        </select>
-                    </label>
-                    <button type="button" className="ghost-btn" disabled={exportDisabled} onClick={() => void runExport('clipboard')} title={dragging ? '拖动中不能抓图' : '复制第 1 页到剪贴板'}>
-                        <ClipboardCopy size={14} />
-                        复制到剪贴板
-                    </button>
-                    <button type="button" className="ghost-btn" disabled={exportDisabled} onClick={() => void runExport('save')} title={dragging ? '拖动中不能抓图' : `按 ${exportScale}× 倍率导出 PNG`}>
-                        {exporting ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
-                        {exporting ? '导出中…' : `导出 PNG（${exportScale}×）`}
-                    </button>
-                </div>
+
             </div>
 
             {status ? (
@@ -828,6 +811,22 @@ export default function PosterPage({ sourceRequest }: { sourceRequest?: ReaderPo
                                         </button>
                                     </div>
                                     {qrNote ? <div className="poster-redaction-note" role="status">{qrNote}</div> : null}
+                                </div>
+
+                                <div className="poster-export-options">
+                                    <label className="poster-scale-control" title="导出像素倍率：3× 最清晰，文件也最大">
+                                        <span>PNG</span>
+                                        <select value={exportScale} disabled={exporting} onChange={(event) => setExportScale(Number(event.target.value) as 1 | 2 | 3)} aria-label="导出像素倍率">
+                                            <option value={1}>1×</option>
+                                            <option value={2}>2×</option>
+                                            <option value={3}>3×</option>
+                                        </select>
+                                    </label>
+                                    <button type="button" className="ghost-btn" disabled={exportDisabled} onClick={() => void runExport('clipboard')} title={dragging ? '拖动中不能抓图' : '复制第 1 页到剪贴板'}>
+                                        <ClipboardCopy size={14} />
+                                        复制到剪贴板
+                                    </button>
+
                                 </div>
 
                                 <div className="poster-final-check" data-safe={options.redaction.enabled}>

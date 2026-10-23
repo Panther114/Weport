@@ -1232,3 +1232,16 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
+
+// Keep conversation actions, message navigation and selection commands in coherent rows.
+.reader-toolbar-tools { align-items: flex-start; gap: 8px 16px; }
+.reader-tool-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.reader-navigation-tools { flex: 1 1 360px; }
+.reader-navigation-tools .reader-search { flex: 1 1 180px; min-width: 150px; }
+.reader-selection-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.reader-selection-tools .ghost-btn:first-child { color: var(--accent); }
+.reader-tool { background: transparent; }
+.reader-tool:not(:disabled):hover { background: var(--accent-softer); }
+.reader-tool:active:not(:disabled) { transform: scale(.97); }
+.reader-tool:focus-visible, .reader-search-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .reader-tool:active:not(:disabled) { transform: none; } }

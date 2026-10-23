@@ -2,6 +2,16 @@ import { describe, expect, it, vi } from 'vitest'
 import { anthropicMessages, getProviderAdapter, googleContents, openAIChatBody, openAIChatMessages, selectAdapter, usageFromAnthropic, usageFromOpenAI } from './providerAdapters'
 import type { ProviderProfile, ProviderStreamInput } from './providerTypes'
 
+describe('local-only model transport', () => {
+  it.each(['openai', 'openai-compatible', 'anthropic', 'google'] as const)('rejects redirects on the %s wire', async protocol => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('fixture rejection', { status: 400 }))
+    try {
+      await expect(getProviderAdapter(profile({ protocol, baseUrl: 'http://127.0.0.1:11434/v1' })).stream(streamInput({ localOnly: true, profile: profile({ protocol, baseUrl: 'http://127.0.0.1:11434/v1' }) }))).rejects.toThrow('fixture rejection')
+      expect(fetch.mock.calls[0][1]?.redirect).toBe('error')
+    } finally { fetch.mockRestore() }
+  })
+})
+
 function profile(patch: Partial<ProviderProfile> = {}): ProviderProfile {
   return {
     id: 'profile-1',

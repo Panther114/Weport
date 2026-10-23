@@ -50,6 +50,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .webot-message {
@@ -317,6 +318,7 @@
   }
 
   input[type='text'],
+  input[type='number'],
   input:not([type]),
   textarea,
   select {
@@ -340,6 +342,32 @@
       color: var(--text-faint);
     }
   }
+}
+
+.webot-budget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+
+  legend {
+    padding: 0 5px;
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  p { margin: 0; line-height: 1.6; }
+}
+
+.webot-budget-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
 }
 
 // 引用选择器不再需要锚点容器：它渲染在 body 下的浮层里（components/ui/FloatingLayer）。
@@ -579,8 +607,7 @@
     h4 {
       font-size: 13.5px;
       font-weight: 600;
-      // 标题占满剩余宽度，把时间和 ✕ 顶到右边（✕ 必须是"这张卡片"的右上角，
-      // 而不是跟在标题后面）
+      // Keep the title flexible while the timestamp remains readable.
       flex: 1;
       min-width: 0;
     }
@@ -628,27 +655,6 @@
   }
 }
 
-// Both minimize and confirmed trash actions stay visible.
-.webot-note-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-
-  &:hover {
-    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
-    color: var(--danger);
-  }
-}
-
 .webot-note-time,
 .webot-note-task {
   font-size: 11px;
@@ -657,10 +663,9 @@
 
 .webot-note-actions {
   display: flex;
-  gap: 4px;
+  gap: 12px;
   margin-left: auto;
 }
 
 .webot-note-body[hidden] { display: none; }
-.webot-note h4 .ghost-btn { padding: 0; border: 0; background: none; box-shadow: none; text-align: left; color: inherit; font: inherit; }
-.webot-note-close:not(.webot-danger):hover { color: var(--text); border-color: var(--border); }
+.webot-note h4 .ghost-btn { min-height: 28px; padding: 2px 0; border: 0; background: none; box-shadow: none; text-align: left; color: inherit; font: inherit; }

@@ -38,7 +38,7 @@ interface TaskRow {
   label: string
   icon: typeof Download
   /** 点一下跳过去的标签页 id（与 App 的 Tab 类型一致） */
-  tab: 'connect' | 'export' | 'weclone' | 'settings' | 'search' | 'diagnostics'
+  tab: 'connect' | 'export' | 'archive' | 'weclone' | 'settings' | 'search' | 'diagnostics' | 'storage'
   cancellable: boolean
   /**
    * 这个任务没有百分比可报（备份接口只有成功/失败）。
@@ -50,6 +50,8 @@ interface TaskRow {
 const ROWS: TaskRow[] = [
   { key: LIVE_TASK.connect, label: '连接微信', icon: PlugZap, tab: 'connect', cancellable: false },
   { key: LIVE_TASK.export, label: '导出聊天记录', icon: Download, tab: 'export', cancellable: true },
+  { key: LIVE_TASK.archive, label: '创建离线归档', icon: DatabaseBackup, tab: 'archive', cancellable: true },
+  { key: LIVE_TASK.storageRelocation, label: '验证存储迁移副本', icon: DatabaseBackup, tab: 'storage', cancellable: false, indeterminate: true },
   { key: LIVE_TASK.updateDownload, label: '下载更新', icon: Download, tab: 'settings', cancellable: false },
   { key: LIVE_TASK.wecloneGenerate, label: '生成 WeClone', icon: Fingerprint, tab: 'weclone', cancellable: true },
   { key: LIVE_TASK.backup, label: '数据备份', icon: DatabaseBackup, tab: 'settings', cancellable: false, indeterminate: true },
@@ -75,6 +77,8 @@ interface Props {
 export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const connect = useLiveTask(LIVE_TASK.connect)
   const exportTask = useLiveTask(LIVE_TASK.export)
+  const archiveTask = useLiveTask(LIVE_TASK.archive)
+  const storageRelocation = useLiveTask(LIVE_TASK.storageRelocation)
   const updateDownload = useLiveTask(LIVE_TASK.updateDownload)
   const clone = useLiveTask(LIVE_TASK.wecloneGenerate)
   const backup = useLiveTask(LIVE_TASK.backup)
@@ -83,6 +87,8 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const states: Record<string, LiveTaskState> = {
     [LIVE_TASK.connect]: connect,
     [LIVE_TASK.export]: exportTask,
+    [LIVE_TASK.archive]: archiveTask,
+    [LIVE_TASK.storageRelocation]: storageRelocation,
     [LIVE_TASK.updateDownload]: updateDownload,
     [LIVE_TASK.wecloneGenerate]: clone,
     [LIVE_TASK.backup]: backup,

@@ -25,6 +25,8 @@ import { chatService } from './chatService'
 import { snsService } from './snsService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { getWeBotService } from './weBotRegistry'
+import { assertDataScope, dataAccessService, restrictSearchResult, type DataAccessGrant } from './dataAccessService'
+import { retrieveIndexedMessages } from './searchRetrieval'
 
 class HttpService {
   private server: http.Server | null = null
@@ -33,16 +35,53 @@ class HttpService {
   private running = false
 
   private parseNumber(value: unknown, fallback: number, min = 0, max = Number.MAX_SAFE_INTEGER): number {
+    if (value === null || value === undefined || value === '') return fallback
     const n = Number(value)
     if (!Number.isFinite(n)) return fallback
     return Math.max(min, Math.min(max, Math.floor(n)))
   }
 
-  private checkAuth(req: http.IncomingMessage): boolean {
+  private authorize(req: http.IncomingMessage): 'administrator' | DataAccessGrant | undefined {
     const token = String(this.configService.get('httpApiToken') || '').trim()
-    if (!token) return true
     const header = String(req.headers.authorization || '')
-    return header === `Bearer ${token}`
+    if (token && header === `Bearer ${token}`) return 'administrator'
+    if (!token && !header) return 'administrator' // Explicit legacy local API without authentication.
+    if (!/^Bearer [a-f0-9]{64}$/.test(header)) return undefined
+    try { return dataAccessService.authenticate(header.slice(7)) } catch { return undefined }
+  }
+
+  /** Scoped clients have only these three read surfaces; all other routes stay administrator-only. */
+  private async handleScoped(req: http.IncomingMessage, url: URL, path: string, grant: DataAccessGrant): Promise<unknown> {
+    const check = (sessionId?: string) => {
+      if (!dataAccessService.active(grant.id)) throw Error('Client grant expired or was revoked.')
+      assertDataScope(grant, String(this.configService.getMyWxidCleaned?.() || this.configService.get('myWxid') || '').trim(), sessionId)
+    }
+    check()
+    if (req.method !== 'GET') throw Error('Scoped clients support GET requests only.')
+    if (path === '/sessions') {
+      const result = await chatService.getSessions(); check()
+      return { ...result, sessions: result.sessions?.filter(row => grant.sessionIds.includes(row.username))
+        .map(row => ({ username: row.username, displayName: row.displayName, type: row.type })),
+        scope: { accountId: grant.accountId, from: grant.from, to: grant.to } }
+    }
+    if (path === '/messages') {
+      const sessionId = String(url.searchParams.get('session') || '').trim(); check(sessionId)
+      const result = await chatService.getMessages(sessionId, this.parseNumber(url.searchParams.get('offset'), 0),
+        this.parseNumber(url.searchParams.get('limit'), 50, 1, 500), grant.from, grant.to)
+      check(sessionId)
+      return { ...result, messages: result.messages?.filter(row => row.createTime * 1000 >= grant.from && row.createTime * 1000 <= grant.to),
+        scope: { accountId: grant.accountId, from: grant.from, to: grant.to } }
+    }
+    if (path === '/search') {
+      const sessionId = String(url.searchParams.get('session') || '').trim() || undefined; check(sessionId)
+      const keyword = String(url.searchParams.get('keyword') || '').trim()
+      if (!keyword) throw Error('A search keyword is required.')
+      const result = await retrieveIndexedMessages({ text: keyword, limit: this.parseNumber(url.searchParams.get('limit'), 50, 1, 200),
+        scope: { sessionIds: sessionId ? [sessionId] : grant.sessionIds, from: grant.from, to: grant.to } })
+      check(sessionId)
+      return { ...restrictSearchResult(result, grant), success: !result.error }
+    }
+    throw Error('This API route is outside the authorized scope.')
   }
 
   private sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
@@ -60,12 +99,18 @@ class HttpService {
     }
     const path = url.pathname.replace(/^\/api/, '') || '/'
 
-    if (!this.checkAuth(req)) {
+    const principal = this.authorize(req)
+    if (!principal) {
       this.sendJson(res, 401, { success: false, error: '未授权：需要正确的 Bearer Token' })
       return
     }
 
     const send = (payload: unknown, status = 200) => this.sendJson(res, status, payload)
+    if (principal !== 'administrator') {
+      try { send(await this.handleScoped(req, url, path, principal)) }
+      catch (error) { send({ success: false, error: error instanceof Error ? error.message : String(error) }, 403) }
+      return
+    }
 
     try {
       switch (path) {

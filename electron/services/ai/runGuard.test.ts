@@ -28,5 +28,7 @@ describe('long productive AI runs', () => {
     expect(guard.shouldFinalize(1, toolRoundLimit(2), 1000, 128000)).toBe(false)
     expect(guard.shouldFinalize(2, toolRoundLimit(2), 1000, 128000)).toBe(true)
     expect(guard.shouldFinalize(1, Infinity, 102400, 128000)).toBe(true)
+    expect(toolRoundLimit(48, false)).toBe(48)
+    expect(guard.shouldFinalize(48, toolRoundLimit(48, false), 1000, 128000)).toBe(true)
   })
 })

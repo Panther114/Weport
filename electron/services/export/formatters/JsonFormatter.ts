@@ -9,6 +9,7 @@ import { formatTimestamp } from '../../export/utils/timestamp';
 import { parallelLimit } from '../../export/utils/parallelLimit';
 import {  MediaExportItem  } from '../../export/types';
 import { wcdbService } from "../../wcdbService";
+import { normalizeSourceDbPath } from '../sourceMessageIdentity'
 
 export class JsonFormatter {
   constructor(private exportService: any) {}
@@ -97,6 +98,7 @@ export class JsonFormatter {
       const mediaMessages = this.exportService.collectMediaMessagesForExport(collected.rows, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
+      const mediaOutcomes = new Map<string, unknown>()
       const mediaDirCache = new Set<string>()
       const beforeMediaDoneFiles = this.exportService.getMediaDoneFilesCount()
 
@@ -106,7 +108,7 @@ export class JsonFormatter {
           exportVideos: options.exportVideos
         }, control)
         const voiceMediaMessages = mediaMessages.filter((msg: any) => msg.localType === 34)
-        if (voiceMediaMessages.length > 0) {
+        if (voiceMediaMessages.length > 0 && !options.archiveMode) {
           await this.exportService.preloadVoiceWavCache(sessionId, voiceMediaMessages, control)
         }
 
@@ -129,6 +131,8 @@ export class JsonFormatter {
           const mediaKey = this.exportService.getMediaCacheKey(msg)
           if (!mediaCache.has(mediaKey)) {
             const mediaItem = await this.exportService.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+              archiveMode: options.archiveMode,
+              mediaPolicy: options.mediaPolicy,
               exportImages: options.exportImages,
               exportVoices: options.exportVoices,
               exportVideos: options.exportVideos,
@@ -142,6 +146,7 @@ export class JsonFormatter {
               control
             })
             mediaCache.set(mediaKey, mediaItem)
+            if (options.archiveMode) mediaOutcomes.set(mediaKey, msg._archiveMediaOutcome)
           }
           mediaExported++
           if (mediaExported % 5 === 0 || mediaExported === mediaMessages.length) {
@@ -342,6 +347,14 @@ export class JsonFormatter {
         if (platformMessageId) msgObj.platformMessageId = platformMessageId
         const sourceIdentityHash = this.exportService.getSourceMessageIdentityHash(msg)
         if (sourceIdentityHash) msgObj.sourceIdentityHash = sourceIdentityHash
+        if (options.archiveMode) {
+          msgObj.sourceIdentity = { db: normalizeSourceDbPath(msg._db_path), table: String(msg._table_name || ''), localId: String(msg.localIdRaw ?? msg.localId) }
+          msgObj.rawContent = String(msg.rawContent || msg.content || '')
+          if (msg.voiceTranscript) msgObj.voiceTranscript = msg.voiceTranscript
+          if ([3, 34, 43, 47].includes(Number(msg.localType)) || this.exportService.isFileAppMessage(msg)) {
+            msgObj.mediaOutcome = (options.exportMedia ? mediaOutcomes.get(mediaKey) : undefined) || { kind: ({ 3: 'image', 34: 'voice', 43: 'video', 47: 'emoji' } as Record<number, string>)[Number(msg.localType)] || 'file', status: options.exportMedia ? 'unsupported' : 'not-requested' }
+          }
+        }
 
         const replyToMessageId = this.exportService.getExportReplyToMessageId(msg.content)
         if (replyToMessageId) msgObj.replyToMessageId = replyToMessageId

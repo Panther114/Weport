@@ -2383,6 +2383,8 @@
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .annual-year-row {
   display: flex;
@@ -2667,7 +2669,20 @@
 }
 .sns-topbar-actions {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+.sns-feed-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+}
+.sns-protection-control {
+  min-width: 0;
+  .chip { max-width: 100%; }
 }
 .sns-topbar-actions .chip {
   padding: 6px 12px;

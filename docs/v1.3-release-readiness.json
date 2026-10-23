@@ -1,0 +1,194 @@
+{
+  "checkedAt": "2026-10-23T11:42:41.327Z",
+  "version": "1.3.0",
+  "scope": "Local Windows candidate with app-wide UI refinements; refined build not installed or published (preceding V1.3 installed with authorization)",
+  "artifact": {
+    "asarSha256": "9d5ab187af6e7863699eb7fa2553d58e21c9827e81fec19e076901602a4fb1f1",
+    "compiledFilesVerified": 198,
+    "installer": "release/Weport-1.3.0-Setup.exe",
+    "installerBytes": 97909023,
+    "installerSha256": "7acfdab161c5a41cc560f0d6558101fb3091d71475765b5d91db3180e7a98921",
+    "installerSha512": "qXiFu4lR6t33LeSOtkXNo3BycKnfBTq2K5vub2jHxS0xboo112Bst4+lDNWgXlCFuBst2XEOcWwYSeEOa6MbsQ==",
+    "latestYmlSha256": "b004122b8fb9004832782d3e7c6fe3ab4225b6024dc6971026199a959917edab"
+  },
+  "checks": {
+    "typecheck": true,
+    "unit": {
+      "files": 151,
+      "passed": 2005,
+      "skipped": 8,
+      "log": ".ui-probe/controls-unit.log"
+    },
+    "nodeFixtures": 36,
+    "packagedNativeInitialization": true,
+    "cliProtocol": 8,
+    "mcpHttp": 23,
+    "tuiFrameChecks": 32,
+    "rendered": {
+      "captures": 47,
+      "controlStates": 58,
+      "readmeImages": 16,
+      "checks": [
+        "light-theme-rendered",
+        "reader-export-930px-no-horizontal-overflow",
+        "explicit-semantic-chat-prefix-preset",
+        "stale-preview-discarded-after-scope-change",
+        "ai-secondary-controls-in-inspector",
+        "ai-scope-state-survives-inspector-navigation",
+        "settings-controls-reviewed-by-category",
+        "webot-editor-and-sns-export-controls",
+        "weclone-management-action-hierarchy",
+        "all-major-control-surfaces-at-930px",
+        "all-major-control-surfaces-in-light-theme"
+      ],
+      "errors": 0,
+      "unhandledFixtureChannels": 0
+    },
+    "performance": {
+      "measurementMode": "hidden-offscreen-compositor",
+      "baselineCompared": false,
+      "start": {
+        "railMs": 659,
+        "fcpMs": 420,
+        "domContentLoadedMs": 134,
+        "heapMb": 9.5,
+        "rssMb": 530
+      },
+      "idleCpu": 0.07,
+      "glassP95Ms": 18
+    }
+  },
+  "realExport": {
+    "receiptSha256": "1e4d0aa1ea08e54983b4e74ef70a15e600418c30d62ae2ef49cd9fcef4dde2b2",
+    "packageAsarAtRun": "8a93a4fa1bc280fa3c3bef84312890e15b9380a726429d53ce14f63e49a9c11f",
+    "currentExportInputs": {
+      "files": 73,
+      "digest": "5121f7e2db4549c7f9c3456abd18907afca77e8532f5aa479bac638e6f89b6b7",
+      "current": true
+    },
+    "nativeAssetsUnchanged": true,
+    "sessions": 206,
+    "messages": 126611,
+    "jsonAndTxtMatch": true,
+    "media": [
+      {
+        "tier": "thumbnail",
+        "opened": true,
+        "exportedExactBytes": true
+      },
+      {
+        "tier": "display",
+        "opened": false,
+        "failureKind": "image-key-unavailable"
+      },
+      {
+        "tier": "original",
+        "opened": true,
+        "exportedExactBytes": true
+      }
+    ],
+    "privateCleanup": true,
+    "realProfileUnchanged": true,
+    "qualification": "Full history exercise used the preceding ASAR and separately bundled production services. All export inputs and native assets still match; final packaged host initialization passed. Later ASAR changes include hidden-probe rendering, privacy wording and app-wide UI placement/refinement; the real-history export inputs and native assets still match."
+  },
+  "ai": [
+    {
+      "file": ".ui-probe/v13-groundedness.json",
+      "sha256": "4cf69859752731e81fbc26427517a292698d3da8f92e163b56343dca1d438828",
+      "inputs": {
+        "files": 57,
+        "digest": "43fcf7c570053af15482d3a549dbbb47421f4e96c45368e4e809de8b155d3a80",
+        "current": true
+      },
+      "cases": 6,
+      "providerRequests": 6,
+      "provider": {
+        "provider": "deepseek",
+        "model": "deepseek-flash"
+      },
+      "strategy": [
+        {
+          "language": "en",
+          "passed": true
+        },
+        {
+          "language": "zh",
+          "passed": true
+        },
+        {
+          "language": "en",
+          "passed": true
+        },
+        {
+          "language": "zh",
+          "passed": true
+        },
+        {
+          "language": "en",
+          "passed": true
+        },
+        {
+          "language": "zh",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "file": ".ui-probe/v13-general-analysis.json",
+      "sha256": "565cd7bf6c8446714e50c79e3c2043a22ef4d613c2722da536023bdd139e024d",
+      "inputs": {
+        "files": 57,
+        "digest": "136e9d04ea5fd1a7059a4a3d5b0e1658389c72bcb272e485a19511569afd2dea",
+        "current": true
+      },
+      "cases": 2,
+      "providerRequests": 18,
+      "provider": {
+        "provider": "deepseek",
+        "model": "deepseek-flash"
+      },
+      "strategy": [
+        {
+          "language": "en",
+          "passed": true,
+          "historyReads": 6,
+          "contiguousReads": 2,
+          "keywordSearches": 1,
+          "sessions": 4
+        },
+        {
+          "language": "zh",
+          "passed": true,
+          "historyReads": 8,
+          "contiguousReads": 4,
+          "keywordSearches": 5,
+          "sessions": 4
+        }
+      ]
+    }
+  ],
+  "semantic": {
+    "fixtureSha256": "4a71fd9d61ec198aa08696c09623ac771376e2df92902c094e203c08e71fb8a2",
+    "baselineRecallAt5": 0.6666666666666666,
+    "chatPrefixRecallAt5": 0.7916666666666666,
+    "queries": 24,
+    "remainingMisses": 5,
+    "defaultEnabled": false
+  },
+  "github": {
+    "issues": 34,
+    "open": 7,
+    "latest": "v1.2.2",
+    "modified": false
+  },
+  "limits": [
+    "No genuine second-account acceptance",
+    "Other WeChat versions and native Mac/Linux runtime coverage deferred",
+    "Production no-login scan gate remains disabled",
+    "Bounded image checks do not establish exhaustive media/key/codec recovery",
+    "Semantic quality measured on a tiny synthetic fixture",
+    "Hidden compositor smoke has no historical performance baseline",
+    "Local installer was built but not installed or published"
+  ],
+  "ok": true
+}

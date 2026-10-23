@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
+import { createServer } from 'http'
 import { SearchIndexService, type SearchIndexDocSource, type SearchIndexServiceOptions } from './searchIndexService'
 
 /**
@@ -180,6 +181,122 @@ beforeEach(() => {
 })
 
 describe('persisted index status after restart', () => {
+  it('keeps default lexical queries independent of optional model configuration', async () => {
+    const semantic = vi.fn(() => { throw new Error('must not touch local model configuration') })
+    const service = createService({ semantic })
+    await service.build()
+    const result = await service.retrieve({ text: 'contract' })
+    expect(result.hits.length).toBeGreaterThan(0)
+    expect(result.coverage?.engine).toBe('bigram-inverted-v1')
+    expect(semantic).not.toHaveBeenCalled()
+  })
+
+  it('uses opt-in scoped hybrid recall with exact physical IDs and explicit lexical fallback', async () => {
+    tables = [{ dbFile: 'message_0.db', table: tableNameFor('wxid_alice'), rows: [
+      row(1, 'paid the cab fare', 'wxid_alice'), row(2, 'unrelated private neighbor', 'wxid_other'),
+    ] }, { dbFile: 'message_0.db', table: tableNameFor('wxid_group'), rows: [row(3, 'denied chat', 'wxid_alice')] }]
+    const inputs: string[][] = []
+    const server = createServer(async (req, res) => {
+      let body = ''; for await (const chunk of req) body += chunk
+      const request = JSON.parse(body); inputs.push(request.input)
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ model: request.model, revision: request.revision,
+        data: request.input.map((_: string, index: number) => ({ index, embedding: [1, 0] })) }))
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const config = { enabled: true, endpoint: `http://127.0.0.1:${(server.address() as any).port}/v1/embeddings`, model: 'fixture', revision: 'fixed' }
+    try {
+      const service = createService({ semantic: () => config })
+      await service.build()
+      const scope = { sessionIds: ['wxid_alice'], senders: ['wxid_alice'], from: 1700000001, to: 1700000001 }
+      await service.buildSemantic({ scope })
+      expect(inputs.flat()).toEqual(['paid the cab fare'])
+      const result = await service.retrieve({ text: 'taxi reimbursement', scope, retrieval: 'hybrid' })
+      expect(result.hits.map(hit => hit.localId)).toEqual(['1'])
+      expect(result.coverage?.semantic).toMatchObject({ eligibleWindows: 1, scoredWindows: 1 })
+      expect(result.hits[0].semanticContext).toEqual([{ db: 'message_0.db', table: tableNameFor('wxid_alice'), localId: '1', idKind: 'local', contentHash: createHash('sha256').update('paid the cab fare').digest('hex') }])
+      config.enabled = false
+      const fallback = await service.retrieve({ text: 'cab', scope, retrieval: 'hybrid' })
+      expect(fallback.hits.map(hit => hit.localId)).toEqual(['1'])
+      expect(fallback.coverage?.engine).toBe('bigram-inverted-v1')
+      expect(fallback.coverage?.semantic?.error).toBeTruthy()
+      expect(fallback.coverage?.complete).toBe(false)
+      expect((await service.retrieve({ text: 'cab', retrieval: 'semantic' })).error).toBeTruthy()
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
+  })
+
+  it('reconciles old edits, low-ID history backfill and row deletion without force', async () => {
+    const service = createService()
+    const alice = tables[0]
+    alice.rows = alice.rows.filter(row => row.local_id !== 2)
+    await service.build()
+    alice.rows[0].message_content = 'older edit distinct-token'
+    alice.rows.push(row(2, 'historical backfill distinct-token', 'wxid_alice'))
+    alice.rows.sort((a, b) => a.local_id - b.local_id)
+    alice.rows = alice.rows.filter(row => row.local_id !== 3)
+    const rebuilt = await service.build()
+    expect(rebuilt.docs).toBe(4900)
+    const result = await service.retrieve({ text: 'distinct-token' })
+    expect(result.hits.map(hit => hit.localId).sort()).toEqual(['1', '2'])
+    expect(result.coverage).toMatchObject({ engine: 'bigram-inverted-v1', complete: true, stale: false, indexedDocuments: 4900 })
+    expect(result.coverage!.candidateDocuments).toBeLessThan(10)
+    expect(result.hits.every(hit => hit.accountId === 'wxid_test' && /^[a-f0-9]{64}$/.test(hit.contentHash!))).toBe(true)
+    const all = await service.query({ text: '今天的安排 3', scope: { sessionIds: ['wxid_alice'], from: 1700000003, to: 1700000003 } })
+    expect(all.total).toBe(0)
+  })
+
+  it('does not remove unseen documents when a reconciliation table read fails', async () => {
+    await createService().build()
+    const source = createSource()
+    const flaky = createService({ source: { ...source, execQuery: async (path, sql) => {
+      if (sql.includes('SELECT *') && path.endsWith('message_0.db')) throw new Error('fixture read failure')
+      return source.execQuery(path, sql)
+    } } })
+    const result = await flaky.build()
+    expect(result.docs).toBe(4901)
+    const hits = await flaky.query({ text: '今天的安排' })
+    expect(hits.total).toBeGreaterThan(0)
+    expect(hits.coverage?.complete).toBe(false)
+    expect(hits.coverage?.failedTables.length).toBeGreaterThan(0)
+  })
+
+  it('rebuilds a damaged derived index while keeping the committed source shards', async () => {
+    await createService().build()
+    const sidecar = readdirSync(corpusDir()).find(name => name.startsWith('lexical-v1-'))!
+    expect(sidecar).toBeTruthy()
+    const shards = shardFiles().sort()
+    writeFileSync(join(corpusDir(), sidecar), Buffer.from('damaged derived bytes'))
+    const result = await createService().query({ text: '项目复盘' })
+    expect(result.hits.length).toBeGreaterThan(0)
+    expect(result.coverage?.engine).toBe('bigram-inverted-v1')
+    expect(shardFiles().sort()).toEqual(shards)
+    expect(statSync(join(corpusDir(), sidecar)).size).toBeGreaterThan(100)
+  })
+
+  it('removes messages whose old content becomes empty on a reconciliation pass', async () => {
+    tables = [{ dbFile: 'message_0.db', table: tableNameFor('wxid_alice'), rows: [row(1, 'before-empty', 'wxid_alice')] }]
+    const service = createService()
+    await service.build()
+    tables[0].rows[0].message_content = ''
+    await service.build()
+    expect((await service.query({ text: 'before-empty' })).total).toBe(0)
+    expect(service.status().docs).toBe(0)
+  })
+
+  it('enforces the fallback scan deadline even when no documents match the query', async () => {
+    const service = createService({ queryBudgetMs: 200 })
+    await service.build({ force: true })
+    let clock = 1_700_000_000_000
+    const time = vi.spyOn(Date, 'now').mockImplementation(() => { clock += 100; return clock })
+    try {
+      const result = await service.query({ text: '龘' })
+      expect(result.total).toBe(0)
+      expect(result.truncated).toBe(true)
+    } finally {
+      time.mockRestore()
+    }
+  })
+
   it('reports an existing index ready before any query without rebuilding source data', async () => {
     await createService().build({ force: true })
     const restarted = createService({ source: {
@@ -388,7 +505,7 @@ describe('构建与增量', () => {
     const alice = tables.find((table) => table.table === tableNameFor('wxid_alice'))!
     alice.rows.push(row(3001, '项目复盘会议 增量新增的那条', 'wxid_alice'))
 
-    const second = await createService().build()
+    const second = await createService().build({ mode: 'append' })
     expect(second.indexed).toBe(1)
     expect(second.docs).toBe(4902)
     expect(second.scanned).toBeLessThan(100) // 只扫到 tail 与新增那一行
@@ -656,6 +773,10 @@ describe('查询', () => {
       limit: 50,
     })
     expect(bySeconds.hits.map((hit) => hit.localIdNumber)).toEqual(byTime.hits.map((hit) => hit.localIdNumber))
+    const boundary = byTime.hits[0].ts
+    const fractional = await service.query({ text: '项目复盘会议', scope: { from: boundary + 1, to: boundary + 1000 }, limit: 50 })
+    expect(fractional.hits.every(hit => hit.ts >= boundary + 1 && hit.ts <= boundary + 1000)).toBe(true)
+    expect(fractional.hits.some(hit => hit.ts === boundary)).toBe(false)
   })
 
   it('分页：游标翻页不重复、不丢结果；篡改的游标当作第一页', async () => {

@@ -1,295 +1,159 @@
-![](docs/media/weport-feature-poster.png)
+# Weport
 
-[V1.2 verification and remaining work](docs/v1.2-verification.md) · [GitHub fix list](docs/v1.2-fix-list.md)
+在电脑上阅读、搜索、导出和分析自己的微信聊天记录。
 
-## 📸 截图
+**下载使用：** [前往下载页面](https://github.com/Panther114/Weport/releases)。当前版本为 **v1.3.0**，本次提供 Windows 安装包。下方截图全部使用虚构数据。
 
-V1.2 保留 Electron，增加本地聊天阅读、跨会话搜索、分享海报与诊断。数据库连接使用已有密钥、手动粘贴或登录捕获；Windows 免登录密钥扫描移至 V1.3 验收。
-
-V1.2 尚未公开发布。Windows 原生初始化、导出、阅读定位、语音转写、朋友圈与界面修复的当前证据和限制见[验收状态](docs/v1.2-verification.md)。Windows 免登录扫描及只读镜像连接不在 V1.2 发布范围内，后续验收计划见 [V1.3](docs/v1.3-plan.md)。
-
-**聊天阅读与搜索** —— 在本机浏览聊天，搜索命中精确定位到原消息；注解按账号保存：
-
-![聊天阅读](docs/screenshots/reader.png)
-![跨会话搜索](docs/screenshots/search.png)
-
-**分享海报与诊断** —— 按内容、样式、隐私检查制作 PNG；在设置中检查数据库、任务和运行状态：
-
-![海报](docs/screenshots/poster.png)
-![诊断](docs/screenshots/diagnostics.png)
-
-**连接微信** —— 三步走：数据目录 → 选择账号 → 解密密钥，每一步都带完成状态：
-
-![连接微信页](docs/screenshots/connect.png)
-
-**导出数据** —— 格式、目录结构、媒体与高级选项一目了然：
-
-![导出数据页](docs/screenshots/export.png)
-
-**朋友圈** —— 全量时间线，左侧按发布者 / 关键词 / 日期筛选，媒体本地解密预览：
-
-![朋友圈](docs/screenshots/sns.png)
-
-**分析** —— 全局分析、群聊分析、年度报告、双人报告四个入口：
-
-![分析入口](docs/screenshots/analytics-hub.png)
-
-**全局分析** —— 消息类型构成、时段分布、联系排行榜与统计排除名单：
-
-![全局分析](docs/screenshots/analytics-global.png)
-
-**群聊分析** —— 成员列表、消息排行、活跃热力图、活跃时段与媒体构成：
-
-![群聊分析](docs/screenshots/analytics-group.png)
-
-**年度报告** —— 一年到头，聊了谁最多、哪一天最热闹：
-
-![年度报告](docs/screenshots/annual-report.png)
-
-**WeportAI** —— 对聊天记录提问：工具调用、思考过程与 Markdown 结论，右侧为长期记忆、笔记与缓存命中率：
-
-![WeportAI 分析助手](docs/screenshots/ai.png)
-
-**WeBot** —— 定时任务：自然语言描述要做什么、`@` 引用群聊或联系人、按天/周/月/间隔排期：
-
-![WeBot 定时任务](docs/screenshots/webot.png)
-
-**WeBot 笔记** —— 任务产出的简短结论存档，可标未读、置顶，也可通过 HTTP API / MCP 读取：
-
-![WeBot 笔记](docs/screenshots/webot-notes.png)
-
-**消息通知** —— 状态条说明当前是否在监听，下面是弹窗外观与接收范围：
-
-![消息通知](docs/screenshots/notifications.png)
-
-**防撤回** —— 安装状态、可搜索的会话列表与批量操作：
-
-![防撤回](docs/screenshots/antirecall.png)
-
-**人格克隆** —— 从聊天记录提炼人格档案，可公开或链接分享：
-
-![人格克隆](docs/screenshots/weclone.png)
-
-**设置** —— 启动、外观、AI、连接器、数据、接口、诊断与问题反馈；支持调色板、固定紧凑导航和带图片的 GitHub 报告草稿：
-
-![设置](docs/screenshots/settings.png)
-
-![设置 · 外观](docs/screenshots/settings-appearance.png)
-
-**通知弹窗** —— 液态玻璃风格，置顶显示、不抢焦点：
-
-![通知弹窗](docs/screenshots/popup.png)
-
-## 🚀 快速开始
+## 开始使用
 
 ### Windows
 
-1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-Setup.exe`）并安装
-2. 打开 Weport，在「连接微信」页选择数据目录（自动检测 `xwechat_files` 文件夹）
-3. 按页面提示**获取解密密钥**（见下方说明）
-4. 切到「导出数据」页，选择格式与输出文件夹，点击**导出全部聊天记录**
+1. 在下载页面选择 `Weport-版本号-Setup.exe`，安装并打开。
+2. 进入「连接微信」，选择微信数据目录和账号。通常可以自动找到 `xwechat_files` 文件夹。
+3. 已有数据库密钥时，粘贴密钥并连接；没有密钥时，按下方步骤获取。
+4. 连接成功后，可以阅读和搜索聊天。需要备份时，进入「导出数据」，选择会话、时间范围、格式和保存位置。
 
-### macOS 15+（Apple Silicon）
+### 获取数据库密钥
 
-> v1.2.1 仅发布 Windows 版，不提供 macOS 安装包，也不计划补发此版本的 Mac 包。Mac 密钥获取仍需真实 Apple Silicon 设备验证；以下说明适用于既有 Mac 版本。
+微信聊天数据库经过加密，Weport 需要密钥才能读取。密钥不是微信登录密码。
 
-1. 从 [Releases](https://github.com/Panther114/Weport/releases) 下载最新安装包（`Weport-*-arm64.dmg`），打开后将 Weport 拖入「应用程序」
-2. 首次打开：右键 Weport →「打开」（未经 Apple 公证的 ad-hoc 签名应用首次需要手动放行）
-3. 打开 Weport，在「连接微信」页选择数据目录（自动检测 `~/Library/Containers/com.tencent.xinWeChat/...`）
-4. 按页面提示**获取解密密钥**（见下方说明）
-5. 切到「导出数据」页，选择格式与输出文件夹，点击**导出全部聊天记录**
+1. 在电脑版微信的「设置 → 通用」中关闭「自动登录」，然后退出当前登录。
+2. 在 Weport 点击「提取密钥」，等待「已准备就绪」。
+3. 用手机扫码登录电脑版微信。Weport 会在登录时捕获密钥并填入。
+4. 点击「确认密钥并连接」。已有密钥也可以直接粘贴，无需重复提取。
 
-> macOS 自动获取密钥依赖系统调试权限（`task_for_pid`）。Weport 会先请求管理员授权并尝试现有 helper；若微信受 SIP/AMFI 保护，授权本身仍不能绕过系统限制，界面会在实际附加失败后给出排障步骤。不要仅为使用 Weport 长期关闭 SIP。数据库读取、导出与通知在密钥已配置后不需要调试权限。
+提取失败时，先打开「连接诊断」，按检查结果处理。不要反复删除数据目录或配置。
 
-### 🔑 获取解密密钥（重要）
+## 可以做什么
 
-已有密钥可直接粘贴并连接；需要重新获取数据库密钥时，使用登录捕获：
+### 阅读聊天、生成回复草稿
 
-1. 打开微信电脑版，在「设置 → 通用」里**关闭「自动登录」**，然后退出当前登录
-2. 点击 Weport 中的**「提取密钥」**，等待出现「已准备就绪」提示
-3. 用手机**扫码登录微信** —— 登录成功的瞬间密钥会自动捕获并填入
-4. 也可以手动粘贴已有的 64 位十六进制密钥，然后点击「确认密钥并连接」
+按会话和时间阅读聊天，跳转到原消息。V1.3 支持选择聊天片段，再选择 WeClone 人格生成回复草稿；生成前可以检查选中的内容，生成后自行编辑、复制。
 
-## 🤖 WeportAI · 聊天历史分析助手
+![聊天阅读](docs/screenshots/reader.png)
+![回复草稿](docs/screenshots/reader-draft.png)
 
-WeportAI 把你自定义的模型与 17 个本地检索工具组合成一个**可推理的 agent**——不用写查询，直接用自然语言问自己的聊天记录（v0.8 起）。WeportAI会将发现自动写入长期记忆。
+### 搜索聊天
 
-**可以这样问：**
+跨会话搜索，按账号、会话、日期、发送者或消息类型缩小范围，再打开原消息。V1.3 还可配置本机语义模型，查找意思相近的内容；这是可选的实验功能，需要另行配置。
 
-| 提问 | 它能做什么 |
-|------|-----------|
-| 「分析我是什么人」 | 全量扫描所有会话与时间窗，输出人格画像 |
-| 「8月8日发生了什么」 | 跨会话重建当天的完整时间线 |
-| 「我和小明的聊天关系怎么样」 | 互动模式、话题分布与关系状态分析 |
-| 「搜一下我们什么时候提过露营」 | 全文关键词搜索，带回原文上下文 |
+![搜索](docs/screenshots/search.png)
 
-**工作方式：**
+### 导出聊天
 
-- **工具链**：会话列表、时间线重建、全文搜索、群成员、会话统计、联系人资料、关系筛选等 17 个工具，AI 按需调用并展示每一步的思考过程与调用结果
-- **长期记忆**：所有发现持续写入导出目录下的 `WeportAI/memory/`（跨对话共享）；单次分析的草稿笔记存于 `notes/`
-- **成本透明**：每次运行显示上下文窗口占用、DeepSeek 提示词缓存命中率与费用估算
-- **完全可控**：模型、API 地址、最大步数、快捷动作、可用工具都可在设置中调整
+选择会话、时间范围、文件格式和是否包含图片、视频、语音等附件。V1.3 的时间范围精确到秒：
 
-> 🔐 隐私：分析时仅把**聊天文本**发送给你配置的模型 API。密钥、文件、头像、原始数据库均不会离开本机；调试日志对密钥等敏感内容做脱敏处理。
+- **仅原图**：只导出能够确认的原图；原图不可用时会说明原因。
+- **尽可能导出**：根据本机已有文件，使用可用的图片版本，可能包含缩略图。
+- **增量导出**：检查已有导出和附件，补充新增内容或重建损坏文件。
 
-## 🖼️ 朋友圈（v0.9）
+微信本机没有保存的附件，Weport 无法凭空恢复。
 
-微信的本地 `sns.db` 存着你的全部朋友圈，Weport 直接读它，离线就能翻任意历史动态：
+![导出](docs/screenshots/export.png)
 
-- **全量浏览** — 分页时间线，按发布者、关键词、日期快速筛选；点击发布者可查看其全部动态
-- **媒体解密** — 图片/实况照片/视频经本地解密后直接预览（内存缓存 + 磁盘缓存加速，无需重新下载）
-- **导出** — JSON / HTML / ARKME JSON / Markdown 四种格式，支持时间范围与媒体文件（图片/实况/视频）选择，后台进度可取消
-- **防删除** — 一键安装朋友圈删除拦截触发器（WCDB 触发器），被删除的动态在本地仍然可见；也可单独删除某条记录
-- **旧缓存迁移** — 自动检测旧版朋友圈媒体缓存目录并迁移，加速历史媒体加载
+| 格式 | 适合用途 |
+|---|---|
+| TXT | 直接阅读纯文本 |
+| HTML | 用浏览器阅读，包含可用附件 |
+| JSON | 保留消息详情，便于后续处理 |
+| XLSX | 用电子表格整理和统计 |
+| Markdown | 在笔记工具中阅读和整理 |
+| ChatLab / JSONL / Arkme JSON | 导入支持这些格式的软件 |
+| WeClone CSV | 准备 WeClone 语料 |
+| PostgreSQL SQL | 导入数据库 |
 
-## 📊 微信数据分析（v0.9）
+### 归档与离线阅读（V1.3）
 
-「分析」模块把所有非 AI 的统计放进一个入口，两块选择：**全局分析**（自己所有私聊的整体画像）与**群聊分析**（单个群的成员与活跃度）：
+将聊天保存为可携带的归档，离线阅读并添加书签、注解。支持定时归档和中断恢复。保留计划只会清理已被新归档完整覆盖、且通过校验的旧归档。
 
-- **全局分析** — 全部私聊会话的总体统计（消息类型构成、24 小时/星期/月度分布、我的每日消息）、联系排行榜 Top 20、统计排除名单（公众号/广告账号一键排除并即时重算），以及**年度报告**（年度核心好友、每月聊得最多的人、全年 7×24 活跃热力图、深夜王者、互相奔赴、响应速度、高频短语、朋友圈年度统计等，可导出报告图片）
-- **群聊分析** — 选择任意群聊：成员列表（群主/好友标识、消息占比条）、消息排行 Top 20、24 小时活跃时段、媒体构成；点击成员查看画像（统计卡片、活跃时段、高频短语、常用表情、消息记录分页）并可导出 CSV
+![归档库](docs/screenshots/archive.png)
 
-所有统计基于本地数据实时计算，支持缓存清理与强制刷新，不依赖任何外部服务。
+### 用 AI 分析聊天
 
-## 📦 导出格式
+在设置中配置模型后，可以让 WeportAI 整理事件、分析关系或查找线索。广泛分析优先连续阅读不同时间段的聊天，再针对具体线索搜索。
 
-| 格式 | 说明 |
-|------|------|
-| TXT / JSON | 纯文本与完整消息详情，通用格式 |
-| HTML | 网页格式，浏览器直接打开浏览 |
-| XLSX | 电子表格，适合统计分析 |
-| Markdown | 支持文本、图片与链接，适合 AI 场景 |
-| ChatLab / JSONL / Arkme JSON | 标准聊天格式，可导入其他软件 |
-| WeClone CSV | WeClone 兼容字段 |
-| PostgreSQL SQL | 数据库脚本，便于导入数据库 |
+V1.3 增加原文来源、已阅读范围说明和按账号分开的记忆。可以检查引用、纠正记忆，并限制允许读取的数据。AI 可能出错，也可能只读到部分历史，请结合原文判断。
 
-支持按会话分目录 / 按类型分目录两种组织方式，媒体文件（图片、视频、语音、表情包、文件）可选导出。
+![WeportAI](docs/screenshots/ai.png)
 
-## 🛠️ 开发
+### 定时整理与笔记
 
-环境要求：Node 20+。Windows / macOS 均可开发与构建（构建需在对应平台上进行）。
+WeBot 按设定时间分析聊天并保存笔记。V1.3 支持只整理新增消息、避免重复保存，以及限制运行用量。远程模型可能按使用量收费，费用以模型服务商为准。
 
-```sh
-npm install                       # 安装依赖（Windows 额外同步运行时 DLL）
-npm run dev                       # 开发模式（vite + electron）
-npm run typecheck                 # 渲染进程 + 主进程类型检查
-npm run build                     # Windows: 构建 NSIS 安装包（release/ 目录）
-npm run build:flash               # Windows: 构建 WeportFlash 便携导出工具
-npm run build:dir                 # 免安装构建（迭代更快）
-npm run build:mac                 # macOS: 构建 DMG + ZIP（arm64）
-powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # Windows UI 冒烟测试（自动截屏 + 内容断言）
-powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1 -PublishToDocs   # 生成并发布 README 截图
-```
+![WeBot](docs/screenshots/webot.png)
+![笔记](docs/screenshots/webot-notes.png)
 
-macOS 打包前需为密钥 helper 恢复可执行位（Git 不跟踪 exec bit）：
+### 浏览朋友圈与查看统计
 
-```sh
-chmod +x resources/key/macos/universal/xkey_helper \
-  resources/key/macos/universal/xkey_helper_macos \
-  resources/key/macos/universal/image_scan_helper \
-  resources/key/macos/universal/libwx_key.dylib \
-  resources/welive/macos/arm64/welive
-```
+浏览微信已缓存在本机的朋友圈，按发布者、关键词或日期筛选，并导出内容。可读范围取决于本机保存的记录，不代表完整朋友圈历史。
 
-`capture-ui.ps1` 使用私有配置与演示数据，离屏截取全部页面、设置分类及通知弹窗，并逐一断言非空。`node scripts/verify-v12-ui.mjs` 另行验证打包后的 XLSX/WASM、搜索定位、阅读器、海报导出及后台任务提示。检查包括：
+统计页面提供私聊、群聊和年度统计，例如聊天频率、活跃时段和消息类型。统计在本机计算，不需要 AI。
 
-- 横向不溢出、左侧栏标签不隐藏（1000/1080/1440 DIP 视口）；
-- WeBot 任务卡片与编辑器的实测宽度/列数（防止「列表被挤成 300px、标题每行一两个字」这类回归）；
-- WeportAI 三栏在窄窗口下中间一栏不低于 300px；
-- **屏幕上不出现 `undefined` / `NaN` / `[object Object]`** —— 页面渲染成功、非空白，却把 `undefined` 写给用户看，是断言抓不到的一类缺陷。
+![朋友圈](docs/screenshots/sns.png)
+![统计](docs/screenshots/analytics.png)
 
-该模式**全部使用脱敏演示数据**（假路径、假密钥、演示账号），不会把真实个人信息截进 README；`-PublishToDocs` 会把截图发布到 `docs/screenshots/`。调试 AI 页面时可用 `WEPORT_TRACE_AI=1` 把渲染进程实际发出的 `ai:*` 调用打到 stdout。
+### WeClone 人格对话
 
-v0.9 的端到端 QA 使用 `WEPORT_V09_DUMP=1` 模式：以脱敏演示数据驱动真实页面渲染（朋友圈 / 分析入口 / 全局分析 / 年度报告 / 群聊分析 / 成员画像），逐页断言关键 DOM 节点与渲染进程 console 错误数，结果写入 `WEPORT_V09_DUMP_OUT` 目录（JSON + 日志），失败退出码非 0：
+从聊天中整理人格资料，并使用自己配置的模型进行对话。资料保存在本机；调用远程模型时，相关资料和聊天样本会发送给该模型服务。没有公开发布或链接分享服务。
 
-```sh
-$env:WEPORT_V09_DUMP = '1'
-$env:WEPORT_V09_DUMP_OUT = "$env:TEMP\v09-dump"
-.\release\win-unpacked\Weport.exe   # 全部断言通过时退出码 0
-```
+![WeClone](docs/screenshots/weclone.png)
 
-### 架构速览
+### 通知与防撤回
 
-| 目录 | 说明 |
-|------|------|
-| `electron/appMain.ts` | 主进程：窗口、托盘、IPC、更新、导出、通知管线、朋友圈/分析/年度报告 IPC、QA 截图与 v0.9 转储模式 |
-| `electron/services/` | 引擎（WeFlow WCDB 栈的 TypeScript 移植）：会话、WCDB、密钥、导出、推送、朋友圈（`snsService.ts`）、全局分析（`analyticsService.ts`）、群聊分析（`groupAnalyticsService.ts`）、年度报告（`annualReportService.ts` + `annualReportWorker.ts`）、媒体解密（`isaac64.ts` / `wasmService.ts`） |
-| `electron/services/weportAiService.ts` | WeportAI：agent 循环、工具调用、记忆/笔记工作区、脱敏日志 |
-| `electron/wcdbHost.ts` | WCDB 宿主子进程（`WeFlow[.exe] --wcdb-host` 硬链接运行，IPC 通信） |
-| `electron/windows/notificationWindow.ts` | 通知弹窗（Windows 液态玻璃 / 跨平台 Chromium 桌面流回退） |
-| `src/pages/SnsPage.tsx` + `src/components/sns/` | 朋友圈界面：时间线、媒体网格、预览灯箱、作者动态、导出对话框 |
-| `src/pages/analytics/` | 分析界面：入口选择（全局/群聊）、全局统计、群聊分析、年度报告（ECharts 双主题：浅蓝 / 黑白） |
-| `src/` | React 渲染层（主界面 + 通知窗口 + WeportAI 面板） |
-| `resources/` | 各平台原生库：`wcdb` / `key` / `wedecrypt` / `welive` / `runtime`（win32 + macos） |
+按会话设置消息通知，查看防撤回功能的安装状态。朋友圈防删除可保留拦截生效后在本机留存的内容，不能恢复所有过去已删除的数据。通知截图仅展示设置界面。
 
-## 🧭 行为约定
+![通知设置](docs/screenshots/notifications.png)
+![防撤回](docs/screenshots/antirecall.png)
 
-- 关闭窗口默认**最小化到托盘**，从托盘菜单「退出」才会完全退出（macOS 上关闭窗口同样隐藏，可从 Dock 菜单栏图标唤出）
-- 开机自启支持**静默启动**（`--background`，不显示主窗口；Windows 写 Run 键，macOS 注册 LoginItem）
-- 通知弹窗为独立置顶窗口，不抢占焦点；点击弹窗可唤出主窗口，右键当前卡片可立即关闭
-- 消息通知页可配置弹窗位置、显示时长和入场/退场动效
-- 数据目录与密钥保存在本机，重启后自动恢复
+### 设置、存储与诊断
 
-## 🩺 故障排查与错误码
+调整外观、配置模型、管理数据访问范围。V1.3 支持检查存储占用、校验后迁移文件，以及分步骤排查连接问题。
 
-遇到问题时，界面上的错误提示会带上**具体原因**，而不只给一个数字。常见错误码含义：
+![设置](docs/screenshots/settings.png)
+![连接诊断](docs/screenshots/diagnostics.png)
+![存储管理](docs/screenshots/settings-storage.png)
 
-| 错误码 | 含义 | 处理办法 |
-|--------|------|----------|
-| `-3001` | 未找到数据库目录（`db_storage`） | 确认数据目录指向**账号目录的父目录**；macOS 上 4.x 的正确位置是 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files` |
-| `-3002` | 未找到 `session.db` | 账号目录选错了，或微信尚未在该账号下产生过会话 |
-| `-3003` / `-3004` | 数据库句柄无效 / 恢复连接失败 | 重启微信后重试；确认微信正在运行 |
-| `-2301` | WCDB 动态库加载失败（安装不完整） | 重新安装；日志会列出实际搜索过的全部候选路径 |
-| `-2302` / `-2303` | WCDB 初始化异常 / 初始化失败 | 见日志中 `[bootstrap]` 行 |
-| `-1006` | OEM 动态库的文件名/签名自检未通过 | 不要重命名安装目录中的 `WeFlow(.exe)` |
-| `-3999` | 微信数据服务初始化失败，且未能解析出具体错误码 | 提示里会附带原始原因；请连同 `wcdb.log` 一起反馈 |
-| `-3998` | 连接过程中出现未预期异常 | 同上，提示里会附带异常原文 |
+## 数据与隐私
 
-macOS 上「获取解密密钥」失败时的提示是**能力问题**而非配置问题：微信 4.x 是加固签名
-且沙盒化的进程，`task_for_pid` 会被系统直接拒绝（即使以 root 运行也一样）。Weport
-不会修改微信本身，因此这条路径在未经处理的微信上通常无法成功；图片导出可以改用
-`kvcomm` 推导的图片密钥（无需附加进程）。
+- 阅读、普通搜索、导出和统计使用本机数据，不需要把聊天发给 AI。
+- **使用远程 AI 时，相关聊天、工具读取结果、记忆、人格资料，以及启用图片理解时选中的图片，可能发送给你配置的模型服务。** WeportAI、WeBot 和 WeClone 都应按这一点判断。
+- 需要仅在本机处理时，配置本机模型并启用相应的数据限制。
+- 数据目录、密钥和模型配置保存在本机。若保存位置属于云同步文件夹，文件仍可能被你的同步软件上传。
+- 应用不收集安装统计或远程错误报告。诊断结果保存在本机，由你决定是否提交。
+- 反馈问题时优先复制诊断页的脱敏摘要。详细诊断包可能包含敏感信息，请检查后再分享，不要公开密钥或私人聊天。
 
-macOS 首次打开提示「已损坏」时：
+## 常见问题
 
-```bash
-xattr -cr /Applications/Weport.app
-```
+**关闭窗口后为什么还在运行？** 关闭窗口默认收起到托盘。需要完全退出时，在托盘菜单选择「退出」。开机启动和通知可以在设置中调整。
 
-macOS 15+ 还会要求一次「系统设置 → 隐私与安全性 → 仍要打开」的放行。
+**找不到账号或无法连接？** 确认选择的是正确的微信数据目录和账号，再运行「连接诊断」。错误码、目录、密钥和数据库读取会分别检查。不要重命名安装目录中的 `WeFlow.exe`。
 
-## 🖥️ 平台支持
+**为什么缺少图片或历史记录？** Weport 只能读取本机已有、且能够解密的数据。有些附件已过期、未下载或只剩缩略图；搜索和 AI 也可能受到索引覆盖范围的限制。
 
-| 平台 | 架构 | 安装包 | 备注 |
-|------|------|--------|------|
-| Windows | x64 | `.exe`（NSIS） | 微信 4.x，完整功能 |
-| macOS | Apple Silicon（arm64） | `.dmg` / `.zip` | macOS 15+、微信 4.x；自动获取密钥受 SIP/AMFI 调试权限限制 |
-| Linux | x64 | `.deb` / `.AppImage` / `.tar.gz` | glibc 2.34+、GLIBCXX 3.4.30+、OpenSSL 3、微信 4.x；密钥提取可能需要 sudo |
+**AI 为什么没看完全部记录？** 历史可能很长，模型有上下文和使用量限制。查看回答中的来源与覆盖说明；必要时缩小会话或日期范围继续分析。
 
-> Intel Mac（x64）暂不支持。macOS 安装包为 ad-hoc 签名，首次打开需右键 →「打开」放行（或系统设置 → 隐私与安全性 → 仍要打开）；自动更新和静默登录启动可能受签名/系统版本限制。Linux 自动更新采用手动下载新版本；Ubuntu/Debian 推荐安装 `.deb`，安装时会配置 Chromium 沙箱辅助程序，不需要关闭沙箱或修改系统安全策略。
+## 平台与安装包
 
-Ubuntu/Debian 安装：`sudo apt install ./Weport-1.2.1-amd64.deb`，然后从应用菜单启动 Weport；依赖会自动安装 ffmpeg，用于 WXGF 图片转换。便携包需自行安装 ffmpeg，无可用转换器时仅能使用同图缩略图。`.AppImage` 为便携兼容包，其运行时会关闭 Chromium 沙箱；`.tar.gz` 不会自动配置系统沙箱辅助程序，在限制用户命名空间的系统上可能无法直接启动。不要通过关闭系统安全策略解决启动问题。
+| 平台 | 安装包 | 说明 |
+|---|---|---|
+| Windows x64 | `Setup.exe` | 当前公开版提供 Windows 安装包；本轮 V1.3 在 Windows 验证 |
+| macOS Apple Silicon | `.dmg` / `.zip` | 请检查对应版本是否提供附件；本轮未完成原生运行验证 |
+| Linux x64 | `.deb` / `.AppImage` / `.tar.gz` | 请检查对应版本是否提供附件；本轮未完成原生运行验证 |
 
-Linux 会检测 `~/xwechat_files`、`~/.xwechat/xwechat_files`、`~/.local/share/xwechat_files` 和 Flatpak 数据目录。若密钥提取失败，请检查 `libcrypto.so.3`、`libcurl.so.4`、helper 可执行权限及 `/proc/sys/kernel/yama/ptrace_scope`；Weport 只报告限制，不会自动降低系统安全策略。AppImage 无法启动时可安装发行版的 FUSE 2 兼容包，或使用 `.tar.gz` 安装包。
+Intel Mac 暂不支持。其他微信版本与第二账号的兼容性尚未在本轮全面验证。
 
-## 🔐 隐私
+[macOS 与 Linux 安装说明](docs/platform-installation.md) · [更新记录](RELEASE_NOTES.md)
 
-所有处理都在本机完成。应用只读取你指定的微信数据目录，并在提取密钥时挂接微信进程捕获登录密钥；不会向任何服务器上传聊天内容。
+## 开发与项目资料
 
-WeportAI 例外：为了让模型回答问题，会把相关**聊天文本**发送到你在设置中配置的模型 API（默认 DeepSeek）。此功能默认关闭，只有当你填写 API 密钥后才启用；密钥仅保存在本机配置中，日志与截图均做脱敏处理。
+基于 Electron、React、TypeScript 和原生 WCDB 引擎。
 
-Weport v1.2.1 不收集安装统计或远程错误报告。诊断结果保存在本机，问题反馈由你自行提交。
+[开发与测试](docs/development.md) · [V1.3 当前进展](docs/v1.3-current-summary.md) · [V1.3 验证结果](docs/v1.3-release-readiness.md) · [问题审计](docs/v1.3-issue-audit.md)
 
-## ⚠️ 免责声明
+## 使用范围与许可证
 
-本工具仅供**个人学习与本地数据归档**使用。使用前请遵守微信《软件许可及服务协议》及所在国家/地区的法律法规，且仅允许处理**本人账号**的本地数据。因不当使用（包括但不限于侵犯他人隐私、违反微信服务条款、用于商业用途等）造成的一切后果由使用者自行承担，作者不对任何滥用行为负责。
+仅处理本人账号的数据，尊重聊天参与者的隐私，并遵守适用规则。请在清理或迁移重要数据前保留备份。
 
-## 📄 License
+Weport 基于 **cc / hicccc77 与 WeFlow 贡献者**的作品修改。整体按 [CC BY-NC-SA 4.0](LICENSE) 分发：保留署名、仅限非商业用途，发布修改版时采用相同或兼容的许可证。第三方组件适用各自许可证。
 
-Weport 是基于 **cc / hicccc77 与 WeFlow 贡献者**作品修改而来的适配项目。
-原始项目与主要改动范围见 [NOTICE.md](./NOTICE.md)，第三方组件及原生资源来源见
-[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)。
-
-本项目整体依据 [CC BY-NC-SA 4.0](./LICENSE) 分发：必须保留署名，仅限非商业用途，
-发布修改版本时必须采用相同或兼容的许可证。单独标明的第三方组件继续适用其各自许可证。
-详细的来源核查记录见 [docs/LEGAL-PROVENANCE.md](./docs/LEGAL-PROVENANCE.md)。
+[项目来源与改动](NOTICE.md) · [第三方声明](THIRD-PARTY-NOTICES.md) · [来源核查记录](docs/LEGAL-PROVENANCE.md)

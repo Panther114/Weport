@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 
 const require = createRequire(import.meta.url)
 const { _electron: electron } = require('playwright-core')
@@ -43,6 +44,7 @@ const root = resolve(process.cwd())
 const syntheticFrameProfile = { width: 502, height: 226, margin: 40, intervalMs: 33, costMs: 11 }
 const useInstalled = process.argv.includes('--installed')
 const skipPopup = process.argv.includes('--skip-popup')
+const hiddenOnly = !process.argv.includes('--native-offscreen')
 const updateBaseline = process.argv.includes('--update')
 const skipBaseline = process.argv.includes('--no-baseline')
 const argValue = (name) => {
@@ -78,9 +80,16 @@ if (!skipPopup) console.log('  弹窗和主窗口都固定在屏幕外；通知�
  * 这既隔离了已运行的 Weport，也确保基准只使用应用的默认配置和合成通知。
  */
 const userDataDir = mkdtempSync(join(tmpdir(), 'weport-bench-'))
+writeFileSync(join(userDataDir, 'Weport-config.json'), JSON.stringify({
+  mcpEnabled: false, httpApiEnabled: false, launchAtStartup: false, messagePushEnabled: false,
+  cachePath: join(userDataDir, 'media'), exportPath: join(userDataDir, 'exports'),
+}))
 
 const target = label || (customExe ? 'custom' : useInstalled ? 'installed' : 'dev')
 const result = { at: new Date().toISOString(), target, exe, start: null, pages: [], popup: null, glass: null, micro: null, processes: null, stability: null }
+result.measurementMode = hiddenOnly ? 'hidden-offscreen-compositor' : 'offscreen-native-window'
+const packagedAsar = join(dirname(exe), 'resources', 'app.asar')
+if (existsSync(packagedAsar)) result.appAsarSha256 = createHash('sha256').update(readFileSync(packagedAsar)).digest('hex')
 const failures = []
 
 const launchedAt = Date.now()
@@ -88,14 +97,17 @@ const launchArgs = [`--user-data-dir=${userDataDir}`]
 // Start every build hidden. Arm the BrowserWindow guard before emitting activate,
 // so even binaries without a reliable app-side probe flag cannot show/focus on-screen.
 launchArgs.push('--background')
+const launchEnv = { ...process.env }
+delete launchEnv.ELECTRON_RUN_AS_NODE
 const app = await electron.launch({
   executablePath: exe,
   args: launchArgs,
   cwd: root,
   env: {
-    ...process.env,
+    ...launchEnv,
     WEPORT_DISCARD_DELAY_MS: '600000',
     WEPORT_PROBE_OFFSCREEN: '1',
+    WEPORT_PROBE_HIDDEN_ONLY: hiddenOnly ? '1' : '0',
     WEPORT_NATIVE_GLASS: '0',
     // Old builds use this to suppress the GDI fast path. The v1.2 probe flag has its own
     // synthetic BGRA source, so neither build reads desktopCapturer, GDI, or WGC.
@@ -109,7 +121,7 @@ const app = await electron.launch({
  * construction and show paths off-screen and unfocused, and blocks desktop capture so the
  * glass probe uses synthetic frames only.
  */
-const offscreenGuard = await app.evaluate(async ({ BrowserWindow, desktopCapturer }) => {
+const offscreenGuard = await app.evaluate(async ({ BrowserWindow, desktopCapturer }, hiddenOnly) => {
   const prototype = BrowserWindow.prototype
   if (!prototype.__weportProbeOffscreen) {
     const nativeSetPosition = prototype.setPosition
@@ -146,7 +158,7 @@ const offscreenGuard = await app.evaluate(async ({ BrowserWindow, desktopCapture
             writable: true,
             value: function (...args) {
               forceOffscreen(this)
-              return nativeShowInactive.apply(this, args)
+              return hiddenOnly ? undefined : nativeShowInactive.apply(this, args)
             },
           },
           show: {
@@ -154,7 +166,7 @@ const offscreenGuard = await app.evaluate(async ({ BrowserWindow, desktopCapture
             writable: true,
             value: function (...args) {
               forceOffscreen(this)
-              return nativeShowInactive.apply(this, args)
+              return hiddenOnly ? undefined : nativeShowInactive.apply(this, args)
             },
           },
           maximize: {
@@ -192,14 +204,14 @@ const offscreenGuard = await app.evaluate(async ({ BrowserWindow, desktopCapture
       showInactive: {
         configurable: true,
         writable: true,
-        value: function (...args) { armWindow(this); return nativeShowInactive.apply(this, args) },
+        value: function (...args) { armWindow(this); return hiddenOnly ? undefined : nativeShowInactive.apply(this, args) },
       },
     }
     for (const [key, descriptor] of Object.entries(descriptors)) Object.defineProperty(prototype, key, descriptor)
     Object.defineProperty(prototype, 'show', {
       configurable: true,
       writable: true,
-      value: function (...args) { armWindow(this); return nativeShowInactive.apply(this, args) },
+      value: function (...args) { armWindow(this); return hiddenOnly ? undefined : nativeShowInactive.apply(this, args) },
     })
     Object.defineProperty(prototype, 'maximize', {
       configurable: true,
@@ -238,7 +250,7 @@ const offscreenGuard = await app.evaluate(async ({ BrowserWindow, desktopCapture
     focused: Boolean(BrowserWindow.getFocusedWindow()),
     windows,
   }
-}).catch(async (error) => {
+}, hiddenOnly).catch(async (error) => {
   await app.close().catch(() => {})
   try { rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5 }) } catch { /* noop */ }
   throw error
@@ -940,6 +952,7 @@ const pick = (obj, path) => path.split('.').reduce((acc, key) => (acc == null ? 
 
 const baselinePath = join(root, '.ui-probe', 'bench-baseline.json')
 const previous = !skipBaseline && existsSync(baselinePath) ? JSON.parse(readFileSync(baselinePath, 'utf8')) : null
+result.baselineCompared = Boolean(previous)
 
 // 每页单独比：页面的增删不该让整份基线失效
 if (previous?.pages) {
@@ -996,5 +1009,5 @@ if (failures.length) {
   for (const f of failures) console.log(`   · ${f}`)
   process.exitCode = 1
 } else {
-  console.log('\n✓ 全部指标在容差内')
+  console.log(previous ? '\n✓ 全部指标在容差内' : '\n✓ 本次采样与功能检查通过；没有历史基线，未进行性能回归比较')
 }

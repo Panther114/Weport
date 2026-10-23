@@ -17,6 +17,7 @@ import {
   parsePastedKeyInput,
   readPage1,
   saltHexOf,
+  verifyHexKeyForPage,
   verifyPageKey,
 } from './wcdbPageKey'
 import crypto from 'crypto'
@@ -293,5 +294,15 @@ describe('指纹与库枚举', () => {
     writeFileSync(join(dbStorage, 'c.db'), Buffer.alloc(10))
     expect(() => listDbFiles(dbStorage, { maxFiles: 2 })).toThrow(DbFileEnumerationLimitError)
     expect(listDbFiles(dbStorage, { maxFiles: 2, allowTruncated: true })).toHaveLength(2)
+  })
+})
+
+
+describe('authenticated key representation', () => {
+  it('distinguishes raw bytes, hex-decoded passphrase and UTF-8 text using HMAC', () => {
+    expect(verifyHexKeyForPage(buildPage(KAT.macRawHex), KAT.keyHex)?.representation).toBe('raw')
+    expect(verifyHexKeyForPage(buildPageForPassphraseText(Buffer.from(KAT.keyHex, 'hex')), KAT.keyHex)?.representation).toBe('decoded-hex-passphrase')
+    expect(verifyHexKeyForPage(buildPageForPassphraseText(Buffer.from(KAT.keyHex, 'utf8')), KAT.keyHex)?.representation).toBe('utf8-passphrase')
+    expect(verifyHexKeyForPage(buildPage(KAT.macRawHex), 'ff'.repeat(32))).toBeNull()
   })
 })

@@ -30,6 +30,7 @@ export interface ScopeParams {
 }
 
 export interface QueryParams {
+  retrieval?: 'lexical' | 'hybrid' | 'semantic'
   /** 全文关键词（不含任何前缀） */
   text: string
   scope: ScopeParams
@@ -154,7 +155,7 @@ export function parseQueryTokens(input: string): QueryToken[] {
       j += 1
     }
     const prefix = colon > i ? src.slice(i, colon) : ''
-    if (prefix && (PREFIXES[prefix] || DATE_PREFIXES[prefix])) {
+    if (prefix && (PREFIXES[prefix] || DATE_PREFIXES[prefix] || prefix === '检索' || prefix === 'retrieval')) {
       i = colon + 1
       const value = readValue()
       if (value) tokens.push({ kind: 'cond', prefix, value })
@@ -184,9 +185,15 @@ export function paramsFromQuery(input: string): QueryParams {
   let from = ''
   let to = ''
   const texts: string[] = []
+  let retrieval: QueryParams['retrieval']
   for (const token of parseQueryTokens(input)) {
     if (token.kind === 'text') {
       texts.push(token.value)
+      continue
+    }
+    if (token.prefix === '检索' || token.prefix === 'retrieval') {
+      if (token.value === 'hybrid' || token.value === 'semantic' || token.value === 'lexical') retrieval = token.value
+      else texts.push(`${token.prefix}:${token.value}`)
       continue
     }
     const dateField = DATE_PREFIXES[token.prefix]
@@ -221,6 +228,7 @@ export function paramsFromQuery(input: string): QueryParams {
     }
   }
   return {
+    ...(retrieval && retrieval !== 'lexical' ? { retrieval } : {}),
     text: texts.join(' ').trim(),
     scope: {
       tags: [...new Set(tags)],
@@ -236,6 +244,7 @@ export function paramsFromQuery(input: string): QueryParams {
 /** 结构化条件 -> 查询串。空条件不产出任何 token（不会留下 `标签:` 这种半截串）。 */
 export function queryFromParams(params: QueryParams): string {
   const out: string[] = []
+  if (params.retrieval && params.retrieval !== 'lexical') out.push(`检索:${params.retrieval}`)
   const { scope } = params
   for (const tag of scope.tags) out.push(`标签:${encodeValue(tag)}`)
   for (const id of scope.sessionIds) out.push(`会话:${encodeValue(id)}`)
@@ -336,6 +345,7 @@ export function formatRelative(ts: number | undefined | null, now = Date.now()):
 // ---------------------------------------------------------------------------
 
 export interface EngineQueryInput {
+  retrieval?: QueryParams['retrieval']
   text: string
   scope?: SearchScope
   limit?: number
@@ -370,6 +380,7 @@ export function buildEngineQuery(params: QueryParams, opts?: { limit?: number; c
   if (!hint && !hasScope) return null
 
   const out: EngineQueryInput = { text: hint }
+  if (params.retrieval && params.retrieval !== 'lexical') out.retrieval = params.retrieval
   if (hasScope) out.scope = scope
   if (opts?.limit) out.limit = opts.limit
   if (opts?.cursor) out.cursor = opts.cursor
@@ -405,6 +416,7 @@ export function paramsFromSavedSearch(query: string, scope?: SearchScope): Query
   const parsed = paramsFromQuery(query || '')
   const extra = scopeParamsFromSearchScope(scope)
   return {
+    ...(parsed.retrieval ? { retrieval: parsed.retrieval } : {}),
     text: parsed.text,
     scope: {
       tags: parsed.scope.tags,
@@ -487,6 +499,7 @@ export function normalizeResultPage(raw: unknown): SearchResultPage {
   const cursor = rawCursor === null || rawCursor === undefined || rawCursor === '' ? null : String(rawCursor)
   return {
     hits,
+    coverage: page.coverage && typeof page.coverage === 'object' ? page.coverage as SearchCoverage : undefined,
     total: Number.isFinite(Number(page.total)) ? Number(page.total) : hits.length,
     cursor,
     elapsedMs: Number.isFinite(Number(page.elapsedMs)) ? Number(page.elapsedMs) : 0,

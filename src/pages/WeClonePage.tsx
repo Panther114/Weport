@@ -400,9 +400,9 @@ export default function WeClonePage() {
         {section === 'manage' && (
           /* 原来这里是一个"服务器在线/离线"指示灯 —— 没有服务器了，改成说明
              这个功能的边界。用户最该知道的一件事就是"数据不出本机"。 */
-          <span className="weclone-server-chip online" title="人格档案与语料只保存在本机；对话也在本机完成">
+          <span className="weclone-server-chip online" title="人格档案与语料保存在本机；对话时相关材料交给你配置的模型服务">
             <span className="weclone-server-dot" />
-            数据仅存本机
+            档案保存在本机
           </span>
         )}
         <button type="button" className="chip" onClick={() => gotoSection('hub')}>
@@ -535,15 +535,6 @@ export default function WeClonePage() {
             随后就能像「你本人」一样与它对话。整个过程通常要几分钟到十几分钟。
           </span>
         </div>
-        <button
-          className="primary-btn weclone-generate-btn"
-          type="button"
-          disabled={generating}
-          onClick={() => void handleGenerate()}
-        >
-          {generating ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
-          {generating ? '生成中…' : '开始生成'}
-        </button>
       </div>
 
       {/*
@@ -584,6 +575,17 @@ export default function WeClonePage() {
             生成进度会一直显示，切换页面或最小化都不会中断；它跑在本机，随时可以取消。
           </span>
         </p>
+        <div className="weclone-generate-actions">
+          <button
+            className="primary-btn weclone-generate-btn"
+            type="button"
+            disabled={generating}
+            onClick={() => void handleGenerate()}
+          >
+            {generating ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
+            {generating ? '生成中…' : '开始生成'}
+          </button>
+        </div>
       </div>
 
       {(generating || panelOpen) && (

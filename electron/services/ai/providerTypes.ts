@@ -161,6 +161,8 @@ export interface ProviderProfileStore {
 }
 
 export interface ProviderStreamInput {
+  /** Reject HTTP redirects when a run is restricted to a loopback endpoint. */
+  localOnly?: boolean
   toolChoice?: 'auto' | 'none'
   profile: ProviderProfile
   messages: Array<Record<string, unknown>>

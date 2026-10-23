@@ -609,7 +609,8 @@ async function runBackdropStream() {
       console.log(`[NotificationWindow] backdrop loop handed over to the WGC stream after ${frameIndex} frame(s)`);
       break;
     }
-    const visible = notificationWindow.isVisible();
+    // Hidden compositor QA uses generated BGRA frames, never desktop capture.
+    const visible = notificationWindow.isVisible() || (probeOffscreen && process.env.WEPORT_PROBE_HIDDEN_ONLY === "1");
     if (!visible) {
       // 可见性只决定这一轮抓不抓帧，**不能**当退出条件：Windows 上 isVisible()
       // 会在某些时刻（刚显示、被遮挡判定、DWM 状态切换）返回 false，而弹窗其实
@@ -812,6 +813,7 @@ export function createNotificationWindow() {
     focusable: false, // 不抢占焦点
     icon: iconPath,
     webPreferences: {
+        offscreen: process.env.WEPORT_PROBE_HIDDEN_ONLY === "1" && process.env.WEPORT_PROBE_OFFSCREEN === "1",
       preload: join(__dirname, "preload.js"), // FIX: Use correct relative path (same dir in dist)
       contextIsolation: true,
       nodeIntegration: false,

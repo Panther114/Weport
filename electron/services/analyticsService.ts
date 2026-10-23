@@ -546,7 +546,7 @@ class AnalyticsService {
   }
 
   private getCacheFilePath(): string {
-    return join(app.getPath('documents'), 'WeFlow', 'analytics_cache.json')
+    return join(this.configService.get('cachePath'), 'analytics_cache.json')
   }
 
   private normalizeAggregateSessions(

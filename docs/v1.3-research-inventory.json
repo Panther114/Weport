@@ -1,0 +1,367 @@
+{
+  "date": "2026-10-20",
+  "timezone": "Asia/Taipei",
+  "weport_commit": "313c7a11dbf48cc9a53deadd22fa734d23ac047f",
+  "repositories": [
+    {
+      "repo": "ChatLab/ChatLab",
+      "sha": "0edc64d99a243eb2de5e32213082807bc419e942",
+      "files": 1797,
+      "archived": false,
+      "pushed_at": "2026-10-12T12:50:43Z",
+      "default_branch": "main",
+      "open_issues_count": 17,
+      "license": "AGPL-3.0"
+    },
+    {
+      "repo": "hicccc77/WeFlow",
+      "sha": "fb58afa9876c6b334887a33471dd5f0077eedec4",
+      "files": 554,
+      "archived": false,
+      "pushed_at": "2026-10-20T07:05:46Z",
+      "default_branch": "main",
+      "open_issues_count": 106,
+      "license": "NOASSERTION"
+    },
+    {
+      "repo": "ycccccccy/echotrace",
+      "sha": "9535da2dddb635306ec4f5ffb46e8589bfdc6adf",
+      "files": 11,
+      "archived": false,
+      "pushed_at": "2026-03-20T14:11:25Z",
+      "default_branch": "main",
+      "open_issues_count": 31,
+      "license": "MIT"
+    },
+    {
+      "repo": "sjzar/chatlog",
+      "sha": "7dad93d7b55a1f801bad3be16620083d2f998599",
+      "files": 1,
+      "archived": false,
+      "pushed_at": "2025-10-20T03:45:13Z",
+      "default_branch": "main",
+      "open_issues_count": 97,
+      "license": null
+    },
+    {
+      "repo": "xaoyaoo/PyWxDump",
+      "sha": "7f635fbacb2f346f2bbc9f94f6c956e2b07aad54",
+      "files": 3,
+      "archived": false,
+      "pushed_at": "2025-10-20T10:36:39Z",
+      "default_branch": "master",
+      "open_issues_count": 80,
+      "license": null
+    },
+    {
+      "repo": "LC044/WeChatMsg",
+      "sha": "5d6d094d8a77c9837d0b7479f79dc6a6c8c677b2",
+      "files": 5,
+      "archived": false,
+      "pushed_at": "2025-12-30T13:31:16Z",
+      "default_branch": "master",
+      "open_issues_count": 25,
+      "license": null
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "sha": "ae229ca894c0b80ad84664afcfdde523b5e87057",
+      "files": 702,
+      "archived": false,
+      "pushed_at": "2026-08-02T01:55:40Z",
+      "default_branch": "master",
+      "open_issues_count": 164,
+      "license": "AGPL-3.0"
+    },
+    {
+      "repo": "screenpipe/screenpipe",
+      "sha": "315ac4a99ef47729a820eab333dda8ca32e6fbe5",
+      "files": 5929,
+      "archived": false,
+      "pushed_at": "2026-10-20T03:39:36Z",
+      "default_branch": "main",
+      "open_issues_count": 47,
+      "license": "NOASSERTION"
+    },
+    {
+      "repo": "karakeep-app/karakeep",
+      "sha": "5c72fa95807df2d7dd96f0c9ac52a536b5bf3cfc",
+      "files": 2305,
+      "archived": false,
+      "pushed_at": "2026-10-19T21:05:52Z",
+      "default_branch": "main",
+      "open_issues_count": 704,
+      "license": "AGPL-3.0"
+    },
+    {
+      "repo": "open-webui/open-webui",
+      "sha": "91ea4e3421d1d8069f13d4a463fcb5986d94ea60",
+      "files": 5182,
+      "archived": false,
+      "pushed_at": "2026-10-19T14:13:24Z",
+      "default_branch": "main",
+      "open_issues_count": 345,
+      "license": "NOASSERTION"
+    },
+    {
+      "repo": "xunchahaha/alpha-releases",
+      "archived": false,
+      "pushed_at": "2026-10-20T07:05:29Z",
+      "default_branch": "main",
+      "open_issues_count": 13,
+      "license": null
+    },
+    {
+      "repo": "ILoveBingLu/miyu",
+      "api_error": "HTTP Error 404: Not Found"
+    },
+    {
+      "repo": "Panther114/Weport",
+      "archived": false,
+      "pushed_at": "2026-10-19T15:19:28Z",
+      "default_branch": "main",
+      "open_issues_count": 8,
+      "license": "NOASSERTION"
+    },
+    {
+      "repo": "olansoft/weflow-wcdb-api-oss",
+      "sha": "aa9ed70c6877c114a2d93a4679c4ab37c4707964",
+      "files": 23
+    },
+    {
+      "repo": "XRSec/Yance",
+      "sha": "7472efb9b1cb5fa4dc265cea908e5c20b486fc53",
+      "files": 135
+    }
+  ],
+  "inspection_paths": [
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/schema.ts",
+      "anchor_text": "CHUNK_VECTOR_INDEX_TABLE",
+      "finding": "Source/model/dimension partitions; persistent session indexing state."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/store.ts",
+      "anchor_text": "export class EmbeddingIndexStore",
+      "finding": "Separate SQLite/vector store, WAL, transactional insert machinery and replay-safe insertion."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/retrieval/semantic-search.ts",
+      "anchor_text": "export async function semanticSearch",
+      "finding": "Dense candidate retrieval; date filtering after a finite, enlarged shortlist."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/retrieval/semantic-search.test.ts",
+      "anchor_text": "test('timeRangeMs filters",
+      "finding": "Inspected time-window and ranking tests; these are not a proof of complete filtered retrieval."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/retrieval/evidence.ts",
+      "anchor_text": "export function assembleEvidence",
+      "finding": "Expands source windows, merges nearby hits, and respects evidence token budgets."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/retrieval/evidence.test.ts",
+      "anchor_text": "test('expands hit",
+      "finding": "Inspected expansion and parent-boundary tests."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "src/stores/aiChatEvidenceBlocks.ts",
+      "anchor_text": "extractEvidencePayload",
+      "finding": "Typed evidence payload extraction into a dedicated UI content block."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/tools/src/definitions/cross-chat-tools.ts",
+      "anchor_text": "message_id:",
+      "finding": "Cross-chat message context requires source session and message identity."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/services/import-idempotency.ts",
+      "anchor_text": "export class ImportIdempotencyCache",
+      "finding": "Request body hash, pending/success/conflict states; explicitly process-local with TTL."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/services/import-idempotency.test.ts",
+      "anchor_text": "test('replays",
+      "finding": "Inspected replay, conflict and expiry tests."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/shared-types/chatlab-format.ts",
+      "anchor_text": "CHATLAB_FORMAT_VERSION",
+      "finding": "Current emitted format 0.0.2; readers also accept 0.0.1."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/sync/src/scheduler.ts",
+      "anchor_text": "function startTimer",
+      "finding": "Source-specific pull timers; avoid mistaking timers for durable job checkpoints."
+    },
+    {
+      "repo": "ChatLab/ChatLab",
+      "path": "packages/node-runtime/src/semantic-index/embedding/local-runtime.ts",
+      "anchor_text": "verifyRuntimeInSubprocess",
+      "finding": "Staged local runtime verification; native packaging deserves a separate gate."
+    },
+    {
+      "repo": "hicccc77/WeFlow",
+      "path": "docs/third-party-components.md",
+      "anchor_text": "#",
+      "finding": "Native/database, key and export capabilities configured externally; document says component origin/signature/implementation is not verified."
+    },
+    {
+      "repo": "hicccc77/WeFlow",
+      "path": "electron/services/wcdbCore.ts",
+      "anchor_text": "export class WcdbCore",
+      "finding": "Inspected current wrapper structure and component-facing service boundary."
+    },
+    {
+      "repo": "karakeep-app/karakeep",
+      "path": "packages/plugins/queue-liteque/src/index.ts",
+      "anchor_text": "class LitequeQueueClient",
+      "finding": "SQLite queue.db backend, retry translation, timeouts and bounded concurrency."
+    },
+    {
+      "repo": "karakeep-app/karakeep",
+      "path": "apps/workers/workers/assetPreprocessingWorker.ts",
+      "anchor_text": "export class AssetPreprocessingWorker",
+      "finding": "Retry exhaustion clears pending derived states; Tesseract OCR confidence threshold and cleanup."
+    },
+    {
+      "repo": "karakeep-app/karakeep",
+      "path": "apps/workers/workers/backupWorker.ts",
+      "anchor_text": "export const BackupSchedulingWorker",
+      "finding": "Scheduled backup queue, deterministic per-user scheduling and idempotency key."
+    },
+    {
+      "repo": "karakeep-app/karakeep",
+      "path": "packages/shared/searchQueryParser.ts",
+      "anchor_text": "enum TokenType",
+      "finding": "Structured qualifiers and boolean query grammar; useful for inspectable filters."
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "path": "src/khoj/search_type/text_search.py",
+      "anchor_text": "async def query",
+      "finding": "Embedding query path, source-aware result collation and metadata."
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "path": "src/khoj/search_filter/date_filter.py",
+      "anchor_text": "class DateFilter",
+      "finding": "Explicit date-filter grammar; interpretation must match message time semantics."
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "path": "src/khoj/routers/api_automation.py",
+      "anchor_text": "crontime:",
+      "finding": "Automation routing, cron normalization and timezone input."
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "path": "src/khoj/routers/helpers.py",
+      "anchor_text": "def schedule_automation",
+      "finding": "Timezone-aware scheduling, stable job identity and process lock."
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "path": "src/khoj/routers/helpers.py",
+      "anchor_text": "def should_notify",
+      "finding": "Extra model notification judgment; exception path returns True."
+    },
+    {
+      "repo": "open-webui/open-webui",
+      "path": "backend/open_webui/retrieval/utils.py",
+      "anchor_text": "async def query_doc_with_hybrid_search",
+      "finding": "Native hybrid route or legacy BM25/vector ensemble plus reranker. Legacy BM25 splits on whitespace."
+    },
+    {
+      "repo": "open-webui/open-webui",
+      "path": "backend/open_webui/utils/middleware.py",
+      "anchor_text": "def get_citation_source_from_tool_result",
+      "finding": "Tool results become structured citation source groups."
+    },
+    {
+      "repo": "open-webui/open-webui",
+      "path": "backend/open_webui/utils/middleware.py",
+      "anchor_text": "def get_source_context",
+      "finding": "Stable citation identifiers represented in source context."
+    },
+    {
+      "repo": "screenpipe/screenpipe",
+      "path": "crates/screenpipe-db/src/migrations/20260415000000_frames_fts_external_content.sql",
+      "anchor_text": "CREATE VIRTUAL TABLE",
+      "finding": "External-content FTS migration and insert/update/delete maintenance. Performance figures in comments are upstream claims, not reproduced measurements."
+    },
+    {
+      "repo": "screenpipe/screenpipe",
+      "path": "crates/screenpipe-db/src/text_normalizer.rs",
+      "anchor_text": "pub fn sanitize_fts5_query",
+      "finding": "Literal-query sanitization and compound-token expansion; not sufficient Chinese segmentation."
+    },
+    {
+      "repo": "screenpipe/screenpipe",
+      "path": "crates/screenpipe-db/tests/keyword_search_order_test.rs",
+      "anchor_text": "mod tests",
+      "finding": "Inspected source for keyword ordering and metadata-preservation coverage."
+    },
+    {
+      "repo": "screenpipe/screenpipe",
+      "path": "crates/screenpipe-core/src/pipes/permissions.rs",
+      "anchor_text": "pub enum PermissionRule",
+      "finding": "Typed allow/deny rules, API/content scope and server-side privacy-filter design."
+    },
+    {
+      "repo": "olansoft/weflow-wcdb-api-oss",
+      "path": "include/wcdb_api.h",
+      "anchor_text": "wcdb_init",
+      "finding": "C ABI surface; matching export names do not prove behavior compatibility."
+    },
+    {
+      "repo": "olansoft/weflow-wcdb-api-oss",
+      "path": "src/core_account.cpp",
+      "anchor_text": "WCDB_API int32_t InitProtection",
+      "finding": "Protection/auth entrypoints return success; init sets a flag. These are not Weport compatibility acceptance."
+    },
+    {
+      "repo": "olansoft/weflow-wcdb-api-oss",
+      "path": "src/compat_exports.cpp",
+      "anchor_text": "WCDB_API int32_t wcdb_get_message_by_svrid",
+      "finding": "strtoll(server ID), LIMIT 1, and int32 local-ID conversion conflict with Weport exact identity guarantees."
+    },
+    {
+      "repo": "olansoft/weflow-wcdb-api-oss",
+      "path": "src/cloud_telemetry.cpp",
+      "anchor_text": "std::string g_cloud_base_url",
+      "finding": "Explicit cloud report methods and network dependency; presence does not establish automatic transmission."
+    },
+    {
+      "repo": "olansoft/weflow-wcdb-api-oss",
+      "path": "CMakeLists.txt",
+      "anchor_text": "cmake_minimum_required",
+      "finding": "Inspected platform build configuration; no native compilation or runtime validation performed."
+    },
+    {
+      "repo": "XRSec/Yance",
+      "path": "docs/reference/project-status.md",
+      "anchor_text": "#",
+      "finding": "Planning-only; active code/runtime/API not implemented and license unspecified. old/ is archival."
+    },
+    {
+      "repo": "XRSec/Yance",
+      "path": "docs/reference/contracts/proposed/evidence-record.schema.json",
+      "anchor_text": "\"required\"",
+      "finding": "Proposed support/contradict/correct/invalidate relations, observed/recorded times, hash and source availability."
+    }
+  ]
+}

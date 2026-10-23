@@ -7,7 +7,7 @@ import * as http from 'http'
 import * as https from 'https'
 import crypto from 'crypto'
 import { sourceFingerprint } from '../sourceFingerprint'
-import { sourceMessageIdentityHash, stableMediaMessageKey } from '../sourceMessageIdentity'
+import { exactLocalIdToken, sourceMessageIdentityHash, stableMediaMessageKey } from '../sourceMessageIdentity'
 import { fileURLToPath } from 'url'
 // 只用类型（ExcelJS.Cell 出现在下面两个公开方法的签名里）；运行时按需动态加载，
 // 避免所有导出（哪怕是 TXT）都背上 exceljs 的 ~18MB 常驻。见 ExcelFormatter.ts 说明。
@@ -151,6 +151,8 @@ export class ExportContext {
           dbPath: config?.dbPath,
           decryptKey: config?.decryptKey,
           myWxid: config?.myWxid,
+          imageXorKey: config?.imageXorKey,
+          imageAesKey: config?.imageAesKey,
           resourcesPath: config?.resourcesPath,
           appPath: config?.appPath,
           isPackaged: config?.isPackaged
@@ -885,17 +887,19 @@ export class ExportContext {
     }
 
     private async copyMediaWithCacheAndDedup(kind: 'image' | 'video' | 'emoji', sourcePath: string, destPath: string, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>, relativePath?: string): Promise<{ success: boolean; code?: string }> {
+        const sourceHash = await hashFileContent(sourcePath)
+        this.throwIfStopRequested(control)
+        const ledgerEntry = relativePath ? this.ledgerMediaIndex.get(relativePath) : undefined
+        // A prior output hash authenticates old bytes, not the current source.
+        const ledgerMatchesSource = Boolean(sourceHash && ledgerEntry && sourceHash.sha256 === ledgerEntry.sha256 && sourceHash.bytes === ledgerEntry.bytes)
         const existedBeforeCopy = await pathExists(destPath);
         if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
           // v1.2 §10.1：账本里有这一条时，必须按内容核对（大小 + sha256）才允许复用；
           // 账本说"这一份"、磁盘上却是半截/被改过 → 重做，不能因为"文件在"就跳过。
-          const ledgerEntry = relativePath ? this.ledgerMediaIndex.get(relativePath) : undefined
           if (!ledgerEntry) {
             // Legacy outputs and interrupted exports can exist without a ledger.
             // Existence alone does not prove that they contain this payload.
-            const [sourceHash, destinationHash] = await Promise.all([
-              hashFileContent(sourcePath), hashFileContent(destPath)
-            ])
+            const destinationHash = await hashFileContent(destPath)
             this.throwIfStopRequested(control)
             if (sourceHash && destinationHash?.sha256 === sourceHash.sha256 && destinationHash.bytes === sourceHash.bytes) {
               this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
@@ -904,23 +908,22 @@ export class ExportContext {
             this.noteLedgerMismatch('media-unverified-existing-output')
           } else {
             const verified = await verifyMediaAgainstLedger(destPath, ledgerEntry)
-            if (verified.skip) {
+            if (verified.skip && ledgerMatchesSource) {
               this.noteMediaTelemetry({
                 doneFiles: 1,
                 dedupReuseFiles: 1
               })
               return { success: true }
             }
-            this.noteLedgerMismatch(`media-${verified.reason || 'mismatch'}`)
+            this.noteLedgerMismatch(verified.skip ? 'media-source-content-changed' : `media-${verified.reason || 'mismatch'}`)
           }
         }
         // v1.2 §10.1：账本命中（相对路径 + 内容哈希都对得上）→ 真跳过
-        if (relativePath) {
+        if (relativePath && ledgerMatchesSource) {
           const reuse = await this.tryReuseLedgerMedia(relativePath, destPath)
           if (reuse.reused) return { success: true }
         }
         // v1.2 §10.1：同一份内容本次已经写过一份 → hardlink 复用，不重复复制/转码
-        const sourceHash = await hashFileContent(sourcePath)
         if (sourceHash && sourceHash.sha256) {
           const reusedByContent = await this.reuseByContentHash(sourceHash.sha256, destPath, control)
           if (reusedByContent) return { success: true }
@@ -3230,6 +3233,8 @@ export class ExportContext {
     }
 
     public async exportMediaForMessage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, options: {
+          archiveMode?: boolean
+          mediaPolicy?: ExportOptions['mediaPolicy']
           exportImages?: boolean
           exportVoices?: boolean
           exportVideos?: boolean
@@ -3243,10 +3248,18 @@ export class ExportContext {
           dirCache?: Set<string>
           control?: ExportTaskControl
         }): Promise<MediaExportItem | null> {
-        return this.withSharedMediaLimit(() => this.exportMediaForMessageUnbounded(msg, sessionId, mediaRootDir, mediaRelativePrefix, options))
+        delete msg._archiveMediaOutcome; delete msg._archiveMediaFailure; delete msg._archiveImageTier
+        const result = await this.withSharedMediaLimit(() => this.exportMediaForMessageUnbounded(msg, sessionId, mediaRootDir, mediaRelativePrefix, options))
+        if (options.archiveMode) {
+          const kind = ({ 3: 'image', 34: 'voice', 43: 'video', 47: 'emoji' } as Record<number, string>)[Number(msg.localType)] || 'file'
+          msg._archiveMediaOutcome = { kind, status: result ? (kind === 'image' ? msg._archiveImageTier || 'display' : 'available') : msg._archiveMediaFailure || 'missing-locally', ...(result ? { relativePath: result.relativePath } : {}) }
+        }
+        return result
     }
 
     private async exportMediaForMessageUnbounded(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, options: {
+          archiveMode?: boolean
+          mediaPolicy?: ExportOptions['mediaPolicy']
           exportImages?: boolean
           exportVoices?: boolean
           exportVideos?: boolean
@@ -3263,6 +3276,12 @@ export class ExportContext {
         const localType = msg.localType;
         const weliveMediaPath = this.resolveWeliveMediaPath(msg)
         if (weliveMediaPath) {
+          // Imported paths do not prove the original image tier. Do not silently
+          // adopt one under the original-only archive contract.
+          if (options.mediaPolicy === 'original-only' && localType === 3) {
+            msg._archiveMediaFailure = 'original-unavailable'
+            return null
+          }
           const adopted = await this.adoptWeliveExportedMedia(msg, weliveMediaPath, mediaRootDir, mediaRelativePrefix, {
             exportImages: options.exportImages,
             exportVoices: options.exportVoices,
@@ -3436,7 +3455,7 @@ export class ExportContext {
     /**
      * 导出图片文件
      */
-    private async exportImage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
+    private async exportImage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy' | 'mediaPolicy' | 'archiveMode'>): Promise<MediaExportItem | null> {
         try {
           const imagesDir = path.join(mediaRootDir, mediaRelativePrefix, 'images')
           await ensureExportDir(imagesDir, control, dirCache)
@@ -3487,11 +3506,12 @@ export class ExportContext {
                 excludeThumbnail: true
               })
               if (decryptResult.failureKind === 'missing_key') sawMissingImageKey = true
+              if (decryptResult.failureKind === 'missing_key' || decryptResult.failureKind === 'decrypt_failed') msg._archiveMediaFailure = 'decryption-failed'
               const decryptedPath = pickResolvedImagePath(decryptResult)
               if (decryptedPath) return decryptedPath
 
               const localId = Number(msg?.localId || 0)
-              if (Number.isFinite(localId) && localId > 0) {
+              if (!options?.archiveMode && Number.isFinite(localId) && localId > 0) {
                 const fallback = await chatService.getImageData(sessionId, String(localId), { excludeThumbnail: true })
                 if (fallback.success && fallback.data) {
                   const buffer = Buffer.from(fallback.data, 'base64')
@@ -3529,7 +3549,7 @@ export class ExportContext {
           let imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
           let imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
           const initialMissingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName, (msg as any)?.localId)
-          if (initialMissingRunCacheKey && this.mediaRunMissingImageKeys.has(initialMissingRunCacheKey)) {
+          if (!options?.archiveMode && initialMissingRunCacheKey && this.mediaRunMissingImageKeys.has(initialMissingRunCacheKey)) {
             return null
           }
           let sourcePath = await tryResolveImagePath(imageMd5, imageDatName)
@@ -3537,7 +3557,7 @@ export class ExportContext {
           // 快速流字段存在偏差时，按 localId 强制回填再重试一次，避免“导出进度前进但写入 0”。
           if (!sourcePath) {
             const localId = Number(msg?.localId || 0)
-            if (Number.isFinite(localId) && localId > 0) {
+            if (!options?.archiveMode && Number.isFinite(localId) && localId > 0) {
               await this.backfillMediaFieldsFromMessageDetail(sessionId, [msg], new Set([3]), undefined, { force: true })
               imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
               imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
@@ -3560,8 +3580,14 @@ export class ExportContext {
             return null
           }
 
+          const imageSourceName = path.basename(sourcePath).toLowerCase()
+          msg._archiveImageTier = /_hd\.[^.]+$/.test(imageSourceName) ? 'original' : /(?:_t|_thumb|\.t)\.[^.]+$/.test(imageSourceName) ? 'thumbnail' : 'display'
+          if (options?.mediaPolicy === 'original-only' && msg._archiveImageTier !== 'original') {
+            msg._archiveMediaFailure = 'original-unavailable'
+            return null
+          }
           // 为每条消息生成稳定且唯一的文件名前缀，避免跨日期/消息发生同名覆盖
-          const messageId = String(msg.localId || Date.now())
+          const messageId = String(msg.localIdRaw ?? msg.localId ?? Date.now())
           const imageKey = (imageMd5 || imageDatName || 'image').replace(/[^a-zA-Z0-9_-]/g, '')
 
           // 从 data URL 或 file URL 获取实际路径
@@ -3724,12 +3750,16 @@ export class ExportContext {
     /**
      * 导出语音文件
      */
-    private async exportVoice(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
+    private async exportVoice(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy' | 'archiveMode'>): Promise<MediaExportItem | null> {
         try {
           const voicesDir = path.join(mediaRootDir, mediaRelativePrefix, 'voices')
           await ensureExportDir(voicesDir, control, dirCache)
 
-          const msgId = String(msg.localId)
+          const msgId = String(msg.localIdRaw ?? msg.localId)
+          if (options?.archiveMode && (!msg._db_path || !msg._table_name || !exactLocalIdToken(msgId))) {
+            msg._archiveMediaFailure = 'unsupported'
+            return null
+          }
           const safeSession = this.cleanAccountDirName(sessionId)
             .replace(/[^a-zA-Z0-9_-]/g, '_')
             .slice(0, 48) || 'session'
@@ -3743,11 +3773,13 @@ export class ExportContext {
             msgId,
             Number.isFinite(Number(msg?.createTime)) ? Number(msg.createTime) : undefined,
             msg?.serverIdRaw || msg?.serverId,
-            msg?.senderUsername || undefined
+            msg?.senderUsername || undefined,
+            options?.archiveMode && msg?._db_path && msg?._table_name ? { db: msg._db_path, table: msg._table_name } : undefined
           )
           if (!voiceResult.success || !voiceResult.data) {
             // issue #22：以前这里静默返回 null —— 用户只看到"导出的语音没有文件"。
             // 记进统计，导出结束时按条数提示（原因多半是微信里没有完整语音文件）。
+            msg._archiveMediaFailure = voiceResult.failureKind || 'missing-locally'
             this.noteMediaTelemetry({ voiceFailedFiles: 1 })
             return null
           }
@@ -4684,6 +4716,8 @@ export class ExportContext {
           kind = 'file'
         }
         if (!kind) return null
+        // Imported paths (including remote URLs) have no verifiable image tier.
+        if (kind === 'image' && options.mediaPolicy === 'original-only') return null
         if (!sourcePathRaw) {
           return null
         }
@@ -5085,7 +5119,11 @@ export class ExportContext {
             onCollectProgress,
             control
           )
-          if (streamCollected.success) {
+          // Native media streams may omit physical provenance or expose a rounded
+          // numeric local ID. Never mix these rows with canonical cursor rows or
+          // reconstruct identity from server IDs; retry the complete collection.
+          const hasExactSourceIdentities = streamCollected.rows.every(row => Boolean(this.getSourceMessageIdentityHash(row)))
+          if (streamCollected.success && hasExactSourceIdentities) {
             usedFastMediaStream = true
             rows.push(...streamCollected.rows)
             for (const username of streamCollected.senderUsernames) {
@@ -5094,7 +5132,7 @@ export class ExportContext {
             firstTime = streamCollected.firstTime
             lastTime = streamCollected.lastTime
           } else {
-            console.warn(`[Export] 媒体快速流读取失败，回退游标链路: session=${sessionId}, type=${fastMediaType}, error=${streamCollected.error || 'unknown'}`)
+            console.warn(`[Export] 媒体快速流不可用，回退游标链路: session=${sessionId}, type=${fastMediaType}, error=${streamCollected.error || (hasExactSourceIdentities ? 'unknown' : 'missing-exact-source-identity')}`)
           }
         }
 
@@ -5509,7 +5547,7 @@ export class ExportContext {
         const fileOnlyMediaFilter = this.isFileOnlyMediaFilter(targetMediaTypes);
         const needsBackfill = rows.filter((msg) => {
                   if (force) {
-                    return Number(msg?.localId || 0) > 0
+                    return Boolean(exactLocalIdToken(msg?.localIdRaw ?? msg?.localId))
                   }
                   const isFileCandidate = this.isFileAppLocalType(Number(msg.localType || 0)) || (fileOnlyMediaFilter && this.hasFileAppMessageHints(msg))
                   if (isFileCandidate) {
@@ -5525,11 +5563,18 @@ export class ExportContext {
         const DETAIL_CONCURRENCY = 6;
         await parallelLimit(needsBackfill, DETAIL_CONCURRENCY, async (msg) => {
           this.throwIfStopRequested(control)
-          const localId = Number(msg.localId || 0)
-          if (!Number.isFinite(localId) || localId <= 0) return
+          const localIdToken = exactLocalIdToken(msg.localIdRaw ?? msg.localId)
+          if (!localIdToken || localIdToken === '0') return
 
           try {
-            const detail = await wcdbService.getMessageById(sessionId, localId)
+            const scoped = Boolean(msg._db_path && msg._table_name)
+            // Media enrichment must address the same physical row as the export.
+            // The legacy native local-ID lookup cannot disambiguate shards.
+            const localId = scoped ? 0 : Number(localIdToken)
+            if (!scoped && !Number.isSafeInteger(localId)) return
+            const detail = scoped ? await chatService.getMessageByIdentity({ sessionId, localId: localIdToken,
+              ts: msg.createTime, db: msg._db_path, table: msg._table_name, idKind: 'local' })
+              : await wcdbService.getMessageById(sessionId, localId)
             if (!detail.success || !detail.message) return
 
             const row = detail.message as any

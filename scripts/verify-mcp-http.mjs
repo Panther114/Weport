@@ -68,6 +68,7 @@ try {
     env: {
       ...process.env,
       WEPORT_PROBE_OFFSCREEN: "1",
+      WEPORT_PROBE_HIDDEN_ONLY: "1",
       WEPORT_NATIVE_GLASS: "0",
     },
     timeout: 60000,
@@ -81,9 +82,8 @@ try {
       position = proto.setPosition,
       hide = proto.hide;
     const present = function () {
-      if (process.platform === "darwin") return hide.call(this);
       position.call(this, -4000, 0);
-      return inactive.call(this);
+      return hide.call(this);
     };
     proto.show = present;
     proto.showInactive = present;

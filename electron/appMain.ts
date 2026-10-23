@@ -45,9 +45,15 @@ import { WasmService } from './services/wasmService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
-import { chatService } from './services/chatService'
+import { chatService, type Message } from './services/chatService'
 import { wcdbService } from './services/wcdbService'
 import { exportService } from './services/export'
+import { registerArchiveIpc } from './services/archive/archiveIpc'
+import type { ArchiveLibrary } from './services/archive/archiveLibrary'
+import { registerDataAccessIpc } from './services/dataAccessIpc'
+import { applyPreparedStorageCleanup, applyPreparedStorageRelocation, resolveStorageLocation } from './services/storageLocations'
+import { validateLocalEmbeddingConfig, type LocalEmbeddingConfig } from './services/semanticIndex'
+import { registerStorageIpc } from './services/storageIpc'
 // v1.2 §10.3 ③：写操作的"自动快照 → 写入 → 可一键回滚"链路
 import { applyRetention, createSnapshot, listSnapshots, resolveAccountDatabasePaths, restoreSnapshot, verifySnapshot } from './services/snapshotService'
 import { exportTaskControlService } from './services/exportTaskControlService'
@@ -71,11 +77,14 @@ import { weportAiService } from './services/weportAiService'
 import { getProviderCatalog } from './services/ai/providerCatalog'
 import { refreshModelRegistry } from './services/ai/registryRuntime'
 import { WeBotService, type WeBotDispatchRequest, type WeBotDispatchResult } from './services/weBotService'
+import { collectDigestBatch } from './services/weBotDigestCollector'
+import { DIGEST_TEMPLATES } from './services/weBotDigest'
 import { setWeBotService } from './services/weBotRegistry'
 import { weCloneService } from './services/weCloneService'
 import { TASK_KEY, taskStatusService } from './services/taskStatusService'
 import { AnnotationsService } from './services/annotationsService'
 import { SearchIndexService, createExportContextDecoder } from './services/searchIndexService'
+import { registerSearchRetrieval } from './services/searchRetrieval'
 import { runWithAbortSignal } from './services/ai/abortRun'
 import { connectorsService } from './services/connectors/connectorsService'
 import { registerCliCommands } from './services/cliCommands'
@@ -1167,6 +1176,7 @@ function createWindow(autoShow: boolean): BrowserWindow {
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
+      offscreen: process.env.WEPORT_PROBE_HIDDEN_ONLY === '1' && process.env.WEPORT_PROBE_OFFSCREEN === '1',
       contextIsolation: true,
       nodeIntegration: false,
       // 关闭拼写检查：省去拼写服务与词典内存（本应用无文本编辑需求）
@@ -1633,7 +1643,7 @@ const collectLegacySnsCacheMigrationPlan = async (): Promise<SnsCacheMigrationPl
 
   const legacyBaseDir = configService.getCacheBasePath()
   const configuredCachePath = String(configService.get('cachePath') || '').trim()
-  const currentBaseDir = configuredCachePath || join(app.getPath('documents'), 'Weport')
+  const currentBaseDir = configuredCachePath || join(app.getPath('userData'), 'media')
 
   if (!legacyBaseDir || !currentBaseDir) return null
 
@@ -2197,9 +2207,14 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
 
   const chat = weportAiService.createChat(request.task.title, { kind: 'automation', taskId: request.task.id })
   const sections: string[] = []
+  if (request.task.digest && request.digestBatch) {
+    sections.push(DIGEST_TEMPLATES[request.task.digest.template])
+    sections.push(`只分析以下已限定账号、会话及时间范围的新增证据，不读取其他数据。引用必须使用提供的 weport-evidence 链接。${request.digestBatch.hasMore ? '本次受消息或字符预算限制，仅覆盖列出的新增消息，后续运行继续。' : ''}`)
+    sections.push(request.digestBatch.evidence.map(row => `[来源](${row.sourceUrl}) ${new Date(row.timestamp * 1000).toISOString()}\n${row.text}`).join('\n\n'))
+  }
   if (request.task.description.trim()) sections.push(request.task.description.trim())
 
-  if (request.task.references.length > 0) {
+  if (!request.task.digest && request.task.references.length > 0) {
     const lines = request.task.references
       .map((reference) => {
         const kind = reference.kind === 'group' ? '群聊' : reference.kind === 'official' ? '公众号' : '私聊'
@@ -2212,14 +2227,16 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
   sections.push(
     `这是 WeBot 定时任务的自动执行（${new Date().toLocaleString('zh-CN')}）。` +
       '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。' +
-      '如果结论取决于聊天里的**图片**（作业照片、截图、通知单），必须用 read_chat_images 真正看图后再下结论 —— ' +
-      '不要凭文件名、文字描述或猜测代替看图；图看不了就如实说明原因。'
+      (request.task.digest ? '本次仅提供文本证据。图片、附件与未读取内容不可作为已验证事实；相关结论必须说明缺少原始内容。' :
+      '如果结论取决于聊天里的**图片**（作业照片、截图、通知单），必须用 read_chat_images 真正看图后再下结论 —— 不要凭文件名、文字描述或猜测代替看图；图看不了就如实说明原因。')
   )
 
   // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
   // 任务可以独立指向一个便宜/快的模型，而不影响 WeportAI 的手动对话。
   const result = await runWithAbortSignal(signal,
-    () => weportAiService.runChat(chat.id, sections.join('\n\n'), { consumer: 'webot' }),
+    () => weportAiService.runChat(chat.id, sections.join('\n\n'), request.task.digest ? {
+      consumer: 'webot', accountId: request.task.digest.scope.accountId, tools: 'none', maxSteps: 1, maxTotalTokens: request.task.digest.limits.maxTotalTokens,
+    } : { consumer: 'webot' }),
     () => weportAiService.abort(chat.id))
   if (!result.success) throw new Error(result.error || '任务执行失败')
 
@@ -2235,6 +2252,12 @@ function ensureWeBotService(): WeBotService {
   weBotService = new WeBotService({
     dataDir: join(app.getPath('userData'), 'webot'),
     dispatch: dispatchWeBotTask,
+    currentAccountId: () => String(configService?.getMyWxidCleaned() || configService?.get('myWxid') || '').trim(),
+    collectDigest: (task, signal) => collectDigestBatch(task, signal, {
+      currentAccountId: () => String(configService?.getMyWxidCleaned() || configService?.get('myWxid') || '').trim(),
+      getMessages: (...args) => chatService.getMessages(...args),
+      registerEvidence: (accountId, sessionId, row) => weportAiService.registerEvidence(accountId, sessionId, [row as Message])[0] || '',
+    }),
     onRunStarted: (run) => {
       // 「到点了正在跑」这一刻也要可见：任务可能跑几分钟，界面在此之前
       // 完全没有变化。渲染层把这条 running 记录直接插进运行日志。
@@ -2306,6 +2329,11 @@ function resolveMcpBridgePath(): string {
 // ---------------------------------------------------------------------------
 
 let searchIndexServiceRef: SearchIndexService | null = null
+let semanticBuild: { taskId: string; cancelled: boolean } | null = null
+function localEmbeddingConfig(): LocalEmbeddingConfig {
+  return configService?.get('localEmbedding') || { enabled: false, endpoint: 'http://127.0.0.1:5083/v1/embeddings', model: '', revision: '' }
+}
+registerSearchRetrieval(() => getSearchIndexService())
 let annotationsServiceRef: AnnotationsService | null = null
 
 /**
@@ -2337,7 +2365,7 @@ function getSearchIndexService(): SearchIndexService {
   if (!config) throw new Error('配置尚未初始化，无法建立索引')
   const context = exportService.context
   searchIndexServiceRef = new SearchIndexService({
-    rootDir: join(app.getPath('userData'), 'search-index'),
+    rootDir: resolveStorageLocation(app.getPath('userData'), 'search-index', join(app.getPath('userData'), 'search-index')),
     source: {
       listMessageDbs: async () => {
         const result = await wcdbService.listMessageDbs()
@@ -2377,6 +2405,7 @@ function getSearchIndexService(): SearchIndexService {
     resolveWxid: () => String(config.get('myWxid') || ''),
     resolveDbPath: () => String(config.get('dbPath') || ''),
     loadVoiceTranscripts: readVoiceTranscriptCache,
+    semantic: localEmbeddingConfig,
   })
   return searchIndexServiceRef
 }
@@ -2391,7 +2420,11 @@ function getAnnotationsService(): AnnotationsService {
   return annotationsServiceRef
 }
 
+let archiveLibraryRef: ArchiveLibrary | null = null
 export function registerIpcHandlers() {
+  registerDataAccessIpc(() => String(configService?.getMyWxidCleaned() || configService?.get('myWxid') || '').trim())
+  registerStorageIpc({ config: () => { if (!configService) throw Error('Configuration unavailable'); return configService }, workspace: () => weportAiService.workspaceRootForStorage(), aiBusy: () => weportAiService.hasActiveRuns() })
+  archiveLibraryRef = registerArchiveIpc({ config: () => { if (!configService) throw Error('配置尚未初始化'); return configService }, annotations: getAnnotationsService, resources: resolveResourcesPath, guardExport: async () => { await ensureInitialUpdatePolicy(); const error = compatibilityError(APP_VERSION, true); if (error) throw Error(error) } })
   registerBugReportHandlers({ ipcMain, dialog, clipboard, nativeImage, shell,
     appVersion: app.getVersion(), platform: process.platform,
     platformRelease: os.release(), arch: process.arch })
@@ -3778,6 +3811,15 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     success: weportAiService.deleteChat(String(chatId || '')),
   }))
   ipcMain.handle('ai:getChat', (_e, chatId: string) => weportAiService.getChat(String(chatId || '')))
+  ipcMain.handle('ai:resolveEvidence', (_e, id: string) => weportAiService.resolveEvidence(String(id || '')))
+  ipcMain.handle('ai:listMemoryClaims', () => weportAiService.listMemoryClaims())
+  ipcMain.handle('ai:previewContext', (_e, scope: import('./services/dataAccessService').DataAccessScope) => weportAiService.previewContext(scope))
+  ipcMain.handle('ai:correctMemoryClaim', (_e, value: { id: string; statement: string; correction: string }) => {
+    const prior = weportAiService.listMemoryClaims().find(claim => claim.id === String(value?.id || ''))
+    if (!prior) throw Error('The memory claim is unavailable for this account.')
+    return weportAiService.saveMemoryClaim({ statement: String(value.statement || '').slice(0, 8000), kind: 'interpretation', status: 'uncertain', asOf: Date.now(),
+      evidenceIds: [], counterEvidenceIds: prior.evidenceIds, supersedes: prior.id, correction: String(value.correction || '').slice(0, 8000) })
+  })
   // 手动压缩：与 runChat 的自动压缩共用 service 侧实现，返回体区分
   // 「已压缩」和「还没到阈值」，面板据此给出不同提示。
   ipcMain.handle('ai:compactChat', (_e, chatId: string) => weportAiService.compactChat(String(chatId || '')))
@@ -3802,8 +3844,8 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('ai:saveActions', (_e, actions: any) => ({
     success: weportAiService.saveActions(Array.isArray(actions) ? actions : []),
   }))
-  ipcMain.handle('ai:send', (_e, chatId: string, text: string) =>
-    weportAiService.runChat(String(chatId || ''), String(text || '')))
+  ipcMain.handle('ai:send', (_e, chatId: string, text: string, options?: import('./services/ai/dataScope').AiRunOptions) =>
+    weportAiService.runChat(String(chatId || ''), String(text || ''), options))
   ipcMain.handle('ai:abort', (_e, chatId: string) => {
     weportAiService.abort(String(chatId || ''))
     return { success: true }
@@ -3930,8 +3972,8 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // （还没生成过克隆、模型 key 不可用）需要具体的下一步指引。
   ipcMain.handle(
     'weclone:chat',
-    (_e, cloneId: string, message: string, history?: Array<{ role: string; content: string }>) =>
-      weCloneService.chatWithClone({ cloneId: String(cloneId || ''), message: String(message || ''), history })
+    (_e, cloneId: string, message: string, history?: Array<{ role: string; content: string }>, readerGuard?: { accountId: string; sessionId: string }) =>
+      weCloneService.chatWithClone({ cloneId: String(cloneId || ''), message: String(message || ''), history, readerGuard })
   )
   ipcMain.handle('weclone:cancel', () => {
     wecloneControllers.get('generate')?.abort()
@@ -3956,8 +3998,38 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   // `search:indexProgress` 推增量事件（界面实时刷新）。
   // ---------------------------------------------------------------------------
   ipcMain.handle('search:indexStatus', () => getSearchIndexService().loadStatus())
+  ipcMain.handle('search:semanticConfig', () => localEmbeddingConfig())
+  ipcMain.handle('search:saveSemanticConfig', (_event, input: LocalEmbeddingConfig) => {
+    if (semanticBuild || getSearchIndexService().isBuilding) throw Error('Wait for the current search build to finish.')
+    const config: LocalEmbeddingConfig = { enabled: input?.enabled === true, endpoint: String(input?.endpoint || '').trim(),
+      model: String(input?.model || '').trim(), revision: String(input?.revision || '').trim(),
+      queryPrefix: String(input?.queryPrefix || '').slice(0, 128), passagePrefix: String(input?.passagePrefix || '').slice(0, 128) }
+    if (config.enabled) validateLocalEmbeddingConfig(config)
+    configService?.set('localEmbedding', config)
+    return config
+  })
+  ipcMain.handle('search:buildSemantic', (_event, options?: { scope?: import('./services/searchIndexService').SearchScope }) => {
+    const service = getSearchIndexService()
+    if (semanticBuild) return { taskId: semanticBuild.taskId }
+    if (service.isBuilding) return { taskId: service.taskId || '' }
+    const build = { taskId: `semantic-index-${Date.now()}`, cancelled: false }
+    semanticBuild = build
+    taskStatusService.begin(TASK_KEY.searchIndex, '正在建立本机语义索引…', 'embedding')
+    void service.buildSemantic({ scope: options?.scope, shouldCancel: () => build.cancelled,
+      onProgress: (completed, total) => taskStatusService.progress(TASK_KEY.searchIndex, {
+        progress: total ? completed / total * 100 : 0, stage: 'embedding', message: `本机语义索引 ${completed}/${total}`,
+        log: false, detail: { taskId: build.taskId, completed, total } }),
+    }).then(result => {
+      taskStatusService.end(TASK_KEY.searchIndex, build.cancelled ? 'aborted' : 'done', {
+        message: build.cancelled ? '语义索引构建已取消' : `语义索引完成：${result.documents} 条消息${result.truncated ? '（覆盖不完整）' : ''}`,
+        detail: { taskId: build.taskId, ...result } })
+    }).catch(error => taskStatusService.end(TASK_KEY.searchIndex, build.cancelled ? 'aborted' : 'failed', {
+      error: String(error?.message || error), message: build.cancelled ? '语义索引构建已取消' : '语义索引构建失败' })).finally(() => { semanticBuild = null })
+    return { taskId: build.taskId }
+  })
   ipcMain.handle('search:buildIndex', (_event, payload?: { force?: boolean; wxid?: string }) => {
     const service = getSearchIndexService()
+    if (semanticBuild) return { taskId: semanticBuild.taskId }
     // 重复点击不产生第二个构建：返回同一个 taskId，界面继续跟原来那条进度
     if (service.isBuilding) return { taskId: service.taskId || '' }
     const taskId = `search-index-${Date.now()}`
@@ -4018,6 +4090,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
    * 已写的分片不会被新 manifest 引用，磁盘上仍是上一次提交的完整索引。
    */
   ipcMain.handle('search:cancelIndex', () => {
+    if (semanticBuild) semanticBuild.cancelled = true
     getSearchIndexService().requestCancel()
     return { success: true }
   })
@@ -4423,6 +4496,21 @@ function installScreenshotDemoHandlers() {
   override('ai:getDebugLog', () => ({ lines: [] }))
   override('ai:clearDebugLog', () => ({ success: true }))
   override('ai:send', () => ({ success: true }))
+  override('data-access:list', () => [])
+  override('data-access:currentAccount', () => 'wxid_demo')
+  override('storage:status', () => ({ entries: [], relocation: null, mediaPath: '演示媒体目录', exportPath: '演示导出目录' }))
+  for (const action of ['usage', 'prepare', 'discard', 'discardCleanup', 'cleanup', 'clearDerived', 'open', 'restart']) override('storage:' + action, () => { throw Error('截图模式不会修改或读取真实存储') })
+  override('search:semanticConfig', () => ({ enabled: false, endpoint: '', model: '', revision: '' }))
+  for (const action of ['saveSemanticConfig', 'buildSemantic']) override('search:' + action, () => { throw Error('截图模式不会运行真实语义模型') })
+  override('archive:status', () => ({ success: true, data: { entries: [], jobs: [], schedules: [] } }))
+  for (const action of ['create', 'cancel', 'preflight', 'import', 'open', 'page', 'media', 'evidence', 'bookmark', 'restore', 'saveSchedule', 'removeSchedule', 'chooseDirectory']) {
+    override('archive:' + action, () => ({ success: false, error: '截图模式不会创建或读取真实归档' }))
+  }
+  override('ai:listMemoryClaims', () => [])
+  override('ai:previewContext', () => { throw Error('截图模式不会读取真实聊天') })
+  override('ai:correctMemoryClaim', () => { throw Error('Demo mode does not change memory') })
+  override('data-access:create', () => { throw Error('Demo mode does not issue credentials') })
+  override('data-access:revoke', () => undefined)
   override('ai:abort', () => ({ success: true }))
 
   // 连接器演示数据：默认给一个"已连接"的 Todoist 卡片，截图里能同时看到状态胶囊、
@@ -8042,6 +8130,7 @@ function installMainProcessErrorHandlers() {
     if (fatalProcessError) return
     fatalProcessError = true
     isAppQuitting = true
+    archiveLibraryRef?.stop()
     // Registering this handler prevents Electron's default modal
     // "A JavaScript error occurred in the main process" dialog. A process
     // which reached uncaughtException is not safe to keep serving requests;
@@ -8473,6 +8562,10 @@ export async function startEngineServices(
   process.env.WEPORT_USER_DATA_PATH = app.getPath('userData')
 
   configService = ConfigService.getInstance()
+  const protectedStorage = [String(configService.get('dbPath') || ''), configService.getAccountDir() || ''].filter(Boolean)
+  await applyPreparedStorageRelocation(app.getPath('userData'), protectedStorage)
+  await applyPreparedStorageCleanup(app.getPath('userData'), protectedStorage)
+  chatService.initializeStorageAfterRestart()
 
   // 头像本地磁盘缓存（weport-media:// 协议提供本地即时读取）
   avatarCacheService.init(configService.getCacheBasePath())
@@ -8685,9 +8778,13 @@ function startApp() {
     // 壳侧（仅 Electron 主进程）：开机自启 Run 键同步（值里是 process.execPath，
     // 主窗口、托盘和协议注册由桌面入口负责。
     // 遗留自启项清理与更新器初始化。
-    syncLaunchAtStartupPreference()
-    cleanupLegacyAutostartEntries()
-    applyUpdaterChannel()
+    // Private rendering/performance probes must not alter the installed app's
+    // machine-wide startup integration or create desktop-visible tray surfaces.
+    if (process.env.WEPORT_PROBE_OFFSCREEN !== '1') {
+      syncLaunchAtStartupPreference()
+      cleanupLegacyAutostartEntries()
+      applyUpdaterChannel()
+    }
 
     // TUI 引擎：不建窗口、不建托盘，`weport` 在终端里通过 stdio 驱动服务层。
     if (isCliMode) {
@@ -8715,7 +8812,7 @@ function startApp() {
       mainWindow = createWindow(true)
     }
 
-    createTray()
+    if (process.env.WEPORT_PROBE_OFFSCREEN !== '1') createTray()
 
     // 通知服务已在 startEngineServices() 里按配置启动（连接数据库并开启监控管道）
 

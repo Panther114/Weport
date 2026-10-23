@@ -1,0 +1,224 @@
+{
+  "generatedAt": "2026-10-23T11:03:29.154Z",
+  "syntheticOnly": true,
+  "hidden": true,
+  "noEngine": true,
+  "rendererHtmlSha256": "b69cc18395caf0b2c2c6e21cc8017528466dea9c85bbe60a2c761df86004838e",
+  "checks": [
+    "light-theme-rendered",
+    "reader-export-930px-no-horizontal-overflow",
+    "explicit-semantic-chat-prefix-preset",
+    "stale-preview-discarded-after-scope-change",
+    "ai-secondary-controls-in-inspector",
+    "ai-scope-state-survives-inspector-navigation",
+    "settings-controls-reviewed-by-category",
+    "webot-editor-and-sns-export-controls",
+    "weclone-management-action-hierarchy",
+    "all-major-control-surfaces-at-930px",
+    "all-major-control-surfaces-in-light-theme"
+  ],
+  "captures": [
+    {
+      "tab": "connect",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 27.66909438873845,
+      "sha256": "66f18acaff0bbd215caaac9e4bb1dc9229d39da0e7d7787fa14b46f9b69878d9"
+    },
+    {
+      "tab": "export",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 28.4751898180744,
+      "sha256": "18e9d6175b80df310d5db1528b1338db7d9c2eff57b5d5640fa8051a61385313"
+    },
+    {
+      "tab": "archive",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 22.740061247166757,
+      "sha256": "5a478c96eb1c97dc6d360c920357555d400a57ca13301eb25bc190e56cabafa5"
+    },
+    {
+      "tab": "reader",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 23.880905729808724,
+      "sha256": "726d35ca6a276e977178c19c084b93973eb9e4cc59f3240a3bac81e30f04eba7"
+    },
+    {
+      "tab": "reader-export",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 29.023507177170142,
+      "sha256": "99a8f37141588fab32412fca71a4451cfc766143596924f4a7f9d5a828254535"
+    },
+    {
+      "tab": "reader-draft",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 27.251192984920127,
+      "sha256": "d92c3325849fc22d95e2d6e88fcf495c69ca92193306ab82d217d55dae952372"
+    },
+    {
+      "tab": "sns",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 27.31080556077046,
+      "sha256": "63dfdba45df8783479dc21816d912501f4da042efb45d0e00406df664aa0772a"
+    },
+    {
+      "tab": "poster",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 21.81274325419374,
+      "sha256": "78ec16f095f431ef942b6f2f64f28be2bf9530ac97e8f8f9f3cbacb1a25fac45"
+    },
+    {
+      "tab": "analytics",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 22.0180693816508,
+      "sha256": "a8784882d47c7d31396c5274b14a2389c9ea4a5aa163f8ba5ce2ec3f45a4a974"
+    },
+    {
+      "tab": "antirecall",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 24.127386901090112,
+      "sha256": "4bc13088502b79db59f2895224ae3498e62e38ef0bf21fca748d52bb98551ef0"
+    },
+    {
+      "tab": "notifications",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 34.17870504979846,
+      "sha256": "536f2b2b12e68cbe8d4d9971079a3c3444736786fc1cf2b4712a71f93dcec7dd"
+    },
+    {
+      "tab": "search",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 23.887914264709,
+      "sha256": "6a821b88668c4c73bb81b5fce6db4e539006ac5357fa460567a9960aa2a5e809"
+    },
+    {
+      "tab": "ai",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 30.21452304762145,
+      "sha256": "83cc1a81aa3855326a782d522a8bfe53f85eea9189d9d2c6aa4245c32b554a4f"
+    },
+    {
+      "tab": "webot",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 23.08470647519335,
+      "sha256": "79b64b8635250d7fdab15357e65ca01f02bbba0b2acd6f0526c5045affbfa9c7"
+    },
+    {
+      "tab": "webot-notes",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 22.15127001955301,
+      "sha256": "df4a20a292e733fd26486d17b4fb865abb2699adecb7efc2558b19234aa4069a"
+    },
+    {
+      "tab": "weclone",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 19.61441652260929,
+      "sha256": "d4458b4081e675a32dbd015c6078ee3b6223c2f7034c4e0f85fbf31f6f51d226"
+    },
+    {
+      "tab": "settings",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 22.158905732653228,
+      "sha256": "bc07eb2b70ea7211709336bafcdd1d5ef2a7f7531128db79bed935227d6e341d"
+    },
+    {
+      "tab": "diagnostics",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 27.106872579190288,
+      "sha256": "a95c8a6a79cb008f6f5adfdf3a2428c0c446015112238f6e929eec2e928bd8a8"
+    },
+    {
+      "tab": "settings-storage",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 23.325168570205754,
+      "sha256": "0c64556e7dc7f83e14663c9f8d656c89d982f21b2e34050de28ce1fc6d771d2e"
+    },
+    {
+      "tab": "settings-appearance",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 26.2213154578123,
+      "sha256": "8cffeb54246f1deaa91fe9af9652d797a29f121fe41ea49af79ef0337b47bc81"
+    },
+    {
+      "tab": "settings-light",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 16.977017102995852,
+      "sha256": "0eab5f858da344c3c8a9e5adf7f28630ffe664649e30292bdab1b1a310298dd2"
+    },
+    {
+      "tab": "reader-narrow",
+      "width": 1860,
+      "height": 1400,
+      "visible": false,
+      "stddev": 31.510329800954395,
+      "sha256": "bcfd830e41828d24265a4592af8a723199f05a39bcd463ceccbcf9a799ef6151"
+    },
+    {
+      "tab": "search-semantic",
+      "width": 2720,
+      "height": 1704,
+      "visible": false,
+      "stddev": 25.376327256410793,
+      "sha256": "fc37a623b0f8cccf50a28aac77478470771ae7b9e89e280766111c62189a7eaa"
+    }
+  ],
+  "readmeImages": [
+    "docs/screenshots/reader.png",
+    "docs/screenshots/reader-draft.png",
+    "docs/screenshots/search.png",
+    "docs/screenshots/export.png",
+    "docs/screenshots/archive.png",
+    "docs/screenshots/ai.png",
+    "docs/screenshots/webot.png",
+    "docs/screenshots/webot-notes.png",
+    "docs/screenshots/sns.png",
+    "docs/screenshots/analytics.png",
+    "docs/screenshots/weclone.png",
+    "docs/screenshots/notifications.png",
+    "docs/screenshots/antirecall.png",
+    "docs/screenshots/settings.png",
+    "docs/screenshots/diagnostics.png",
+    "docs/screenshots/settings-storage.png"
+  ]
+}

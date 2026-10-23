@@ -91,9 +91,10 @@ export const READABLE_PROTECT_FLAGS = [0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80]
 export const MEM_COMMIT = 0x1000
 /** 跳过大于 500 MB 的区域（保护性上限）。证据：`cipher2.cjs:87`。 */
 export const MAX_REGION_BYTES = 500 * 1024 * 1024
-/** 分块大小与重叠。证据：`cipher2.cjs:60-61`（2 MB + 0x80 重叠）。 */
+/** 2 MB chunks; overlap must cover a longest supported record across a boundary. */
 export const CHUNK_BYTES = 2 * 1024 * 1024
-export const CHUNK_OVERLAP = 0x80
+export const MAX_ENCODED_RECORD_BYTES = 2 + 192 + 1
+export const CHUNK_OVERLAP = MAX_ENCODED_RECORD_BYTES - 1
 /** blob 长度上限。证据：`cipher2.cjs:22`（本机恒 99）。 */
 export const BLOB_MAX = 1024
 /** 事件循环让出时间片（ms）。超过这个时间没让出，UI 就能感觉到卡顿。 */
@@ -210,6 +211,51 @@ export function readHexRunAt(text: Buffer, start: number, maxLen = 192): string 
   if (len < 64) return null
   if (end >= text.length || text[end] !== 0x27) return null
   return text.toString('latin1', start, end)
+}
+
+/**
+ * Decode only record-shaped candidates, trying every local mask phase. Cipher
+ * blobs use a blob-local mask index, which need not match their virtual address.
+ * Prefix searches run in native Buffer.indexOf; random matches stop at the first
+ * non-hex byte instead of decoding the whole memory chunk 32 times.
+ * Candidates still require page-1 HMAC validation by the scanner.
+ */
+export function extractMemoryCipherRecords(view: Buffer): DecodedKeyRecord[] {
+  const records: DecodedKeyRecord[] = []
+  const seen = new Set<string>()
+  const decoded = Buffer.allocUnsafe(MAX_ENCODED_RECORD_BYTES)
+  for (let phase = 0; phase < CIPHER_XOR_PERIOD; phase++) {
+    const prefix = Buffer.from([
+      0x78 ^ CIPHER_XOR_MASK[phase],
+      0x27 ^ CIPHER_XOR_MASK[(phase + 1) % CIPHER_XOR_PERIOD],
+    ])
+    let start = -1
+    while ((start = view.indexOf(prefix, start + 1)) >= 0) {
+      let length = 0
+      for (; length < decoded.length && start + length < view.length; length++) {
+        const value = view[start + length] ^ CIPHER_XOR_MASK[(phase + length) % CIPHER_XOR_PERIOD]
+        decoded[length] = value
+        if (length < 2) continue
+        if (value === 0x27) {
+          if (length >= 66) {
+            for (const record of extractKeyRecords(decoded.toString('latin1', 0, length + 1))) {
+              const id = `${record.keyHex}|${record.saltHex ?? ''}`
+              if (!seen.has(id)) { seen.add(id); records.push(record) }
+            }
+          }
+          break
+        }
+        if (!((value >= 0x30 && value <= 0x39) || (value >= 0x61 && value <= 0x66) || (value >= 0x41 && value <= 0x46))) break
+      }
+    }
+  }
+  return records
+}
+
+/** Windows x64 user pointers must use the same bound as VirtualQueryEx. */
+export function isReadableUserAddress(address: number, length = 1): boolean {
+  return Number.isSafeInteger(address) && Number.isSafeInteger(length)
+    && address > 0 && length > 0 && address + length - 1 <= 0x7fffffffffff
 }
 
 /**
@@ -916,11 +962,9 @@ export async function scanWindowsWeChatDbKeys(options: ScanOptions = {}): Promis
       const tScanStart = nowMs()
       const needleHitsLocal: number[] = [] // 仅诊断：证明该版本确实带了这份配置类
       const buf = Buffer.alloc(chunkBytes + CHUNK_OVERLAP)
-      const scratch = Buffer.allocUnsafe(chunkBytes + CHUNK_OVERLAP)
       const out = [0]
       let bytes = 0
       let regionsDone = 0
-      const maskLen = CIPHER_XOR_MASK.length
       const recordsFromContent: DecodedKeyRecord[] = []
 
       for (const [base, size] of regions) {
@@ -943,40 +987,9 @@ export async function scanWindowsWeChatDbKeys(options: ScanOptions = {}): Promis
           let n = -1
           while ((n = view.indexOf(CIPHER_NEEDLE, n + 1)) >= 0) needleHitsLocal.push(base + off + n)
 
-          // 掩码解码：相位必须按**绝对地址**对齐（blob 落在哪个相位取决于它在内存里的位置）。
-          //
-          // 性能注意：写成 `scratch[k] = view[k] ^ MASK[(k + phase) % maskLen]` 时，每个
-          // 字节都要做一次整数除法（maskLen 在运行时才知道，V8 无法把它变成乘法），
-          // 实测把本机 1.6 GB 扫成了 40 s。改成"maskLen 字节为一组、组内用常量下标"
-          // 之后无除法，同机降到 ~10 s。这段循环是整条路径的热点，改它之前请用
-          // `.wxkey-research/probe/keyscan-live.cjs` 复测墙钟时间。
-          const phase = (base + off) % maskLen
-          const m0 = CIPHER_XOR_MASK
-          let k = 0
-          if (phase === 0) {
-            for (; k + maskLen <= got; k += maskLen) {
-              for (let t = 0; t < maskLen; t++) scratch[k + t] = view[k + t] ^ m0[t]
-            }
-          } else {
-            // 相位非 0 时，先把"旋转后的掩码"摊平，之后同样是常量下标
-            const rot = Buffer.allocUnsafe(maskLen)
-            for (let t = 0; t < maskLen; t++) rot[t] = m0[(t + phase) % maskLen]
-            for (; k + maskLen <= got; k += maskLen) {
-              for (let t = 0; t < maskLen; t++) scratch[k + t] = view[k + t] ^ rot[t]
-            }
-            for (let t = 0; k + t < got; t++) scratch[k + t] = view[k + t] ^ rot[t]
-          }
-          for (; k < got; k++) scratch[k] = view[k] ^ m0[(k + phase) % maskLen]
-          const decoded = scratch.subarray(0, got)
-          let i = -1
-          while ((i = decoded.indexOf(CIPHER_RECORD_PREFIX, i + 1)) >= 0) {
-            const run = readHexRunAt(decoded, i + CIPHER_RECORD_PREFIX.length)
-            if (!run) continue
-            diagnostics.recordHits++
-            for (const record of extractKeyRecords(`${CIPHER_RECORD_PREFIX.toString('latin1')}${run}'`)) {
-              recordsFromContent.push(record)
-            }
-          }
+          const contentRecords = extractMemoryCipherRecords(view)
+          diagnostics.recordHits += contentRecords.length
+          recordsFromContent.push(...contentRecords)
           await maybeYield()
         }
         regionsDone++
@@ -1006,7 +1019,7 @@ export async function scanWindowsWeChatDbKeys(options: ScanOptions = {}): Promis
       const recoveryCache = new Map<string, MaskRecoveryResult>()
       const MAX_BLOBS = 256
       const readMem = (startAddr: number, len: number): Buffer | null => {
-        if (len <= 0 || startAddr <= 0 || startAddr > 0x7fffffffff) return null
+        if (!isReadableUserAddress(startAddr, len)) return null
         const b = Buffer.alloc(len)
         const o = [0]
         if (!k32.ReadProcessMemory(handle, startAddr, b, len, o)) return null
@@ -1062,7 +1075,7 @@ export async function scanWindowsWeChatDbKeys(options: ScanOptions = {}): Promis
             const dataPtr = Number(dump.readBigUInt64LE(o))
             const dataLen = Number(dump.readBigUInt64LE(o + 8))
             if (!(dataLen > 40 && dataLen <= BLOB_MAX)) continue
-            if (!(dataPtr > 0x10000 && dataPtr < 0x7fffffffff) || dataPtr % 8 !== 0) continue
+            if (!(dataPtr > 0x10000 && isReadableUserAddress(dataPtr, dataLen)) || dataPtr % 8 !== 0) continue
             const blob = readMem(dataPtr, dataLen)
             if (!blob) continue
             if (decodeBlobCached(blob).records.length === 0) continue

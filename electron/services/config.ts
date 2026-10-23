@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import Store from 'electron-store'
 import { expandHomePath } from '../utils/pathUtils'
 import { CacheMapStore } from './cacheMapStore'
+import { defaultMediaStorageLocation, resetStorageLocation, resolveStorageLocation } from './storageLocations'
 
 // Electron safeStorage is unavailable in the pure Node WCDB host.
 let app: any = null
@@ -86,6 +87,7 @@ interface ConfigSchema {
   exportFormat?: 'txt' | 'json';
   // 缓存相关
   cachePath: string
+  localEmbedding?: import('./semanticIndex').LocalEmbeddingConfig
   lastOpenedDb: string
   lastSession: string
 
@@ -99,6 +101,7 @@ interface ConfigSchema {
   // 导出选项（Weport GUI，与 WeFlow exportDefault* 对齐）
   exportMedia: { images: boolean; videos: boolean; voices: boolean; emojis: boolean; files: boolean; maxFileSizeMb: number }
   exportAvatars: boolean
+  exportMediaPolicy: 'best-available' | 'original-only'
   exportVoiceAsText: boolean
   exportConflictStrategy: 'incremental' | 'overwrite' | 'rename'
   exportConcurrency: number
@@ -348,6 +351,7 @@ export class ConfigService {
       silentStartup: true,
       exportMedia: { images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 },
       exportAvatars: false,
+      exportMediaPolicy: 'best-available',
       exportVoiceAsText: false,
       exportConflictStrategy: 'overwrite',
       exportConcurrency: 3,
@@ -554,6 +558,12 @@ export class ConfigService {
   // === get / set ===
 
   get<K extends keyof ConfigSchema>(key: K): ConfigSchema[K] {
+    if (key === 'cachePath' || key === 'exportPath') {
+      const profile = this.getUserDataPath()
+      const configured = String(this.store.get(key) || '')
+      const fallback = configured || (key === 'cachePath' ? defaultMediaStorageLocation(profile, app?.getPath?.('documents') || join(profile, 'documents')) : '')
+      return resolveStorageLocation(profile, key === 'cachePath' ? 'media' : 'exports', fallback) as ConfigSchema[K]
+    }
     if (this.cacheMapStore && isCacheMapKey(key as string)) {
       return this.cacheMapStore.get(key as string) as ConfigSchema[K]
     }
@@ -598,6 +608,7 @@ export class ConfigService {
   }
 
   set<K extends keyof ConfigSchema>(key: K, value: ConfigSchema[K]): void {
+    if ((key === 'cachePath' || key === 'exportPath') && value !== this.get(key)) resetStorageLocation(this.getUserDataPath(), key === 'cachePath' ? 'media' : 'exports')
     if (this.cacheMapStore && isCacheMapKey(key as string)) {
       this.cacheMapStore.set(key as string, value)
       return
@@ -1323,11 +1334,12 @@ export class ConfigService {
   }
 
   getCacheBasePath(): string {
-    return join(this.getUserDataPath(), 'cache')
+    return resolveStorageLocation(this.getUserDataPath(), 'cache', join(this.getUserDataPath(), 'cache'))
   }
 
   getAll(): Partial<ConfigSchema> {
     const all = { ...this.store.store } as Record<string, unknown>
+    all.cachePath = this.get('cachePath'); all.exportPath = this.get('exportPath')
     if (this.cacheMapStore) {
       Object.assign(all, this.cacheMapStore.entries())
     }

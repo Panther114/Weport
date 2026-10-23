@@ -40,6 +40,7 @@ import {
   unitKeyOf,
   latestArtifactUnits,
   verifyArtifact,
+  verifyLedgerMediaArtifacts,
 } from '../ledger';
 import { cleanupStaleAtomicTemps } from '../atomicWrite';
 import { hashFileContent } from '../mediaDedupeCache';
@@ -63,18 +64,21 @@ import { WeCloneFormatter } from '../formatters/WeCloneFormatter';
  */
 async function collectMediaHashes(
   exportRootDir: string,
-  sessionDir: string,
+  mediaDirectories: string[],
 ): Promise<Array<{ path: string; sha256: string; bytes: number }>> {
-  const root = path.resolve(sessionDir)
+  const roots = new Set(mediaDirectories.map(directory => path.resolve(directory)))
   const files: string[] = []
-  const stack = [root]
+  const stack = [...roots]
   while (stack.length > 0) {
     const current = stack.pop() as string
     let entries: fs.Dirent[]
     try {
       entries = await fs.promises.readdir(current, { withFileTypes: true })
-    } catch {
-      continue
+    } catch (error) {
+      // A category never created by the formatter is a valid empty inventory.
+      // Failed reads within an existing category must not authorize a skip.
+      if (roots.has(current) && (error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
     }
     for (const entry of entries) {
       const full = path.join(current, entry.name)
@@ -92,7 +96,7 @@ async function collectMediaHashes(
   const out: Array<{ path: string; sha256: string; bytes: number }> = []
   for (const file of files) {
     const hash = await hashFileContent(file)
-    if (!hash) continue
+    if (!hash) throw new Error(`无法校验导出媒体：${file}`)
     out.push({
       path: toLedgerRelativePath(exportRootDir, file),
       sha256: hash.sha256,
@@ -283,14 +287,23 @@ export class ExportOrchestrator {
         const claimedOutputPaths = new Set<string>();
         const progressEmitter = this.context.createProgressEmitter(onProgress);
         let attachMediaTelemetry = false;
+        let finalized = false
         const emitProgress = (progress: ExportProgress, options?: { force?: boolean }) => {
+                  // Formatter completion only closes one session. Hashing, the root
+                  // manifest and optional diagnostics still own the active task.
+                  if (!finalized) progress = { ...progress,
+                    current: progress.total > 0 ? Math.min(progress.current, progress.total * 0.99) : progress.current,
+                    phase: progress.phase === 'complete' ? 'writing' : progress.phase,
+                  }
                   const payload = attachMediaTelemetry
                     ? { ...progress, ...this.context.getMediaTelemetrySnapshot() }
                     : progress
                   progressEmitter.emit(payload, options)
                 };
         try {
+          this.context.throwIfStopRequested(control)
           const conn = await this.context.ensureConnected()
+          this.context.throwIfStopRequested(control)
           if (!conn.success) {
             return { success: false, successCount: 0, failCount: sessionIds.length, imageKeyMissingFiles: 0, voiceFailedFiles: 0, error: conn.error }
           }
@@ -320,15 +333,11 @@ export class ExportOrchestrator {
               }
             }
           }
-          // 账本里的媒体路径是**相对 `exportBaseDir`** 的（`collectMediaHashes(exportBaseDir, …)`），
-          // 所以内容寻址表的根也必须是 `exportBaseDir`。以前这里传的是 `outputDir`：布局 B
-          // 两者相同、看不出问题；布局 A（exportBaseDir = `<outputDir>/texts`）就整体高了一级，
-          // `resolveAbsolute` 还原出来的路径全错 —— 续跑时媒体去重**静默失效**，同一张图被重复
-          // 解密/复制，而界面与日志都看不出来。
+          // Media ledger paths are relative to the selected export root, including layout A sibling media.
           const writeLayout = this.context.resolveExportWriteLayout(effectiveOptions)
           const exportBaseDir = writeLayout === 'A' ? path.join(outputDir, 'texts') : outputDir
           this.context.resetLedgerRuntimeState()
-          this.context.loadLedgerMediaIndex(runMediaHashes, exportBaseDir)
+          this.context.loadLedgerMediaIndex(runMediaHashes, outputDir)
           const ledgerSequence = new Map<string, number>()
 
           const exportMediaEnabled = this.context.isMediaExportEnabled(effectiveOptions)
@@ -594,7 +603,8 @@ export class ExportOrchestrator {
                   bytes: ledgerRecord.bytes,
                   sha256: ledgerRecord.sha256,
                 })
-                if (verification.ok) {
+                const mediaVerified = !exportMediaEnabled || await verifyLedgerMediaArtifacts(outputDir, ledgerRecord.mediaHashes)
+                if (verification.ok && mediaVerified) {
                   if (ledgerRecord.messageCount !== undefined) exportedMessageHints.set(sessionId, ledgerRecord.messageCount)
                   successCount++
                   successSessionIds.push(sessionId)
@@ -616,7 +626,7 @@ export class ExportOrchestrator {
                   return 'done'
                 }
                 // 文件不在/被改过 → 按"没导过"重导，并把这次的判定记下来
-                this.context.noteLedgerMismatch(verification.reason || 'unknown')
+                this.context.noteLedgerMismatch(!mediaVerified ? 'media-artifact-mismatch' : verification.reason || 'unknown')
               }
               // 账本里有记录但产物不符：沿用**账本里的落点**重导，让续跑真正落回同一个路径
               const resumeOutputPath = ledgerRecord?.outputPath && !claimedOutputPaths.has(ledgerRecord.outputPath)
@@ -719,8 +729,10 @@ export class ExportOrchestrator {
                 try {
                   const fingerprint = await fingerprintFile(outputPath)
                   // 媒体清单只在开了媒体导出时收集（多一次遍历，但让续跑能按内容跳过复制）
+                  const mediaLayout = this.context.getMediaLayout(outputPath, effectiveOptions)
+                  const mediaBase = path.resolve(mediaLayout.mediaRootDir, mediaLayout.mediaRelativePrefix)
                   const mediaHashes = exportMediaEnabled
-                    ? await collectMediaHashes(exportBaseDir, sessionDir)
+                    ? await collectMediaHashes(outputDir, ['images', 'voices', 'videos', 'emojis', 'file'].map(category => path.join(mediaBase, category)))
                     : undefined
                   const entry = await ledger.append({
                     taskId,
@@ -743,8 +755,7 @@ export class ExportOrchestrator {
                         runMediaHashes.push(mediaEntry)
                       }
                     }
-                    // 同上：根必须是账本路径的基准目录（`exportBaseDir`），不是 `outputDir`
-                    this.context.loadLedgerMediaIndex(runMediaHashes, exportBaseDir)
+                    this.context.loadLedgerMediaIndex(runMediaHashes, outputDir)
                   }
                 } catch (ledgerError) {
                   console.warn(`[Export] 账本写入失败（不影响本次导出）: ${String(ledgerError)}`)
@@ -813,9 +824,11 @@ export class ExportOrchestrator {
           queue = poolResult.pending
           stopRequested ||= poolResult.stopped
           pauseRequested ||= poolResult.paused
+          stopRequested ||= control?.shouldStop?.() === true
+          pauseRequested ||= control?.shouldPause?.() === true
 
           const pendingSessionIds = [...queue]
-          if (stopRequested && pendingSessionIds.length > 0) {
+          if (stopRequested) {
             return {
               success: true,
               successCount,
@@ -853,7 +866,8 @@ export class ExportOrchestrator {
             total: sessionIds.length,
             currentSession: '',
             currentSessionId: '',
-            phase: 'complete'
+            phase: 'writing',
+            phaseLabel: '正在完成导出清单…'
           }, { force: true })
           progressEmitter.flush()
           // §10.1：目录级清单（原子写）。续跑跳过会话时，清单仍从**账本**汇总全部单元，
@@ -887,6 +901,8 @@ export class ExportOrchestrator {
           // 报"少了 N 行"只会误导（取消路径另有清理逻辑）。
           // 自检失败绝不能让一次成功的导出变成失败：只记日志 + 落一份 ok:false 报告。
           if (effectiveOptions.verifyAfterExport === true && !stopRequested && !pauseRequested && successSessionIds.length > 0) {
+            this.context.throwIfStopRequested(control)
+            emitProgress({ current: sessionIds.length, total: sessionIds.length, currentSession: '', phase: 'writing', phaseLabel: '正在诊断导出完整性…' }, { force: true })
             const uniqueSuccessSessionIds = [...new Set(successSessionIds)]
             try {
               const integrityReport = await runIntegrityCheck({
@@ -945,10 +961,14 @@ export class ExportOrchestrator {
             }
           }
 
+          this.context.throwIfStopRequested(control)
           const allFailed = successCount === 0 && failCount > 0
           const failureSummary = allFailed
             ? Object.values(failedSessionErrors).slice(0, 3).join('；') || '所有会话导出失败'
             : undefined
+          finalized = true
+          emitProgress({ current: sessionIds.length, total: sessionIds.length, currentSession: '', currentSessionId: '', phase: 'complete' }, { force: true })
+          progressEmitter.flush()
           return {
             success: !allFailed,
             successCount,
@@ -964,7 +984,13 @@ export class ExportOrchestrator {
           }
         } catch (e) {
           progressEmitter.flush()
-          return { success: false, successCount, failCount, imageKeyMissingFiles: this.getRunImageKeyMissingCount(), voiceFailedFiles: this.getRunVoiceFailedCount(), error: String(e) }
+          const stopped = this.context.isStopError(e)
+          const paused = !stopped && this.context.isPauseError(e)
+          return { success: stopped || paused, successCount, failCount,
+            ...(stopped ? { stopped: true } : paused ? { paused: true } : { error: String(e) }),
+            pendingSessionIds: sessionIds.filter(id => !successSessionIds.includes(id) && !failedSessionIds.includes(id) && !emptySkippedSessionIds.includes(id)),
+            successSessionIds, failedSessionIds, failedSessionErrors, sessionOutputPaths, emptySkippedSessionIds,
+            imageKeyMissingFiles: this.getRunImageKeyMissingCount(), voiceFailedFiles: this.getRunVoiceFailedCount() }
         } finally {
           this.context.clearMediaRuntimeState()
         }

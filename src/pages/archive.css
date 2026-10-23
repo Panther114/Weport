@@ -1,0 +1,48 @@
+.archive-page { display: grid; gap: 16px; min-width: 0; }
+.archive-page h1, .archive-page h2 { color: var(--accent, #7d9dd7); }
+.archive-controls { display: grid; gap: 12px; }
+.archive-page label { display: grid; gap: 6px; }
+.archive-page select, .archive-page input { max-width: 100%; }
+.archive-page article { padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.archive-page button { margin: 4px; transition: transform .15s cubic-bezier(.34,1.56,.64,1), opacity .15s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.archive-page button:hover { transform: translateY(-1px); }
+.archive-page button:active { transform: scale(.98); }
+.archive-page button:disabled { opacity: .5; }
+.archive-page .archive-error { color: var(--danger, #ef8282); }
+.archive-message p { white-space: pre-wrap; }
+.archive-message img { display: block; max-width: 100%; max-height: 480px; object-fit: contain; }
+@media (prefers-reduced-motion: reduce) { .archive-page button { transition: none; transform: none; } }
+
+.archive-evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+
+/* Commands follow their scope: creation footer, library heading, or archive row. */
+.archive-page .panel { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); }
+.archive-page h1 { margin: 0; font-size: 22px; font-weight: 400; }
+.archive-page h2 { margin: 0; font-size: 16px; font-weight: 400; }
+.archive-page header p { margin: 6px 0 0; color: var(--text-dim); }
+.archive-create-grid { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.5fr); column-gap: 20px; align-items: start; }
+.archive-page .archive-session-picker { grid-row: 1 / 5; margin: 0; }
+.archive-session-picker select { min-height: 210px; }
+.archive-destination { display: grid; gap: 6px; }
+.archive-field-label, .archive-page .archive-field-note { color: var(--text-dim); font-size: 12px; }
+.archive-page .archive-field-note { margin: 0; }
+.archive-inline-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.archive-page .archive-inline-actions button { flex: 0 0 auto; }
+.archive-path { min-width: 0; flex: 1 1 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 12px; }
+.archive-date-fields, .archive-reader-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.archive-media-fields { display: grid; gap: 4px; }
+.archive-page .archive-checkbox { display: flex; align-items: center; gap: 8px; margin-bottom: 0; }
+.archive-create-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.archive-section-heading, .archive-entry { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.archive-entry-info { flex: 1 1 220px; min-width: 0; font-size: 13px; color: var(--text-dim); }
+.archive-entry-info strong { color: var(--text); font-weight: 400; }
+.archive-page button { margin: 0; }
+.archive-page button:hover:disabled { transform: none; }
+.archive-page details { border-top: 1px solid var(--line); padding-top: 4px; }
+.archive-page summary { font-weight: 400; }
+.archive-page .archive-reader > p { color: var(--text-dim); }
+@media (max-width: 850px) {
+  .archive-create-grid, .archive-date-fields, .archive-reader-filters { grid-template-columns: minmax(0, 1fr); }
+  .archive-page .archive-session-picker { grid-row: auto; }
+  .archive-create-grid { row-gap: 12px; }
+}

@@ -69,6 +69,8 @@ export function IndexStatusBar({ index, indexLoading, indexError, onRefresh }: I
       ) : index?.ready ? (
         <span className="sp-status-text">
           索引就绪 · {index.docs.toLocaleString('zh-CN')} 条
+          {index.engine === 'bigram-inverted-v1' ? ' · 子串倒排索引' : ''}
+          {index.truncated ? ' · 索引覆盖不完整' : index.reconciled === false ? ' · 尚未完成全量核对' : ''}
           {index.lastBuiltAt ? ` · 更新于 ${formatRelative(index.lastBuiltAt)}` : ''}
           {index.accounts?.length
             ? ` · ${index.accounts.map((account) => `${account.wxid}${account.stale ? '（待更新）' : ''}`).join('、')}`

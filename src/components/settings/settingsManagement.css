@@ -1,0 +1,44 @@
+.settings-management { min-width: 0; }
+.settings-management summary::after { content: none; }
+.settings-management .panel-head h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; }
+.settings-management .settings-disclosure { border-top: 1px solid var(--line); }
+.settings-management .settings-disclosure > summary { display: flex; align-items: center; gap: 10px; padding: 12px 2px; list-style: none; border-radius: 6px; transition: color .16s ease, background .16s ease; }
+.settings-management .settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-management .settings-disclosure > summary::before { content: '›'; font-size: 18px; line-height: 1; transition: transform .16s ease; }
+.settings-management .settings-disclosure[open] > summary::before { transform: rotate(90deg); }
+.settings-management .settings-disclosure > summary:hover { background: var(--accent-softer); }
+.settings-management .settings-disclosure > summary:active { background: var(--accent-soft); }
+.settings-management .settings-disclosure-main { border-top: 0; }
+.settings-management .settings-disclosure-main > summary { padding: 0; }
+.settings-management .settings-storage-entry > summary::before,
+.settings-management .settings-disclosure-main > summary::before { display: none; }
+.settings-management summary > span { min-width: 0; flex: 1; }
+.settings-management summary strong { display: block; font-size: 14px; font-weight: 600; color: var(--accent); }
+.settings-management summary small { display: block; margin-top: 5px; font-size: 12px; font-weight: 400; line-height: 1.5; color: var(--text-dim); overflow-wrap: anywhere; }
+.settings-management .settings-disclosure-chevron { flex-shrink: 0; color: var(--text-dim); transition: transform .16s ease; }
+.settings-management .settings-disclosure[open] > summary > .settings-disclosure-chevron { transform: rotate(180deg); }
+.settings-management .settings-disclosure-body { padding: 2px 0 10px; }
+.settings-management .settings-storage-entry .settings-disclosure-body { padding-left: 12px; border-left: 2px solid var(--line); margin-bottom: 12px; }
+.settings-management .settings-storage-maintenance { margin-top: 6px; }
+.settings-management .settings-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.settings-management .settings-action-row > button,
+.settings-management .settings-grant-list button { margin: 0; }
+.settings-management .settings-field-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.settings-management .settings-session-scope { padding: 12px; margin: 12px 0; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); min-width: 0; }
+.settings-management .settings-session-scope legend { padding: 0 5px; font-size: 12px; color: var(--text-dim); }
+.settings-management .settings-session-list { max-height: 180px; overflow-y: auto; margin-top: 8px; }
+.settings-management .settings-session-list label { display: flex; align-items: center; gap: 8px; margin: 0; padding: 7px 4px; color: var(--text); }
+.settings-management .settings-session-list label span { min-width: 0; overflow-wrap: anywhere; }
+.settings-management .settings-session-list input { flex-shrink: 0; }
+.settings-management .settings-grant-list { list-style: none; padding: 0; margin: 12px 0; }
+.settings-management .settings-grant-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.settings-management .settings-grant-list li > div { min-width: 0; overflow-wrap: anywhere; }
+.settings-management .settings-grant-list strong { font-size: 13px; }
+.settings-management .settings-grant-list span { display: block; margin-top: 5px; color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+.settings-management .settings-task-state { padding: 12px; margin-top: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); background: var(--accent-softer); }
+@media (max-width: 600px) { .settings-management .settings-field-pair { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .settings-management .settings-disclosure > summary,
+  .settings-management .settings-disclosure > summary::before,
+  .settings-management .settings-disclosure-chevron { transition: none; }
+}

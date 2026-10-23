@@ -412,7 +412,16 @@ const resolveSnsLocationText = (location?: SnsLocation): string => {
 
 class SnsService {
     private configService: ConfigService
-    private contactCache: ContactCacheService
+    private contactCacheInstance: ContactCacheService | null = null
+    private contactCacheBase = ''
+    private get contactCache(): ContactCacheService {
+        const base = String(this.configService.get('cachePath') || this.configService.getCacheBasePath())
+        if (!this.contactCacheInstance || this.contactCacheBase !== base) {
+            this.contactCacheInstance = new ContactCacheService(base)
+            this.contactCacheBase = base
+        }
+        return this.contactCacheInstance
+    }
     private imageCache = new Map<string, string>()
     private imageCacheMeta = new Map<string, number>()
     /** 进行中的媒体解密请求（同资源并发去重：网格/灯箱/下载共享一次下载） */
@@ -433,7 +442,6 @@ class SnsService {
 
     constructor() {
         this.configService = new ConfigService()
-        this.contactCache = new ContactCacheService(this.configService.get('cachePath') as string)
     }
 
     clearMemoryCache(): void {
@@ -1013,7 +1021,7 @@ class SnsService {
 
     private getSnsCacheDir(): string {
         const configuredCachePath = String(this.configService.get('cachePath') || '').trim()
-        const baseDir = configuredCachePath || join(app.getPath('documents'), 'WeFlow')
+        const baseDir = configuredCachePath || join(this.configService.getCacheBasePath(), 'media')
         const snsCacheDir = join(baseDir, 'sns_cache')
         if (!existsSync(snsCacheDir)) {
             mkdirSync(snsCacheDir, { recursive: true })
@@ -1023,7 +1031,7 @@ class SnsService {
 
     private getEmojiCacheDir(): string {
         const configuredCachePath = String(this.configService.get('cachePath') || '').trim()
-        const baseDir = configuredCachePath || join(app.getPath('documents'), 'WeFlow')
+        const baseDir = configuredCachePath || join(this.configService.getCacheBasePath(), 'media')
         const emojiDir = join(baseDir, 'Emojis')
         if (!existsSync(emojiDir)) {
             mkdirSync(emojiDir, { recursive: true })

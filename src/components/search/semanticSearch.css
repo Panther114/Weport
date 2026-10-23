@@ -1,0 +1,30 @@
+.sp-semantic { min-width: 0; font-size: 12px; }
+.sp-semantic-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sp-semantic-label { color: var(--accent); font-weight: 400; }
+.sp-semantic .seg button { margin: 0; padding: 4px 9px; font-size: 12px; }
+.sp-semantic details { border-bottom: 1px solid var(--line); }
+.sp-semantic details[open] { max-height: min(42vh, 340px); overflow-y: auto; padding-right: 6px; }
+.sp-semantic summary { font-size: 12px; }
+.sp-semantic p { margin: 6px 0; font-size: 12px; line-height: 1.5; }
+.sp-semantic-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+.sp-semantic-fields label:first-child { grid-column: 1 / -1; }
+.sp-semantic-fields label { margin: 5px 0; font-size: 12px; }
+.sp-semantic-fields input { padding: 6px 8px !important; }
+.sp-semantic .sp-semantic-enable { display: flex; align-items: center; gap: 8px; }
+.sp-semantic-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.sp-semantic-presets .seg { display: flex; flex-wrap: wrap; }
+.sp-semantic-hint { color: var(--text-dim); }
+.sp-semantic-warning { color: var(--warning, #b7791f); }
+.sp-semantic summary { transition: opacity .15s ease, transform .15s ease; }
+.sp-semantic summary:hover { opacity: .8; }
+.sp-semantic summary:active { transform: scale(.995); }
+@media (max-width: 700px) { .sp-semantic-fields { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .sp-semantic summary { transition: none; transform: none; } }
+
+.sp-semantic { border-top: 1px solid var(--line); padding-top: 5px; }
+.sp-semantic details { border-bottom: 0; }
+.sp-semantic summary { display: flex; width: 100%; color: var(--text-dim); font-weight: 400; }
+.sp-semantic details[open] > summary { color: var(--accent); }
+.sp-semantic-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 0 4px; }
+.sp-semantic .sp-semantic-actions button { margin: 0; }
+.sp-semantic .sp-semantic-row { padding: 2px 0 5px; }

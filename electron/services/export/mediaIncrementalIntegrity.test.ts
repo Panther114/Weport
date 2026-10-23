@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import { createHash } from 'node:crypto'
 
 vi.mock('../config', () => ({ ConfigService: class {
   getCacheBasePath() { return os.tmpdir() }
@@ -93,5 +94,23 @@ describe('incremental media without a previous ledger', () => {
       { exportConflictStrategy: 'incremental' }, 'media/target.bin')
     expect(unavailable.success).toBe(false)
     expect(fs.readFileSync(target, 'utf8')).toBe('valid original fixture bytes')
+  })
+})
+
+
+describe('current source versus previous media ledger', () => {
+  it('replaces old valid ledger bytes when the source payload changes at a stable path', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'weport-media-integrity-')); roots.push(root)
+    const source = path.join(root, 'source.png'), target = path.join(root, 'output.png')
+    const oldBytes = 'previous attachment', currentBytes = 'new original attachment bytes'
+    fs.writeFileSync(source, currentBytes); fs.writeFileSync(target, oldBytes)
+    const context = new ExportContext()
+    context.loadLedgerMediaIndex([{ path: 'output.png', bytes: Buffer.byteLength(oldBytes), sha256: createHash('sha256').update(oldBytes).digest('hex') }], root)
+    const copy = () => (context as any).copyMediaWithCacheAndDedup('image', source, target, undefined, { exportConflictStrategy: 'incremental' }, 'output.png')
+    expect((await copy()).success).toBe(true)
+    expect(fs.readFileSync(target, 'utf8')).toBe(currentBytes)
+    fs.unlinkSync(source)
+    expect((await copy()).success).toBe(false)
+    expect(fs.readFileSync(target, 'utf8')).toBe(currentBytes)
   })
 })

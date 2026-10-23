@@ -1,6 +1,10 @@
 import { exportDateRange } from './utils/exportDateRange'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PrivacySettings from './components/settings/PrivacySettings'
+import DataAccessSettings from './components/settings/DataAccessSettings'
+import StorageSettings from './components/settings/StorageSettings'
+import './components/settings/settingsManagement.css'
+import './styles/appControls.css'
 import {
   Plug,
   PlugZap,
@@ -125,6 +129,7 @@ const AnalyticsModule = lazy(() => import('./pages/analytics/AnalyticsModule'))
 // v1.2 §6：跨页搜索 + 标签 / 收藏 / 保存的搜索。lazy —— 索引状态与结果页都只在真的
 // 点进来时才需要（首屏启动图不该为它付费）。
 const SearchPage = lazy(() => import('./pages/SearchPage'))
+const ArchivePage = lazy(() => import('./pages/ArchivePage'))
 // v1.2 §5：诊断页（连接与数据健康自检 + 本地诊断包导出）。同样 lazy。
 const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage'))
 // v1.2 §3：内置聊天阅读器（只读）。lazy —— 它是这套界面里最重的一页。
@@ -183,7 +188,7 @@ import './styles/v1.scss'
 import './styles/theme.scss'
 import './styles/interaction.scss'
 
-type Tab = 'connect' | 'export' | 'reader' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'poster' | 'analytics' | 'search' | 'diagnostics' | 'settings'
+type Tab = 'connect' | 'export' | 'archive' | 'reader' | 'antirecall' | 'notifications' | 'ai' | 'webot' | 'webot-notes' | 'weclone' | 'sns' | 'poster' | 'analytics' | 'search' | 'diagnostics' | 'settings'
 type Format = 'txt' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'excel' | 'sql' | 'chatlab' | 'chatlab-jsonl' | 'weclone'
 type PathStyle = 'auto' | 'posix' | 'windows'
 type ConflictStrategy = 'incremental' | 'overwrite' | 'rename'
@@ -364,6 +369,7 @@ const TABS: Array<{
 }> = [
   { id: 'connect', label: '连接微信', icon: PlugZap, group: 'wechat', hint: '数据目录、账号与解密密钥' },
   { id: 'export', label: '导出数据', icon: Download, group: 'wechat', hint: '选择会话与格式，导出到本地' },
+  { id: 'archive', label: '归档库', icon: Archive, group: 'wechat', hint: '创建、验证与离线阅读可迁移归档' },
   { id: 'reader', label: '聊天阅读', icon: ReaderIcon, group: 'wechat', hint: '在应用里直接翻阅本地聊天记录（只读）' },
   { id: 'sns', label: '朋友圈', icon: Images, group: 'wechat', hint: '浏览与导出朋友圈动态' },
   { id: 'poster', label: '海报', icon: PosterIcon, group: 'wechat', hint: '把一段对话或动态做成可分享的图片' },
@@ -411,6 +417,19 @@ export default function App() {
   const [selectedWxid, setSelectedWxid] = useState('')
   const [decryptKey, setDecryptKey] = useState('')
   const [readerOpenRequest, setReaderOpenRequest] = useState<ReaderOpenRequest>()
+  useEffect(() => {
+    let disposed = false
+    const openEvidence = async (event: Event) => {
+      const source = (event as CustomEvent<{ accountId: string; sessionId: string; localId: string; idKind: 'local'; db: string; table: string; ts: number }>).detail
+      if (!source) return
+      const currentAccount = await window.electronAPI.dataAccess.currentAccount().catch(() => '')
+      if (disposed || source.accountId !== currentAccount) return
+      setReaderOpenRequest({ ...source, accountId: selectedWxid, requestId: Date.now() })
+      setTab('reader')
+    }
+    window.addEventListener('weport:verified-evidence', openEvidence)
+    return () => { disposed = true; window.removeEventListener('weport:verified-evidence', openEvidence) }
+  }, [selectedWxid])
   const [posterSource, setPosterSource] = useState<ReaderPosterRequest>()
   const [showKey, setShowKey] = useState(false)
   const [keyStatus, setKeyStatus] = useState('')
@@ -476,6 +495,7 @@ export default function App() {
   // 设置页在 v1.0 改成「左侧分类 + 右侧内容」：之前是六块等权重的面板竖着
   // 排成一条长滚动，想改一项得先滚过另外五项。默认落在「常规」。
   const [settingsSection, setSettingsSection] = useState<'general' | 'appearance' | 'ai' | 'assign' | 'connectors' | 'data' | 'connect' | 'privacy' | 'diagnostics' | 'report' | 'about'>('general')
+  const [storageSettingsOpen, setStorageSettingsOpen] = useState(false)
   const [mcpStatus, setMcpStatus] = useState<{ running: boolean; port: number; host: string; tokenConfigured: boolean } | null>(null)
   const [mcpCopied, setMcpCopied] = useState(false)
   // 免打扰自检结果（「跟随微信消息免打扰」到底有没有在生效）
@@ -598,6 +618,7 @@ export default function App() {
   // 导出选项（WeFlow 对齐）
   const [exportStartDate, setExportStartDate] = useState('')
   const [exportEndDate, setExportEndDate] = useState('')
+  const [exportMediaPolicy, setExportMediaPolicy] = useState<'best-available' | 'original-only'>('best-available')
   const [exportMedia, setExportMedia] = useState({ images: false, videos: false, voices: false, emojis: false, files: false, maxFileSizeMb: 200 })
   const [exportAvatars, setExportAvatars] = useState(false)
   const [exportVoiceAsText, setExportVoiceAsText] = useState(false)
@@ -704,6 +725,7 @@ export default function App() {
   const saveExportOptions = useCallback((opts: {
     format?: Format
     media?: typeof exportMedia
+    mediaPolicy?: 'best-available' | 'original-only'
     avatars?: boolean
     voiceAsText?: boolean
     pathStyle?: PathStyle
@@ -714,6 +736,7 @@ export default function App() {
   }) => {
     if (opts.format !== undefined) void api.config.set('exportFormat', opts.format)
     if (opts.media !== undefined) void api.config.set('exportMedia', opts.media)
+    if (opts.mediaPolicy !== undefined) void api.config.set('exportMediaPolicy', opts.mediaPolicy)
     if (opts.avatars !== undefined) void api.config.set('exportAvatars', opts.avatars)
     if (opts.voiceAsText !== undefined) void api.config.set('exportVoiceAsText', opts.voiceAsText)
     if (opts.pathStyle !== undefined) void api.config.set('exportDefaultPathStyle', opts.pathStyle)
@@ -728,7 +751,9 @@ export default function App() {
     setWriteLayout(EXPORT_DEFAULTS.writeLayout)
     setExportStartDate('')
     setExportEndDate('')
+    setExportMediaPolicy('best-available')
     setExportMedia(EXPORT_DEFAULTS.media)
+    saveExportOptions({ mediaPolicy: 'best-available' })
     setExportAvatars(EXPORT_DEFAULTS.avatars)
     setExportVoiceAsText(EXPORT_DEFAULTS.voiceAsText)
     setExportPathStyle(EXPORT_DEFAULTS.pathStyle)
@@ -1124,6 +1149,8 @@ export default function App() {
         // 导出选项
         try {
           const media = await api.config.get('exportMedia')
+          const mediaPolicy = await api.config.get('exportMediaPolicy')
+          setExportMediaPolicy(mediaPolicy === 'original-only' ? 'original-only' : 'best-available')
           if (media && typeof media === 'object') {
             setExportMedia((prev) => ({
               ...prev,
@@ -1386,13 +1413,18 @@ export default function App() {
    * 它在哪个标签下 —— 这个按钮把那一步省掉。取消则直接复用各功能已有的取消
    * 通道（导出按 taskId、克隆走 weclone.cancel）。
    */
-  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'weclone' | 'settings' | 'search' | 'diagnostics') => {
-    setTab(target === 'diagnostics' ? 'settings' : target)
+  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'archive' | 'weclone' | 'settings' | 'search' | 'diagnostics' | 'storage') => {
+    setTab(target === 'diagnostics' || target === 'storage' ? 'settings' : target)
     if (target === 'diagnostics') setSettingsSection('diagnostics')
+    if (target === 'storage') { setSettingsSection('data'); setStorageSettingsOpen(true) }
   }, [])
 
   const handleCancelTask = useCallback(
     (key: string) => {
+      if (key === LIVE_TASK.archive) {
+        void api.archive.cancel().catch((error: unknown) => pushToast('err', '取消归档失败', String(error)))
+        return
+      }
       if (key === LIVE_TASK.export) {
         const taskId = liveTask(LIVE_TASK.export).getState().detail?.taskId
         if (typeof taskId === 'string' && taskId) void api.export.cancelTask(taskId)
@@ -1462,6 +1494,7 @@ export default function App() {
       exportEmojis: exportMedia.emojis,
       exportFiles: exportMedia.files,
       exportMedia: mediaEnabled,
+      mediaPolicy: exportMediaPolicy,
       maxFileSizeMb: exportMedia.maxFileSizeMb,
       exportAvatars,
       exportVoiceAsText,
@@ -2731,8 +2764,8 @@ export default function App() {
 
             <div className="panel-head exp-head">
               {/* 主操作放在页头并让页头吸顶：导出按钮从此**始终可见**，而且
-                  不会像底部悬浮条那样盖住内容。页头右侧依次是「范围状态 →
-                  恢复默认 → 清空导出库 → 开始导出」，破坏性操作离主操作最远。 */}
+                  不会像底部悬浮条那样盖住内容。页头只保留范围、恢复默认与导出；
+                  清空导出库在高级选项里，避免维护操作挤占主操作。 */}
               <div className="exp-head-state">
                 <span className="exp-head-chip">
                   <FileType size={13} />
@@ -2757,15 +2790,6 @@ export default function App() {
                 >
                   <RotateCcw size={13} />
                   恢复默认
-                </button>
-                <button
-                  className="danger-btn"
-                  type="button"
-                  disabled={busy || !exportPath.trim()}
-                  onClick={() => setClearOpen(true)}
-                >
-                  <Trash2 size={13} />
-                  清空导出库
                 </button>
                 <button className="primary-btn" type="button" disabled={busy} onClick={() => void runExport()}>
                   <Download size={14} />
@@ -2956,12 +2980,12 @@ export default function App() {
                 <div className="exp-section">
                   <div className="exp-sec-head">日期范围</div>
                   <div className="export-date-range">
-                    <label>开始日期<input type="date" aria-label="导出开始日期" value={exportStartDate} max={exportEndDate || undefined} disabled={busy} onChange={(event) => setExportStartDate(event.target.value)} /></label>
+                    <label>开始时间<input type="datetime-local" step="1" aria-label="导出开始时间" value={exportStartDate} max={exportEndDate || undefined} disabled={busy} onChange={(event) => setExportStartDate(event.target.value)} /></label>
                     <span>至</span>
-                    <label>结束日期<input type="date" aria-label="导出结束日期" value={exportEndDate} min={exportStartDate || undefined} disabled={busy} onChange={(event) => setExportEndDate(event.target.value)} /></label>
+                    <label>结束时间<input type="datetime-local" step="1" aria-label="导出结束时间" value={exportEndDate} min={exportStartDate || undefined} disabled={busy} onChange={(event) => setExportEndDate(event.target.value)} /></label>
                     <button type="button" className="ghost-btn" disabled={busy || (!exportStartDate && !exportEndDate)} onClick={() => { setExportStartDate(''); setExportEndDate('') }}>全部时间</button>
                   </div>
-                  <p className="hint">留空表示不限，包含开始与结束当天。</p>
+                  <p className="hint">使用本地时间，精确到秒，包含起止时刻；留空表示不限。</p>
                 </div>
 
                 {/* 3. 内容 */}
@@ -3013,6 +3037,12 @@ export default function App() {
                       </label>
                     )}
                   </div>
+                  {exportMedia.images && <label className="export-quality-field">图片画质
+                    <select aria-label="导出图片画质" value={exportMediaPolicy} disabled={busy} onChange={event => { const mediaPolicy = event.target.value as typeof exportMediaPolicy; setExportMediaPolicy(mediaPolicy); saveExportOptions({ mediaPolicy }) }}>
+                      <option value="best-available">本地最佳画质（允许显示版与缩略图）</option>
+                      <option value="original-only">仅原图（无法确认原图时保留占位）</option>
+                    </select>
+                  </label>}
                   {exportMedia.images && imageKeyRequired && (
                     <div className="media-row" style={{ marginTop: 8, alignItems: 'center' }}>
                       <button
@@ -3187,6 +3217,10 @@ export default function App() {
                           ))}
                         </div>
                       </div>
+                      <div className="export-maintenance-row">
+                        <div><strong>导出库维护</strong><span>清理当前输出目录中的导出记录与文件</span></div>
+                        <button className="ghost-btn danger" type="button" disabled={busy || !exportPath.trim()} onClick={() => setClearOpen(true)}><Trash2 size={13} />清空导出库…</button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -3225,6 +3259,7 @@ export default function App() {
             <PosterPage sourceRequest={posterSource} />
           </Suspense>
         )}
+        {tab === 'archive' && <Suspense fallback={<div className="empty">正在打开归档库…</div>}><ArchivePage accountId={selectedWxid} /></Suspense>}
         {tab === 'reader' && (
           <Suspense fallback={<LazyFallback label="聊天阅读" />}>
             <ReaderPage key={selectedWxid} accountId={selectedWxid} openRequest={readerOpenRequest?.accountId === selectedWxid ? readerOpenRequest : undefined} onCreatePoster={request => { setPosterSource(request); setTab('poster') }} />
@@ -3722,8 +3757,8 @@ export default function App() {
                   { id: 'ai', label: 'AI 服务', hint: '提供商 · 模型 · 密钥', icon: Sparkles },
                   { id: 'assign', label: '服务分配', hint: '功能面用哪个服务', icon: PlugZap },
                   { id: 'connectors', label: '连接器', hint: 'Todoist 等第三方工具', icon: Plug },
-                  { id: 'data', label: '数据', hint: '备份与恢复', icon: Archive },
-                  { id: 'connect', label: '接口', hint: 'HTTP API · MCP', icon: Server },
+                  { id: 'data', label: '数据', hint: '备份 · 存储与迁移', icon: Archive },
+                  { id: 'connect', label: '接口', hint: 'HTTP API · MCP · 客户端授权', icon: Server },
                   { id: 'privacy', label: '隐私', hint: '本机处理 · 数据使用说明', icon: Info },
                   { id: 'diagnostics', label: '诊断', hint: '连接 · 数据健康 · 运行自检', icon: DiagnosticsIcon },
                   { id: 'report', label: '问题反馈', hint: '本机编辑 · GitHub 手动提交', icon: Bug },
@@ -4349,6 +4384,7 @@ export default function App() {
               )}
 
               {settingsSection === 'data' && (
+                <>
                 <section className="panel">
                   <div className="panel-head">
                     <h2>
@@ -4403,6 +4439,8 @@ export default function App() {
                 </div>
               </div>
                 </section>
+                <StorageSettings open={storageSettingsOpen} onOpenChange={setStorageSettingsOpen} />
+                </>
               )}
 
               {settingsSection === 'connect' && (
@@ -4473,6 +4511,7 @@ export default function App() {
                     <code>claude_desktop_config.json</code> 后重启宿主即可。
                   </p>
                 </section>
+                <DataAccessSettings />
                 </>
               )}
 

@@ -43,6 +43,11 @@ const emptyDraft = () => ({
   catchUp: 'once' as WeBotCatchUp,
   allowParallel: false,
   references: [] as WeBotReference[],
+  digestTemplate: 'decisions-deadlines' as 'custom' | 'decisions-deadlines' | 'unanswered-questions' | 'weekly-highlights',
+  maxMessages: 200,
+  maxInputChars: 24000,
+  maxTotalTokens: 8000,
+  timeoutSeconds: 120,
 })
 
 type Draft = ReturnType<typeof emptyDraft>
@@ -214,6 +219,11 @@ export default function WeBotModule({ section }: Props) {
       catchUp: task.catchUp,
       allowParallel: task.allowParallel,
       references: task.references.map((reference) => ({ ...reference })),
+      digestTemplate: task.digest?.template || 'custom',
+      maxMessages: task.digest?.limits.maxMessages || 200,
+      maxInputChars: task.digest?.limits.maxInputChars || 24000,
+      maxTotalTokens: task.digest?.limits.maxTotalTokens || 8000,
+      timeoutSeconds: (task.digest?.limits.timeoutMs || 120000) / 1000,
       ...(task.schedule.kind === 'daily'
         ? { scheduleKind: 'daily', hour: task.schedule.hour, minute: task.schedule.minute }
         : task.schedule.kind === 'weekly'
@@ -255,6 +265,13 @@ export default function WeBotModule({ section }: Props) {
       return
     }
     const schedule = buildSchedule(draft)
+    const existing = tasks.find(task => task.id === editingId)
+    const digest = draft.digestTemplate === 'custom' ? undefined : {
+      template: draft.digestTemplate,
+      scope: existing?.digest?.scope || { accountId: '', sessionIds: draft.references.map(ref => ref.id), startTime: Math.floor(Date.now() / 1000) - 7 * 86400 },
+      limits: { maxMessages: draft.maxMessages, maxInputChars: draft.maxInputChars, maxTotalTokens: draft.maxTotalTokens, timeoutMs: draft.timeoutSeconds * 1000 },
+    }
+    if (digest && !draft.references.length) { setMessage('请先用 @ 选择摘要会话；范围在创建后固定。'); return }
     try {
       if (editingId) {
         await api.weBot.updateTask(editingId, {
@@ -264,6 +281,7 @@ export default function WeBotModule({ section }: Props) {
           catchUp: draft.catchUp,
           allowParallel: draft.allowParallel,
           references: draft.references,
+          ...(digest ? { digest } : {}),
         })
       } else {
         await api.weBot.createTask({
@@ -273,6 +291,7 @@ export default function WeBotModule({ section }: Props) {
           catchUp: draft.catchUp,
           allowParallel: draft.allowParallel,
           references: draft.references,
+          ...(digest ? { digest } : {}),
         })
       }
       setMessage('')
@@ -388,7 +407,7 @@ export default function WeBotModule({ section }: Props) {
         </div>
         <div className="webot-toolbar-actions">
           {section === 'tasks' ? (
-            <button type="button" className="secondary-btn" onClick={openCreate}>
+            <button type="button" className="primary-btn" onClick={openCreate}>
               <Plus size={14} /> 新建任务
             </button>
           ) : (
@@ -431,6 +450,15 @@ export default function WeBotModule({ section }: Props) {
 
               <div className="webot-editor-grid">
                 <div className="webot-editor-col">
+                  <label className="webot-field">
+                    <span>摘要模板</span>
+                    <select value={draft.digestTemplate} disabled={Boolean(editingId && tasks.find(task => task.id === editingId)?.digest)} onChange={e => setDraft(prev => ({ ...prev, digestTemplate: e.target.value as Draft['digestTemplate'] }))}>
+                      <option value="decisions-deadlines">决定与截止日期</option>
+                      <option value="unanswered-questions">待答复问题</option>
+                      <option value="weekly-highlights">每周要点</option>
+                      <option value="custom">常规定时任务</option>
+                    </select>
+                  </label>
                   <label className="webot-field">
                     <span>标题</span>
                     <input
@@ -657,6 +685,19 @@ export default function WeBotModule({ section }: Props) {
                 />
                 <span>允许与其他任务同时运行（默认串行，避免同时抢占数据库）</span>
               </label>
+                  {draft.digestTemplate !== 'custom' ? (
+                    <fieldset className="webot-budget">
+                      <legend>运行限制</legend>
+                      <p className="webot-hint">只读取所选账号与会话的新增消息；首次检查近七天。来源范围创建后固定。</p>
+                      <div className="webot-budget-grid">
+                        <label className="webot-field"><span>每次最多消息数</span><input type="number" min={1} max={1000} value={draft.maxMessages} onChange={e => setDraft(prev => ({ ...prev, maxMessages: Number(e.target.value) }))} /></label>
+                        <label className="webot-field"><span>文本字符上限</span><input type="number" min={1000} max={100000} value={draft.maxInputChars} onChange={e => setDraft(prev => ({ ...prev, maxInputChars: Number(e.target.value) }))} /></label>
+                        <label className="webot-field"><span>Token 预算（软限制）</span><input type="number" min={256} max={32000} value={draft.maxTotalTokens} onChange={e => setDraft(prev => ({ ...prev, maxTotalTokens: Number(e.target.value) }))} /></label>
+                        <label className="webot-field"><span>超时秒数</span><input type="number" min={1} max={300} value={draft.timeoutSeconds} onChange={e => setDraft(prev => ({ ...prev, timeoutSeconds: Number(e.target.value) }))} /></label>
+                      </div>
+                      <p className="webot-hint">没有新增时不调用模型、不通知。每次最多一次请求；Token 预算不是账单硬上限，结论需复核。</p>
+                    </fieldset>
+                  ) : null}
                 </div>
               </div>
 
@@ -689,7 +730,7 @@ export default function WeBotModule({ section }: Props) {
                   <header>
                     <h4 className="webot-card-title">{task.title}</h4>
                     <label className="webot-switch" title={task.enabled ? '已启用，点击停用' : '已停用，点击启用'}>
-                      <input type="checkbox" checked={task.enabled} onChange={() => void toggleEnabled(task)} />
+                      <input type="checkbox" checked={task.enabled} aria-label={`${task.enabled ? '停用' : '启用'}任务 ${task.title}`} onChange={() => void toggleEnabled(task)} />
                       <span />
                     </label>
                   </header>
@@ -774,6 +815,7 @@ export default function WeBotModule({ section }: Props) {
                       aria-expanded={logOpen}
                       data-busy={running || undefined}
                       title="运行记录"
+                      aria-label={`${logOpen ? '收起' : '查看'} ${task.title} 的运行记录`}
                     >
                       <History size={13} />
                       {taskRuns.length > 0 ? taskRuns.length : ''}
@@ -806,16 +848,6 @@ export default function WeBotModule({ section }: Props) {
                 <header>
                   <h4><button type="button" className="ghost-btn" aria-expanded={!minimized.has(note.id)} onClick={() => toggleNote(note.id)}>{minimized.has(note.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}{note.title}</button></h4>
                   <span className="webot-note-time">{describeRelativeTime(note.createdAt)}</span>
-                  <button
-                    type="button"
-                    className="webot-note-close"
-                    aria-label={`${minimized.has(note.id) ? '展开' : '收起'}笔记 ${note.title}`}
-                    title={minimized.has(note.id) ? '展开笔记' : '收起笔记'}
-                    onClick={() => toggleNote(note.id)}
-                  >
-                    {minimized.has(note.id) ? <ChevronDown size={13} /> : <X size={13} />}
-                  </button>
-                  <button type="button" className="webot-note-close webot-danger" title="删除笔记" aria-label={`删除笔记 ${note.title}`} onClick={() => setDeleteTarget(note)}><Trash2 size={13} /></button>
                 </header>
                 {/* 笔记正文按 **Markdown** 渲染（v1.0.1）。模型本来就输出 md
                     （`- 第 3 题`、`**周三小测**`），旧版按纯文本渲染，用户看到的
@@ -843,6 +875,7 @@ export default function WeBotModule({ section }: Props) {
                     >
                       <Pin size={13} />
                     </button>
+                    <button type="button" className="ghost-btn webot-danger webot-note-delete" title="删除笔记" aria-label={`删除笔记 ${note.title}`} onClick={() => setDeleteTarget(note)}><Trash2 size={13} /></button>
                   </div>
                 </footer>
               </article>

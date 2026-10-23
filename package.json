@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -19,13 +19,13 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "build:tui": "npm --prefix packages/weport-tui run build",
     "qa:tui": "npm run build:tui && node scripts/qa-tui.mjs",
-    "test:unit": "node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs scripts/verify-mac-native.test.cjs scripts/verify-linux-native.test.cjs && vitest run",
+    "test:unit": "node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs scripts/verify-mac-native.test.cjs scripts/verify-linux-native.test.cjs scripts/groundedness-rubric.test.mjs scripts/scan-export-harness.test.mjs && vitest run",
     "test:native-assets": "node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs scripts/verify-mac-native.test.cjs scripts/verify-linux-native.test.cjs",
     "test:unit:watch": "vitest",
     "bench": "node scripts/bench-perf.mjs",
     "bench:installed": "node scripts/bench-perf.mjs --installed",
     "bench:update": "node scripts/bench-perf.mjs --update",
-    "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs scripts/verify-mac-native.test.cjs scripts/verify-linux-native.test.cjs && vitest run && vite build --config vite.config.mts && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
+    "test": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && node --test scripts/verify-native-assets.test.cjs scripts/verify-packaged-native.test.cjs scripts/verify-mac-native.test.cjs scripts/verify-linux-native.test.cjs scripts/groundedness-rubric.test.mjs scripts/scan-export-harness.test.mjs && vitest run && vite build --config vite.config.mts && powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1",
     "build": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && node scripts/prepare-flash-ui.cjs && electron-builder --publish never",
     "build:dir": "npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && node scripts/prepare-flash-ui.cjs && electron-builder --dir --publish never",
     "build:mac": "bash scripts/build-mac-image-helper.sh && npm run build:tui && node scripts/extract-release-notes.mjs --allow-missing && node scripts/verify-mac-native.cjs && node scripts/prepare-native-modes.cjs && node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && tsc --noEmit && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --mac dmg zip --arm64 --publish never",
@@ -262,7 +262,18 @@
     },
     "deb": {
       "compression": "gz",
-      "depends": ["libgtk-3-0", "libnotify4", "libnss3", "libxss1", "libxtst6", "xdg-utils", "libatspi2.0-0", "libuuid1", "libsecret-1-0", "ffmpeg"],
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "ffmpeg"
+      ],
       "afterInstall": "scripts/linux-after-install.sh"
     },
     "nsis": {

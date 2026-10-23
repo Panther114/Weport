@@ -23,6 +23,7 @@ type CheckState = 'ok' | 'warn' | 'fail' | 'unknown'
  * 新增检查前缀时两处都要加；`groupOf` 对未知前缀回落到「其它」，不会把检查项弄丢。
  */
 const GROUPS: Array<{ id: string; title: string; hint: string }> = [
+  { id: 'connection', title: '连接阶段', hint: '可分享的阶段结论，不含账号、路径或密钥' },
   { id: 'app', title: '应用与构建', hint: '版本、平台、运行形态' },
   { id: 'wechat', title: '微信连接', hint: '安装、运行、版本、数据目录与账号' },
   { id: 'db', title: '数据库与密钥', hint: '逐库打开状态、密钥指纹、首页 HMAC 校验' },

@@ -153,6 +153,7 @@ export class ChatLabFormatter {
           const mediaKey = this.exportService.getMediaCacheKey(msg)
           if (!mediaCache.has(mediaKey)) {
             const mediaItem = await this.exportService.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+              mediaPolicy: options.mediaPolicy,
               exportImages: options.exportImages,
               exportVoices: options.exportVoices,
               exportVideos: options.exportVideos,

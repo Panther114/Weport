@@ -29,7 +29,12 @@ export interface SessionExportResult {
   error?: string
 }
 
-export async function exportReaderSession(session: ReaderSession): Promise<SessionExportResult> {
+export interface ReaderExportOptions {
+  mediaPolicy?: ExportRequest['mediaPolicy']
+  dateRange?: ExportRequest['dateRange']
+}
+
+export async function exportReaderSession(session: ReaderSession, options: ReaderExportOptions = {}): Promise<SessionExportResult> {
   const api = typeof window !== 'undefined' ? window.electronAPI : undefined
   if (!api?.export?.exportSessions) {
     return { ok: false, error: '导出通道不可用（export:exportSessions）' }
@@ -59,6 +64,7 @@ export async function exportReaderSession(session: ReaderSession): Promise<Sessi
   const namePref = (await read<string>('exportDefaultDisplayNamePreference')) || 'remark'
   const concurrency = Number(await read<number>('exportConcurrency')) || undefined
   const layout = (await read<string>('exportWriteLayout')) || 'A'
+  const savedMediaPolicy = await read<string>('exportMediaPolicy')
 
   const mediaEnabled = Boolean(media.images || media.videos || media.voices || media.emojis || media.files)
 
@@ -66,6 +72,8 @@ export async function exportReaderSession(session: ReaderSession): Promise<Sessi
     const result = await api.export.exportSessions(outputRoot, {
       // 只导出这一个会话：引擎侧会拿 `sessionIds` 与会话列表求交，失效会明确报错。
       sessionIds: [session.id],
+      mediaPolicy: options.mediaPolicy || (savedMediaPolicy === 'original-only' ? 'original-only' : 'best-available'),
+      dateRange: options.dateRange || null,
       format: format as ExportRequest['format'],
       exportImages: media.images === true,
       exportVideos: media.videos === true,
@@ -84,14 +92,15 @@ export async function exportReaderSession(session: ReaderSession): Promise<Sessi
       sessionLayout: layout === 'C' ? 'per-session' : 'shared',
       sessionNameWithTypePrefix: true,
     })
-    if (result?.success === false) {
-      return { ok: false, error: String(result.error || '导出失败') }
+    if (!result || result.success !== true) {
+      return { ok: false, error: String(result?.error || '导出失败：未收到完成结果') }
     }
+    if (result.stopped || result.paused) return { ok: false, error: result.paused ? '导出已暂停，请查看全局任务状态。' : '导出已停止，请查看全局任务状态。' }
     const skipped = Number(result?.skipped)
     if (skipped > 0 || Number(result?.successCount) === 0) {
       return { ok: false, error: '这个会话没有可导出的消息' }
     }
-    return { ok: true, outputRoot, message: `已开始导出到 ${outputRoot}（进度看全局进度条）` }
+    return { ok: true, outputRoot, message: `已导出到 ${outputRoot}` }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }

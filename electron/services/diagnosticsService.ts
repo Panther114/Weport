@@ -48,10 +48,11 @@ export type DiagnosticCheck = MacDiagnosticCheck
 export type DiagnosticsReport = MacDiagnosticsReport
 
 /** 检查 id 的前缀即分组（`wechat.running` → `wechat`）。 */
-export type DiagnosticGroupId = 'app' | 'wechat' | 'db' | 'engine' | 'config' | 'logs' | 'env' | 'perm' | 'other'
+export type DiagnosticGroupId = 'app' | 'wechat' | 'db' | 'engine' | 'config' | 'logs' | 'env' | 'perm' | 'connection' | 'other'
 
 /** 界面用的分组顺序与中文标题（顺序 = 排查顺序）。 */
 export const DIAGNOSTIC_GROUPS: Array<{ id: DiagnosticGroupId; title: string; hint: string }> = [
+  { id: 'connection', title: '连接阶段', hint: '宿主、初始化、路径、账号与逐库覆盖' },
   { id: 'app', title: '应用与构建', hint: '版本、平台、运行形态' },
   { id: 'wechat', title: '微信连接', hint: '安装、运行、版本、数据目录与账号' },
   { id: 'db', title: '数据库与密钥', hint: '逐库打开状态、密钥指纹、首页 HMAC 校验' },
@@ -353,14 +354,39 @@ export function renderSummaryText(
   checks: DiagnosticCheck[],
   meta: { appVersion: string; platform: string; arch: string; collectedAt: number },
 ): string {
+  // Shareable support text is a schema projection, never arbitrary diagnostic
+  // strings. Future checks or unexpected native errors cannot add private text.
+  const stages = [
+    ['connection.host', '宿主', '重启 Weport，检查安装完整性与安全软件隔离记录。'],
+    ['connection.init', '初始化', '查看本机引擎初始化项，检查 WCDB 动态库完整性。'],
+    ['connection.path', '数据目录', '重新选择包含账号 db_storage 的微信 4.x 数据目录。'],
+    ['connection.account', '账号', '明确选择当前账号，不使用首个账号代替。'],
+    ['connection.representation', '密钥编码', '确认所选账号后重新获取或手动输入密钥。'],
+    ['connection.coverage', '历史分片', '运行逐库密钥健康检查，补全 session 与所有消息分片。'],
+  ] as const
+  const supportChecks = stages.flatMap(([id, label, action]) => {
+    const item = checks.find(check => check.id === id)
+    if (!item) return []
+    const state = ['ok', 'warn', 'fail', 'unknown'].includes(item.state) ? item.state : 'unknown'
+    let facts = ''
+    if (id === 'connection.representation') {
+      const representations = ['raw', 'decoded-hex-passphrase', 'utf8-passphrase'].filter(mode => new RegExp(`\\b${mode}\\b`).test(item.detail))
+      facts = representations.length ? `认证编码：${representations.join('、')}。` : '尚未认证编码。'
+    }
+    if (id === 'connection.coverage') {
+      const counts = /历史必需库 (\d{1,6}) 个，已检查 (\d{1,6}) 个，通过 (\d{1,6}) 个/.exec(item.detail)
+      facts = counts ? `必需 ${counts[1]} 个，检查 ${counts[2]} 个，通过 ${counts[3]} 个。` : '覆盖计数不可用。'
+    }
+    return [`[${state.toUpperCase()}] 连接阶段 · ${label}：${facts}${state === 'ok' ? '阶段检查通过；不代表原生开库或完整导出验收。' : action}`]
+  })
+  const version = /^\d+(?:\.\d+){0,3}(?:[-+][a-zA-Z0-9.-]+)?$/.test(meta.appVersion) ? meta.appVersion : 'unknown'
+  const platform = ['win32', 'darwin', 'linux'].includes(meta.platform) ? meta.platform : 'unknown'
+  const arch = ['x64', 'arm64', 'ia32', 'arm'].includes(meta.arch) ? meta.arch : 'unknown'
   return [
-    `Weport ${meta.appVersion} · ${meta.platform} · ${meta.arch}`,
-    `采集时间：${new Date(meta.collectedAt).toLocaleString('zh-CN')}`,
-    '',
-    ...checks.map((check) => `[${check.state.toUpperCase()}] ${check.label}：${check.detail}`),
-    '',
-    '--- 原始输出 ---',
-    ...checks.filter((check) => check.raw).map((check) => `### ${check.label}\n${check.raw}`),
+    `Weport ${version} · ${platform} · ${arch}`,
+    ...supportChecks,
+    ...(supportChecks.length ? [] : ['连接阶段结论尚未生成，请重新检测。']),
+    '仅含连接阶段和计数；不含账号、路径、密钥或聊天内容。',
   ].join('\n')
 }
 
@@ -704,7 +730,15 @@ export async function collectDiagnostics(
   )
 
   // ===== 3. 数据库与密钥 =====
-  const primaryAccount = accountsWithSession[0] ?? accounts[0] ?? null
+  let selectedAccountDir: string | null = null
+  let hasAccountSelection = false
+  try {
+    const { ConfigService } = await import('./config')
+    const config = ConfigService.getInstance()
+    hasAccountSelection = Boolean(config.get('myWxid'))
+    selectedAccountDir = config.getAccountDir(dataRoot)
+  } catch { /* Missing account selection stays explicit; never inspect an arbitrary account. */ }
+  const primaryAccount = selectedAccountDir ? accounts.find(account => account.dir === selectedAccountDir) ?? null : !hasAccountSelection && accounts.length === 1 ? accounts[0] : null
   let configKeyHex: string | null = null
   let configKeyError: string | null = null
   try {
@@ -732,6 +766,7 @@ export async function collectDiagnostics(
     id: string
     verdict: 'ok' | 'fail' | 'unknown'
     note: string
+    representation?: string
   }
   const verdicts: DbVerdict[] = []
   if (dbEnumerationError) {
@@ -764,10 +799,12 @@ export async function collectDiagnostics(
         verdicts.push({ id: entry.id, verdict: 'unknown', note: page.message || '读不到首页' })
         continue
       }
-      const mode = verifyHexKeyForPage(page.page1, configKeyHex!)?.mode
+      const verified = verifyHexKeyForPage(page.page1, configKeyHex!)
+      const mode = verified?.mode
       verdicts.push({
         id: entry.id,
         verdict: mode ? 'ok' : 'fail',
+        representation: verified?.representation,
         note: mode
           ? `命中 ${mode} 形态 · salt=${saltHexOf(page.page1).slice(0, 8)}…`
           : '首页 HMAC 不匹配（这把密钥不属于该库）',
@@ -1087,6 +1124,21 @@ export async function collectDiagnostics(
     )
   }
 
+  const requiredHistory = dbEntries.filter(entry => entry.kind === 'session' || /^(?:biz_)?message(?:_|$)/.test(entry.kind))
+  const requiredIds = new Set(requiredHistory.map(entry => entry.id))
+  const inspectedHistory = verdicts.filter(entry => requiredIds.has(entry.id))
+  const authenticatedHistory = inspectedHistory.filter(entry => entry.verdict === 'ok').length
+  const hasSession = requiredHistory.some(entry => entry.kind === 'session')
+  const hasMessages = requiredHistory.some(entry => /^(?:biz_)?message(?:_|$)/.test(entry.kind))
+  const completeHistory = hasSession && hasMessages && authenticatedHistory === requiredHistory.length && !dbEnumerationError
+  checks.push(
+    check('connection.host', '连接阶段 · 宿主', engineReady ? 'ok' : 'fail', engineReady ? 'Node IPC 宿主已就绪。' : '宿主未就绪：重启 Weport；若仍失败，请检查安装完整性和安全软件隔离记录。'),
+    check('connection.init', '连接阶段 · 初始化', initErrorText ? 'fail' : engineReady ? 'ok' : 'unknown', mentions1006 ? '宿主名称校验失败（-1006）：重新安装应用，勿手动改名宿主。' : initErrorText ? '原生初始化失败：检查 WCDB 动态库是否完整，查看本机引擎初始化项；密钥校验不能修复宿主加载失败。' : engineReady ? '当前没有记录初始化错误；是否原生开库成功需单独确认。' : '宿主尚未就绪，不能确认初始化。'),
+    check('connection.path', '连接阶段 · 数据目录', dataRootExists ? 'ok' : 'fail', dataRootExists ? '所选数据目录存在。' : '所选数据目录不可用：选择包含账号 db_storage 的微信 4.x 数据目录。'),
+    check('connection.account', '连接阶段 · 账号', primaryAccount ? 'ok' : 'fail', primaryAccount ? '已定位当前所选账号。' : accounts.length > 1 ? '检测到多个账号：在设置里明确选择账号，未使用首个账号代替。' : '未定位所选账号：确认微信已初始化该账号，并重新选择数据目录。'),
+    check('connection.representation', '连接阶段 · 密钥编码', verdicts.some(entry => entry.representation) ? 'ok' : 'unknown', verdicts.some(entry => entry.representation) ? `首页认证命中的编码：${[...new Set(verdicts.flatMap(entry => entry.representation ? [entry.representation] : []))].join('、')}。编码由 HMAC 决定，不由密钥长度推断。` : '未认证任何编码：检查所选账号后重新获取或手动输入账号密钥。'),
+    check('connection.coverage', '连接阶段 · 历史分片', completeHistory ? 'ok' : 'warn', `历史必需库 ${requiredHistory.length} 个，已检查 ${inspectedHistory.length} 个，通过 ${authenticatedHistory} 个。${completeHistory ? '当前首页认证覆盖完整；仍需原生开库验证。' : '尚不能确认完整历史：运行逐库密钥健康检查，补全 session 和全部 message/biz_message 分片；快速抽检不代表全部可用。'}`),
+  )
   const summary = renderSummaryText(checks, { appVersion: context.appVersion, platform, arch: archName, collectedAt })
   return {
     supported: true,

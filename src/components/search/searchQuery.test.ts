@@ -21,6 +21,19 @@ import {
 const scope0 = () => ({ ...EMPTY_SCOPE })
 
 describe('查询串 <-> 条件', () => {
+  it('round-trips explicit local retrieval through engine requests, URLs and saved searches', () => {
+    const params = paramsFromQuery('检索:hybrid 会话:wxid_a 出差报销')
+    expect(params.retrieval).toBe('hybrid')
+    expect(params.text).toBe('出差报销')
+    expect(buildEngineQuery(params)?.retrieval).toBe('hybrid')
+    const serialized = queryFromParams(params)
+    expect(paramsFromQuery(serialized)).toEqual(params)
+    expect(paramsFromSavedSearch(serialized).retrieval).toBe('hybrid')
+    expect(paramsFromQuery('retrieval:semantic travel expenses').retrieval).toBe('semantic')
+    expect(buildEngineQuery(paramsFromQuery('normal query'))?.retrieval).toBeUndefined()
+    expect(paramsFromQuery('检索:unknown').text).toBe('检索:unknown')
+    expect(paramsFromQuery(queryFromParams({ text: '检索:hybrid', scope: scope0() })).text).toBe('检索:hybrid')
+  })
   it('解析中文前缀操作符与关键词', () => {
     const params = paramsFromQuery('标签:重要 会话:wxid_a 发送者:张三 从:2026-01-01 到:2026-03-31 类型:图片 合同')
     expect(params.text).toBe('合同')

@@ -4,6 +4,7 @@ import DiagnosticCheckList from '../components/diagnostics/DiagnosticCheckList'
 import LogTailPanel from '../components/diagnostics/LogTailPanel'
 import ErrorCodeHandbook from '../components/diagnostics/ErrorCodeHandbook'
 import SnapshotPanel from '../components/diagnostics/SnapshotPanel'
+import ConnectionCapabilityPanel from '../components/diagnostics/ConnectionCapabilityPanel'
 import { formatBytes, parentDirOf } from '../utils/diagnosticsFormat'
 import '../styles/diagnostics.scss'
 
@@ -215,7 +216,7 @@ export default function DiagnosticsPage() {
             disabled={busy || !report}
             onClick={() => void copyAll()}
           >
-            {copiedAll ? '已复制' : '复制结论'}
+            {copiedAll ? '已复制' : '复制脱敏连接结论'}
           </button>
           <button
             type="button"
@@ -231,10 +232,10 @@ export default function DiagnosticsPage() {
             className="primary-btn"
             disabled={exporting}
             onClick={() => void exportBundle()}
-            title="把检查结果与日志尾巴打成一个本地 zip（不含密钥与聊天内容）"
+            title="生成详细本地 zip；可能包含个人路径、账号及日志，请审阅后分享"
           >
             {exporting ? <Loader2 size={14} className="spin" /> : <FileArchive size={14} />}
-            导出诊断包
+            导出详细本地诊断包
           </button>
         </div>
       </div>
@@ -357,6 +358,7 @@ export default function DiagnosticsPage() {
         ) : null}
       </section>
 
+      <ConnectionCapabilityPanel />
       <SnapshotPanel />
 
       <ErrorCodeHandbook />
@@ -364,10 +366,11 @@ export default function DiagnosticsPage() {
       <LogTailPanel />
 
       <p className="dx-note">
-        「导出诊断包」生成的是一个本地 zip（diagnostics.json / checks.md / 日志尾巴 /
+        「复制脱敏连接结论」仅复制连接阶段与计数，不含账号、路径、密钥或聊天内容。
+        「导出详细本地诊断包」生成的是一个本地 zip（diagnostics.json / checks.md / 日志尾巴 /
         脱敏后的配置）。配置只按**白名单**收录，白名单外的键只保留键名；
         任何密钥或令牌形状的字符串都会被替换成 <code>«redacted:sha256:first8»</code>。
-        包不会自动上传，也不会自动发给任何人。
+        详细包仍可能包含个人路径、账号标识及日志信息，分享前请自行审阅。包不会自动上传，也不会自动发给任何人。
       </p>
     </div>
   )

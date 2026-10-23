@@ -26,10 +26,13 @@ import { getWeBotService } from './weBotRegistry'
 import { snsService } from './snsService'
 import { analyticsService } from './analyticsService'
 import { groupAnalyticsService } from './groupAnalyticsService'
+import { dataAccessService, assertDataScope, restrictSearchResult, type DataAccessGrant } from './dataAccessService'
+import { retrieveIndexedMessages } from './searchRetrieval'
 
 interface McpHttpSession {
   server: McpServer
   transport: StreamableHTTPServerTransport
+  principal?: string
 }
 
 class McpService {
@@ -55,10 +58,47 @@ class McpService {
     return generated
   }
 
-  private checkAuth(req: http.IncomingMessage): boolean {
-    if (!this.token) return true
+  private authorize(req: http.IncomingMessage): 'administrator' | DataAccessGrant | undefined {
     const header = String(req.headers.authorization || '')
-    return header === `Bearer ${this.token}`
+    if (this.token && header === `Bearer ${this.token}`) return 'administrator'
+    if (!/^Bearer [a-f0-9]{64}$/.test(header)) return undefined
+    try { return dataAccessService.authenticate(header.slice(7)) }
+    catch { return undefined }
+  }
+
+  private currentAccount(): string {
+    return String(this.configService.getMyWxidCleaned?.() || this.configService.get('myWxid') || '').trim()
+  }
+
+  private registerScopedTools(server: McpServer, grant: DataAccessGrant): void {
+    const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] })
+    const check = (sessionId?: string) => {
+      if (!dataAccessService.active(grant.id)) throw new Error('Client grant expired or was revoked.')
+      assertDataScope(grant, this.currentAccount(), sessionId)
+    }
+    server.registerTool('list_sessions', { description: 'List chats inside this client scope.', inputSchema: {} }, async () => {
+      check()
+      const result = await chatService.getSessions()
+      check()
+      return text({ success: result.success, error: result.error, sessions: result.sessions?.filter(row => grant.sessionIds.includes(row.username))
+        .map(row => ({ username: row.username, displayName: row.displayName, type: row.type })), scope: { accountId: grant.accountId, from: grant.from, to: grant.to } })
+    })
+    server.registerTool('get_messages', { description: 'Read one authorized chat inside the fixed date range.', inputSchema: {
+      sessionId: z.string().min(1), limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).optional(),
+    } }, async ({ sessionId, limit, offset }) => {
+      check(sessionId)
+      const result = await chatService.getMessages(sessionId, offset || 0, limit || 50, grant.from, grant.to)
+      check(sessionId)
+      return text({ ...result, messages: result.messages?.filter(row => row.createTime * 1000 >= grant.from && row.createTime * 1000 <= grant.to), scope: { accountId: grant.accountId, from: grant.from, to: grant.to } })
+    })
+    server.registerTool('search_messages', { description: 'Search only authorized chats and dates.', inputSchema: {
+      keyword: z.string().min(1), sessionId: z.string().optional(), limit: z.number().int().min(1).max(200).optional(),
+    } }, async ({ keyword, sessionId, limit }) => {
+      check(sessionId)
+      const result = await retrieveIndexedMessages({ text: keyword, limit: limit || 50, scope: { sessionIds: sessionId ? [sessionId] : grant.sessionIds, from: grant.from, to: grant.to } })
+      check(sessionId)
+      return text(restrictSearchResult(result, grant))
+    })
   }
 
   private registerTools(server: McpServer): void {
@@ -169,7 +209,7 @@ class McpService {
       'search_messages',
       {
         title: '搜索消息',
-        description: '按关键词搜索聊天记录（可限定会话）',
+        description: '查询本机消息索引（需先在搜索页建立索引），返回命中、精确来源和覆盖范围；可限定会话。索引快照不代表实时历史。',
         inputSchema: {
           keyword: z.string().min(1).describe('搜索关键词'),
           sessionId: z.string().optional().describe('限定会话ID，不传则全库搜索'),
@@ -177,8 +217,13 @@ class McpService {
         },
       },
       async ({ keyword, sessionId, limit }) => {
-        const r = await chatService.searchMessages(keyword, sessionId, limit || 50)
-        return text(r.success ? { success: true, messages: r.messages } : r)
+        const account = this.currentAccount()
+        if (!account) return text({ success: false, error: 'Connect an account before searching its index.', messages: [] })
+        const result = await retrieveIndexedMessages({ text: keyword, limit: limit || 50,
+          scope: sessionId ? { sessionIds: [sessionId] } : {} })
+        if (this.currentAccount() !== account) return text({ success: false, error: 'Account changed during search.', messages: [] })
+        // Keep the legacy messages field as an alias; entries are indexed hits with exact provenance.
+        return text({ ...result, success: !result.error, messages: result.hits })
       },
     )
 
@@ -338,16 +383,17 @@ class McpService {
     )
   }
 
-  private async createSession(): Promise<McpHttpSession> {
+  private async createSession(grant?: DataAccessGrant, principal?: string): Promise<McpHttpSession> {
     const server = new McpServer({ name: 'weport-mcp', version: '1.0.0' })
-    this.registerTools(server)
+    if (grant) this.registerScopedTools(server, grant)
+    else this.registerTools(server)
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId: string) => {
         // sessionId 在首个 initialize 请求到达时才生成（handleRequest 内部），
         // 只能通过该回调把会话登记到 map 中（过早登记 key 为 undefined 会丢失会话）
         if (!this.sessions.has(sessionId)) {
-          this.sessions.set(sessionId, { server, transport })
+          this.sessions.set(sessionId, { server, transport, principal })
         }
       },
     })
@@ -356,7 +402,7 @@ class McpService {
       if (transport.sessionId) this.sessions.delete(transport.sessionId)
     }
     await server.connect(transport)
-    return { server, transport }
+    return { server, transport, principal }
   }
 
   async start(port?: number, host?: string): Promise<{ success: boolean; port?: number; error?: string }> {
@@ -397,7 +443,8 @@ class McpService {
       res.end(JSON.stringify({ success: false, error: '不允许的 Origin' }))
       return
     }
-    if (!this.checkAuth(req)) {
+    const authenticated = this.authorize(req)
+    if (!authenticated) {
       res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({ success: false, error: '未授权：需要正确的 Bearer Token' }))
       return
@@ -418,8 +465,15 @@ class McpService {
     }
 
     try {
+      const grant = authenticated === 'administrator' ? undefined : authenticated
+      const principal = authenticated === 'administrator' ? 'administrator' : authenticated.id
       const sessionId = String(req.headers['mcp-session-id'] || '')
       let session = sessionId ? this.sessions.get(sessionId) : undefined
+      if (session && session.principal !== undefined && session.principal !== principal) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'This MCP session belongs to another client.' }))
+        return
+      }
 
       // An unknown/terminated session must not become a new transport: the
       // client needs 404 to restart initialization without its old session ID.
@@ -445,7 +499,7 @@ class McpService {
       }
 
       if (!session) {
-        session = await this.createSession()
+        session = await this.createSession(grant, principal)
       }
 
       if (req.method === 'GET') {
