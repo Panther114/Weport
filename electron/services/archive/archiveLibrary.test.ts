@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { createHash } from 'node:crypto'
 import nodeFs, { readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { ArchiveLibrary, ARCHIVE_MANIFEST } from './archiveLibrary'
+import { ArchiveLibrary, ARCHIVE_MANIFEST, archiveAccountHash } from './archiveLibrary'
 import { sourceMessageIdentityHash } from '../export/sourceMessageIdentity'
 import type { ArchiveDependencies } from './archiveLibrary'
 import type { ArchiveRequest } from './types'
@@ -108,6 +108,72 @@ describe('portable archive implementation', () => {
     expect((await x.library.preflight(x.request)).ok).toBe(false)
     x.setAccount('A')
     expect((await x.library.preflight({ ...x.request, sessionIds: [] })).ok).toBe(false)
+  })
+  it('matches the full selected wxid and rejects its cleaned prefix', async () => {
+    const x = await fixture(), accountId = 'wxid_abc123_a1b2'
+    const request = { ...x.request, accountId }
+    x.setAccount(accountId)
+    expect((await x.library.preflight(request)).ok).toBe(true)
+
+    const entry = await x.library.create(request)
+    const manifest = await x.library.verifyRoot(entry.path)
+    expect(manifest.accountHash).toBe(archiveAccountHash(accountId))
+
+    // The account guard requires the full value carried by the request. A
+    // cleaned directory prefix must not pass as if it were that value.
+    x.setAccount('wxid_abc123')
+    const switched = await x.library.preflight(request)
+    expect(switched.ok).toBe(false)
+    expect(switched.errors.join(' ')).toContain('账号已切换')
+    expect((await x.library.open(entry.archiveId)).manifest.accountHash).toBe(archiveAccountHash(accountId))
+    x.library.stop()
+  })
+  it('preserves persisted schedules for the exact full account ID', async () => {
+    const x = await fixture(), accountId = 'wxid_abc123_a1b2'
+    const request = { ...x.request, accountId }
+    x.setAccount(accountId)
+    await x.library.saveSchedule({ request, enabled: true, everyMinutes: 15, keep: 1 })
+    const stored = JSON.parse(await readFile(join(x.root, 'library', 'library.json'), 'utf8'))
+    expect(stored.schedules[0].request.accountId).toBe(accountId)
+    expect(stored.schedules[0].accountHash).toBe(archiveAccountHash(accountId))
+    x.library.stop()
+
+    const restarted = new ArchiveLibrary(x.deps)
+    try {
+      x.advance()
+      x.setAccount('wxid_abc123')
+      await restarted.tick()
+      expect((await restarted.status()).schedules[0].lastError).toContain('计划所属账号')
+      expect(x.deps.exportJson).not.toHaveBeenCalled()
+
+      x.advance()
+      x.setAccount(accountId)
+      await restarted.tick()
+      expect((await restarted.status()).entries[0].accountHash).toBe(archiveAccountHash(accountId))
+      expect((await restarted.status()).schedules[0].lastError).toBeUndefined()
+    } finally { restarted.stop() }
+  })
+  it('aborts when the configured account value changes mid-run and resumes when restored', async () => {
+    const x = await fixture(), accountId = 'wxid_abc123_a1b2', request = { ...x.request, accountId }
+    x.setAccount(accountId)
+    const original = x.deps.exportJson
+    x.deps.exportJson = async (...args) => {
+      const result = await original(...args)
+      x.setAccount('wxid_abc123')
+      return result
+    }
+    await expect(x.library.create(request)).rejects.toThrow('取消')
+    const interrupted = (await x.library.status()).jobs[0]
+    expect(interrupted.state).toBe('aborted')
+    x.library.stop()
+
+    const restarted = new ArchiveLibrary(x.deps)
+    x.setAccount(accountId)
+    x.deps.exportJson = original
+    try {
+      const resumed = await restarted.create(request, interrupted.id)
+      expect(resumed.messages).toBe(2)
+    } finally { restarted.stop() }
   })
 })
 
