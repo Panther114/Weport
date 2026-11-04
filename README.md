@@ -1,5 +1,7 @@
 # Weport
 
+![Weport 功能海报](docs/media/weport-feature-poster.png)
+
 在电脑上阅读、搜索、导出和分析自己的微信聊天记录。
 
 **下载使用：** [前往下载页面](https://github.com/Panther114/Weport/releases)。当前版本为 **v1.3.0**，本次提供 Windows 安装包。下方截图全部使用虚构数据。
