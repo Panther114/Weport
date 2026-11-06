@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, cp, symlink, rename } from 'fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, cp, symlink, rename, realpath } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'node:crypto'
@@ -13,7 +13,9 @@ import type { ArchiveRequest } from './types'
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'weport-archive-library-')); roots.push(root)
+  // macOS exposes TMPDIR through /var -> /private/var. Retention deliberately
+  // rejects symlink ancestors, so use the physical temp root for this fixture.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'weport-archive-library-'))); roots.push(root)
   let account = 'A', fingerprint = 'source-1', now = 1700000000000
   const rows: any[] = [0, 1].map(shard => ({ localType: 1, createTime: 1700000000 + shard, content: shard ? 'hello history' : '你好 历史', rawContent: shard ? 'hello history' : '你好 历史',
     sourceIdentity: { db: `db_storage/message/message_${shard}.db`, table: 'Msg_chat', localId: '9007199254740993' },

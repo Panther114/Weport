@@ -3,29 +3,41 @@
 [返回 README](../README.md)
 
 
-环境要求：Node 20+。Windows / macOS 均可开发与构建（构建需在对应平台上进行）。
+环境要求：Node 24 LTS（当前 Electron / Vite 依赖要求至少 Node 22.12）。Windows / macOS 均可开发与构建（构建需在对应平台上进行）。
 
 ```sh
 npm install                       # 安装依赖（Windows 额外同步运行时 DLL）
 npm run dev                       # 开发模式（vite + electron）
 npm run typecheck                 # 渲染进程 + 主进程类型检查
-npm run build                     # Windows: 构建 NSIS 安装包（release/ 目录）
+npm run build                     # 按当前平台构建安装包（Mac: arm64 DMG + ZIP）
 npm run build:flash               # Windows: 构建 WeportFlash 便携导出工具
-npm run build:dir                 # 免安装构建（迭代更快）
+npm run build:dir                 # 当前平台免安装构建（Mac 同样编译 helper、校验原生库）
 npm run build:mac                 # macOS: 构建 DMG + ZIP（arm64）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1   # Windows UI 冒烟测试（自动截屏 + 内容断言）
 powershell -ExecutionPolicy Bypass -File scripts/capture-ui.ps1 -PublishToDocs   # 生成并发布 README 截图
 ```
 
-macOS 打包前需为密钥 helper 恢复可执行位（Git 不跟踪 exec bit）：
+### Apple Silicon macOS 本机构建
+
+需要 macOS 15+、Apple Silicon 和 Xcode Command Line Tools（`xcode-select --install`）。
 
 ```sh
-chmod +x resources/key/macos/universal/xkey_helper \
-  resources/key/macos/universal/xkey_helper_macos \
-  resources/key/macos/universal/image_scan_helper \
-  resources/key/macos/universal/libwx_key.dylib \
-  resources/welive/macos/arm64/welive
+npm ci
+npm run typecheck
+npm run build
+open release/mac-arm64/Weport.app
 ```
+
+`npm run build` 和 `npm run build:mac` 使用同一流程：从源码编译图片密钥 helper、恢复原生 helper 的执行权限、校验 WCDB/WASM，再构建并 ad-hoc 签名。`npm run build:dir` 也执行这些准备步骤，只跳过 DMG/ZIP 生成。输出位于 `release/`，无需 Rosetta。Intel Mac 会在构建开始前报错。
+
+打包后的签名与合成数据验收：
+
+```sh
+bash scripts/verify-mac-pack.sh release
+node scripts/verify-mac-positive-native.mjs release
+```
+
+签名验收需要完整构建生成的 ZIP。合成数据验收使用独立配置，不读取个人微信记录。真实微信连接步骤和系统权限说明见[安装说明](platform-installation.md)。
 
 `capture-ui.ps1` 使用私有配置与演示数据，离屏截取全部页面、设置分类及通知弹窗，并逐一断言非空。`node scripts/verify-v12-ui.mjs` 另行验证打包后的 XLSX/WASM、搜索定位、阅读器、海报导出及后台任务提示。检查包括：
 

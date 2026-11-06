@@ -8,6 +8,8 @@
 
 支持 Apple Silicon（arm64），不支持 Intel Mac。既有版本面向 macOS 15+ 和微信 4.x。
 
+当前版本没有 Mac 下载包时，可按[Apple Silicon 本机构建步骤](development.md#apple-silicon-macos-本机构建)生成 `release/mac-arm64/Weport.app` 或 DMG/ZIP。默认 `npm run build` 会自动选择 arm64 macOS 流程。
+
 1. 下载对应版本的 `arm64.dmg`，将 Weport 拖入「应用程序」。
 2. 首次打开时，右键应用选择「打开」。如被系统拦截，在「系统设置 → 隐私与安全性」检查放行选项。
 3. 在「连接微信」选择账号目录，通常位于 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files`。
