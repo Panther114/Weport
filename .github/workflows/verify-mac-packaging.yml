@@ -13,6 +13,8 @@ on:
     paths:
       - 'package.json'
       - 'scripts/after-pack.cjs'
+      - 'scripts/build-desktop.cjs'
+      - 'scripts/build-desktop.test.cjs'
       - 'scripts/verify-mac-pack.sh'
       - 'scripts/build-mac-image-helper.sh'
       - 'resources/key/macos/source/**'
@@ -63,6 +65,9 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Verify platform build routing
+        run: node --test scripts/build-desktop.test.cjs
 
       - name: Verify Reader empty-index fallback
         run: npx vitest run src/components/reader/readerSource.test.ts
