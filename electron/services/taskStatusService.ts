@@ -150,6 +150,7 @@ export const TASK_KEY = {
   updateDownload: 'app.updateDownload',
   connect: 'chat.connect',
   /** v1.2 §6 全局搜索索引构建 */
+  quoteReferences: 'reader.references',
   searchIndex: 'search.index',
   databaseMaintenance: 'db.maintenance',
 } as const

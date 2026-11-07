@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Version tag (e.g. v1.2.0)'
         required: true
-        default: 'v1.2.1'
+        default: 'v1.3.1'
       windows_only:
         description: 'Publish Windows only; defer macOS and Linux assets'
         required: false

@@ -220,6 +220,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     searchMessages: (keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number) =>
       ipcRenderer.invoke('chat:searchMessages', keyword, sessionId, limit, offset, beginTimestamp, endTimestamp),
     getVideoData: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }) => ipcRenderer.invoke('chat:getVideoData', identity),
+    getMessageReferences: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: 'local' | 'server' }, options?: { offset?: number; limit?: number; force?: boolean }) => ipcRenderer.invoke('chat:getMessageReferences', identity, options),
     getImageDataByIdentity: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }, options?: { excludeThumbnail?: boolean }) => ipcRenderer.invoke('chat:getImageDataByIdentity', identity, options),
     getFileData: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }) => ipcRenderer.invoke('chat:getFileData', identity),
     getImageData: (sessionId: string, msgId: string, options?: { excludeThumbnail?: boolean }) =>
@@ -265,8 +266,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('sns:downloadImage', payload),
     exportTimeline: (options: any) => ipcRenderer.invoke('sns:exportTimeline', options),
     selectExportDir: () => ipcRenderer.invoke('sns:selectExportDir'),
-    installBlockDeleteTrigger: () => ipcRenderer.invoke('sns:installBlockDeleteTrigger'),
-    uninstallBlockDeleteTrigger: () => ipcRenderer.invoke('sns:uninstallBlockDeleteTrigger'),
+    getProtectionState: (accountId?: string) => ipcRenderer.invoke('sns:getProtectionState', accountId),
+    installBlockDeleteTrigger: (accountId?: string) => ipcRenderer.invoke('sns:installBlockDeleteTrigger', accountId),
+    uninstallBlockDeleteTrigger: (accountId?: string) => ipcRenderer.invoke('sns:uninstallBlockDeleteTrigger', accountId),
     checkBlockDeleteTrigger: () => ipcRenderer.invoke('sns:checkBlockDeleteTrigger'),
     deleteSnsPost: (postId: string) => ipcRenderer.invoke('sns:deleteSnsPost', postId),
     downloadEmoji: (params: { url: string; encryptUrl?: string; aesKey?: string }) =>
@@ -349,7 +351,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     testProfile: (input: any) => ipcRenderer.invoke('ai:testProfile', input),
     setSetup: (patch: any) => ipcRenderer.invoke('ai:setSetup', patch),
     listChats: () => ipcRenderer.invoke('ai:listChats'),
-    createChat: (title?: string) => ipcRenderer.invoke('ai:createChat', title),
+    createChat: (title?: string, options?: { memoryEnabled?: boolean }) => ipcRenderer.invoke('ai:createChat', title, options),
     renameChat: (chatId: string, title: string) => ipcRenderer.invoke('ai:renameChat', chatId, title),
     reorderChats: (orderedIds: string[]) => ipcRenderer.invoke('ai:reorderChats', orderedIds),
     deleteChat: (chatId: string) => ipcRenderer.invoke('ai:deleteChat', chatId),
@@ -379,6 +381,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     updateTask: (id: string, patch: any) => ipcRenderer.invoke('webot:updateTask', id, patch),
     deleteTask: (id: string) => ipcRenderer.invoke('webot:deleteTask', id),
     runNow: (id: string) => ipcRenderer.invoke('webot:runNow', id),
+    listTranscripts: (taskId?: string) => ipcRenderer.invoke('webot:listTranscripts', taskId),
+    getTranscript: (id: string) => ipcRenderer.invoke('webot:getTranscript', id),
     listRuns: (taskId?: string) => ipcRenderer.invoke('webot:listRuns', taskId),
     listNotes: (options?: { taskId?: string; limit?: number }) => ipcRenderer.invoke('webot:listNotes', options),
     getNote: (id: string) => ipcRenderer.invoke('webot:getNote', id),

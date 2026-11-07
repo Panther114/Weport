@@ -1,0 +1,13 @@
+.reader-reference-overlay { position: fixed; inset: 0; z-index: var(--z-modal, 1000); background: #0007; display: grid; place-items: center; padding: 24px; }
+.reader-reference-dialog { width: min(680px, 100%); max-height: 85vh; overflow: auto; padding: 22px; border: 1px solid var(--border); border-radius: 16px; color: var(--text); background: var(--bg); box-shadow: 0 18px 70px #0004; }
+.reader-reference-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.reader-reference-head h2 { color: var(--accent); font-size: 17px; margin: 0; }
+.reader-reference-dialog blockquote { margin: 16px 0; padding: 10px 14px; border-left: 2px solid var(--accent); overflow-wrap: anywhere; }
+.reader-reference-list { display: grid; gap: 10px; }
+.reader-reference-list > button { text-align: left; color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: transparent; transition: transform 140ms ease, border-color 140ms ease; overflow-wrap: anywhere; }
+.reader-reference-list > button:hover { border-color: var(--accent); transform: translateY(-1px); }
+.reader-reference-list > button:active { transform: scale(.99); }
+.reader-reference-list span { font-size: 12px; color: var(--accent); }
+.reader-reference-list p { margin: 7px 0 0; white-space: pre-wrap; }
+.reader-reference-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+@media (prefers-reduced-motion: reduce) { .reader-reference-list > button { transition: none; transform: none !important; } }

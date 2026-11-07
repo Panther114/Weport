@@ -143,14 +143,15 @@ describe('AI history investigation', () => {
     debugLog.mockRestore()
   })
 
-  it('freezes distinct automation instructions without changing the tool definitions', () => {
+  it('uses the same minimal capability prompt without imposing automation answer style', () => {
     const service = weportAiService as any
     const tools = service.buildTools()
     const interactive = service.createModelRequestShape(tools)
     const automatic = service.createModelRequestShape(tools, true)
     expect(automatic.tools).toEqual(interactive.tools)
-    expect(automatic.systemContent).toContain('omit the interactive plan')
-    expect(interactive.systemContent).toContain('Match the language of the latest user message')
-    expect(automatic.hash).not.toBe(interactive.hash)
+    expect(automatic.systemContent).toBe(interactive.systemContent)
+    expect(interactive.systemContent.length).toBeLessThan(500)
+    expect(interactive.systemContent).not.toMatch(/language|Markdown|FIRST|MANDATORY|professional/i)
+    expect(automatic.hash).toBe(interactive.hash)
   })
 })

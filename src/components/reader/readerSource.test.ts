@@ -420,3 +420,14 @@ describe('searchSession', () => {
     expect(result.error).toBeUndefined()
   })
 })
+
+
+describe('full-size Reader image quality', () => {
+  it('requests the best available local tier using exact source identity', async () => {
+    const getImageDataByIdentity = vi.fn(async () => ({ success: true, data: 'iVBORw0KGgo' }))
+    stubChat({ getImageDataByIdentity })
+    const message = normalizeMessage({ localId: 42, createTime: 1790388300, localType: 3, _db_path: 'C:/wx/message_2.db', _table_name: 'Msg_abc' }, 's1')
+    await loadMessageImage(message, { excludeThumbnail: true })
+    expect(getImageDataByIdentity).toHaveBeenCalledWith({ sessionId: 's1', localId: '42', ts: 1790388300000, db: 'C:/wx/message_2.db', table: 'Msg_abc', idKind: 'local' }, { excludeThumbnail: true })
+  })
+})

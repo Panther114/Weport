@@ -1,6 +1,6 @@
 {
   "name": "weport",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "description": "Weport — WeChat chat history exporter (Electron + React + native engine)",
   "author": {
@@ -30,7 +30,7 @@
     "build:dir": "node scripts/build-desktop.cjs --dir",
     "build:mac": "node scripts/build-desktop.cjs --mac",
     "build:linux": "node scripts/build-desktop.cjs --linux",
-    "package": "node scripts/verify-native-assets.cjs && node scripts/verify-wasm-assets.cjs && node scripts/clean-dist-electron.cjs && vite build --config vite.config.mts && node scripts/prepare-host-bundle.cjs && node scripts/prepare-mcp-bundle.cjs && electron-builder --publish never",
+    "package": "node scripts/build-desktop.cjs",
     "build:flash": "node scripts/build-desktop.cjs --win --dir && electron-builder --config electron-builder.flash.cjs --win portable --publish never"
   },
   "dependencies": {

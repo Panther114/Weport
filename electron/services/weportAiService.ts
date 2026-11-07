@@ -1,4 +1,4 @@
-import { SYSTEM_PROMPT, AUTOMATION_PROMPT } from './ai/systemPrompt'
+import { SYSTEM_PROMPT } from './ai/systemPrompt'
 /**
  * WeportAI — Weport 原生聊天历史分析助手（v0.8）。
  *
@@ -54,6 +54,7 @@ import { evidenceReference, evidenceId, evidenceContentHash, validateClaim, type
 import { assertDataScope, restrictSearchResult, validateDataScope, type DataAccessScope } from './dataAccessService'
 import { retrieveIndexedMessages } from './searchRetrieval'
 import { migrateLegacyAi } from './ai/accountMigration'
+import { loadChatIndexes, persistChatIndexes } from './ai/automationStorage'
 import { resolveStorageLocation } from './storageLocations'
 export type { AiImagePart } from './ai/imageParts'
 
@@ -139,7 +140,8 @@ export interface AiChatMeta {
   sortOrder?: number
   /** 标题生成版本：1=旧版兜底/AI，2=新版 8 字意图标题或用户手动改名 */
   titleVersion?: number
-  invocation?: { kind: 'automation'; taskId: string }
+  memoryEnabled?: boolean
+  invocation?: { kind: 'automation'; taskId: string; runId?: string }
 }
 
 export interface AiChatData {
@@ -341,18 +343,6 @@ function sanitizeForApi(s: string): string {
     .replace(/(?<![\uD800-\uDFFF])[\uDC00-\uDFFF]/g, '\uFFFD')
 }
 
-/**
- * 把历史消息里的错误拼写（WreportAI / WepoortAI / Weport Ai / wreport ai 等）
- * 统一规整为 "WeportAI"。早期轮次里模型曾把自己误写成 "WreportAI" 并被持久化，
- * 恢复会话时模型会照抄自己过去的错误自称。发送给 API 前必须清洗。
- */
-function normalizeIdentityName(s: string): string {
-  return String(s)
-    .replace(/\bWepoort\s*AI\b/gi, 'WeportAI')
-    .replace(/\bWreport\s*AI\b/gi, 'WeportAI')
-    .replace(/\bWeport\s*AI\b/gi, 'WeportAI')
-}
-
 function dateKeyOf(sec: number): string {
   const d = new Date(sec * 1000)
   const pad = (x: number) => String(x).padStart(2, '0')
@@ -543,14 +533,10 @@ export class WeportAiService {
     this.ensureDirs()
     if (this.chatsLoaded) return this.chats
     try {
-      const indexPath = join(this.dataDir, 'index.json')
-      if (existsSync(indexPath)) {
-        const raw = JSON.parse(readFileSync(indexPath, 'utf8')) as { chats?: AiChatMeta[] }
-        this.chats = Array.isArray(raw.chats) ? raw.chats : []
-      }
+      this.chats = loadChatIndexes<AiChatMeta>(this.dataDir, join(this.getWorkspaceRoot(), 'accounts', accountNamespace(this.storageAccount || '')))
     } catch (e) {
       console.warn('[WeportAI] 读取会话索引失败:', e)
-      this.chats = []
+      throw e
     }
     this.chatsLoaded = true
     // 排序：用户拖过（存在 sortOrder）→ 按 sortOrder；否则按最近活跃
@@ -570,19 +556,21 @@ export class WeportAiService {
 
   private persistChats(): void {
     try {
-      const target = join(this.dataDir, 'index.json')
-      const tmp = `${target}.${process.pid}.tmp`
-      writeFileSync(tmp, JSON.stringify({ chats: this.chats }, null, 2), 'utf8')
-      // 原子替换：崩溃/断电时索引不会剩半个 JSON（此前直接写最终文件，
-      // 中途失败会把整个会话列表打成空）
-      renameSync(tmp, target)
+      persistChatIndexes(this.dataDir, this.chats)
     } catch (e) {
       console.warn('[WeportAI] 写入会话索引失败:', e)
     }
   }
 
+  private chatSessionDir(chatId: string): string {
+    const directory = this.chats.find(chat => chat.id === chatId)?.invocation?.kind === 'automation'
+      ? join(this.dataDir, 'automations', 'sessions') : this.sessionsDir
+    mkdirSync(directory, { recursive: true })
+    return directory
+  }
+
   private chatFilePath(chatId: string): string {
-    return join(this.sessionsDir, `${chatId}.json`)
+    return join(this.chatSessionDir(chatId), `${chatId}.json`)
   }
 
   /**
@@ -637,7 +625,7 @@ export class WeportAiService {
   }
 
   private chatArchivePath(chatId: string): string {
-    return join(this.sessionsDir, `${chatId}.archive.jsonl`)
+    return join(this.chatSessionDir(chatId), `${chatId}.archive.jsonl`)
   }
 
   /** Preserve canonical old turns before the provider projection is compacted. */
@@ -675,30 +663,6 @@ export class WeportAiService {
       }
       const messages = Array.isArray(raw.messages) ? raw.messages : []
       let compressed = typeof raw.compressed === 'string' ? raw.compressed : ''
-      // 自愈：清洗持久化历史里遗留的错误自称（早期模型曾把名字误写为 WreportAI，
-      // 恢复会话时会被照抄下去），并回写磁盘使旧会话永久修正。
-      let mutated = false
-      for (const m of messages) {
-        if (m.role !== 'assistant' && m.role !== 'user') continue
-        const cleaned = normalizeIdentityName(m.content || '')
-        if (cleaned !== m.content) {
-          m.content = cleaned
-          mutated = true
-        }
-        if (m.reasoning) {
-          const reasoning = normalizeIdentityName(m.reasoning)
-          if (reasoning !== m.reasoning) {
-            m.reasoning = reasoning
-            mutated = true
-          }
-        }
-      }
-      const cleanedCompressed = normalizeIdentityName(compressed)
-      if (cleanedCompressed !== compressed) {
-        compressed = cleanedCompressed
-        mutated = true
-      }
-      if (mutated) this.persistMessages(chatId, messages, compressed, raw.lastRun)
       return { messages, compressed, lastRun: raw.lastRun }
     } catch {
       return { messages: [], compressed: '' }
@@ -808,7 +772,8 @@ export class WeportAiService {
   hasActiveRuns(): boolean { return this.running.size > 0 }
 
   private chatWorkspaceDir(chatId: string): string {
-    return join(this.getWorkspaceRoot(), 'accounts', accountNamespace(this.storageAccount ?? this.currentAccount()), 'chats', chatId)
+    return join(this.getWorkspaceRoot(), 'accounts', accountNamespace(this.storageAccount ?? this.currentAccount()),
+      this.chats.find(chat => chat.id === chatId)?.invocation?.kind === 'automation' ? 'automations' : 'chats', chatId)
   }
 
   /** 跨对话共享的长期记忆目录 */
@@ -934,6 +899,7 @@ export class WeportAiService {
     let scope: 'memory' | 'notes'
     let rel: string
     if (p.startsWith('memory/')) {
+      if (!this.isMemoryEnabled(chatId)) return null
       base = this.memoryDir()
       scope = 'memory'
       rel = p.slice('memory/'.length)
@@ -977,7 +943,7 @@ export class WeportAiService {
       }
       walk(base)
     }
-    scan(this.memoryDir(), 'memory/', 'memory')
+    if (this.isMemoryEnabled(chatId)) scan(this.memoryDir(), 'memory/', 'memory')
     scan(this.noteDir(chatId), 'notes/', 'notes')
     out.sort((a, b) => a.path.localeCompare(b.path))
     return out
@@ -987,11 +953,20 @@ export class WeportAiService {
   // 会话（Chat）管理
   // -------------------------------------------------------------------------
 
-  listChats(): AiChatMeta[] {
-    return this.loadChats()
+  listChats(options?: { includeAutomations?: boolean }): AiChatMeta[] {
+    return this.loadChats().filter(chat => options?.includeAutomations || chat.invocation?.kind !== 'automation')
   }
 
-  createChat(title?: string, invocation?: AiChatMeta['invocation']): AiChatMeta {
+  listAutomationChats(taskId?: string): AiChatMeta[] {
+    return this.loadChats().filter(chat => chat.invocation?.kind === 'automation' && (!taskId || chat.invocation.taskId === taskId)).sort((a, b) => b.createdAt - a.createdAt)
+  }
+
+  isMemoryEnabled(chatId: string): boolean {
+    const chat = this.loadChats().find(chat => chat.id === chatId)
+    return Boolean(chat && chat.memoryEnabled !== false)
+  }
+
+  createChat(title?: string, invocation?: AiChatMeta['invocation'], options?: { memoryEnabled?: boolean }): AiChatMeta {
     const chats = this.loadChats()
     // 新对话永远排在最上面：比现有最小的 sortOrder 再小 1（未拖过则从 0 开始）
     const minOrder = chats.reduce<number | undefined>((min, c) => {
@@ -1001,6 +976,7 @@ export class WeportAiService {
     const chat: AiChatMeta = {
       id: randomUUID(),
       invocation,
+      memoryEnabled: options?.memoryEnabled !== false,
       title: String(title || '').trim().slice(0, 60) || '新对话',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1009,7 +985,7 @@ export class WeportAiService {
     }
     chats.unshift(chat)
     this.persistChats()
-    mkdirSync(this.memoryDir(), { recursive: true })
+    if (chat.memoryEnabled) mkdirSync(this.memoryDir(), { recursive: true })
     mkdirSync(this.noteDir(chat.id), { recursive: true })
     return chat
   }
@@ -1050,14 +1026,15 @@ export class WeportAiService {
     // 先中止正在进行的 agent 运行，避免删除后运行继续写回已删除的文件
     this.abort(chatId)
     this.running.delete(chatId)
+    const files = [this.chatFilePath(chatId), this.chatArchivePath(chatId)]
+    const workspace = this.chatWorkspaceDir(chatId)
     chats.splice(idx, 1)
     this.previousApiInput.delete(chatId)
     this.dropPrefixProbe(chatId)
     this.persistChats()
     try {
-      rmSync(this.chatFilePath(chatId), { force: true })
-      rmSync(this.chatArchivePath(chatId), { force: true })
-      rmSync(this.chatWorkspaceDir(chatId), { recursive: true, force: true })
+      for (const file of files) rmSync(file, { force: true })
+      rmSync(workspace, { recursive: true, force: true })
     } catch { /* noop */ }
     return true
   }
@@ -1072,11 +1049,20 @@ export class WeportAiService {
       chat,
       running: this.running.has(chatId),
       workspaceDir: this.chatWorkspaceDir(chatId),
-      memoryDir: this.memoryDir(),
+      memoryDir: this.isMemoryEnabled(chatId) ? this.memoryDir() : '',
       messages: stored.messages,
       compressed: stored.compressed,
       lastRun: stored.lastRun,
     }
+  }
+
+  getAutomationChat(chatId: string): AiChatData | null {
+    if (this.loadChats().find(chat => chat.id === chatId)?.invocation?.kind !== 'automation') return null
+    const chat = this.loadChats().find(chat => chat.id === chatId)!
+    const data = this.loadMessages(chatId)
+    return { chat, running: this.running.has(chatId), workspaceDir: this.chatWorkspaceDir(chatId),
+      memoryDir: this.isMemoryEnabled(chatId) ? this.memoryDir() : '',
+      messages: [...this.loadArchivedMessages(chatId), ...data.messages], compressed: data.compressed, lastRun: data.lastRun }
   }
 
   listNotes(chatId: string): Array<{ path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }> {
@@ -1548,7 +1534,7 @@ export class WeportAiService {
       {
         name: 'list_sessions',
         description:
-          'Page through WeChat chats with display name, type, count hint and activity time. For relationship ranking use get_relationship_candidates instead of paging every private chat. Use sort=oldest to deliberately discover distant/quiet history.',
+          'List WeChat conversations with names, types, count hints and activity timestamps.',
         parameters: {
           type: 'object',
           properties: {
@@ -1602,7 +1588,7 @@ export class WeportAiService {
       {
         name: 'sync_chat_history',
         description:
-          'Force a FRESH read of WeChat history: drops the message cursors, cached statistics and cached session list, then re-reads from the local database and reports what is actually there right now (latest message per requested chat). Call this BEFORE any claim that depends on the newest data ("最新", "今天", "有没有新消息", "现在怎么样了") — a previous tool result in this very conversation is a snapshot from minutes ago, and the account owner keeps sending messages while you work. Cheap and safe: it only invalidates caches, it never writes to WeChat.',
+          'Invalidate derived history caches and retrieve the latest available message for selected conversations.',
         parameters: {
           type: 'object',
           properties: {
@@ -1663,7 +1649,7 @@ export class WeportAiService {
       {
         name: 'get_social_overview',
         description:
-          'Cross-chat survey: message volume per chat (optionally within a date range), sorted by volume, plus totals and activity breadth. Use in the SURVEY phase of open-ended questions (e.g. "分析我是什么人") to decide which chats and time windows deserve deep dives.',
+          'Aggregate message counts, interaction patterns and representative conversations for a time range.',
         parameters: {
           type: 'object',
           properties: {
@@ -1733,7 +1719,7 @@ export class WeportAiService {
       {
         name: 'get_relationship_candidates',
         description:
-          'Build a compact PRIVATE-chat candidate set for relationship analysis. Ranks investigation priority using message volume, active-day breadth, relationship span, recent continuity and older-history continuity — not volume alone. The score only selects whom to inspect; it is NOT a closeness verdict. Follow with sample_session_history.',
+          'Rank contacts by interaction statistics within the requested date range.',
         parameters: {
           type: 'object',
           properties: {
@@ -1794,7 +1780,7 @@ export class WeportAiService {
       {
         name: 'sample_session_history',
         description:
-          'Read one chat across its FULL history using stable pagination offsets at recent/middle/early positions. Returns compact, evenly sampled message evidence plus sent/received balance for each period. Prefer this over many unbounded read_session_messages calls when comparing people or long-term change; use focused reads afterward for verification.',
+          'Read sampled chronological windows of one conversation with coverage and continuation metadata.',
         parameters: {
           type: 'object',
           properties: {
@@ -1877,7 +1863,7 @@ export class WeportAiService {
       {
         name: 'review_prior_analyses',
         description:
-          'Review prior WeportAI runs as fallible research leads: earlier user questions, tool sequence/coverage, final conclusion excerpt, and cache outcome. Use to avoid repeating blind alleys and to find people/windows worth re-checking. Prior AI answers are NOT evidence and must be verified against chat tools.',
+          'Retrieve previous interactive analyses for the selected account. Excludes memory-disabled chats and automated runs.',
         parameters: {
           type: 'object',
           properties: {
@@ -1887,10 +1873,11 @@ export class WeportAiService {
         },
         friendly: () => '回顾了以往分析的调查路径与结论线索',
         handler: async (args, ctx) => {
+          if (!this.isMemoryEnabled(ctx.chatId)) throw new Error('Memory is disabled for this conversation.')
           const keyword = String(args.keyword || '').trim().toLowerCase()
           const limit = clampInt(args.limit, 1, 10, 5)
           const rows = this.loadChats()
-            .filter((chat) => chat.id !== ctx.chatId)
+            .filter((chat) => chat.id !== ctx.chatId && chat.memoryEnabled !== false && chat.invocation?.kind !== 'automation')
             .map((chat) => {
               const stored = this.loadMessages(chat.id)
               const canonical = [...this.loadArchivedMessages(chat.id), ...stored.messages]
@@ -1924,7 +1911,7 @@ export class WeportAiService {
       {
         name: 'read_session_messages',
         description:
-          'Read a substantial contiguous page of ONE chat (newest first by default), with sender, time, parsed text and nextOffset. This is a primary evidence tool for broad analysis: after surveying representative chats and historical strata, read successive 300-500-message pages across early, middle and recent periods to discover themes in context. It also verifies specific claims. Follow nextOffset without overlapping pages; a keyword hit list is not a substitute for conversation history.',
+          'Read a chronological page of messages from one conversation, with source links and continuation offsets.',
         parameters: {
           type: 'object',
           properties: {
@@ -1972,7 +1959,7 @@ export class WeportAiService {
       {
         name: 'read_chat_images',
         description:
-          'Look at actual PICTURES posted in one chat (homework photos, screenshots, receipts, schedules). Use this whenever the answer depends on what an image shows — text search cannot see inside a picture. Returns the images themselves to a vision-capable model, plus who sent each one and when. Pairs with read_session_messages: use that to find the time window, then this to actually look.',
+          'Read locally available images from the specified messages. Returns up to three images per call.',
         parameters: {
           type: 'object',
           properties: {
@@ -2075,7 +2062,7 @@ export class WeportAiService {
       {
         name: 'read_day_events',
         description:
-          'Cross-chat chronological view of ONE day: all messages from ALL chats on that date, merged by time, each prefixed with its chat name. Essential for connecting events that appear in multiple chats the same day.',
+          'Read a bounded chronological timeline across conversations for one day.',
         parameters: {
           type: 'object',
           properties: {
@@ -2098,7 +2085,7 @@ export class WeportAiService {
       {
         name: 'read_period_events',
         description:
-          'Cross-chat chronological view of a date range: all messages from all chats between startDate and endDate, merged by time, each prefixed with its chat name. Use for timelines, trip/event reconstruction, or "what happened this week".',
+          'Read a bounded chronological timeline across conversations for a date range.',
         parameters: {
           type: 'object',
           properties: {
@@ -2125,7 +2112,7 @@ export class WeportAiService {
       {
         name: 'search_messages',
         description:
-          'Find a specified phrase, identifier or concrete hypothesis across chats by keyword (supports Chinese). Use directly for explicit lookup tasks, or after chronological history reading to check a specific emerging claim. This is NOT a representative history sample: guessed theme words bias broad profile/relationship/topic analysis, and no hits never prove absence. Prefer sample_session_history and substantial read_session_messages pages for general analysis.',
+          'Search indexed messages by text and date, returning source identities and excerpts.',
         parameters: {
           type: 'object',
           properties: {
@@ -2174,7 +2161,7 @@ export class WeportAiService {
       {
         name: 'get_session_stats',
         description:
-          'Statistics for one or more chats: total/voice/image/video/emoji/file/transfer/red-packet/call message counts, plus first/last activity. Optionally scoped to a date range. Use for the survey step.',
+          'Return message counts and activity statistics for one conversation.',
         parameters: {
           type: 'object',
           properties: {
@@ -2221,7 +2208,7 @@ export class WeportAiService {
       {
         name: 'list_dates',
         description:
-          'List dates that have message activity, either for ONE chat or as a cross-chat activity calendar. Use it to find which days are interesting before reading them.',
+          'List dates with available messages and activity counts.',
         parameters: {
           type: 'object',
           properties: {
@@ -2277,7 +2264,7 @@ export class WeportAiService {
       {
         name: 'get_contact_info',
         description:
-          'Look up contact profile info for a username: display name, remark, nickname, alias, GENDER (if stored in the contact table), region and signature. For groups (chatroom ids) use get_group_members instead.',
+          'Look up local contact metadata and display names.',
         parameters: {
           type: 'object',
           properties: {
@@ -2337,7 +2324,7 @@ export class WeportAiService {
       {
         name: 'get_group_members',
         description:
-          'Get the member roster of a GROUP chat: total member count, each member\'s group nickname, remark, nickname and whether the member is the account owner. Use this to understand WHO is in a group (roles, circles, subgroups) before or while analyzing its messages.',
+          'List members and available local metadata for a group conversation.',
         parameters: {
           type: 'object',
           properties: {
@@ -2417,7 +2404,7 @@ export class WeportAiService {
       },
       {
         name: 'get_self_overview',
-        description: 'Return the account being analyzed (my wxid), the data scope (db path), and global counts (private/group/official chats). Call once at the start of a big task.',
+        description: 'Describe the selected local account and conversation inventory.',
         parameters: { type: 'object', properties: {} },
         friendly: () => '获取了当前分析范围概览',
         handler: async () => {
@@ -2436,14 +2423,17 @@ export class WeportAiService {
       },
       {
         name: 'list_memory_claims',
-        description: 'Read dated, account-scoped memory claims with source evidence, uncertainty and correction history. Prior claims are fallible leads, not current evidence.',
+        description: 'Read dated memory claims and their stored source and correction relationships.',
         parameters: { type: 'object', properties: {} },
         friendly: () => '查看了带证据的记忆与更正记录',
-        handler: async () => JSON.stringify(this.listMemoryClaims()),
+        handler: async (_, ctx) => {
+          if (!this.isMemoryEnabled(ctx.chatId)) throw new Error('Memory is disabled for this conversation.')
+          return JSON.stringify(this.listMemoryClaims())
+        },
       },
       {
         name: 'save_memory_claim',
-        description: 'Store a dated observation or uncertain interpretation. Use source IDs from weport-evidence links. Corrections retain prior claims using supersedes, plus counterEvidenceIds and correction. Never store an interpretation as an established fact.',
+        description: 'Save a dated claim with registered source IDs. Corrections retain the superseded claim and counterevidence.',
         parameters: { type: 'object', properties: {
           statement: { type: 'string' }, kind: { type: 'string', enum: ['observation', 'interpretation'] },
           asOf: { type: 'number', description: 'Unix milliseconds at which this claim was checked' },
@@ -2451,7 +2441,8 @@ export class WeportAiService {
           supersedes: { type: 'string' }, correction: { type: 'string' },
         }, required: ['statement', 'kind', 'asOf', 'evidenceIds'] },
         friendly: () => '保存了带日期、证据与更正关系的记忆',
-        handler: async args => {
+        handler: async (args, ctx) => {
+          if (!this.isMemoryEnabled(ctx.chatId)) throw new Error('Memory is disabled for this conversation.')
           const ids = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : []
           const counters = Array.isArray(args.counterEvidenceIds) ? args.counterEvidenceIds.map(String) : []
           for (const id of [...ids, ...counters]) {
@@ -2467,7 +2458,7 @@ export class WeportAiService {
       {
         name: 'list_notes',
         description:
-          'List the Markdown files in your workspace: memory/ (shared long-term memory across all chats) and notes/ (current chat). Call at the start of every task and after writing notes.',
+          'List available Markdown files in shared memory/ and current-conversation notes/. Disabled memory is excluded.',
         parameters: { type: 'object', properties: {} },
         friendly: () => '浏览了工作区记忆与笔记',
         handler: async (_, ctx) => {
@@ -2480,7 +2471,7 @@ export class WeportAiService {
       {
         name: 'read_note',
         description:
-          'Read a bounded slice of a Markdown workspace file. Persistent memory is fallible background, not evidence. For memory files the default mode is tail so the newest appended corrections are visible; use query to retrieve matching lines plus context instead of rereading a whole file.',
+          'Read a bounded head, tail or text-filtered slice of a Markdown workspace file.',
         parameters: {
           type: 'object',
           properties: {
@@ -2536,12 +2527,12 @@ export class WeportAiService {
       {
         name: 'write_note',
         description:
-          'Write a Markdown workspace file. Existing memory/* files are append-only regardless of append, so durable history cannot be erased; write dated evidence, confidence, source chat/time, and corrections. Existing notes/* may be replaced when append=false. This is the ONLY file-writing tool.',
+          'Write a Markdown workspace file. Existing memory files are append-only; notes may be replaced or appended.',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: 'Relative path, must end with .md: memory/xxx.md or notes/xxx.md' },
-            content: { type: 'string', description: 'Markdown content. Keep it factual and evidence-backed.' },
+            content: { type: 'string', description: 'Markdown content.' },
             append: { type: 'boolean', description: 'Append instead of overwrite (default false)' },
           },
           required: ['path', 'content'],
@@ -2601,7 +2592,7 @@ export class WeportAiService {
       {
         name: 'list_connector_targets',
         description:
-          'List the places a task can be filed in a connected third-party service (Todoist projects, labels, inbox). Call this before creating a task when you need a project or label id; omit the target to file into the Inbox.',
+          'List available destinations in connected external services.',
         parameters: {
           type: 'object',
           properties: {
@@ -2623,7 +2614,7 @@ export class WeportAiService {
     tools.push({
       name: 'create_connector_task',
       description:
-        'Create a task in a connected third-party service (Todoist). Use it when the user asks you to record a follow-up, reminder, or to-do outside Weport. Write the task content in the same language the user speaks, keep it one actionable line, and put supporting detail in `description`. The due date accepts natural language ("tomorrow at 5pm", "next Monday", "每周一") — pass it through as `due_text` instead of computing a date yourself.',
+        'Create a task in a connected external service when agent write permission is enabled.',
       parameters: {
         type: 'object',
         properties: {
@@ -2671,9 +2662,9 @@ export class WeportAiService {
       .sort((a, b) => a.function.name.localeCompare(b.function.name))
   }
 
-  private createModelRequestShape(definitions: ToolDefinition[], automated = false): ModelRequestShape {
+  private createModelRequestShape(definitions: ToolDefinition[], _automated = false): ModelRequestShape {
     const custom = String(this.configService.get('weportAiCustomPrompt') || '').trim()
-    const basePrompt = automated ? `${SYSTEM_PROMPT}\n\n${AUTOMATION_PROMPT}` : SYSTEM_PROMPT
+    const basePrompt = SYSTEM_PROMPT
     const systemContent = custom ? `${basePrompt}\n\n## User-supplied instructions (always honored)\n${custom}` : basePrompt
     const tools = this.toOpenAiTools(definitions)
     const hash = createHash('sha256')
@@ -2887,7 +2878,9 @@ export class WeportAiService {
       // Freeze every provider-visible prefix component for this run. Settings
       // or plugin/tool changes take effect on the next user turn, never midway
       // through an append-only cache epoch.
-      const availableTools = options?.tools === 'none' ? [] : this.buildTools().filter(tool => processing !== 'local-only' || !['list_connector_targets', 'create_connector_task'].includes(tool.name))
+      const availableTools = options?.tools === 'none' ? [] : this.buildTools().filter(tool =>
+        (chat.memoryEnabled !== false || !['list_memory_claims', 'save_memory_claim', 'review_prior_analyses'].includes(tool.name)) &&
+        (processing !== 'local-only' || !['list_connector_targets', 'create_connector_task'].includes(tool.name)))
       const runToolDefinitions = scope ? availableTools.filter(tool => ['read_session_messages', 'search_messages'].includes(tool.name)).map(tool => ({ ...tool,
         handler: async (args: Record<string, unknown>, toolContext: ToolHandlerContext) => {
           const sessionId = String(args.sessionId || '').trim()
@@ -3243,9 +3236,7 @@ export class WeportAiService {
       out.push({
         role: 'system',
         content: sanitizeForApi(
-          normalizeIdentityName(
-            `以下摘要来自本对话更早的轮次（原始消息已压缩以节省上下文，其中提到的工具结果不必再重读）：\n${compressed}`,
-          ),
+          `Earlier conversation summary:\n${compressed}`,
         ),
       })
     }
@@ -3258,9 +3249,9 @@ export class WeportAiService {
     for (let index = 0; index < history.length; index += 1) {
       const m = history[index]
       if (m.role === 'user') {
-        out.push({ role: 'user', content: sanitizeForApi(normalizeIdentityName(m.content)) })
+        out.push({ role: 'user', content: sanitizeForApi(m.content) })
       } else if (m.role === 'assistant') {
-        const item: Record<string, unknown> = { role: 'assistant', content: sanitizeForApi(normalizeIdentityName(m.content || '')) }
+        const item: Record<string, unknown> = { role: 'assistant', content: sanitizeForApi(m.content || '') }
         const completeToolTurn = completeAssistantIndexes.has(index)
         if (options.preserveReasoning && m.reasoning && (completeToolTurn || !m.toolCalls?.length)) {
           // DeepSeek requires the original reasoning_content for tool turns;

@@ -903,8 +903,8 @@ export class ImageDecryptService {
         const cached = this.getResolvedCache(scopedKey)
         if (!cached || !existsSync(cached)) continue
         if (!allowThumbnail && !this.isHdDatPath(cached)) continue
-        if (excludeThumbnail && this.isTVariantDat(cached)) {
-          if (!thumbnailFallbackPath) thumbnailFallbackPath = cached
+        if (excludeThumbnail && !this.isHdDatPath(cached)) {
+          if (!thumbnailFallbackPath || this.getDatTier(cached, cacheKey) > this.getDatTier(thumbnailFallbackPath, cacheKey)) thumbnailFallbackPath = cached
           continue
         }
         return cached
@@ -919,8 +919,8 @@ export class ImageDecryptService {
         if (!allowThumbnail && !this.isHdDatPath(hardlinkPath)) continue
         // hardlink 索引只认 md5、不认档位：命中缩略图不能就此收工，
         // 用户点开过图片的话显示版就在同一目录里
-        if (excludeThumbnail && this.isTVariantDat(hardlinkPath)) {
-          if (!thumbnailFallbackPath) thumbnailFallbackPath = hardlinkPath
+        if (excludeThumbnail && !this.isHdDatPath(hardlinkPath)) {
+          if (!thumbnailFallbackPath || this.getDatTier(hardlinkPath, baseMd5) > this.getDatTier(thumbnailFallbackPath, baseMd5)) thumbnailFallbackPath = hardlinkPath
           continue
         }
         this.cacheDatPath(accountDir, baseMd5, hardlinkPath)
@@ -1037,7 +1037,7 @@ export class ImageDecryptService {
   ): Promise<ThumbnailPromotion> {
     if (!cachedPath || !existsSync(cachedPath)) return { kind: 'none' }
     const currentTier = this.getCachedPathTier(cachedPath)
-    if (currentTier !== 1) return { kind: 'none' }
+    if (currentTier >= 3) return { kind: 'none' }
 
     const accountDir = this.resolveCurrentAccountDir()
     if (!accountDir) return { kind: 'none' }
@@ -1053,7 +1053,6 @@ export class ImageDecryptService {
       if (!candidate) continue
       const candidateTier = this.getDatTier(candidate, baseMd5)
       if (candidateTier <= bestTier) continue
-      if (bestDatPath && this.fileSizeSafe(candidate) <= this.fileSizeSafe(bestDatPath)) continue
       bestDatPath = candidate
       bestTier = candidateTier
     }
@@ -1078,6 +1077,9 @@ export class ImageDecryptService {
     }
 
     this.deleteResolvedMediaCache(payload, cacheKey)
+    for (const key of [...lookupBases, payload.imageMd5, payload.imageDatName]) {
+      if (key) this.cacheDatPath(accountDir, key, bestDatPath)
+    }
     this.logInfo('[ImageDecrypt] 磁盘上有更高档 dat，丢弃过期的缩略图映射', {
       cachedPath,
       bestDatPath,
@@ -1967,7 +1969,8 @@ export class ImageDecryptService {
       payload.hardlinkOnly === true ? 'hl1' : 'hl0',
       payload.disableUpdateCheck === true ? 'du1' : 'du0',
       payload.allowCacheIndex === false ? 'ci0' : 'ci1',
-      payload.allowCachePromotion === false ? 'cp0' : 'cp1'
+      payload.allowCachePromotion === false ? 'cp0' : 'cp1',
+      payload.excludeThumbnail === true ? 'best' : 'preview'
     ].join('|')
   }
 
@@ -1983,7 +1986,8 @@ export class ImageDecryptService {
       payload.hardlinkOnly === true ? 'hl1' : 'hl0',
       payload.disableUpdateCheck === true ? 'du1' : 'du0',
       payload.allowCacheIndex === false ? 'ci0' : 'ci1',
-      payload.allowCachePromotion === false ? 'cp0' : 'cp1'
+      payload.allowCachePromotion === false ? 'cp0' : 'cp1',
+      payload.excludeThumbnail === true ? 'best' : 'preview'
     ].join('|')
   }
 

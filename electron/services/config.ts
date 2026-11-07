@@ -130,6 +130,7 @@ interface ConfigSchema {
   updateChannel: 'auto' | 'stable' | 'preview' | 'dev'
 
   // 通知
+  notificationCaptureMode: 'compatible' | 'live-glass'
   notificationEnabled: boolean
   aiInsightNotificationEnabled: boolean
   notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'top-center'
@@ -372,6 +373,7 @@ export class ConfigService {
       authHelloSecret: '',
       ignoredUpdateVersion: '',
       updateChannel: 'auto',
+      notificationCaptureMode: 'compatible',
       notificationEnabled: true,
       aiInsightNotificationEnabled: true,
       notificationPosition: 'top-right',

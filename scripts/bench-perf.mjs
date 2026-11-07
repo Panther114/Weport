@@ -804,6 +804,7 @@ try {
 
     console.log('\n[C/D] 通知弹窗')
     // 第一轮：用户的默认（折射 0 / 磨砂 0 → 玻璃不接背景像素）
+    await setGlass('notificationCaptureMode', 'live-glass')
     await setGlass('notificationGlassFrost', 0)
     await setGlass('notificationGlassBlur', 0)
     await setGlass('notificationGlassShadow', 0)

@@ -241,7 +241,7 @@ export function messageMatchesIdentity(message: ReaderMessage, identity: Message
   return true
 }
 
-function identityForMessage(message: ReaderMessage): MessageIdentityQuery {
+export function identityForMessage(message: ReaderMessage): MessageIdentityQuery {
   const idKind = message.idKind || (message.localId > 0 ? 'local' : 'server')
   return {
     sessionId: message.sessionId,
@@ -276,13 +276,13 @@ export async function loadMessageByIdentity(query: MessageIdentityQuery): Promis
 // ---------------------------------------------------------------------------
 
 /** 图片：引擎解密后回 base64 或本地路径（`mediaUrlFromPayload` 两种都认）。 */
-export async function loadMessageImage(message: ReaderMessage): Promise<{ url?: string; error?: string }> {
+export async function loadMessageImage(message: ReaderMessage, options?: { excludeThumbnail?: boolean }): Promise<{ url?: string; error?: string }> {
   const chat = chatBridge()
   if (typeof chat?.getImageDataByIdentity !== 'function') {
     return { error: '引擎未提供精确图片通道（chat:getImageDataByIdentity）' }
   }
   try {
-    const payload = await chat.getImageDataByIdentity(identityForMessage(message))
+    const payload = await chat.getImageDataByIdentity(identityForMessage(message), ...(options ? [options] : []))
     return mediaUrlFromPayload(payload)
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }

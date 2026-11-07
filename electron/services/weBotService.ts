@@ -1,3 +1,4 @@
+import { BoundedRegexMatcher, normalizeMessageTrigger, type WeBotMessageTrigger } from './weBotRegex'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
@@ -17,6 +18,9 @@ export interface WeBotReference {
 }
 
 export interface WeBotTask {
+  trigger?: WeBotMessageTrigger
+  triggerState?: { messageIds: string[]; lastTriggeredAt: number }
+  triggerError?: string
   digest?: DigestConfig
   digestState?: DigestState
   id: string
@@ -101,7 +105,10 @@ export interface WeBotRunNotice {
   note?: WeBotNote
 }
 
+export interface WeBotTriggerMessage { accountId: string; sessionId: string; messageKey: string; text: string; timestamp: number; isSend?: number | null }
+
 export interface WeBotDispatchRequest {
+  triggerMessage?: WeBotTriggerMessage
   task: WeBotTask
   run: WeBotRun
   digestBatch?: DigestBatch
@@ -225,10 +232,13 @@ export class WeBotService {
   private readonly nowFn: () => number
   private readonly currentAccountId?: () => string
   private readonly collectDigest?: WeBotServiceOptions['collectDigest']
+  private messageRunQueue: Promise<unknown> = Promise.resolve()
+  private readonly regexMatcher = new BoundedRegexMatcher()
   private readonly activeTasks = new Set<string>()
 
   private state: PersistedState = { ...EMPTY_STATE, tasks: [], runs: [], notes: [] }
   private loaded = false
+  private stopping = false
   private timer: NodeJS.Timeout | null = null
   private ticking = false
   private readonly running = new Map<string, AbortController>()
@@ -305,6 +315,7 @@ export class WeBotService {
   // -------------------------------------------------------------------------
 
   start(): void {
+    this.stopping = false
     this.load()
     if (this.timer) return
     // 启动时立刻跑一次：把休眠/未运行期间错过的任务按补偿策略补上。
@@ -314,7 +325,9 @@ export class WeBotService {
   }
 
   stop(): void {
+    this.stopping = true
     this.stopScheduler()
+    this.regexMatcher.close()
     for (const controller of this.running.values()) controller.abort()
     this.running.clear()
   }
@@ -339,7 +352,7 @@ export class WeBotService {
       const due: Array<{ task: WeBotTask; scheduledAt: number }> = []
 
       for (const task of this.state.tasks) {
-        if (!task.enabled) continue
+        if (!task.enabled || task.trigger) continue
         const dueRuns = collectDueRuns(task.schedule, {
           nowMs: now,
           nextDueMs: task.nextRunAt ?? undefined,
@@ -377,12 +390,12 @@ export class WeBotService {
     this.load()
     const task = this.state.tasks.find((item) => item.id === taskId)
     if (!task) return { success: false, error: '任务不存在' }
-    if (this.activeTasks.has(task.id)) return { success: false, error: '任务正在运行' }
+    if (this.stopping || this.activeTasks.has(task.id)) return { success: false, error: '任务正在运行' }
     await this.runTask(task, this.nowFn())
     return { success: true }
   }
 
-  private async runTask(task: WeBotTask, scheduledAt: number): Promise<void> {
+  private async runTask(task: WeBotTask, scheduledAt: number, triggerMessage?: WeBotTriggerMessage): Promise<void> {
     if (this.activeTasks.has(task.id)) return
     this.activeTasks.add(task.id)
     const taskSnapshot = JSON.parse(JSON.stringify(task)) as WeBotTask
@@ -412,6 +425,10 @@ export class WeBotService {
     try {
       const digest = taskSnapshot.digest
       const assertScope = () => {
+        if (taskSnapshot.trigger) {
+          const current = this.state.tasks.find(item => item.id === task.id)
+          if (this.currentAccountId?.() !== taskSnapshot.trigger.accountId || !current?.enabled || JSON.stringify(current.trigger) !== JSON.stringify(taskSnapshot.trigger)) throw new Error('消息触发任务的账号、开关或规则已变更。')
+        }
         if (!digest) return
         if (this.currentAccountId?.() !== digest.scope.accountId) throw new Error('摘要绑定的账号与当前账号不一致。')
         const current = this.state.tasks.find(item => item.id === task.id)
@@ -440,7 +457,7 @@ export class WeBotService {
           return
         }
       }
-      const result = await this.dispatchFn({ task: taskSnapshot, run: { ...run }, digestBatch }, controller.signal)
+      const result = await this.dispatchFn({ task: taskSnapshot, run: { ...run }, digestBatch, triggerMessage }, controller.signal)
       assertScope()
       if (controller.signal.aborted) throw new Error('已中止')
       if (digest && !String(result.summary || '').trim()) throw new Error('摘要没有返回有效结论。')
@@ -554,13 +571,14 @@ export class WeBotService {
       title: String(input.title).trim().slice(0, 80) || '未命名任务',
       description: String(input.description || '').trim().slice(0, 4000),
       schedule: input.schedule,
+      trigger: input.trigger ? normalizeMessageTrigger(input.trigger, this.currentAccountId?.() || '') : undefined,
       catchUp: input.catchUp || 'once',
       enabled: input.enabled !== false,
       references: Array.isArray(input.references) ? input.references.slice(0, 20) : [],
       allowParallel: input.allowParallel === true,
       createdAt: now,
       updatedAt: now,
-      nextRunAt: input.enabled === false ? null : nextRunAfter(input.schedule, now),
+      nextRunAt: input.enabled === false || input.trigger ? null : nextRunAfter(input.schedule, now),
       lastRunAt: null,
       digest: input.digest ? normalizeDigest(input.digest, this.currentAccountId?.() || '', (input.references || []).map(r => r.id)) : undefined,
     }
@@ -573,6 +591,8 @@ export class WeBotService {
     this.load()
     const task = this.state.tasks.find((item) => item.id === id)
     if (!task) return null
+    if (patch.triggerState !== undefined) throw new Error('消息触发水位由运行记录维护。')
+    if (patch.trigger) patch = { ...patch, trigger: normalizeMessageTrigger(patch.trigger, task.trigger?.accountId || this.currentAccountId?.() || '') }
     if (patch.digestState !== undefined) throw new Error('摘要水位由成功提交维护。')
     if (task.digest && patch.digest && JSON.stringify(patch.digest.scope) !== JSON.stringify(task.digest.scope)) throw new Error('摘要来源范围不可修改，请新建任务。')
     if (task.digest && patch.digest && patch.digest.template !== task.digest.template) throw new Error('摘要模板不可修改，请新建任务。')
@@ -582,7 +602,7 @@ export class WeBotService {
     const scheduleChanged = patch.schedule !== undefined
     Object.assign(task, patch, { id: task.id, updatedAt: this.nowFn() })
     if (scheduleChanged) task.nextRunAt = nextRunAfter(task.schedule, this.nowFn())
-    if (!task.enabled) task.nextRunAt = null
+    if (!task.enabled || task.trigger) task.nextRunAt = null
     else if (task.nextRunAt === null) task.nextRunAt = nextRunAfter(task.schedule, this.nowFn())
     this.persist()
     return JSON.parse(JSON.stringify(task)) as WeBotTask
@@ -596,6 +616,51 @@ export class WeBotService {
     // 笔记刻意不随任务删除：用户可能把某次结果当作记录长期保留。
     this.persist()
     return true
+  }
+
+  reportMessageTriggerError(error: string): void {
+    this.load()
+    let changed = false
+    for (const task of this.state.tasks) {
+      if (task.enabled && task.trigger?.accountId === this.currentAccountId?.() && task.triggerError !== error) { task.triggerError = error; changed = true }
+    }
+    if (changed) this.persist()
+  }
+
+  hasMessageTriggers(): boolean {
+    return this.listTasks().some(task => task.enabled && task.trigger?.accountId === this.currentAccountId?.())
+  }
+
+  async handleIncomingMessage(message: WeBotTriggerMessage): Promise<void> {
+    this.load()
+    if (this.stopping || message.accountId !== this.currentAccountId?.() || !message.messageKey || message.isSend === 1) return
+    for (const task of this.state.tasks) {
+      const trigger = task.trigger
+      if (!task.enabled || !trigger || trigger.accountId !== message.accountId || message.timestamp < Math.floor(task.createdAt / 1000)) continue
+      if (task.references.length && !task.references.some(reference => reference.id === message.sessionId)) continue
+      if (task.triggerState?.messageIds.includes(message.messageKey) || this.activeTasks.has(task.id)) continue
+      if (task.triggerState && this.nowFn() - task.triggerState.lastTriggeredAt < trigger.cooldownSeconds * 1000) continue
+      const frozen = JSON.stringify(trigger)
+      let matched = false
+      try {
+        matched = await this.regexMatcher.match(trigger.pattern, trigger.flags, message.text)
+        if (task.triggerError) { delete task.triggerError; this.persist() }
+      } catch (error) {
+        const detail = String((error as Error)?.message || error)
+        if (task.triggerError !== detail) { task.triggerError = detail; this.persist() }
+        continue
+      }
+      if (!matched || message.accountId !== this.currentAccountId?.() || !task.enabled || frozen !== JSON.stringify(task.trigger) || !this.state.tasks.includes(task)) continue
+      const previousTriggerState = task.triggerState
+      task.triggerState = { messageIds: [...(task.triggerState?.messageIds || []), message.messageKey].slice(-1000), lastTriggeredAt: this.nowFn() }
+      try { this.persist(true) } catch (error) { task.triggerState = previousTriggerState; throw error } // Commit before any chargeable call.
+      const execute = async () => {
+        if (this.stopping || !task.enabled || message.accountId !== this.currentAccountId?.() || frozen !== JSON.stringify(task.trigger) || !this.state.tasks.includes(task)) return
+        await this.runTask(task, this.nowFn(), message)
+      }
+      if (task.allowParallel) void execute().catch(error => console.error('[WeBot] Message run failed:', error))
+      else this.messageRunQueue = this.messageRunQueue.then(execute).catch(error => console.error('[WeBot] Message run failed:', error))
+    }
   }
 
   /** 有启用中的任务时，退出前应提醒用户（托盘「退出」会停止调度）。 */

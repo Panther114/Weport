@@ -1,3 +1,4 @@
+import WeBotHistory from '../components/weportAi/WeBotHistory'
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Clock, History, PenLine, Pin, Play, Plus, Trash2, X } from 'lucide-react'
@@ -34,6 +35,10 @@ const minimizedNoteIds = new Set<string>()
 const emptyDraft = () => ({
   title: '',
   description: '',
+  triggerMode: 'schedule' as 'schedule' | 'message',
+  triggerPattern: '',
+  triggerFlags: 'i',
+  triggerCooldown: 60,
   scheduleKind: 'daily' as WeBotSchedule['kind'],
   hour: 8,
   minute: 30,
@@ -101,6 +106,7 @@ export default function WeBotModule({ section }: Props) {
   const twelveHour = useMemo(() => toTwelveHour(draft.hour), [draft.hour])
 
   /** 展开了运行记录的任务 id。 */
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [openLogs, setOpenLogs] = useState<Set<string>>(() => new Set())
 
   const refresh = useCallback(async () => {
@@ -124,7 +130,9 @@ export default function WeBotModule({ section }: Props) {
 
   useEffect(() => {
     void refresh()
-  }, [refresh])
+    const timer = setInterval(() => void api.weBot.listTasks().then(setTasks).catch(() => undefined), 15000)
+    return () => clearInterval(timer)
+  }, [refresh, api])
 
   useEffect(() => {
     // 会话列表只取一次（共享缓存 60s，两个 `@` 入口共用）：引用候选不需要实时刷新，
@@ -224,6 +232,10 @@ export default function WeBotModule({ section }: Props) {
       maxInputChars: task.digest?.limits.maxInputChars || 24000,
       maxTotalTokens: task.digest?.limits.maxTotalTokens || 8000,
       timeoutSeconds: (task.digest?.limits.timeoutMs || 120000) / 1000,
+      triggerMode: task.trigger ? 'message' : 'schedule',
+      triggerPattern: task.trigger?.pattern || '',
+      triggerFlags: task.trigger?.flags || 'i',
+      triggerCooldown: task.trigger?.cooldownSeconds || 60,
       ...(task.schedule.kind === 'daily'
         ? { scheduleKind: 'daily', hour: task.schedule.hour, minute: task.schedule.minute }
         : task.schedule.kind === 'weekly'
@@ -265,6 +277,7 @@ export default function WeBotModule({ section }: Props) {
       return
     }
     const schedule = buildSchedule(draft)
+    const trigger = draft.triggerMode === 'message' ? { kind: 'message' as const, pattern: draft.triggerPattern, flags: draft.triggerFlags, cooldownSeconds: draft.triggerCooldown, accountId: '' } : undefined
     const existing = tasks.find(task => task.id === editingId)
     const digest = draft.digestTemplate === 'custom' ? undefined : {
       template: draft.digestTemplate,
@@ -278,6 +291,7 @@ export default function WeBotModule({ section }: Props) {
           title: draft.title.trim(),
           description: draft.description.trim(),
           schedule,
+          trigger,
           catchUp: draft.catchUp,
           allowParallel: draft.allowParallel,
           references: draft.references,
@@ -288,6 +302,7 @@ export default function WeBotModule({ section }: Props) {
           title: draft.title.trim(),
           description: draft.description.trim(),
           schedule,
+          trigger,
           catchUp: draft.catchUp,
           allowParallel: draft.allowParallel,
           references: draft.references,
@@ -398,14 +413,15 @@ export default function WeBotModule({ section }: Props) {
           这里只保留一条紧凑工具栏：左边说明当前视图，右边放该视图的动作。 */}
       <div className="webot-toolbar">
         <div>
-          <h2>{section === 'tasks' ? '定时任务' : '笔记'}</h2>
+          <h2>{section === 'tasks' ? '自动任务' : '笔记'}</h2>
           <span className="webot-toolbar-sub">
             {section === 'tasks'
-              ? `共 ${tasks.length} 个任务；任务到点自动执行，结果写入笔记`
+              ? `共 ${tasks.length} 个任务；按时间或匹配消息触发，结果写入笔记`
               : `共 ${notes.length} 条笔记（只有成功的运行会留下笔记）`}
           </span>
         </div>
         <div className="webot-toolbar-actions">
+          <button type="button" className="ghost-btn" aria-expanded={historyOpen} onClick={() => setHistoryOpen(value => !value)}>运行历史</button>
           {section === 'tasks' ? (
             <button type="button" className="primary-btn" onClick={openCreate}>
               <Plus size={14} /> 新建任务
@@ -428,6 +444,7 @@ export default function WeBotModule({ section }: Props) {
         </div>
       </div>
 
+      {historyOpen ? <WeBotHistory /> : null}
       {message ? (
         <div className="webot-message" role="status">
           {message}
@@ -536,6 +553,19 @@ export default function WeBotModule({ section }: Props) {
 
                 <div className="webot-editor-col">
                   <div className="webot-field">
+                    <label htmlFor="webot-trigger-mode">触发方式</label>
+                    <select id="webot-trigger-mode" value={draft.triggerMode} onChange={event => setDraft(previous => ({ ...previous, triggerMode: event.target.value as 'schedule' | 'message' }))}>
+                      <option value="schedule">按时间执行</option><option value="message">新消息匹配正则</option>
+                    </select>
+                  </div>
+                  {draft.triggerMode === 'message' ? <div className="webot-field">
+                    <label htmlFor="webot-trigger-pattern">正则表达式</label>
+                    <input id="webot-trigger-pattern" value={draft.triggerPattern} maxLength={512} placeholder="例如：截止|提交|deadline" onChange={event => setDraft(previous => ({ ...previous, triggerPattern: event.target.value }))} />
+                    <label htmlFor="webot-trigger-flags">标志（i / m / s / u）</label><input id="webot-trigger-flags" value={draft.triggerFlags} onChange={event => setDraft(previous => ({ ...previous, triggerFlags: event.target.value }))} />
+                    <label htmlFor="webot-trigger-cooldown">冷却时间（秒）</label><input id="webot-trigger-cooldown" type="number" min={1} max={86400} value={draft.triggerCooldown} onChange={event => setDraft(previous => ({ ...previous, triggerCooldown: Number(event.target.value) || 60 }))} />
+                    <span className="hint">仅匹配开启后收到的新消息；可用 @ 限定会话。绑定创建时的账号，运行期间合并触发，不补跑关闭期间的消息。</span>
+                  </div> : null}
+                  <div className="webot-field" hidden={draft.triggerMode === 'message'}>
                     <span>执行频率</span>
                 <div className="segmented" role="radiogroup" aria-label="执行频率">
                   {(
@@ -560,7 +590,7 @@ export default function WeBotModule({ section }: Props) {
                   ))}
                 </div>
 
-                <div className="webot-schedule-row">
+                <div className="webot-schedule-row" hidden={draft.triggerMode === 'message'}>
                   {draft.scheduleKind === 'interval' ? (
                     <label>
                       <span>每</span>
@@ -653,7 +683,7 @@ export default function WeBotModule({ section }: Props) {
                   )}
                 </div>
                 <p className="webot-hint">
-                  {describeSchedule(buildSchedule(draft))} · 下次 {describeNextRun(Date.now() + 60_000)}
+                  {draft.triggerMode === 'message' ? `正则消息触发 · 冷却 ${draft.triggerCooldown} 秒` : `${describeSchedule(buildSchedule(draft))} · 下次 ${describeNextRun(Date.now() + 60_000)}`}
                 </p>
               </div>
 
@@ -737,9 +767,9 @@ export default function WeBotModule({ section }: Props) {
 
                   <div className="webot-card-meta">
                     <span>
-                      <Clock size={12} /> {describeSchedule(task.schedule)}
+                      <Clock size={12} /> {task.trigger ? `消息正则：/${task.trigger.pattern}/${task.trigger.flags} · 冷却 ${task.trigger.cooldownSeconds} 秒` : describeSchedule(task.schedule)}
                     </span>
-                    <span>下次 {describeNextRun(task.nextRunAt)}</span>
+                    <span>{task.trigger ? task.enabled ? '等待新消息匹配' : '已停用' : `下次 ${describeNextRun(task.nextRunAt)}`}</span>
                   </div>
 
                   {task.references.length > 0 ? (
@@ -756,6 +786,7 @@ export default function WeBotModule({ section }: Props) {
                   {/* 上次失败只说一句话，**完整原因在运行记录里**：一句截断过的
                       `上次失败：fetch failed` 用户既无从判断是网络还是配置，
                       也看不到它是什么时候跑的、之前是否成功过。 */}
+                  {task.triggerError ? <div className="webot-card-error" role="alert">消息触发：{task.triggerError}</div> : null}
                   {lastRun?.status === 'error' ? (
                     <div className="webot-card-error">
                       <span>上次失败：{lastRun.error}</span>

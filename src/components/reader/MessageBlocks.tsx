@@ -15,13 +15,14 @@
  * 引擎能解析出 CDN 地址，但那是微信的服务器：渲染层直接请求会绕过主进程的解密与
  * 缓存，也把用户的 IP 暴露给 CDN，且缩略图本来就要 AES 密钥。媒体一律走引擎通道。
  */
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, FileText, Gift, Image as ImageIcon, Link2, MapPin, Play, Star, UserRound, Volume2 } from 'lucide-react'
 import { renderTextWithEmoji } from '../../utils/renderTextWithEmoji'
 import type { ReaderMessage } from './readerTypes'
 import { formatBytes, formatDuration, splitHighlight, splitMentions } from './readerMessage'
 
 export interface BlockActions {
+  onReferences?: (message: ReaderMessage) => void
   onOpenImage: (message: ReaderMessage) => void
   onCopy: (message: ReaderMessage) => void
 }
@@ -121,6 +122,8 @@ export const QuoteBlock = memo(function QuoteBlock({ sender, text }: { sender: s
  * 滚一遍几百张图的会话会直接把渲染进程撑爆。60 MB 大约够一屏到两屏，超出就按
  * 最久未用淘汰；被淘汰的图滚回来时重新解密（本地磁盘解密 ≈ 几十毫秒）。
  */
+export const ReaderImageScope = createContext('')
+
 const IMAGE_CACHE_BYTES = 60 * 1024 * 1024
 const imageCache = new Map<string, { url: string; bytes: number }>()
 const imagePending = new Map<string, Promise<{ url?: string; error?: string }>>()
@@ -132,7 +135,7 @@ function cacheKey(message: ReaderMessage | undefined): string {
 
 function rememberImage(key: string, url: string): void {
   const bytes = url.startsWith('data:') ? url.length : 4096
-  if (imageCache.has(key)) imageCache.delete(key)
+  if (imageCache.has(key)) { imageCacheBytes -= imageCache.get(key)!.bytes; imageCache.delete(key) }
   imageCache.set(key, { url, bytes })
   imageCacheBytes += bytes
   while (imageCacheBytes > IMAGE_CACHE_BYTES && imageCache.size > 1) {
@@ -162,8 +165,9 @@ export interface ImageState {
 }
 
 /** 解密一张图（带进程内缓存与并发合并）。组件与灯箱共用同一条路径。 */
-export function useReaderImage(message: ReaderMessage | undefined, enabled: boolean): ImageState {
-  const key = cacheKey(message)
+export function useReaderImage(message: ReaderMessage | undefined, enabled: boolean, quality: 'preview' | 'full' = 'preview'): ImageState {
+  const account = useContext(ReaderImageScope)
+  const key = JSON.stringify([account, cacheKey(message), quality])
   const cached = imageCache.get(key)
   const [state, setState] = useState<ImageState & { key: string }>({
     key,
@@ -175,18 +179,18 @@ export function useReaderImage(message: ReaderMessage | undefined, enabled: bool
   useEffect(() => {
     if (!enabled || !message) return
     const hit = imageCache.get(key)
-    if (hit) {
+    if (hit && quality === 'preview') {
       setState({ key, url: hit.url, loading: false })
       return
     }
     let alive = true
     let pending = imagePending.get(key)
     if (!pending) {
-      pending = loadSource().then((module) => module.loadMessageImage(message))
+      pending = loadSource().then((module) => module.loadMessageImage(message, quality === 'full' ? { excludeThumbnail: true } : undefined))
       imagePending.set(key, pending)
-      pending.finally(() => imagePending.delete(key))
+      void pending.finally(() => imagePending.delete(key)).catch(() => undefined)
     }
-    setState((prev) => (prev.key === key && prev.loading ? prev : { key, loading: true }))
+    setState((prev) => (prev.key === key && prev.loading ? prev : { key, url: hit?.url, loading: true }))
     void pending.then((result) => {
       if (!alive) return
       if (result.url) {
@@ -199,7 +203,7 @@ export function useReaderImage(message: ReaderMessage | undefined, enabled: bool
     return () => {
       alive = false
     }
-  }, [key, message, enabled])
+  }, [key, message, enabled, quality])
 
   return state.key === key ? state : { url: cached?.url, loading: enabled, error: undefined }
 }

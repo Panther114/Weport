@@ -24,6 +24,8 @@ interface WeBotReference {
 }
 
 interface WeBotTask {
+  trigger?: { kind: 'message'; pattern: string; flags: string; cooldownSeconds: number; accountId: string }
+  triggerError?: string
   digest?: {
     template: 'decisions-deadlines' | 'unanswered-questions' | 'weekly-highlights'
     scope: { accountId: string; sessionIds: string[]; startTime: number }
@@ -275,7 +277,7 @@ interface ElectronApi {
   }
   config: {
     get: (key: string) => Promise<any>
-    set: (key: string, value: any) => Promise<{ success: boolean }>
+    set: (key: string, value: any) => Promise<{ success: boolean; error?: string }>
     clear: () => Promise<{ success: boolean }>
     updateWxidEntry: (wxid: string, patch: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>
   }
@@ -459,6 +461,7 @@ interface ElectronApi {
       endTimestamp?: number
     ) => Promise<{ success: boolean; messages?: any[]; error?: string }>
     getVideoData: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }) => Promise<{ success: boolean; localPath?: string; url?: string; mime?: string; error?: string }>
+    getMessageReferences: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: 'local' | 'server' }, options?: { offset?: number; limit?: number; force?: boolean }) => Promise<{ success: boolean; messages?: unknown[]; total?: number; hasMore?: boolean; ambiguousCount?: number; scanned?: number; snapshotAt?: number; error?: string }>
     getImageDataByIdentity: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }, options?: { excludeThumbnail?: boolean }) => Promise<{ success: boolean; data?: string; error?: string }>
     getFileData: (identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: string }) => Promise<{ success: boolean; localPath?: string; fileName?: string; error?: string }>
     getImageData: (
@@ -566,8 +569,8 @@ interface ElectronApi {
     }>
     assignConsumer: (consumer: string, profileId: string) => Promise<{ success: boolean; error?: string }>
     testProfile: (input: { providerId: string; protocol?: string; baseUrl?: string; apiKey?: string }) => Promise<{ success: boolean; models?: string[]; status?: number; error?: string }>
-    listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }> }>
-    createChat: (title?: string) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } } }>
+    listChats: () => Promise<{ chats: Array<{ id: string; title: string; createdAt: number; updatedAt: number; memoryEnabled?: boolean; invocation?: { kind: 'automation'; taskId: string; runId?: string } }> }>
+    createChat: (title?: string, options?: { memoryEnabled?: boolean }) => Promise<{ chat: { id: string; title: string; createdAt: number; updatedAt: number; memoryEnabled?: boolean; invocation?: { kind: 'automation'; taskId: string; runId?: string } } }>
     renameChat: (chatId: string, title: string) => Promise<{ success: boolean }>
     reorderChats: (orderedIds: string[]) => Promise<{ success: boolean }>
     deleteChat: (chatId: string) => Promise<{ success: boolean }>
@@ -582,7 +585,7 @@ interface ElectronApi {
       error?: string
     }>
     getChat: (chatId: string) => Promise<{
-      chat: { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
+      chat: { id: string; title: string; createdAt: number; updatedAt: number; memoryEnabled?: boolean; invocation?: { kind: 'automation'; taskId: string; runId?: string } }
       running: boolean
       workspaceDir: string
       memoryDir: string
@@ -631,8 +634,9 @@ interface ElectronApi {
     downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; filePath?: string; error?: string }>
     exportTimeline: (options: any) => Promise<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; paused?: boolean; stopped?: boolean; error?: string }>
     selectExportDir: () => Promise<{ canceled: boolean; filePath?: string }>
-    installBlockDeleteTrigger: () => Promise<{ success: boolean; alreadyInstalled?: boolean; error?: string }>
-    uninstallBlockDeleteTrigger: () => Promise<{ success: boolean; error?: string }>
+    getProtectionState: (accountId?: string) => Promise<{ success: boolean; error?: string; state: { desired: boolean; pending: boolean; error?: string; updatedAt: number; requestId: string } | null }>
+    installBlockDeleteTrigger: (accountId?: string) => Promise<{ success: boolean; alreadyInstalled?: boolean; pending?: boolean; error?: string }>
+    uninstallBlockDeleteTrigger: (accountId?: string) => Promise<{ success: boolean; pending?: boolean; error?: string }>
     checkBlockDeleteTrigger: () => Promise<{ success: boolean; installed?: boolean; error?: string }>
     deleteSnsPost: (postId: string) => Promise<{ success: boolean; error?: string }>
     downloadEmoji: (params: { url: string; encryptUrl?: string; aesKey?: string }) => Promise<{ success: boolean; localPath?: string; error?: string }>
@@ -692,6 +696,8 @@ interface ElectronApi {
     updateTask: (id: string, patch: Partial<WeBotTask>) => Promise<WeBotTask | null>
     deleteTask: (id: string) => Promise<boolean>
     runNow: (id: string) => Promise<{ success: boolean; error?: string }>
+    listTranscripts: (taskId?: string) => Promise<Array<{ id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string; runId?: string } }>>
+    getTranscript: (id: string) => ReturnType<ElectronApi['ai']['getChat']>
     listRuns: (taskId?: string) => Promise<WeBotRun[]>
     listNotes: (options?: { taskId?: string; limit?: number }) => Promise<WeBotNote[]>
     getNote: (id: string) => Promise<WeBotNote | null>

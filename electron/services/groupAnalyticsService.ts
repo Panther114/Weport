@@ -118,15 +118,20 @@ class GroupAnalyticsService {
   private readonly displayNameCacheTtlMs = 10 * 60 * 1000
   private readonly displayNameCacheMax = 4000
 
+  private accountScope(): string {
+    return JSON.stringify([this.configService.get('dbPath'), this.configService.get('myWxid')])
+  }
+
   private async getDisplayNamesCached(usernames: string[]): Promise<Map<string, string>> {
     const map = new Map<string, string>()
     const missing: string[] = []
     const now = Date.now()
+    const account = this.accountScope()
     for (const raw of usernames) {
       const u = String(raw || '').trim()
       if (!u) continue
-      const hit = this.displayNameCache.get(u)
-      const at = this.displayNameCheckedAt.get(u) || 0
+      const hit = this.displayNameCache.get(`${account}|${u}`)
+      const at = this.displayNameCheckedAt.get(`${account}|${u}`) || 0
       if (hit !== undefined && now - at < this.displayNameCacheTtlMs) {
         if (hit) map.set(u, hit)
         continue
@@ -135,11 +140,12 @@ class GroupAnalyticsService {
     }
     if (missing.length > 0) {
       const res = await wcdbService.getDisplayNames(missing)
+      if (account !== this.accountScope()) throw new Error('分析期间账号已切换')
       if (res.success && res.map) {
-        for (const [u, name] of Object.entries(res.map)) {
-          const n = String(name || '').trim()
-          this.displayNameCache.set(u, n)
-          this.displayNameCheckedAt.set(u, now)
+        for (const u of missing) {
+          const n = String(res.map[u] || '').trim()
+          this.displayNameCache.set(`${account}|${u}`, n)
+          this.displayNameCheckedAt.set(`${account}|${u}`, now)
           if (n) map.set(u, n)
         }
       }
@@ -157,7 +163,8 @@ class GroupAnalyticsService {
   }
 
   private async getGroupStatsCached(chatroomId: string, startTime: number, endTime: number): Promise<any> {
-    const key = `${chatroomId}|${startTime}|${endTime}`
+    const account = this.accountScope()
+    const key = `${account}|${chatroomId}|${startTime}|${endTime}`
     const now = Date.now()
     const cached = this.groupStatsCache.get(key)
     if (cached && now - cached.updatedAt < this.groupStatsCacheTtlMs) {
@@ -174,6 +181,7 @@ class GroupAnalyticsService {
         await new Promise((resolve) => setTimeout(resolve, 250))
         result = await wcdbService.getGroupStats(chatroomId, startTime, endTime)
       }
+      if (account !== this.accountScope()) return { success: false, error: '分析期间账号已切换' }
       if (result.success && result.data) {
         this.groupStatsCache.set(key, { updatedAt: Date.now(), data: result.data })
         if (this.groupStatsCache.size > 128) {
@@ -654,7 +662,7 @@ class GroupAnalyticsService {
 
   private buildGroupMembersPanelCacheKey(chatroomId: string, includeMessageCounts: boolean): string {
     const dbPath = String(this.configService.get('dbPath') || '').trim()
-    const wxid = this.cleanAccountDirName(String(this.configService.get('myWxid') || '').trim())
+    const wxid = String(this.configService.get('myWxid') || '').trim()
     const mode = includeMessageCounts ? 'full' : 'members'
     return `${dbPath}::${wxid}::${chatroomId}::${mode}`
   }
@@ -1641,7 +1649,8 @@ class GroupAnalyticsService {
       const normalizedChatroomId = String(chatroomId || '').trim()
       if (!normalizedChatroomId) return { success: false, error: '群聊ID不能为空' }
 
-      const cacheKey = `${normalizedChatroomId}:${this.normalizeCursorTimestamp(startTime || 0)}:${this.normalizeCursorTimestamp(endTime || 0)}`
+      const account = this.accountScope()
+      const cacheKey = `${account}:${normalizedChatroomId}:${this.normalizeCursorTimestamp(startTime || 0)}:${this.normalizeCursorTimestamp(endTime || 0)}`
       const now = Date.now()
       const cached = this.groupActivityHeatmapCache.get(cacheKey)
       if (cached && now - cached.updatedAt < this.groupActivityHeatmapCacheTtlMs) {
@@ -1685,6 +1694,7 @@ class GroupAnalyticsService {
           await wcdbService.closeMessageCursor(cursor)
         }
         const data: GroupActivityHeatmap = { data: matrix, total }
+        if (account !== this.accountScope()) return { success: false, error: '分析期间账号已切换' }
         this.groupActivityHeatmapCache.set(cacheKey, { updatedAt: Date.now(), data })
         if (this.groupActivityHeatmapCache.size > 80) {
           const oldest = Array.from(this.groupActivityHeatmapCache.entries()).sort((a, b) => a[1].updatedAt - b[1].updatedAt)[0]

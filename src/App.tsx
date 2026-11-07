@@ -1,3 +1,4 @@
+import NotificationCaptureSetting from './components/settings/NotificationCaptureSetting'
 import { exportDateRange } from './utils/exportDateRange'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PrivacySettings from './components/settings/PrivacySettings'
@@ -377,7 +378,7 @@ const TABS: Array<{
   { id: 'antirecall', label: '防撤回', icon: ShieldCheck, group: 'wechat', hint: '防撤回触发与已撤回消息' },
   { id: 'notifications', label: '消息通知设置', icon: Bell, group: 'wechat', hint: '弹窗外观、玻璃样式与接收范围都在这里（系统「设置」页里没有）' },
   { id: 'ai', label: 'WeportAI', icon: Sparkles, group: 'intelligence', hint: '本地聊天记录分析助手' },
-  { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间自动执行的分析任务' },
+  { id: 'webot', label: 'WeBot', icon: CalendarClock, group: 'intelligence', hint: '按时间或新消息触发的分析任务' },
   { id: 'webot-notes', label: 'WeBot 笔记', icon: Pin, group: 'intelligence', hint: '任务留下的结论与记录' },
   { id: 'weclone', label: 'WeClone', icon: Fingerprint, group: 'intelligence', hint: '从聊天记录构建可对话的人格副本' },
   { id: 'search', label: '搜索', icon: SearchIcon, group: 'wechat', hint: '跨会话搜索消息、标签与收藏' },
@@ -1413,7 +1414,7 @@ export default function App() {
    * 它在哪个标签下 —— 这个按钮把那一步省掉。取消则直接复用各功能已有的取消
    * 通道（导出按 taskId、克隆走 weclone.cancel）。
    */
-  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'archive' | 'weclone' | 'settings' | 'search' | 'diagnostics' | 'storage') => {
+  const handleOpenTaskTab = useCallback((target: 'connect' | 'export' | 'archive' | 'weclone' | 'settings' | 'search' | 'diagnostics' | 'storage' | 'reader') => {
     setTab(target === 'diagnostics' || target === 'storage' ? 'settings' : target)
     if (target === 'diagnostics') setSettingsSection('diagnostics')
     if (target === 'storage') { setSettingsSection('data'); setStorageSettingsOpen(true) }
@@ -3246,7 +3247,7 @@ export default function App() {
 
         {tab === 'ai' && (
           <Suspense fallback={<LazyFallback label="WeportAI" />}>
-            <WeportAiPanel
+            <WeportAiPanel key={selectedWxid}
               onOpenSettings={() => {
                 setSettingsSection('ai')
                 switchTab('settings')
@@ -3280,17 +3281,17 @@ export default function App() {
         )}
         {(tab === 'webot' || tab === 'webot-notes') && (
           <Suspense fallback={<LazyFallback label={tab === 'webot-notes' ? 'WeBot 笔记' : 'WeBot'} />}>
-            <WeBotModule section={tab === 'webot-notes' ? 'notes' : 'tasks'} />
+            <WeBotModule key={selectedWxid} section={tab === 'webot-notes' ? 'notes' : 'tasks'} />
           </Suspense>
         )}
         {tab === 'sns' && (
           <Suspense fallback={<LazyFallback label="朋友圈" />}>
-            <SnsPage />
+            <SnsPage key={selectedWxid} accountId={selectedWxid} />
           </Suspense>
         )}
         {tab === 'analytics' && (
           <Suspense fallback={<LazyFallback label="分析" />}>
-            <AnalyticsModule section={analyticsSection} onSectionChange={setAnalyticsSection} />
+            <AnalyticsModule key={selectedWxid} section={analyticsSection} onSectionChange={setAnalyticsSection} />
           </Suspense>
         )}
 
@@ -3677,6 +3678,7 @@ export default function App() {
                 <span>整张卡片的填充、文字、形状、材质与尺寸，改一下预览立刻变</span>
               </div>
               <Suspense fallback={<div className="wp-loading">正在加载玻璃设置…</div>}>
+                <NotificationCaptureSetting />
                 <NotificationGlassPanel />
               </Suspense>
             </section>

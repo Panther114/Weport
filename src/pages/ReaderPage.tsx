@@ -29,6 +29,9 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useAnnotations } from '../hooks/useAnnotations'
 import { copyTextToClipboard } from '../utils/clipboard'
 import { MessageRow } from '../components/reader/MessageRow'
+import ReferenceMessagesDialog from '../components/reader/ReferenceMessagesDialog'
+import { identityForMessage } from '../components/reader/readerSource'
+import { ReaderImageScope } from '../components/reader/MessageBlocks'
 import { ReaderImageViewer } from '../components/reader/ReaderImageViewer'
 import { ReaderToolbar } from '../components/reader/ReaderToolbar'
 import { ReaderReplyDraft } from '../components/reader/ReaderReplyDraft'
@@ -162,6 +165,8 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
   }, [])
 
   // ---- 搜索 / 多选 / 灯箱 ----
+  const [referenceTarget, setReferenceTarget] = useState<ReaderMessage | null>(null)
+  const closeReferences = useCallback(() => setReferenceTarget(null), [])
   const [searchKeyword, setSearchKeyword] = useState('')
   const [hits, setHits] = useState<ReaderSearchHit[]>([])
   const [searching, setSearching] = useState(false)
@@ -318,6 +323,7 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
 
   const openSession = useCallback(
     (session: ReaderSession) => {
+      setReferenceTarget(null)
       setSelectedId(session.id)
       setTimeWindow(null)
       setJumpDate('')
@@ -568,7 +574,7 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
     [messages, selected, timeWindow],
   )
 
-  const blockActions = useMemo(() => ({ onOpenImage: openImage, onCopy: copyMessage }), [openImage, copyMessage])
+  const blockActions = useMemo(() => ({ onOpenImage: openImage, onCopy: copyMessage, onReferences: setReferenceTarget }), [openImage, copyMessage])
   const headerContext = useMemo<HeaderContext>(
     () => ({ loading: loadingOlder, hasMore, channelMissing }),
     [loadingOlder, hasMore, channelMissing],
@@ -583,6 +589,7 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
   const draftScopeKey = JSON.stringify([accountId, selectedId, timeWindow, loadingWindow, draftMessages])
 
   return (
+    <ReaderImageScope.Provider value={accountId}>
     <div className="v09-page reader-page" aria-label="聊天阅读器">
       <SessionRail
         sessions={filteredSessions}
@@ -741,6 +748,12 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
         )}
       </div>
 
+      {referenceTarget ? <ReferenceMessagesDialog target={referenceTarget} onClose={closeReferences} onOpen={message => {
+        const range = { start: Math.max(0, message.ts - 30000), end: message.ts + 30000 }
+        setTimeWindow(range)
+        setReferenceTarget(null)
+        void loadFirstPage(message.sessionId, range, { ...identityForMessage(message), requestId: Date.now() })
+      }} /> : null}
       {viewerIndex >= 0 && imageMessages.length > 0 && (
         <ReaderImageViewer
           images={imageMessages}
@@ -750,5 +763,6 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
         />
       )}
     </div>
+    </ReaderImageScope.Provider>
   )
 }

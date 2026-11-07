@@ -1,3 +1,5 @@
+import { exactServerId, quoteTarget } from './quoteReferences'
+import { taskStatusService, TASK_KEY } from './taskStatusService'
 import { needsGroupDisplayName } from './groupDisplayName'
 import { join, dirname, basename, extname } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, watch, promises as fsPromises } from 'fs'
@@ -11683,6 +11685,114 @@ class ChatService {
   }
 
   /** Resolve a search hit using its shard, table and timestamp, not local_id alone. */
+  private referenceCache = new Map<string, { messages: Message[]; ambiguousCount: number; scanned: number; snapshotAt: number }>()
+  private referenceScan: { key: string; promise: Promise<{ messages: Message[]; ambiguousCount: number; scanned: number; snapshotAt: number }> } | null = null
+
+  async *scanFreshMessages(sessionId: string, since: number): AsyncGenerator<Message[]> {
+    const connection = await this.ensureConnected()
+    if (!connection.success) throw new Error(connection.error || '数据库未连接')
+    const context = this.captureAntiRevokeContext()
+    const check = () => { if (!this.isAntiRevokeContextCurrent(context)) throw new Error('读取期间账号已切换') }
+    const opened = await wcdbService.openMessageCursor(sessionId, 500, true, since, 0)
+    if (!opened.success || !opened.cursor) throw new Error(opened.error || '无法打开新消息游标')
+    try {
+      check()
+      while (true) {
+        check()
+        const batch = await wcdbService.fetchMessageBatch(opened.cursor)
+        check()
+        if (!batch.success || !Array.isArray(batch.rows)) throw new Error(batch.error || '新消息读取失败')
+        const messages: Message[] = []
+        for (const row of batch.rows) messages.push(await this.parseMessage(row, { source: 'detail', sessionId }))
+        check()
+        yield messages
+        if (!batch.hasMore) break
+        if (!messages.length) throw new Error('消息触发游标未推进')
+      }
+    } finally { await wcdbService.closeMessageCursor(opened.cursor) }
+  }
+
+  async getMessageReferences(identity: Parameters<ChatService['getMessageByIdentity']>[0], options?: { offset?: number; limit?: number; force?: boolean }): Promise<{
+    success: boolean; messages?: Message[]; total?: number; hasMore?: boolean; ambiguousCount?: number; scanned?: number; snapshotAt?: number; error?: string
+  }> {
+    try {
+      const connected = await this.ensureConnected()
+      if (!connected.success) throw new Error(connected.error || '数据库未连接')
+      const context = this.captureAntiRevokeContext()
+      const assertAccount = () => { if (!this.isAntiRevokeContextCurrent(context)) throw new Error('引用检索期间账号已切换，请重新检索') }
+      const target = await this.getMessageByIdentity(identity)
+      assertAccount()
+      if (!target.success || !target.message) throw new Error(target.error || '原消息不可用')
+      const serverId = exactServerId(target.message.serverIdRaw ?? target.message.serverId)
+      if (!serverId) throw new Error('该消息没有可精确匹配的服务器 ID')
+      const key = JSON.stringify([context, identity])
+      let cached = options?.force ? undefined : this.referenceCache.get(key)
+      if (cached && Date.now() - cached.snapshotAt > 30000) cached = undefined
+      if (!cached && Number(options?.offset) > 0 && !this.referenceScan) throw new Error('引用快照已过期，请重新检索后翻页')
+      if (!cached) {
+        if (this.referenceScan && this.referenceScan.key !== key) throw new Error('已有引用检索正在运行，请等待完成')
+        if (!this.referenceScan) {
+          const task = (async () => {
+            taskStatusService.begin(TASK_KEY.quoteReferences, '正在检索消息引用', '扫描消息')
+            let scanned = 0
+            try {
+              const cursorResult = await wcdbService.openMessageCursor(identity.sessionId, 1000, true, 0, 0)
+              if (!cursorResult.success || !cursorResult.cursor) throw new Error(cursorResult.error || '无法打开引用检索游标')
+              const candidates: Array<{ message: Message; timestamp?: number }> = []
+              const sourceTimes: number[] = []
+              try {
+                assertAccount()
+                while (true) {
+                  assertAccount()
+                  const batch = await wcdbService.fetchMessageBatch(cursorResult.cursor)
+                  assertAccount()
+                  if (!batch.success || !Array.isArray(batch.rows)) throw new Error(batch.error || '引用检索读取失败')
+                  for (const row of batch.rows) {
+                    scanned++
+                    if (exactServerId(row.__weport_server_id_text ?? row.server_id ?? row.serverId) === serverId) sourceTimes.push(this.getRowTimestampSeconds(row, ['create_time', 'createTime'], 0))
+                    const xml = this.decodeMessageContent(row.message_content, row.compress_content) || String(row.content || '')
+                    const reference = quoteTarget(xml)
+                    if (reference?.serverId === serverId) candidates.push({ message: await this.parseMessage(row, { source: 'detail', sessionId: identity.sessionId }), timestamp: reference.timestamp })
+                  }
+                  taskStatusService.progress(TASK_KEY.quoteReferences, { message: `已扫描 ${scanned} 条消息`, log: false })
+                  if (!batch.hasMore) break
+                  if (!batch.rows.length) throw new Error('引用检索游标未推进')
+                  await new Promise(resolve => setImmediate(resolve))
+                }
+              } finally { await wcdbService.closeMessageCursor(cursorResult.cursor) }
+              assertAccount()
+              const targetTime = target.message!.createTime
+              let ambiguousCount = 0
+              const messages = candidates.filter(candidate => {
+                if (candidate.timestamp && candidate.timestamp !== targetTime) return false
+                const collisions = candidate.timestamp ? sourceTimes.filter(time => time === targetTime).length : sourceTimes.length
+                if (collisions > 1) { ambiguousCount++; return false }
+                return true
+              }).map(candidate => candidate.message)
+              await this.enrichGroupMessageSenderProfiles(messages, identity.sessionId)
+              assertAccount()
+              const result = { messages, scanned, ambiguousCount, snapshotAt: Date.now() }
+              this.referenceCache.set(key, result)
+              if (this.referenceCache.size > 8) this.referenceCache.delete(this.referenceCache.keys().next().value!)
+              taskStatusService.end(TASK_KEY.quoteReferences, 'done', { message: `找到 ${messages.length} 条引用${ambiguousCount ? `，${ambiguousCount} 条存在来源歧义` : ''}` })
+              return result
+            } catch (error) {
+              taskStatusService.end(TASK_KEY.quoteReferences, 'failed', { message: '引用检索失败', error: String(error) })
+              throw error
+            }
+          })()
+          this.referenceScan = { key, promise: task }
+          void task.finally(() => { if (this.referenceScan?.promise === task) this.referenceScan = null }).catch(() => undefined)
+        }
+        cached = await this.referenceScan.promise
+      }
+      assertAccount()
+      const offset = Math.max(0, Math.floor(Number(options?.offset) || 0))
+      const limit = Math.max(1, Math.min(100, Math.floor(Number(options?.limit) || 50)))
+      return { success: true, ...cached, messages: cached.messages.slice(offset, offset + limit), total: cached.messages.length, hasMore: offset + limit < cached.messages.length }
+    } catch (error) { return { success: false, error: String(error) } }
+  }
+
   async getMessageByIdentity(identity: { sessionId: string; localId: string | number; ts: number; db?: string; table?: string; idKind?: 'local' | 'server' }): Promise<{ success: boolean; message?: Message; error?: string }> {
     const sessionId = String(identity?.sessionId || '').trim()
     const id = String(identity?.localId || '').trim()
