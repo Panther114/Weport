@@ -291,6 +291,7 @@ export const MessageRow = memo(function MessageRow({
                 onToggle={() => onToggleMark(message)}
               />
               <CopyAction message={message} onCopy={onCopy} />
+              {!centered && actions.onReferences ? <button type="button" className="icon-btn-ghost" title="查看引用此消息的消息" aria-label="查看引用此消息的消息" onClick={() => actions.onReferences?.(message)}><MessageSquareQuote size={13} /></button> : null}
               {!centered && (
                 <NoteAction
                   disabled={!annotationsReady}

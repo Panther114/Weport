@@ -1,3 +1,5 @@
+import { SnsProtectionService } from './services/snsProtectionService'
+import { WeBotMessageMonitor } from './services/weBotMessageMonitor'
 /**
  * Weport GUI 主进程实现（由 main.ts 在非宿主模式下调用）。
  *
@@ -844,6 +846,34 @@ function boundProgressSessionLabel(value: unknown): string {
  * 也不能在没有回滚点的情况下动用户的库。保留策略（最近 10 份）由 snapshotService
  * 在快照成功后自行应用。
  */
+let snsProtectionService: SnsProtectionService | null = null
+function ensureSnsProtectionService(): SnsProtectionService {
+  if (snsProtectionService) return snsProtectionService
+  snsProtectionService = new SnsProtectionService({
+    file: join(app.getPath('userData'), 'sns-protection.json'),
+    account: () => String(configService?.get('myWxid') || '').trim(),
+    wechatRunning: async () => {
+      const observer = process.platform === 'win32' ? new KeyService() : process.platform === 'darwin' ? new KeyServiceMac() : new KeyServiceLinux()
+      return (await observer.observePlatform()).wechatPids.length > 0
+    },
+    installed: async () => {
+      const connected = await chatService.connect()
+      if (!connected.success) return { success: false, error: connected.error }
+      if (chatService.isReadOnlySnapshot()) return { success: false, error: '自动保护需要原账号密钥连接，不能修改只读快照。' }
+      return snsService.checkSnsBlockDeleteTrigger()
+    },
+    apply: async (enabled, valid) => {
+      if (!valid()) return { success: false, error: '自动保护请求已取消或账号已切换。' }
+      if (chatService.isReadOnlySnapshot()) return { success: false, error: '不能修改只读快照。' }
+      return withWriteSnapshot(enabled ? 'sns-auto-block-delete-install' : 'sns-auto-block-delete-uninstall', () => {
+        if (!valid()) return Promise.resolve({ success: false, error: '自动保护请求已取消或账号已切换。' })
+        return enabled ? snsService.installSnsBlockDeleteTrigger() : snsService.uninstallSnsBlockDeleteTrigger()
+      })
+    },
+  })
+  return snsProtectionService
+}
+
 let databaseWritesInFlight = 0
 taskStatusService.onTransition(() => {
   try { mainWindow?.webContents.send('task:statusChanged', taskStatusService.all()) } catch { /* Window may have been destroyed. */ }
@@ -851,7 +881,7 @@ taskStatusService.onTransition(() => {
 async function withWriteSnapshot<T>(reason: string, run: () => Promise<T>): Promise<T | { success: false; error: string }> {
   if (wcdbService.isMaintenanceActive()) return { success: false, error: '数据库正在恢复快照，请稍后重试' }
   if (databaseWritesInFlight) return { success: false, error: '已有数据库维护任务正在运行，请稍后重试' }
-  if (exportTaskControlService.hasActiveTasks() || taskStatusService.get(TASK_KEY.searchIndex).status === 'running') return { success: false, error: '请等待导出或搜索索引任务结束后再修改数据库' }
+  if (exportTaskControlService.hasActiveTasks() || taskStatusService.get(TASK_KEY.searchIndex).status === 'running' || taskStatusService.get(TASK_KEY.quoteReferences).status === 'running') return { success: false, error: '请等待导出或搜索索引任务结束后再修改数据库' }
   databaseWritesInFlight++
   taskStatusService.begin(TASK_KEY.databaseMaintenance, '正在备份数据库', '备份快照')
   try {
@@ -2201,11 +2231,12 @@ async function runRealDataDump() {
  */
 let weBotService: WeBotService | null = null
 let weBotSchedulerStarted = false
+let weBotMessageMonitor: WeBotMessageMonitor | null = null
 
 async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSignal): Promise<WeBotDispatchResult> {
   if (signal.aborted) throw new Error('已中止')
 
-  const chat = weportAiService.createChat(request.task.title, { kind: 'automation', taskId: request.task.id })
+  const chat = weportAiService.createChat(request.task.title, { kind: 'automation', taskId: request.task.id, runId: request.run.id })
   const sections: string[] = []
   if (request.task.digest && request.digestBatch) {
     sections.push(DIGEST_TEMPLATES[request.task.digest.template])
@@ -2213,6 +2244,7 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
     sections.push(request.digestBatch.evidence.map(row => `[来源](${row.sourceUrl}) ${new Date(row.timestamp * 1000).toISOString()}\n${row.text}`).join('\n\n'))
   }
   if (request.task.description.trim()) sections.push(request.task.description.trim())
+  if (request.triggerMessage) sections.push(`Triggering message: ${request.triggerMessage.sessionId} · ${new Date(request.triggerMessage.timestamp * 1000).toISOString()}\n${request.triggerMessage.text}`)
 
   if (!request.task.digest && request.task.references.length > 0) {
     const lines = request.task.references
@@ -2224,19 +2256,12 @@ async function dispatchWeBotTask(request: WeBotDispatchRequest, signal: AbortSig
     sections.push(`本任务限定的会话：\n${lines}\n请聚焦这些会话（可用 list_sessions 找到对应 id 后读取消息）。`)
   }
 
-  sections.push(
-    `这是 WeBot 定时任务的自动执行（${new Date().toLocaleString('zh-CN')}）。` +
-      '请只输出简洁结论，正文控制在 300 字以内，不要复述原始消息。' +
-      (request.task.digest ? '本次仅提供文本证据。图片、附件与未读取内容不可作为已验证事实；相关结论必须说明缺少原始内容。' :
-      '如果结论取决于聊天里的**图片**（作业照片、截图、通知单），必须用 read_chat_images 真正看图后再下结论 —— 不要凭文件名、文字描述或猜测代替看图；图看不了就如实说明原因。')
-  )
-
   // WeBot 在「设置 → AI 服务」里有自己的服务指向（默认跟随默认服务），因此定时
   // 任务可以独立指向一个便宜/快的模型，而不影响 WeportAI 的手动对话。
   const result = await runWithAbortSignal(signal,
     () => weportAiService.runChat(chat.id, sections.join('\n\n'), request.task.digest ? {
       consumer: 'webot', accountId: request.task.digest.scope.accountId, tools: 'none', maxSteps: 1, maxTotalTokens: request.task.digest.limits.maxTotalTokens,
-    } : { consumer: 'webot' }),
+    } : { consumer: 'webot', ...(request.task.trigger ? { accountId: request.task.trigger.accountId } : {}) }),
     () => weportAiService.abort(chat.id))
   if (!result.success) throw new Error(result.error || '任务执行失败')
 
@@ -2301,7 +2326,37 @@ function ensureWeBotService(): WeBotService {
 /** Keep catch-up scheduling active only while at least one schedule is enabled. */
 function syncWeBotScheduler(): void {
   const service = ensureWeBotService()
-  if (service.hasEnabledTasks()) {
+  if (!weBotMessageMonitor) {
+    const account = () => String(configService?.getMyWxidCleaned() || configService?.get('myWxid') || '').trim()
+    weBotMessageMonitor = new WeBotMessageMonitor({
+      account,
+      enabled: () => service.hasMessageTriggers(),
+      connect: async () => {
+        const result = await chatService.connect()
+        if (!result.success) throw new Error(result.error || '消息触发连接失败')
+        if (chatService.isReadOnlySnapshot()) throw new Error('消息触发需要实时连接，导入快照不可用。')
+      },
+      sessions: async () => {
+        const result = await chatService.getSessions()
+        if (!result.success) throw new Error(result.error || '读取消息触发会话失败')
+        const rules = service.listTasks().filter(task => task.enabled && task.trigger?.accountId === account())
+        const allSessions = rules.some(task => !task.references.length)
+        const allowed = new Set(rules.flatMap(task => task.references.map(ref => ref.id)))
+        return (result.sessions || []).filter(session => allSessions || allowed.has(session.username)).map(session => ({ id: session.username, latestTimestamp: session.lastTimestamp || 0 }))
+      },
+      scan: async function* (sessionId, since) {
+        for await (const messages of chatService.scanFreshMessages(sessionId, since)) {
+          yield messages.map(message => ({ sessionId, messageKey: message.messageKey, text: message.parsedContent || message.rawContent || '', timestamp: message.createTime, isSend: message.isSend }))
+        }
+      },
+      deliver: message => service.handleIncomingMessage(message),
+      error: message => service.reportMessageTriggerError(message),
+    })
+    chatService.addDbMonitorListener(() => weBotMessageMonitor?.wake())
+  }
+  if (service.hasMessageTriggers()) weBotMessageMonitor.start()
+  else weBotMessageMonitor.stop()
+  if (service.listTasks().some(task => task.enabled && !task.trigger)) {
     if (!weBotSchedulerStarted) {
       service.start() // start() performs the required missed-job catch-up tick
       weBotSchedulerStarted = true
@@ -2495,6 +2550,7 @@ export function registerIpcHandlers() {
     }
     if (['dbPath', 'myWxid', 'decryptKey'].includes(key)) { imageKeyReadiness?.invalidate() }
     (configService as any)?.set(key, value)
+    if (key === 'notificationCaptureMode') destroyNotificationWindow()
     if (key === 'launchAtStartup') {
       applyLaunchAtStartupPreference(value === true)
     }
@@ -2511,6 +2567,8 @@ export function registerIpcHandlers() {
     if (key === 'dbPath' || key === 'decryptKey' || key === 'myWxid') {
       // 连接条件就绪后预热联系人缓存（首次使用即可显示真实昵称）
       scheduleContactWarmup()
+      syncWeBotScheduler()
+      ensureSnsProtectionService().start()
     }
     return { success: true }
   })
@@ -2997,6 +3055,7 @@ export function registerIpcHandlers() {
   ipcMain.handle('chat:getMessageDates', (_e, sessionId: string) => chatService.getMessageDates(String(sessionId || '')))
   ipcMain.handle('chat:getMessageByIdentity', (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0]) =>
     chatService.getMessageByIdentity(identity))
+  ipcMain.handle('chat:getMessageReferences', (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0], options?: { offset?: number; limit?: number; force?: boolean }) => chatService.getMessageReferences(identity, options))
   ipcMain.handle('chat:getImageDataByIdentity', (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0], options?: { excludeThumbnail?: boolean }) =>
     chatService.getImageDataByIdentity(identity, options))
   ipcMain.handle('chat:getVideoData', async (_e, identity: Parameters<typeof chatService.getMessageByIdentity>[0]) => {
@@ -3382,10 +3441,10 @@ export function registerIpcHandlers() {
     if (result.canceled || !result.filePaths?.[0]) return { canceled: true }
     return { canceled: false, filePath: result.filePaths[0] }
   })
-  ipcMain.handle('sns:installBlockDeleteTrigger', () =>
-    withWriteSnapshot('sns-block-delete-install', () => snsService.installSnsBlockDeleteTrigger()))
-  ipcMain.handle('sns:uninstallBlockDeleteTrigger', () =>
-    withWriteSnapshot('sns-block-delete-uninstall', () => snsService.uninstallSnsBlockDeleteTrigger()))
+  const assertSnsAccount = (expected?: string) => { if (expected !== undefined && expected !== String(configService?.get('myWxid') || '').trim()) throw new Error('账号已改变，请重新打开朋友圈。') }
+  ipcMain.handle('sns:getProtectionState', (_e, expected?: string) => { assertSnsAccount(expected); return { success: true, state: ensureSnsProtectionService().state() } })
+  ipcMain.handle('sns:installBlockDeleteTrigger', (_e, expected?: string) => { assertSnsAccount(expected); return { success: true, pending: true, state: ensureSnsProtectionService().request(true) } })
+  ipcMain.handle('sns:uninstallBlockDeleteTrigger', (_e, expected?: string) => { assertSnsAccount(expected); return { success: true, pending: true, state: ensureSnsProtectionService().request(false) } })
   ipcMain.handle('sns:checkBlockDeleteTrigger', () => snsService.checkSnsBlockDeleteTrigger())
   // v1.2 §10.3 ③：删朋友圈是写操作（删记录），先快照再删
   ipcMain.handle('sns:deleteSnsPost', (_e, postId: string) =>
@@ -3800,7 +3859,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     return { success: true }
   })
   ipcMain.handle('ai:listChats', () => ({ chats: weportAiService.listChats() }))
-  ipcMain.handle('ai:createChat', (_e, title?: string) => ({ chat: weportAiService.createChat(title) }))
+  ipcMain.handle('ai:createChat', (_e, title?: string, options?: { memoryEnabled?: boolean }) => ({ chat: weportAiService.createChat(title, undefined, options) }))
   ipcMain.handle('ai:renameChat', (_e, chatId: string, title: string) => ({
     success: weportAiService.renameChat(String(chatId || ''), String(title || '')),
   }))
@@ -3875,6 +3934,8 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     return deleted
   })
   ipcMain.handle('webot:runNow', (_e, id: string) => ensureWeBotService().runNow(String(id || '')))
+  ipcMain.handle('webot:listTranscripts', (_e, taskId?: string) => weportAiService.listAutomationChats(taskId))
+  ipcMain.handle('webot:getTranscript', (_e, id: string) => weportAiService.getAutomationChat(String(id || '')))
   ipcMain.handle('webot:listRuns', (_e, taskId?: string) => ensureWeBotService().listRuns(taskId ? String(taskId) : undefined))
   ipcMain.handle('webot:listNotes', (_e, options?: any) => ensureWeBotService().listNotes(options || {}))
   ipcMain.handle('webot:getNote', (_e, id: string) => ensureWeBotService().getNote(String(id || '')))
@@ -4621,6 +4682,8 @@ function installScreenshotDemoHandlers() {
     references: [{ id: 'demo-work@chatroom', label: '项目协作', kind: 'group' as const }],
     nextRunAt: Date.now() + 540_000,
   }
+  override('webot:listTranscripts', () => [])
+  override('webot:getTranscript', () => null)
   override('webot:listTasks', () => [demoWebBotTask, demoWebBotTask2, demoWebBotTask3])
   override('webot:listNotes', () => [demoWebBotNote, demoWebBotNote2])
   override('webot:getNote', () => demoWebBotNote)
@@ -5257,6 +5320,7 @@ function installV09DemoHandlers() {
     return { success: true, dataUrl: demoSnsAvatarUrl('图') }
   })
   override('sns:downloadEmoji', () => ({ success: true, localPath: '' }))
+  override('sns:getProtectionState', () => ({ success: true, state: null }))
   override('sns:checkBlockDeleteTrigger', () => ({ success: true, installed: true }))
   override('sns:installBlockDeleteTrigger', () => ({ success: true, alreadyInstalled: true }))
   override('sns:uninstallBlockDeleteTrigger', () => ({ success: true }))
@@ -8634,6 +8698,7 @@ export async function startEngineServices(
   setWeBotService(ensureWeBotService())
   // No timer is needed when the task file has no enabled schedules. Existing enabled tasks
   // still start immediately so their missed-job catch-up semantics remain unchanged.
+  ensureSnsProtectionService().start()
   syncWeBotScheduler()
 
   // WeportAI 事件 → 渲染进程（流式状态/工具执行/结果）
@@ -8955,11 +9020,15 @@ try { tray?.destroy() } catch { /* noop */ }
     try { await httpService.stop() } catch { /* noop */ }
     try { await mcpServiceRef?.stop() } catch { /* noop */ }
     // WeBot：先停调度再中止对话，避免退出过程中又派发新任务。
-    try { weBotService?.stop() } catch { /* noop */ }
+    try {
+      weBotMessageMonitor?.stop()
+      snsProtectionService?.stop()
+      weBotService?.stop()
+    } catch { /* noop */ }
     // WeClone：中止正在进行的克隆生成
     try { weCloneService.cancel() } catch { /* noop */ }
     messagePushService?.stop()
-    for (const chatId of weportAiService.listChats().map((c) => c.id)) {
+    for (const chatId of weportAiService.listChats({ includeAutomations: true }).map((c) => c.id)) {
       weportAiService.abort(chatId)
     }
     const forceExitTimer = setTimeout(() => {

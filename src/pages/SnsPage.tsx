@@ -72,7 +72,7 @@ const toDayKey = (ts: number) => {
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
 }
 
-export default function SnsPage() {
+export default function SnsPage({ accountId }: { accountId: string }) {
   const [authors, setAuthors] = useState<SnsAuthor[]>([])
   const [authorsLoading, setAuthorsLoading] = useState(true)
   const [authorSearch, setAuthorSearch] = useState('')
@@ -87,6 +87,7 @@ export default function SnsPage() {
   const [feedError, setFeedError] = useState<string | null>(null)
   const [overview, setOverview] = useState<OverviewStats | null>(null)
   const [antiDelete, setAntiDelete] = useState<'unknown' | 'installed' | 'uninstalled'>('unknown')
+  const [protection, setProtection] = useState<Awaited<ReturnType<Window['electronAPI']['sns']['getProtectionState']>>['state']>(null)
   const [antiDeleteBusy, setAntiDeleteBusy] = useState(false)
   const [antiDeleteFeedback, setAntiDeleteFeedback] = useState<{ error: boolean; message: string } | null>(null)
   const antiDeleteOperationRef = useRef(false)
@@ -473,6 +474,32 @@ export default function SnsPage() {
     }
   }, [readAntiDeleteState])
 
+  useEffect(() => {
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const result = await window.electronAPI.sns.getProtectionState(accountId)
+        if (!active) return
+        if (!result.success) throw new Error(result.error || '账号已改变')
+        setProtection(result.state)
+        if (result.state?.pending) {
+          setAntiDeleteFeedback({ error: Boolean(result.state.error), message: result.state.error
+            ? `自动设置暂未完成：${result.state.error}；将稍后重试。`
+            : `已安排${result.state.desired ? '开启' : '关闭'}防删除；退出微信后会自动备份并应用，无需再次点击。` })
+          timer = setTimeout(() => void poll(), 3000)
+        } else if (result.state) {
+          const verified = await readAntiDeleteState()
+          if (!active) return
+          setAntiDelete(verified)
+          setAntiDeleteFeedback({ error: false, message: verified === 'installed' ? '防删除已开启，当前状态已确认' : '防删除已关闭，当前状态已确认' })
+        }
+      } catch (error) { if (active) setAntiDeleteFeedback({ error: true, message: `读取自动保护状态失败：${String(error)}` }) }
+    }
+    void poll()
+    return () => { active = false; if (timer) clearTimeout(timer) }
+  }, [accountId, protection?.requestId, readAntiDeleteState])
+
   // 首次挂载：先秒开页缓存，再加载真实数据
   useEffect(() => {
     void loadOverview()
@@ -630,20 +657,26 @@ export default function SnsPage() {
 
   const toggleAntiDelete = async () => {
     if (antiDeleteOperationRef.current) return
-    if (antiDelete === 'unknown') {
+    if (antiDelete === 'unknown' && !protection?.pending) {
       await refreshAntiDeleteState()
       return
     }
-    const enabling = antiDelete !== 'installed'
+    const enabling = protection?.pending ? !protection.desired : antiDelete !== 'installed'
     antiDeleteOperationRef.current = true
     setAntiDeleteBusy(true)
     setAntiDeleteFeedback(null)
     let operationApplied = false
     try {
       const result = enabling
-        ? await window.electronAPI.sns.installBlockDeleteTrigger()
-        : await window.electronAPI.sns.uninstallBlockDeleteTrigger()
+        ? await window.electronAPI.sns.installBlockDeleteTrigger(accountId)
+        : await window.electronAPI.sns.uninstallBlockDeleteTrigger(accountId)
       if (!result.success) throw new Error(result.error || '操作失败，请重试')
+      if (result.pending) {
+        const queued = await window.electronAPI.sns.getProtectionState(accountId)
+        setProtection(queued.state)
+        setAntiDeleteFeedback({ error: false, message: `已安排${enabling ? '开启' : '关闭'}防删除；退出微信后会自动备份并应用，无需再次点击。` })
+        return
+      }
       operationApplied = true
       const verified = await readAntiDeleteState()
       setAntiDelete(verified)
@@ -951,7 +984,7 @@ export default function SnsPage() {
             title={antiDelete === 'unknown' ? '重新检查朋友圈防删除状态' : antiDelete === 'installed' ? '点击关闭朋友圈防删除' : '点击开启朋友圈防删除'}
           >
             {antiDeleteBusy ? <Loader2 size={13} className="spin" /> : antiDelete === 'installed' ? <ShieldCheck size={13} /> : <ShieldOff size={13} />}
-            {antiDeleteBusy ? '处理中…' : antiDelete === 'installed' ? '防删除已开启' : antiDelete === 'uninstalled' ? '防删除已关闭' : '防删除状态未知 · 重试'}
+            {antiDeleteBusy ? '处理中…' : protection?.pending ? `待退出微信后${protection.desired ? '开启' : '关闭'}` : antiDelete === 'installed' ? '防删除已开启' : antiDelete === 'uninstalled' ? '防删除已关闭' : '防删除状态未知 · 重试'}
           </button>
           </div>
           <div className="sns-feed-actions" role="group" aria-label="动态操作">

@@ -295,6 +295,7 @@ export const LIVE_TASK = {
    * 铁律 3 点名要避免的那种"看起来什么都没发生"。所以走同一个 store，
    * 页面用 `useLiveTask` 订阅。
    */
+  quoteReferences: 'reader.references',
   searchIndex: 'search.index',
   databaseMaintenance: 'db.maintenance',
 } as const

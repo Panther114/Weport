@@ -336,6 +336,8 @@ export const GroupAnalytics: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [members, setMembers] = useState<GroupMembersPanelEntry[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
+  const [panelLoading, setPanelLoading] = useState(false)
+  const [panelError, setPanelError] = useState('')
   const [ranking, setRanking] = useState<GroupMessageRank[]>([])
   const rankingBarSizing = useMeasuredBarWidth(Math.max(1, ranking.length), 3, 14, 42)
   const [rankingLimit, setRankingLimit] = useState(20)
@@ -365,44 +367,65 @@ export const GroupAnalytics: React.FC = () => {
     void loadGroups()
   }, [loadGroups])
 
-  const loadGroupData = useCallback(
-    async (group: GroupChatInfo) => {
-      setSelected(group)
-      setTab('members')
-      setMembersLoading(true)
-setMembers([])
-      setRanking([])
-      setHours(null)
-      setMedia(null)
-      setHeatmap(null)
-      try {
-        const [membersRes, rankRes, hoursRes, mediaRes, heatRes] = await Promise.all([
-          window.electronAPI.groupAnalytics.getGroupMembersPanelData(group.username, { includeMessageCounts: true }),
-          window.electronAPI.groupAnalytics.getGroupMessageRanking(group.username, rankingLimit, 0, 0),
-          window.electronAPI.groupAnalytics.getGroupActiveHours(group.username, 0, 0),
-          window.electronAPI.groupAnalytics.getGroupMediaStats(group.username, 0, 0),
-          window.electronAPI.groupAnalytics.getGroupActivityHeatmap(group.username, 0, 0),
-        ])
-        if (membersRes.success) setMembers(membersRes.data || [])
-        if (rankRes.success) setRanking(rankRes.data || [])
-        if (hoursRes.success) setHours(hoursRes.data || null)
-        if (mediaRes.success) setMedia(mediaRes.data || null)
-        if (heatRes.success && heatRes.data) setHeatmap(heatRes.data)
-      } finally {
-        setMembersLoading(false)
-      }
-    },
-    [rankingLimit],
-  )
-
-  const reloadRanking = useCallback(async (group: GroupChatInfo, limit: number) => {
-    const result = await window.electronAPI.groupAnalytics.getGroupMessageRanking(group.username, limit, 0, 0)
-    if (result.success) setRanking(result.data || [])
+  const loadGroupData = useCallback((group: GroupChatInfo) => {
+    setSelected(group)
+    setTab('members')
+    setMemberDialog(null)
+    setMembers([])
+    setRanking([])
+    setHours(null)
+    setMedia(null)
+    setHeatmap(null)
   }, [])
 
   useEffect(() => {
-    if (selected) void reloadRanking(selected, rankingLimit)
-  }, [rankingLimit, reloadRanking, selected])
+    if (!selected) return
+    let active = true
+    const groupId = selected.username
+    setPanelLoading(true)
+    setPanelError('')
+    if (tab === 'members') setMembersLoading(true)
+    const load = async () => {
+      // Each tab requests only the data it presents. In particular the full
+      // history heatmap is never in the member-list critical path.
+      switch (tab) {
+        case 'members': {
+          const result = await window.electronAPI.groupAnalytics.getGroupMembersPanelData(groupId, { includeMessageCounts: true })
+          if (!result.success) throw new Error(result.error || '加载成员失败')
+          if (active) setMembers(result.data || [])
+          break
+        }
+        case 'ranking': {
+          const result = await window.electronAPI.groupAnalytics.getGroupMessageRanking(groupId, rankingLimit, 0, 0)
+          if (!result.success) throw new Error(result.error || '加载排行失败')
+          if (active) setRanking(result.data || [])
+          break
+        }
+        case 'hours': {
+          const result = await window.electronAPI.groupAnalytics.getGroupActiveHours(groupId, 0, 0)
+          if (!result.success) throw new Error(result.error || '加载活跃时段失败')
+          if (active) setHours(result.data || null)
+          break
+        }
+        case 'media': {
+          const result = await window.electronAPI.groupAnalytics.getGroupMediaStats(groupId, 0, 0)
+          if (!result.success) throw new Error(result.error || '加载媒体统计失败')
+          if (active) setMedia(result.data || null)
+          break
+        }
+        case 'heatmap': {
+          const result = await window.electronAPI.groupAnalytics.getGroupActivityHeatmap(groupId, 0, 0)
+          if (!result.success) throw new Error(result.error || '加载热力图失败')
+          if (active) setHeatmap(result.data || null)
+          break
+        }
+      }
+    }
+    void load().catch(error => { if (active) setPanelError(String(error)) }).finally(() => {
+      if (active) { setPanelLoading(false); setMembersLoading(false) }
+    })
+    return () => { active = false }
+  }, [selected?.username, tab, rankingLimit])
 
   const filteredGroups = useMemo(() => {
     const filtered = groups.filter((g) => !search || g.displayName.toLowerCase().includes(search.toLowerCase()))
@@ -613,6 +636,8 @@ setMembers([])
                   })}
               </div>
 
+              {panelError ? <div className="wp-error" role="alert">{panelError}</div> : null}
+              {panelLoading && tab !== 'members' ? <div className="wp-loading" role="status">正在加载所选图表…</div> : null}
               {tab === 'members' && (
                 <div className="v09-panel">
                   <div className="v09-panel-head">

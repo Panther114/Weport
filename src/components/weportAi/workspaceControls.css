@@ -35,3 +35,8 @@
 @media (max-width: 1220px) { .ai-shell { --ai-inspector-width: 250px; --ai-chat-list-width: 208px; } }
 @media (max-width: 1040px) { .ai-shell { --ai-inspector-width: 216px; --ai-chat-list-width: 196px; } }
 @media (max-width: 940px) { .ai-shell { --ai-inspector-width: 190px; --ai-chat-list-width: 190px; } }
+
+.ai-memory-choice { display: flex; align-items: center; gap: 8px; margin: 4px 12px 12px; font-size: 12px; color: var(--text-secondary); }
+.ai-memory-choice input { accent-color: var(--accent); }
+.ai-memory-status { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+.ai-memory-status[data-enabled="true"] { color: var(--accent); }

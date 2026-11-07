@@ -38,7 +38,7 @@ interface TaskRow {
   label: string
   icon: typeof Download
   /** 点一下跳过去的标签页 id（与 App 的 Tab 类型一致） */
-  tab: 'connect' | 'export' | 'archive' | 'weclone' | 'settings' | 'search' | 'diagnostics' | 'storage'
+  tab: 'connect' | 'export' | 'archive' | 'weclone' | 'settings' | 'search' | 'diagnostics' | 'storage' | 'reader'
   cancellable: boolean
   /**
    * 这个任务没有百分比可报（备份接口只有成功/失败）。
@@ -55,6 +55,7 @@ const ROWS: TaskRow[] = [
   { key: LIVE_TASK.updateDownload, label: '下载更新', icon: Download, tab: 'settings', cancellable: false },
   { key: LIVE_TASK.wecloneGenerate, label: '生成 WeClone', icon: Fingerprint, tab: 'weclone', cancellable: true },
   { key: LIVE_TASK.backup, label: '数据备份', icon: DatabaseBackup, tab: 'settings', cancellable: false, indeterminate: true },
+  { key: LIVE_TASK.quoteReferences, label: '检索消息引用', icon: Search, tab: 'reader', cancellable: false, indeterminate: true },
   { key: LIVE_TASK.searchIndex, label: '建立搜索索引', icon: Search, tab: 'search', cancellable: true },
   { key: LIVE_TASK.databaseMaintenance, label: '数据库维护', icon: DatabaseBackup, tab: 'diagnostics', cancellable: false, indeterminate: true },
 ]
@@ -82,6 +83,7 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const updateDownload = useLiveTask(LIVE_TASK.updateDownload)
   const clone = useLiveTask(LIVE_TASK.wecloneGenerate)
   const backup = useLiveTask(LIVE_TASK.backup)
+  const quoteReferences = useLiveTask(LIVE_TASK.quoteReferences)
   const searchIndex = useLiveTask(LIVE_TASK.searchIndex)
   const databaseMaintenance = useLiveTask(LIVE_TASK.databaseMaintenance)
   const states: Record<string, LiveTaskState> = {
@@ -92,6 +94,7 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
     [LIVE_TASK.updateDownload]: updateDownload,
     [LIVE_TASK.wecloneGenerate]: clone,
     [LIVE_TASK.backup]: backup,
+    [LIVE_TASK.quoteReferences]: quoteReferences,
     [LIVE_TASK.searchIndex]: searchIndex,
     [LIVE_TASK.databaseMaintenance]: databaseMaintenance,
   }

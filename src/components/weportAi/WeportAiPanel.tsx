@@ -6,7 +6,6 @@ import { findActiveMention, referenceKindLabel, rewriteMentionQuery, stripMentio
 import { loadReferenceCandidates } from '../../utils/sessionCandidates'
 import {
   Sparkles,
-  Clock,
   Plus,
   Settings2,
   Trash2,
@@ -43,7 +42,7 @@ import InvestigationCoverage from './InvestigationCoverage'
 import './providerProfiles.css'
 import './workspaceControls.css'
 
-type AiChatMeta = { id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
+type AiChatMeta = { memoryEnabled?: boolean; id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
 // `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
 // ToolChip 渲染转圈而不是把它标成失败。
 type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string; imageCount?: number }
@@ -316,6 +315,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [setup, setSetup] = useState<SetupInfo | null>(null)
   const [chats, setChats] = useState<AiChatMeta[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [newChatMemoryEnabled, setNewChatMemoryEnabled] = useState(true)
+  const [activeMemoryEnabled, setActiveMemoryEnabled] = useState(true)
   const [messages, setMessages] = useState<AiMessage[]>([])
   const [running, setRunning] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
@@ -434,6 +435,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           setMessages(data.messages || [])
           setWorkspaceDir(data.workspaceDir)
           setMemoryDir(data.memoryDir)
+          setActiveMemoryEnabled(data.chat.memoryEnabled !== false)
           // 缓存命中率/用量是「该会话专属」的：切换会话后显示各自上次运行的数据
           const last = data.lastRun as
             | {
@@ -822,13 +824,13 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
 
   async function handleNewChat() {
     // 当前已是空的「新对话」→ 复用，不再重复创建
-    if (activeId && messages.length === 0) {
+    if (activeId && messages.length === 0 && activeMemoryEnabled === newChatMemoryEnabled) {
       setLive(null)
       setError('')
       inputRef.current?.focus()
       return
     }
-    const created = await api.ai.createChat()
+    const created = await api.ai.createChat(undefined, { memoryEnabled: newChatMemoryEnabled })
     await refreshChats()
     await openChat(created.chat.id)
   }
@@ -984,6 +986,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           <Plus size={14} />
           新建对话
         </button>
+        <label className="ai-memory-choice"><input type="checkbox" checked={newChatMemoryEnabled} onChange={event => setNewChatMemoryEnabled(event.target.checked)} />新对话启用记忆</label>
         <div className="ai-chat-list" role="list" aria-label="WeportAI 对话">
           {chats.map((c) => (
             <div
@@ -1031,8 +1034,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                     onClick={() => void openChat(c.id)}
                     title={c.title}
                   >
-                    <>{c.invocation?.kind === 'automation' ? <Clock size={13} /> : <MessageSquareText size={13} strokeWidth={1.8} />}</>
-                    <span>{c.invocation?.kind === 'automation' ? `自动任务 · ${c.title}` : c.title}</span>
+                    <MessageSquareText size={13} strokeWidth={1.8} />
+                    <span>{c.title}</span>
                   </button>
                   <button
                     type="button"
@@ -1093,6 +1096,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
         <div className="ai-topbar">
           <h1>{chats.find((c) => c.id === activeId)?.title || 'WeportAI'}</h1>
           <div className="ai-topbar-meta">
+            <span className="ai-memory-status" data-enabled={activeMemoryEnabled}>{activeMemoryEnabled ? '记忆开启' : '记忆关闭'}</span>
             {setup?.model ? (
               <span className="ai-meter ai-meter-model" title={`当前 AI 服务与模型：${setup.model}`}>
                 <span className="ai-meter-label">模型</span>
@@ -1483,11 +1487,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             {workspaceDir || '—'}
           </div>
           <div className="ai-ws-list" hidden={workspaceView !== 'notes'}>
-            <MemoryClaims chatId={activeId || ''} />
+            {activeMemoryEnabled ? <MemoryClaims chatId={activeId || ''} /> : <p className="ai-ws-empty">此对话不能读取或写入共享记忆，可使用当前对话笔记。</p>}
             {notes.length === 0 ? (
               <div className="ai-ws-empty">
-                还没有记忆文件。让 AI「把发现写入 memory/xxx.md」，文件会出现在这里；
-                memory/ 为跨对话共享的长期记忆，notes/ 为当前对话草稿。
+                工作区暂无文件。notes/ 保存当前对话笔记；启用记忆的对话还可使用共享 memory/。
               </div>
             ) : (
               <>

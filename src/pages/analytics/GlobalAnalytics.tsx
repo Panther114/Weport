@@ -98,6 +98,9 @@ export const GlobalAnalytics: React.FC = () => {
   const [includeGroups, setIncludeGroups] = useState(false)
   const [rankingLoading, setRankingLoading] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [detailsLoading, setDetailsLoading] = useState(false)
+  const [detailsError, setDetailsError] = useState('')
+  const loadRevision = useRef(0)
   const [error, setError] = useState<string | null>(null)
   const hourlyBarSizing = useMeasuredBarWidth(24, 1, 16, 42)
   const weekdayBarSizing = useMeasuredBarWidth(7, 2, 24, 72)
@@ -106,19 +109,19 @@ export const GlobalAnalytics: React.FC = () => {
   const rankingCacheRef = useRef<Map<string, ContactRanking[]>>(new Map())
   const rankingRequestRef = useRef(0)
   const loadRankings = useCallback(async (limit: number, withGroups: boolean, opts?: { force?: boolean }) => {
+    const reqId = ++rankingRequestRef.current
     const cacheKey = withGroups ? 'with-groups' : 'private'
     const cached = rankingCacheRef.current.get(cacheKey)
-    const needFetch = opts?.force || !cached || cached.length < limit
     // 已有足量缓存则直接切片，零闪烁、零等待
     if (cached && cached.length >= limit && !opts?.force) {
       setRankings(cached.slice(0, limit))
+      setRankingLoading(false)
       return
     }
     // 乐观：先展示已有缓存的切片，再后台拉取全量 100
     if (cached && cached.length > 0 && !opts?.force) {
       setRankings(cached.slice(0, Math.min(limit, cached.length)))
     }
-    const reqId = ++rankingRequestRef.current
     setRankingLoading(true)
     try {
       // 始终拉取 100 条缓存于本地，切 Top 10/20/50 均本地切片，无需二次请求
@@ -126,12 +129,14 @@ export const GlobalAnalytics: React.FC = () => {
       const result = await window.electronAPI.analytics.getContactRankings(fetchLimit, 0, 0, { includeGroupChats: withGroups })
       if (reqId !== rankingRequestRef.current) return
       if (!result.success) {
-        setError(result.error || '加载联系人排行失败')
+        setDetailsError(result.error || '加载联系人排行失败')
         return
       }
       const full = (result.data || []) as ContactRanking[]
       rankingCacheRef.current.set(cacheKey, full)
       setRankings(full.slice(0, limit))
+    } catch (error) {
+      if (reqId === rankingRequestRef.current) setDetailsError(String(error))
     } finally {
       if (reqId === rankingRequestRef.current) setRankingLoading(false)
     }
@@ -146,48 +151,70 @@ export const GlobalAnalytics: React.FC = () => {
   }, [])
 
   const loadAll = useCallback(async (force = false) => {
+    const request = ++loadRevision.current
     setLoading(true)
     setError(null)
+    setDetailsError('')
+    setDetailsLoading(true)
+    if (force) rankingCacheRef.current.clear()
     try {
-      const [statsRes, timeRes, selfRes, exclRes, dailyRes, wordRes] = await Promise.all([
+      // Ready-to-render core statistics must not wait for cursor-based charts.
+      const [statsRes, timeRes, exclRes] = await Promise.all([
         window.electronAPI.analytics.getOverallStatistics(force),
         window.electronAPI.analytics.getTimeDistribution(force),
-        window.electronAPI.analytics.getSelfSentDailyDistribution(undefined, undefined, force),
         window.electronAPI.analytics.getExcludedUsernames(),
-        window.electronAPI.analytics.getDailyActivity(force),
-        window.electronAPI.analytics.getWordFrequency(60, force),
       ])
+      if (request !== loadRevision.current) return
       if (statsRes.success && statsRes.data) setStats(statsRes.data)
-      else if (statsRes.error) setError(statsRes.error)
+      else { setError(statsRes.error || '加载统计失败'); setDetailsLoading(false); return }
       if (timeRes.success) setTimeDist(timeRes.data)
-      if (selfRes.success) setSelfSent(selfRes.data)
+      else setDetailsError(timeRes.error || '时段统计加载失败')
       if (exclRes.success) setExcluded(exclRes.data || [])
-      if (dailyRes.success && dailyRes.data) setDailyActivity(dailyRes.data)
-      if (wordRes.success && wordRes.data) {
-        setWordFreq(wordRes.data.items || [])
-        setWordFreqMeta({ scannedMessages: wordRes.data.scannedMessages, textMessages: wordRes.data.textMessages })
-      }
-      // 候选列表与主统计解耦，单独懒加载（打开排除对话框时必已就绪）
-      void loadExcludeCandidates(includeGroups, force)
-    } catch (e) {
-      setError(String(e))
-    } finally {
       setLoading(false)
+      const detail = async (label: string, work: () => Promise<void>) => {
+        try { await work() } catch (error) {
+          if (request === loadRevision.current) setDetailsError(previous => [previous, `${label}：${String(error)}`].filter(Boolean).join('；'))
+        }
+      }
+      void Promise.all([
+        detail('发送趋势', async () => {
+          const result = await window.electronAPI.analytics.getSelfSentDailyDistribution(undefined, undefined, force)
+          if (!result.success) throw new Error(result.error || '加载失败')
+          if (request === loadRevision.current) setSelfSent(result.data)
+        }),
+        detail('活跃日历', async () => {
+          const result = await window.electronAPI.analytics.getDailyActivity(force)
+          if (!result.success) throw new Error(result.error || '加载失败')
+          if (request === loadRevision.current && result.data) setDailyActivity(result.data)
+        }),
+        detail('高频词云', async () => {
+          const result = await window.electronAPI.analytics.getWordFrequency(60, force)
+          if (!result.success) throw new Error(result.error || '加载失败')
+          if (request === loadRevision.current && result.data) {
+            setWordFreq(result.data.items || [])
+            setWordFreqMeta({ scannedMessages: result.data.scannedMessages, textMessages: result.data.textMessages })
+          }
+        }),
+      ]).finally(() => { if (request === loadRevision.current) setDetailsLoading(false) })
+    } catch (error) {
+      if (request === loadRevision.current) { setError(String(error)); setDetailsLoading(false) }
+    } finally {
+      if (request === loadRevision.current) setLoading(false)
     }
-  }, [includeGroups, loadExcludeCandidates])
+  }, [])
 
   useEffect(() => {
     void loadAll()
+    return () => { loadRevision.current++; rankingRequestRef.current++ }
   }, [loadAll])
 
   useEffect(() => {
     if (stats && !loading) void loadRankings(rankingLimit, includeGroups)
   }, [includeGroups, loading, rankingLimit, loadRankings, stats])
 
-  // 排除候选单独跟随 includeGroups 变化（不与排行榜强耦合、失败不置全局 error）
   useEffect(() => {
-    if (!loading) void loadExcludeCandidates(includeGroups)
-  }, [includeGroups, loading, loadExcludeCandidates])
+    if (excludeDialogOpen) void loadExcludeCandidates(includeGroups)
+  }, [excludeDialogOpen, includeGroups, loadExcludeCandidates])
 
   // ---------------------------------------------------------------- 图表配置
   const hourlyOption = useMemo(() => {
@@ -400,6 +427,8 @@ export const GlobalAnalytics: React.FC = () => {
 
   return (
     <div className="analytics-global">
+      {detailsLoading ? <div className="v09-sub" role="status">基本统计已就绪，正在加载详细图表…</div> : null}
+      {detailsError ? <div className="wp-error" role="alert">{detailsError}</div> : null}
       {/* 页面顶部改成和其他页一致的状态条：左边一句话说清「这些数字覆盖什么
           范围」，右边一个刷新。原来是一个光秃秃的 chip 加一行灰字，既不像按钮区
           也不像说明区。 */}
@@ -513,7 +542,7 @@ export const GlobalAnalytics: React.FC = () => {
               formatTooltip={(item) => `${item.word}：${item.count} 次`}
             />
           ) : (
-            <div className="wp-loading" style={{ height: 280 }}>暂无文本消息</div>
+            <div className="wp-loading" style={{ height: 280 }}>{detailsLoading && !wordFreqMeta ? '正在扫描文本消息…' : '暂无文本消息'}</div>
           )}
         </div>
       </div>

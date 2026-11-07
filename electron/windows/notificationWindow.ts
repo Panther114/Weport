@@ -1,3 +1,4 @@
+import { desktopCaptureAllowed } from '../services/notificationCapturePolicy';
 import { app, BrowserWindow, desktopCapturer, ipcMain, screen, shell } from "electron";
 import { join } from "path";
 import { captureScreenRegion, dipRectToPhysical, fastCaptureAvailable } from "../services/glassCapture";
@@ -339,7 +340,7 @@ function ensureGlassPanel(
   scale: number,
   bands: Array<{ id: number; x: number; y: number; width: number; height: number }>,
 ) {
-  if (!nativeGlass || !notificationWindow || notificationWindow.isDestroyed()) {
+  if (!isDesktopCaptureEnabled() || !nativeGlass || !notificationWindow || notificationWindow.isDestroyed()) {
     return null;
   }
   if (glassPanel && glassPanelDpr !== scale) destroyGlassPanel();
@@ -389,10 +390,14 @@ function ensureGlassPanel(
 let cachedSourceId: string | null = null;
 let sourceIdInflight: Promise<string | null> | null = null;
 
+function isDesktopCaptureEnabled(): boolean {
+  return desktopCaptureAllowed(notifGlassGet(ConfigService.getInstance(), 'notificationCaptureMode'), process.platform);
+}
+
 async function refreshDesktopSourceId(): Promise<string | null> {
   // Linux 一律不解析采集源：Wayland 下任何 desktopCapturer 调用都会拉起
   // xdg-desktop-portal 的屏幕共享授权。放在这里守卫，未来新增调用点也不会漏。
-  if (process.platform === "linux") return null;
+  if (!isDesktopCaptureEnabled()) return null;
   if (sourceIdInflight) return sourceIdInflight;
   sourceIdInflight = (async () => {
     try {
@@ -417,7 +422,7 @@ async function refreshDesktopSourceId(): Promise<string | null> {
 /** 启动时预热采集源，让首条通知不必等采集管线初始化 */
 export function prewarmDesktopSourceId(): void {
   // Linux 默认走系统通知，应用内弹窗只是无采集的兜底，没有可预热的东西
-  if (process.platform === "linux" || process.env.WEPORT_PROBE_OFFSCREEN === "1") return;
+  if (!isDesktopCaptureEnabled() || process.env.WEPORT_PROBE_OFFSCREEN === "1") return;
   if (nativeGlass) return;
   void refreshDesktopSourceId();
 }
@@ -595,7 +600,7 @@ async function grabDesktopFrame(): Promise<string | null> {
 async function runBackdropStream() {
   // Linux 不跑抓帧循环：这是 portal「共享屏幕」弹窗的来源。应用内弹窗在这条路上
   // 只保留用户配置的整卡填充，没有实时桌面折射。
-  if (process.platform === "linux") return;
+  if (!isDesktopCaptureEnabled()) return;
   if (backdropRunning || nativeGlass) return;
   if (!notificationWindow || notificationWindow.isDestroyed()) return;
   backdropRunning = true;
@@ -726,6 +731,7 @@ export function getBackdropSeq(): number {
 }
 
 function setLiveGlassProtection(on: boolean) {
+  if (on && !isDesktopCaptureEnabled()) return;
   // `WEPORT_QA_NOPROTECT=1`：截图 QA 专用 —— 不上 WDA_EXCLUDEFROMCAPTURE，
   // 否则 PrintWindow/BitBlt 都把弹窗排除掉（win.capture 一律纯黑），根本拍不到卡片。
   // 生产路径绝不能带这个环境变量：保护一撤，抓帧就会把弹窗自己拍进玻璃/窗外景。
@@ -1138,7 +1144,7 @@ async function showAndSend(win: BrowserWindow, data: any) {
     // 渲染层的延迟追踪（`WEPORT_POPUP_TRACE=1` 时开启）：渲染进程看不到主进程的
     // 环境变量，只能随 payload 捎过去。见 services/popupTrace.ts。
     trace: popupTraceEnabled(),
-    backdrop: process.platform === "linux"
+    backdrop: !isDesktopCaptureEnabled()
       ? {
           // Linux 不提供采集源：sourceId 为 null 时渲染层不会发起 getUserMedia
           // （见 NotificationWindow.tsx），主进程的定帧循环也不会启动。玻璃只保留
@@ -1252,7 +1258,7 @@ export async function registerNotificationHandlers() {
 
   // 渲染层在卡片入场动画落定后上报实测几何（窗口本地 CSS 像素）
   ipcMain.on("notification:glassRect", (_event, payload) => {
-    if (!nativeGlass || !notificationWindow || notificationWindow.isDestroyed()) return;
+    if (!isDesktopCaptureEnabled() || !nativeGlass || !notificationWindow || notificationWindow.isDestroyed()) return;
     const display = screen.getDisplayMatching(notificationWindow.getBounds());
     // 优先用渲染层实测的 devicePixelRatio（已含可能的页面缩放），显示器缩放兜底
     const scale = payload.dpr || display.scaleFactor;

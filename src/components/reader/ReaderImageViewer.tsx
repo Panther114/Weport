@@ -33,9 +33,9 @@ export function ReaderImageViewer({ images, index, onIndex, onClose }: ReaderIma
   const previous = total > 1 ? images[(safeIndex - 1 + total) % total] : undefined
   const next = total > 1 ? images[(safeIndex + 1) % total] : undefined
 
-  const currentState = useReaderImage(current, Boolean(current))
-  const previousState = useReaderImage(previous, Boolean(previous))
-  const nextState = useReaderImage(next, Boolean(next))
+  const currentState = useReaderImage(current, Boolean(current), 'full')
+  const previousState = useReaderImage(previous, Boolean(previous), 'full')
+  const nextState = useReaderImage(next, Boolean(next), 'full')
 
   const items = useMemo(() => {
     const resolved = new Map<string, string>()

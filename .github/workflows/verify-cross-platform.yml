@@ -1,4 +1,4 @@
-name: Verify v1.2.1 macOS and Linux
+name: Verify macOS and Linux
 
 # Verification only: read-only token, no tags, no release publishing/backfill.
 on:
@@ -58,8 +58,7 @@ jobs:
         run: npm run test:unit
       - name: Strict version and release notes verification
         run: |
-          node -e "if(require('./package.json').version !== '1.2.1') throw Error('Expected v1.2.1')"
-          node scripts/extract-release-notes.mjs 1.2.1
+          node scripts/extract-release-notes.mjs
       - name: Build macOS packages without publishing
         if: runner.os == 'macOS'
         run: npm run build:mac
@@ -74,7 +73,8 @@ jobs:
         if: runner.os == 'Linux' && !cancelled() && steps.linux-build.outcome == 'success'
         shell: bash
         run: |
-          sudo apt-get install --no-install-recommends -y ./release/Weport-1.2.1-amd64.deb
+          package_version=$(node -p "require('./package.json').version")
+          sudo apt-get install --no-install-recommends -y "./release/Weport-${package_version}-amd64.deb"
           test "$(stat -c '%U:%G:%a' /opt/Weport/chrome-sandbox)" = 'root:root:4755'
           test -z "$(find /opt/Weport -type d -perm /022 -print -quit)"
           xvfb-run --auto-servernum dbus-run-session -- node scripts/verify-mcp-http.mjs .ui-probe/installed-linux /opt/Weport/weport

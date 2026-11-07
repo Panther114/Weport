@@ -250,18 +250,23 @@ class AnalyticsService {
     sessionId: string,
     onRow: (row: Record<string, any>) => void,
     beginTimestamp = 0,
-    endTimestamp = 0
+    endTimestamp = 0,
+    shouldStop: () => boolean = () => false,
   ): Promise<void> {
+    const account = this.accountScope()
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, true, beginTimestamp, endTimestamp)
-    if (!cursorResult.success || !cursorResult.cursor) return
+    if (!cursorResult.success || !cursorResult.cursor) throw new Error(cursorResult.error || '无法读取分析消息游标')
 
     try {
       let hasMore = true
       let batchCount = 0
-      while (hasMore) {
+      while (hasMore && !shouldStop()) {
+        if (account !== this.accountScope()) throw new Error('分析期间账号已切换')
         const batch = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-        if (!batch.success || !batch.rows) break
+        if (account !== this.accountScope()) throw new Error('分析期间账号已切换')
+        if (!batch.success || !Array.isArray(batch.rows)) throw new Error(batch.error || '分析消息分页读取失败')
         for (const row of batch.rows) {
+          if (shouldStop()) break
           onRow(row)
         }
         hasMore = batch.hasMore === true
@@ -358,13 +363,17 @@ class AnalyticsService {
     }
   }
 
+  private accountScope(): string {
+    return JSON.stringify([this.configService.get('dbPath'), this.configService.get('myWxid')])
+  }
+
   private buildAggregateCacheKey(sessionIds: string[], beginTimestamp: number, endTimestamp: number, revision = ''): string {
     if (sessionIds.length === 0) {
-      return `${beginTimestamp}-${endTimestamp}-0-empty-${revision}`
+      return `${this.accountScope()}-${beginTimestamp}-${endTimestamp}-0-empty-${revision}`
     }
     const normalized = Array.from(new Set(sessionIds.map((id) => String(id)))).sort()
     const hash = createHash('sha1').update(normalized.join('|')).digest('hex').slice(0, 12)
-    return `${beginTimestamp}-${endTimestamp}-${normalized.length}-${hash}-${revision}`
+    return `${this.accountScope()}-${beginTimestamp}-${endTimestamp}-${normalized.length}-${hash}-${revision}`
   }
 
   private async computeAggregateByCursor(sessionIds: string[], beginTimestamp = 0, endTimestamp = 0): Promise<any> {
@@ -958,7 +967,7 @@ class AnalyticsService {
           for (const token of tokenizeText(content)) {
             counts.set(token, (counts.get(token) || 0) + 1)
           }
-        })
+        }, 0, 0, () => scannedMessages >= MAX_SCANNED)
       }
 
       const data: WordFrequencyResult = {

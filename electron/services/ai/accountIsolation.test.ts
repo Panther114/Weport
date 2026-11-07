@@ -140,7 +140,7 @@ describe('actual AI account and task boundaries', () => {
       const options = shape as { tools: unknown[]; systemContent: string }
       const history = messages as Array<{ content: string }>
       expect(options.tools).toEqual([])
-      expect(options.systemContent).toContain('These context labels do not need a tool lookup or a registered hex ID.')
+      expect(options.systemContent).not.toContain('Mandatory memory protocol')
       expect(history.at(-1)!.content).toContain('[memo-a]')
       return { ok: true, content: JSON.stringify(answer), usage: { totalTokens: 20 } }
     })
@@ -176,5 +176,58 @@ describe('actual AI account and task boundaries', () => {
     expect((await service.runChat(chat.id, 'Check', { scope: scope() })).success).toBe(false)
     expect(chatService.getMessages).not.toHaveBeenCalled()
     expect(service.listChats()).toEqual([])
+  })
+})
+
+
+describe('per-chat memory and automation ownership', () => {
+  it('defaults memory on and persists an explicitly disabled creation choice across restart', () => {
+    const { service } = setup()
+    const enabled = service.createChat('Enabled')
+    const disabled = service.createChat('Disabled', undefined, { memoryEnabled: false })
+    expect(enabled.memoryEnabled).toBe(true)
+    const restarted = new WeportAiService()
+    expect(restarted.isMemoryEnabled(disabled.id)).toBe(false)
+    expect(restarted.getChat(disabled.id)?.memoryDir).toBe('')
+  })
+  it('excludes memory and prior-analysis tools from disabled runs while preserving current-chat notes', async () => {
+    const { service, call } = setup(), chat = service.createChat('Disabled', undefined, { memoryEnabled: false })
+    expect((await service.runChat(chat.id, 'Use current notes only')).success).toBe(true)
+    const tools = (call.mock.calls[0][4] as any).tools.map((tool: any) => tool.function.name)
+    expect(tools).toContain('write_note')
+    expect(tools).not.toEqual(expect.arrayContaining(['list_memory_claims', 'save_memory_claim', 'review_prior_analyses']))
+    for (const name of ['list_memory_claims', 'save_memory_claim', 'review_prior_analyses']) expect(tools).not.toContain(name)
+    const write = (service as any).buildTools().find((tool: any) => tool.name === 'write_note')
+    expect(await write.handler({ path: 'memory/denied.md', content: 'secret' }, { chatId: chat.id })).toContain('错误')
+    expect(await write.handler({ path: 'notes/local.md', content: 'allowed' }, { chatId: chat.id })).toContain('笔记已写入')
+    expect(service.readNoteFile(chat.id, 'memory/denied.md')).toBeNull()
+    expect(service.readNoteFile(chat.id, 'notes/local.md')).toBe('allowed\n')
+    expect(service.listNotes(chat.id).map(note => note.scope)).toEqual(['notes'])
+    const claim = (service as any).buildTools().find((tool: any) => tool.name === 'save_memory_claim')
+    await expect(claim.handler({}, { chatId: chat.id })).rejects.toThrow('Memory is disabled')
+  })
+  it('preserves user literals on disk and in the provider projection', () => {
+    const { service } = setup(), chat = service.createChat('Literal spelling')
+    const original = 'Quote "WreportAI" and "Weport Ai" literally.'
+    const message = { id: 'literal', role: 'user', content: original, createdAt: 1 }
+    ;(service as any).persistMessages(chat.id, [message])
+    expect(service.getChat(chat.id)?.messages[0].content).toBe(original)
+    expect(new WeportAiService().getChat(chat.id)?.messages[0].content).toBe(original)
+    expect((service as any).buildApiMessages([message], '', 'minimal')[1].content).toBe(original)
+  })
+  it('keeps full automation history out of interactive lists and reloads it after restart', () => {
+    const { service } = setup()
+    const interactive = service.createChat('Interactive')
+    const automation = service.createChat('Automation', { kind: 'automation', taskId: 'task', runId: 'run' })
+    const archived = { id: 'old', role: 'user', content: 'Old task', createdAt: 1 }
+    const recent = { id: 'new', role: 'assistant', content: 'Result', createdAt: 2 }
+    ;(service as any).archiveMessages(automation.id, [archived])
+    ;(service as any).persistMessages(automation.id, [recent])
+    const restarted = new WeportAiService()
+    expect(restarted.listChats().map(chat => chat.id)).toEqual([interactive.id])
+    expect(restarted.listAutomationChats('task')[0].id).toBe(automation.id)
+    expect(restarted.getAutomationChat(automation.id)?.messages.map(message => message.id)).toEqual(['old', 'new'])
+    expect(restarted.getAutomationChat(interactive.id)).toBeNull()
+    expect(restarted.listChats({ includeAutomations: true })).toHaveLength(2)
   })
 })
