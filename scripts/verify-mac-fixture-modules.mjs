@@ -61,8 +61,11 @@ export async function verifyFixtureModules(page, scratch, manifest, result, outp
   // Readiness is a DOM state assertion, so keep the same deadline with a timer.
   await page.waitForFunction(() => document.querySelector('.rail-item[data-tab="reader"]')?.disabled === false,
     null, { timeout: 30000, polling: 100 })
-  await page.locator('.rail-item[data-tab="reader"]').click()
-  await page.locator('.reader-session').first().click()
+  // This fixture checks native data and reader state, not hit targets (covered
+  // by verify-v12-ui). Hidden Xvfb windows can suspend the compositor frames
+  // Playwright needs for click stability even after the readiness check passes.
+  await page.locator('.rail-item[data-tab="reader"]').evaluate(button => button.click())
+  await page.locator('.reader-session').first().evaluate(button => button.click())
   await page.locator('.reader-row').first().waitFor({ timeout: 30000 })
   await page.locator('.reader-search-input').fill('incoming')
   await page.waitForFunction(() => {
