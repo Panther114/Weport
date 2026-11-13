@@ -3870,6 +3870,7 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     success: weportAiService.deleteChat(String(chatId || '')),
   }))
   ipcMain.handle('ai:getChat', (_e, chatId: string) => weportAiService.getChat(String(chatId || '')))
+  ipcMain.handle('ai:setMemoryEnabled', (_e, chatId: string, enabled: boolean) => weportAiService.setMemoryEnabled(chatId, enabled))
   ipcMain.handle('ai:resolveEvidence', (_e, id: string) => weportAiService.resolveEvidence(String(id || '')))
   ipcMain.handle('ai:listMemoryClaims', () => weportAiService.listMemoryClaims())
   ipcMain.handle('ai:previewContext', (_e, scope: import('./services/dataAccessService').DataAccessScope) => weportAiService.previewContext(scope))
@@ -8999,6 +9000,7 @@ function startApp() {
   })
 
   app.on('window-all-closed', () => {
+    if (mainWindowReclaimInProgress) return
     if (process.platform !== 'darwin') {
       if (!isAppQuitting && tray) {
         // 托盘模式：窗口全关不等于退出（正常流程走 hide，这里兜底）

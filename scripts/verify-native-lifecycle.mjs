@@ -65,9 +65,13 @@ try {
     await app.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('index.html'))
       if (!window) throw Error('Missing main window')
-      // Exercise the application's close-to-tray timer, including its own
-      // reclaim guard. Direct destroy() intentionally follows a different path.
-      window.close()
+      // Probe mode deliberately has no tray. close() therefore means Quit,
+      // rather than close-to-tray. Exercise the same hide -> application-owned
+      // discard timer without creating a native tray icon or destroying directly.
+      window.hide()
+      // macOS guard windows are already hidden; notify the app's hide handler
+      // explicitly so the real reclaim timer is exercised on that platform too.
+      window.emit('hide')
     })
     await discarded
     await app.evaluate(({ app }) => app.emit('activate'))

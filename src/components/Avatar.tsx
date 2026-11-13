@@ -31,30 +31,24 @@ interface AvatarProps {
     lazy?: boolean
     loading?: boolean
     onClick?: () => void
+    username?: string
 }
 
-export const Avatar = React.memo(function Avatar({
-    src: rawSrc,
-    name,
-    size = 48,
-    shape = 'rounded',
-    className = '',
-    lazy = true,
-    loading = false,
-    onClick
-}: AvatarProps) {
-    // v1.2：本地头像 URL 可能来自缓存（朋友圈时间线 / 分析结果里存着上一版外壳写下的
-    // 组件内所有 `src` 用法就都是可用的形态（实测：修好生成端后朋友圈仍有一批旧前缀头像报错）。
-    const src = normalizeLocalMediaUrl(rawSrc)
-    // 本地协议 URL（磁盘缓存头像）无需排队，直接即时加载
-    const isLocalSrc = isLocalMediaUrl(src)
-    // 如果 URL 已在缓存中，则直接标记为已加载，不显示骨架屏和淡入动画
-    const isCached = useMemo(() => src ? loadedAvatarCache.has(src) : false, [src])
-    const isFailed = useMemo(() => src ? avatarLoadQueue.hasFailed(src) : false, [src])
+export const Avatar = React.memo(function Avatar(props: AvatarProps) {
+    const src = normalizeLocalMediaUrl(props.src)
+    // Virtualized rows can change identity while an earlier request is still pending.
+    return <AvatarImage key={`${props.username || ''}:${src || ''}`} {...props} src={src} />
+})
+
+function AvatarImage({ src, name, size = 48, shape = 'rounded', className = '', lazy = true,
+    loading = false, onClick, username }: AvatarProps) {
+    const [resolvedSrc, setResolvedSrc] = useState(src)
+    const isLocalSrc = isLocalMediaUrl(resolvedSrc)
+    const isCached = useMemo(() => resolvedSrc ? loadedAvatarCache.has(resolvedSrc) : false, [resolvedSrc])
     const [imageLoaded, setImageLoaded] = useState(isCached)
-    const [imageError, setImageError] = useState(isFailed)
+    const [imageError, setImageError] = useState(false)
     const [shouldLoad, setShouldLoad] = useState(!lazy || isCached || isLocalSrc)
-    const [isInQueue, setIsInQueue] = useState(false)
+    const [attempt, setAttempt] = useState(0)
     const imgRef = useRef<HTMLImageElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
 
@@ -64,67 +58,72 @@ export const Avatar = React.memo(function Avatar({
         return chars[0] || '?'
     }
 
-    // Intersection Observer for lazy loading
     useEffect(() => {
-        if (!lazy || shouldLoad || isInQueue || !src || !containerRef.current || isCached || imageError || isFailed) return
-
-        const observer = new IntersectionObserver(
-            (entries) => {
-                entries.forEach((entry) => {
-                    if (entry.isIntersecting && !isInQueue) {
-                        setIsInQueue(true)
-                        avatarLoadQueue.enqueue(src).then(() => {
-                            setImageError(false)
-                            setShouldLoad(true)
-                        }).catch(() => {
-                            setImageError(true)
-                            setShouldLoad(false)
-                        }).finally(() => {
-                            setIsInQueue(false)
-                        })
-                        observer.disconnect()
-                    }
-                })
-            },
-            { rootMargin: '100px' }
-        )
-
-        observer.observe(containerRef.current)
-
-        return () => observer.disconnect()
-    }, [src, lazy, shouldLoad, isInQueue, isCached, imageError, isFailed])
-
-    // Reset state when src changes
-    useEffect(() => {
-        const cached = src ? loadedAvatarCache.has(src) : false
-        const failed = src ? avatarLoadQueue.hasFailed(src) : false
-        const localSrc = isLocalMediaUrl(src)
-        setImageLoaded(cached)
-        setImageError(failed)
-        if (failed) {
-            setShouldLoad(false)
-            setIsInQueue(false)
-        } else if (lazy && !cached && !localSrc) {
-            setShouldLoad(false)
-            setIsInQueue(false)
-        } else {
-            setShouldLoad(true)
+        let disposed = false
+        if (!resolvedSrc && !username) return
+        const start = () => {
+            if (!resolvedSrc && username) {
+                void window.electronAPI.chat.getContactAvatar(username).then(contact => {
+                    if (disposed) return
+                    const local = normalizeLocalMediaUrl(contact?.avatarUrl)
+                    if (local) setResolvedSrc(local)
+                    else setImageError(true)
+                }).catch(() => { if (!disposed) setImageError(true) })
+                return
+            }
+            if (!resolvedSrc) return
+            if (isLocalSrc || isCached || !lazy) { setShouldLoad(true); return }
+            avatarLoadQueue.enqueue(resolvedSrc, attempt > 0).then(() => {
+                if (!disposed) { setImageError(false); setShouldLoad(true) }
+            }).catch(() => { if (!disposed) setImageError(true) })
         }
-    }, [src, lazy])
+        if (!lazy || isLocalSrc || isCached) start()
+        else {
+            const observer = new IntersectionObserver(entries => {
+                if (entries.some(entry => entry.isIntersecting)) { observer.disconnect(); start() }
+            }, { rootMargin: '100px' })
+            if (containerRef.current) observer.observe(containerRef.current)
+            return () => { disposed = true; observer.disconnect() }
+        }
+        return () => { disposed = true }
+    }, [resolvedSrc, lazy, isLocalSrc, isCached, attempt, username])
 
-    // Check if image is already cached/loaded
     useEffect(() => {
-        if (shouldLoad && imgRef.current?.complete && imgRef.current?.naturalWidth > 0) {
+        if (!imageError || attempt >= 2) return
+        let disposed = false
+        const timer = setTimeout(async () => {
+            // The main process may already have localized a previously failing CDN URL.
+            let next = resolvedSrc
+            if (username) {
+                try {
+                    const contact = await window.electronAPI.chat.getContactAvatar(username)
+                    next = normalizeLocalMediaUrl(contact?.avatarUrl) || next
+                } catch { /* A bounded retry of the original URL remains available. */ }
+            }
+            if (disposed) return
+            setResolvedSrc(next)
+            setImageLoaded(false)
+            setImageError(false)
+            setShouldLoad(isLocalMediaUrl(next) || !lazy)
+            setAttempt(value => value + 1)
+        }, attempt === 0 ? 1000 : 4000)
+        return () => { disposed = true; clearTimeout(timer) }
+    }, [imageError, attempt, username, resolvedSrc, lazy])
+
+    useEffect(() => {
+        if (shouldLoad && imgRef.current?.complete && imgRef.current.naturalWidth > 0) {
+            if (resolvedSrc) rememberLoadedAvatar(resolvedSrc)
             setImageLoaded(true)
+            setImageError(false)
         }
-    }, [src, shouldLoad])
+    }, [resolvedSrc, shouldLoad, attempt])
 
     const style = {
         width: typeof size === 'number' ? `${size}px` : size,
         height: typeof size === 'number' ? `${size}px` : size,
     }
 
-    const hasValidUrl = !!src && !imageError && shouldLoad
+    const hasValidUrl = !!resolvedSrc && !imageError && shouldLoad
     const shouldShowLoadingPlaceholder = loading && !hasValidUrl && !imageError
 
     return (
@@ -139,21 +138,21 @@ export const Avatar = React.memo(function Avatar({
                     {!imageLoaded && <div className="avatar-skeleton" />}
                     <img
                         ref={imgRef}
-                        src={src}
+                        src={resolvedSrc}
                         alt={name || 'avatar'}
                         className={`avatar-image ${imageLoaded ? 'loaded' : ''} ${isCached ? 'instant' : ''}`}
                         onLoad={() => {
-                            if (src) {
-                                avatarLoadQueue.clearFailed(src)
-                                rememberLoadedAvatar(src)
+                            if (resolvedSrc) {
+                                avatarLoadQueue.clearFailed(resolvedSrc)
+                                rememberLoadedAvatar(resolvedSrc)
                             }
                             setImageLoaded(true)
                             setImageError(false)
                         }}
                         onError={() => {
-                            if (src) {
-                                avatarLoadQueue.markFailed(src)
-                                loadedAvatarCache.delete(src)
+                            if (resolvedSrc) {
+                                avatarLoadQueue.markFailed(resolvedSrc)
+                                loadedAvatarCache.delete(resolvedSrc)
                             }
                             setImageLoaded(false)
                             setImageError(true)
@@ -178,4 +177,4 @@ export const Avatar = React.memo(function Avatar({
             )}
         </div>
     )
-})
+}

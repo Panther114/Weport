@@ -13,6 +13,8 @@ import {
   compressOverflow,
   mergeDigest,
   messageChars,
+  truncateToolResult,
+  weightedTextChars,
   summariseCacheUsage,
   tailLinesWithin,
   type CompressibleMessage,
@@ -323,4 +325,22 @@ describe('messageChars', () => {
   it('把 reasoning 计入体积（推理模型的主要增量）', () => {
     expect(messageChars({ role: 'assistant', content: 'x'.repeat(100), reasoning: 'y'.repeat(900) })).toBeGreaterThan(1000)
   })
+})
+
+
+it('counts CJK text and large tool arguments when estimating compaction pressure', () => {
+  expect(messageChars({ role: 'user', content: '中'.repeat(1000) })).toBeGreaterThanOrEqual(2500)
+  expect(messageChars({ role: 'assistant', content: '', toolCalls: [{ args: { content: 'x'.repeat(10000) } }] })).toBeGreaterThan(10000)
+})
+
+
+it('keeps CJK and ASCII tool results inside one context budget without splitting Unicode characters', () => {
+  for (const text of ['A'.repeat(10000), '证据'.repeat(10000), '🧪 result 中文'.repeat(10000)]) {
+    const truncated = truncateToolResult(text, 1000)
+    expect(weightedTextChars(truncated)).toBeLessThanOrEqual(1000)
+    expect(truncated).toContain('已截断')
+    expect(truncated).not.toMatch(/[\uD800-\uDBFF]$/)
+  }
+  expect(truncateToolResult('short', 100)).toBe('short')
+  expect(truncateToolResult('long', 0)).toBe('')
 })

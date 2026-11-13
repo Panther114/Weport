@@ -226,7 +226,7 @@ export const SnsPostItem: React.FC<SnsPostItemProps> = memo(function SnsPostItem
               }}
               title="查看该发布者的全部朋友圈"
             >
-              <Avatar src={post.avatarUrl} name={post.nickname} size={36} shape="rounded" />
+              <Avatar username={post.username} src={post.avatarUrl} name={post.nickname} size={36} shape="rounded" />
             </button>
           </div>
         )}

@@ -124,7 +124,7 @@ export const ContactSnsTimelineDialog: React.FC<ContactSnsTimelineDialogProps> =
     <div className="wp-overlay author-dialog-overlay" onClick={onClose}>
       <div className="author-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="author-dialog-head">
-          <Avatar src={profile?.avatarUrl || avatarUrl} name={profile?.displayName || displayName} size={44} shape="rounded" />
+          <Avatar username={username} src={profile?.avatarUrl || avatarUrl} name={profile?.displayName || displayName} size={44} shape="rounded" />
           <div className="author-dialog-id">
             <h3>{profile?.displayName || displayName}</h3>
             <p>{profile?.alias || username}</p>

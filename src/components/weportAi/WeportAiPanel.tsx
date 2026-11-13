@@ -315,8 +315,12 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [setup, setSetup] = useState<SetupInfo | null>(null)
   const [chats, setChats] = useState<AiChatMeta[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [newChatMemoryEnabled, setNewChatMemoryEnabled] = useState(true)
-  const [activeMemoryEnabled, setActiveMemoryEnabled] = useState(true)
+  const [activeMemoryEnabled, setActiveMemoryEnabled] = useState(false)
+  const [memoryUpdating, setMemoryUpdating] = useState(false)
+  const [chatLoading, setChatLoading] = useState(false)
+  const openRevision = useRef(0)
+  const sendPending = useRef(new Set<string>())
+  const initializing = useRef(false)
   const [messages, setMessages] = useState<AiMessage[]>([])
   const [running, setRunning] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
@@ -385,8 +389,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       const res = await api.ai.listChats()
       setChats(res.chats || [])
       return res.chats || []
-    } catch {
-      return []
+    } catch (failure) {
+      setError(String(failure))
+      throw failure
     }
   }, [api])
 
@@ -401,18 +406,25 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
 
   const openChat = useCallback(
     async (id: string) => {
+      if (activeIdRef.current === id && !chatLoading && !error) return
       // 切换前中止旧会话的运行：否则旧会话的 status:false 事件会被下面的
       // chatId 过滤丢弃，running 永远卡在 true，Stop 也会打到错误的会话
       if (activeId && activeId !== id) {
         void api.ai.abort(activeId)
         setRunning(false)
       }
-      // 切换前自动清理：空的「新对话」没有保留价值，直接删除
-      if (activeId && activeId !== id && messages.length === 0) {
-        const prev = activeId
-        setActiveId(null)
-        void api.ai.deleteChat(prev).then(() => void refreshChats())
-      }
+      // Loading or failed reads are never evidence that a stored chat is empty.
+      const revision = ++openRevision.current
+      setChatLoading(true)
+      setActiveMemoryEnabled(false)
+      setRunning(false)
+      setCtxStats(null)
+      setWorkspaceDir('')
+      setMemoryDir('')
+      setPreparedContext(null)
+      setViewingNote(null)
+      setNoteDeleteTarget(null)
+      setReferences([])
       setActiveId(id)
       // 同步更新 ref，别等下面那个 effect：`getChat` 的响应可能在 React 提交
       // 这次 setActiveId 之前就回来，那样第 391 行的守卫会把响应当成"过期"丢弃，
@@ -427,7 +439,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       try {
         const data = await api.ai.getChat(id)
         // 期间用户又切换了会话 → 丢弃过期响应，防止 A→B→A 时旧数据覆盖新会话
-        if (activeIdRef.current !== id) return
+        if (activeIdRef.current !== id || openRevision.current !== revision) return
+        if (!data) throw new Error('对话不存在，请重新选择。')
         if (data) {
           // A recreated renderer missed the initial status event. A newer event
           // wins over this snapshot if the run finishes while getChat is pending.
@@ -435,7 +448,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           setMessages(data.messages || [])
           setWorkspaceDir(data.workspaceDir)
           setMemoryDir(data.memoryDir)
-          setActiveMemoryEnabled(data.chat.memoryEnabled !== false)
+          setActiveMemoryEnabled(data.chat.memoryEnabled === true)
           // 缓存命中率/用量是「该会话专属」的：切换会话后显示各自上次运行的数据
           const last = data.lastRun as
             | {
@@ -470,11 +483,15 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           )
         }
         const n = await api.ai.listNotes(id)
-        if (activeIdRef.current !== id) return
+        if (activeIdRef.current !== id || openRevision.current !== revision) return
         setNotes(n.notes || [])
-      } catch { /* noop */ }
+      } catch (failure) {
+        if (openRevision.current === revision) setError(String(failure))
+      } finally {
+        if (openRevision.current === revision) setChatLoading(false)
+      }
     },
-    [api, activeId, messages.length, refreshChats],
+    [api, activeId, chatLoading, error],
   )
 
   const ensureChat = useCallback(async () => {
@@ -490,7 +507,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
 
   useEffect(() => {
     void api.ai.getSetup().then((value) => setSetup(value as unknown as SetupInfo)).catch(() => undefined)
-    void ensureChat()
+    if (!activeId && !initializing.current) {
+      initializing.current = true
+      void ensureChat().catch(failure => setError(String(failure))).finally(() => { initializing.current = false })
+    }
     void refreshActions()
 
     const onDocClick = (e: MouseEvent) => {
@@ -504,7 +524,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     document.addEventListener('mousedown', onDocClick)
 
     const unsub = api.ai.onEvent((e: AiEvent) => {
-      if (e.chatId !== activeId && activeId) return
+      if (e.chatId !== activeIdRef.current) return
       switch (e.type) {
         case 'status':
           runStatusRevisionRef.current += 1
@@ -565,7 +585,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           break
         }
         case 'chat_title':
-          void refreshChats()
+          void refreshChats().catch(() => undefined)
           break
         case 'error':
           if (e.message) {
@@ -587,19 +607,19 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           )
           if (e.context) setCtxStats(e.context)
           setLive(null)
-          void refreshChats()
+          void refreshChats().catch(() => undefined)
           void (async () => {
             if (activeId) {
               try {
                 const data = await api.ai.getChat(activeId)
-                if (data) setMessages(data.messages || [])
+                if (data && activeIdRef.current === activeId) setMessages(data.messages || [])
               } catch { /* noop */ }
             }
           })()
           if (notesDirty) {
             setNotesDirty(false)
             if (activeId) {
-              void api.ai.listNotes(activeId).then((n) => setNotes(n.notes || [])).catch(() => undefined)
+              void api.ai.listNotes(activeId).then((n) => { if (activeIdRef.current === activeId) setNotes(n.notes || []) }).catch(() => undefined)
             }
           }
           break
@@ -616,7 +636,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   useEffect(() => {
     if (notesDirty && activeId) {
       setNotesDirty(false)
-      void api.ai.listNotes(activeId).then((n) => setNotes(n.notes || [])).catch(() => undefined)
+      void api.ai.listNotes(activeId).then((n) => { if (activeIdRef.current === activeId) setNotes(n.notes || []) }).catch(() => undefined)
     }
   }, [notesDirty, activeId, api])
 
@@ -791,7 +811,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
 
   async function handleSend(textOverride?: string) {
     const text = (textOverride ?? input).trim()
-    if (!text || !activeId || running) return
+    if (!text || !activeId || running || chatLoading || memoryUpdating || sendPending.current.has(activeId)) return
+    const sentChatId = activeId
+    sendPending.current.add(sentChatId)
+    setRunning(true)
     setInput('')
     if (preparedContext?.chatId !== activeId) setReferences([])
     resetInputHeight()
@@ -810,27 +833,46 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
         : text
       const res = await api.ai.send(activeId, payload, { processing: localOnly ? 'local-only' : 'cloud-enabled',
         ...(prepared ? { tools: 'none', accountId: prepared.scope.accountId, scope: prepared.scope } : {}) })
-      if (!res.success && res.error && !running) {
+      if (!res.success && res.error && activeIdRef.current === sentChatId) {
         setError(res.error)
         setLive(null)
         const data = await api.ai.getChat(activeId)
-        if (data) setMessages(data.messages || [])
+        if (data && activeIdRef.current === activeId) setMessages(data.messages || [])
       }
     } catch (e) {
-      setError(String(e))
-      setLive(null)
+      if (activeIdRef.current === sentChatId) { setError(String(e)); setLive(null) }
+    } finally {
+      sendPending.current.delete(sentChatId)
+      if (activeIdRef.current === sentChatId) setRunning(false)
     }
+  }
+
+  async function toggleMemory() {
+    if (!activeId || running || memoryUpdating || chatLoading) return
+    const id = activeId
+    setMemoryUpdating(true)
+    try {
+      const data = await api.ai.setMemoryEnabled(id, !activeMemoryEnabled)
+      if (activeIdRef.current !== id || !data) return
+      setActiveMemoryEnabled(data.chat.memoryEnabled === true)
+      setMemoryDir(data.memoryDir)
+      const result = await api.ai.listNotes(id)
+      if (activeIdRef.current === id) setNotes(result.notes || [])
+      await refreshChats()
+    } catch (failure) {
+      if (activeIdRef.current === id) setError(String(failure))
+    } finally { setMemoryUpdating(false) }
   }
 
   async function handleNewChat() {
     // 当前已是空的「新对话」→ 复用，不再重复创建
-    if (activeId && messages.length === 0 && activeMemoryEnabled === newChatMemoryEnabled) {
+    if (activeId && !chatLoading && !running && !sendPending.current.has(activeId) && !error && !activeMemoryEnabled && messages.length === 0) {
       setLive(null)
       setError('')
       inputRef.current?.focus()
       return
     }
-    const created = await api.ai.createChat(undefined, { memoryEnabled: newChatMemoryEnabled })
+    const created = await api.ai.createChat(undefined, { memoryEnabled: false })
     await refreshChats()
     await openChat(created.chat.id)
   }
@@ -888,7 +930,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   }
 
   const chat = useMemo(() => chats.find((c) => c.id === activeId) || null, [chats, activeId])
-  const showEmptyHint = messages.length === 0 && !live
+  const showEmptyHint = !chatLoading && !error && messages.length === 0 && !live
 
   /**
    * Metadata for the profile the run will actually use. This is what drives the
@@ -910,7 +952,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     if (!activeId) return
     try {
       const n = await api.ai.listNotes(activeId)
-      setNotes(n.notes || [])
+      if (activeIdRef.current === activeId) setNotes(n.notes || [])
     } catch { /* noop */ }
   }
 
@@ -918,9 +960,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     if (!activeId) return
     try {
       const res = await api.ai.readNoteFile(activeId, note.path)
-      setViewingNote({ note, content: res.content ?? '（读取失败或文件不存在）' })
+      if (activeIdRef.current === activeId) setViewingNote({ note, content: res.content ?? '（读取失败或文件不存在）' })
     } catch {
-      setViewingNote({ note, content: '（读取失败）' })
+      if (activeIdRef.current === activeId) setViewingNote({ note, content: '（读取失败）' })
     }
   }
 
@@ -953,6 +995,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     setCompacting(true)
     try {
       const res = await api.ai.compactChat(activeId)
+      if (activeIdRef.current !== activeId) return
       if (!res.success) {
         setError(res.error || '压缩失败')
       } else if (!res.changed) {
@@ -960,7 +1003,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       } else {
         pushLocalNotice(`已压缩：归档 ${res.dropped ?? 0} 条，保留 ${res.kept ?? 0} 条`)
         const data = await api.ai.getChat(activeId)
-        setMessages(data?.messages || [])
+        if (activeIdRef.current === activeId) setMessages(data?.messages || [])
       }
     } catch (e) {
       setError(String(e))
@@ -982,11 +1025,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     <div className={`ai-shell${wsCollapsed ? ' ws-hidden' : ''}`}>
       {/* 左栏：对话列表 */}
       <aside className="ai-side">
-        <button className="ai-new-chat" type="button" onClick={() => void handleNewChat()}>
+        <button className="ai-new-chat" type="button" onClick={() => void handleNewChat().catch(failure => setError(String(failure)))}>
           <Plus size={14} />
           新建对话
         </button>
-        <label className="ai-memory-choice"><input type="checkbox" checked={newChatMemoryEnabled} onChange={event => setNewChatMemoryEnabled(event.target.checked)} />新对话启用记忆</label>
         <div className="ai-chat-list" role="list" aria-label="WeportAI 对话">
           {chats.map((c) => (
             <div
@@ -1096,7 +1138,14 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
         <div className="ai-topbar">
           <h1>{chats.find((c) => c.id === activeId)?.title || 'WeportAI'}</h1>
           <div className="ai-topbar-meta">
-            <span className="ai-memory-status" data-enabled={activeMemoryEnabled}>{activeMemoryEnabled ? '记忆开启' : '记忆关闭'}</span>
+            <button type="button" className="ai-memory-toggle" role="switch"
+              aria-label="当前对话记忆" aria-checked={activeMemoryEnabled}
+              disabled={!activeId || chatLoading || memoryUpdating || running}
+              title="为当前对话启用共享记忆；新对话默认关闭"
+              onClick={() => void toggleMemory()}>
+              <span className="ai-memory-track" aria-hidden="true"><span /></span>
+              <span>记忆</span>
+            </button>
             {setup?.model ? (
               <span className="ai-meter ai-meter-model" title={`当前 AI 服务与模型：${setup.model}`}>
                 <span className="ai-meter-label">模型</span>
@@ -1106,11 +1155,11 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             {ctxStats && ctxStats.contextWindow > 0 ? (
               <span
                 className="ai-meter"
-                data-tone={ctxStats.promptTokens / ctxStats.contextWindow > 0.75 ? 'warn' : undefined}
+                data-tone={ctxStats.lastRequestTokens / ctxStats.contextWindow > 0.75 ? 'warn' : undefined}
                 title="最近一次请求的上下文占用"
               >
                 <span className="ai-meter-label">上下文</span>
-                <b>{Math.round((ctxStats.promptTokens / ctxStats.contextWindow) * 100)}%</b>
+                <b>{Math.round((ctxStats.lastRequestTokens / ctxStats.contextWindow) * 100)}%</b>
               </span>
             ) : null}
             {/* 这里曾经还有「单价」与「本轮花费」两个读数。定价估算在 v1.0.1 移除：
@@ -1141,7 +1190,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               type="button"
               className="ai-meter ai-meter-action"
               onClick={() => void compactNow()}
-              disabled={!activeId || compacting || running}
+              disabled={!activeId || chatLoading || compacting || running}
               title="把较早的轮次折叠进摘要，保留最近一段原文。归档原文不会丢失。"
             >
               <span className="ai-meter-label">{compacting ? '压缩中…' : '压缩'}</span>
@@ -1162,7 +1211,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           </div>
         )}
 
-        <div className="ai-thread" ref={scrollRef} onScroll={handleThreadScroll}>
+        <div className="ai-thread" ref={scrollRef} onScroll={handleThreadScroll} aria-busy={chatLoading}>
+          {chatLoading && <p className="ai-notice" role="status">正在读取对话…</p>}
           {showEmptyHint && (
             <div className="ai-empty">
               <div className="ai-empty-mark">
@@ -1171,7 +1221,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               <h2>WeportAI · 聊天历史分析助手</h2>
               <p>
                 基于所选 AI 提供商的本地聊天记录分析环境。它能跨会话查看某一天的完整时间线、搜索任意关键词、统计互动，
-                并把发现持续写入导出目录下的 <code>WeportAI/memory/</code> 长期记忆。
+                可将发现保存为当前对话笔记；开启顶栏记忆开关后，还可使用共享长期记忆。
               </p>
               <div className="ai-empty-tips">
                 <div><strong>试试这样问：</strong></div>
@@ -1431,7 +1481,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           <button
             className="ai-send"
             type="button"
-            disabled={running || !input.trim() || busy}
+            disabled={running || chatLoading || memoryUpdating || !input.trim() || busy}
             onClick={() => void handleSend()}
             title="发送"
           >

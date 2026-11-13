@@ -869,6 +869,11 @@ textarea,
 // Native title bars reduce the available content height (notably on macOS).
 // Keep every route reachable at the 600 px minimum without scrolling the rail.
 @media (max-height: 640px) {
+  // Tooltip wrappers own the flex row height as well as the button.
+  .rail .tab-tip { flex-basis: 28px; }
+  .rail-group, .rail-group-items { gap: 0; }
+  .rail-group-label { padding-bottom: 0; }
+
   .rail-item {
     height: 28px;
     flex-basis: 28px;

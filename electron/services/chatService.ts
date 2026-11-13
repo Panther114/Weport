@@ -8759,7 +8759,7 @@ class ChatService {
       this.contactCacheService.setEntries({ [normalizedUsername]: cacheEntry })
       // 本地化：data → 磁盘缓存；CDN → 后台下载；已缓存 → weport-media:// 即时显示
       const localized = avatarCacheService.localUrlOrOriginal(displayAvatarUrl)
-      if (displayAvatarUrl && localized !== displayAvatarUrl) {
+      if (displayAvatarUrl && localized === displayAvatarUrl) {
         void avatarCacheService.ensure(displayAvatarUrl)
       }
       return { avatarUrl: localized, displayName }

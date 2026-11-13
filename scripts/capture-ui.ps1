@@ -329,28 +329,35 @@ $popupGlass = Join-Path $OutputDir 'popup-glass.json'
 Assert-Captured $popupGlass 'popup-glass.json'
 $glass = Get-Content $popupGlass -Raw | ConvertFrom-Json
 Write-Output "  [popup] glass pipeline=$($glass.pipeline) framesSent=$($glass.framesSent) appliedSeq=$($glass.appliedSeq)/$($glass.sentSeq)"
-if ([int]$glass.framesSent -lt 2) {
-  throw "popup glass got only $($glass.framesSent) desktop frame(s) - the refraction loop is not feeding the popup. Aborting."
+if ($KeepGpu) {
+  if ([int]$glass.framesSent -lt 2) {
+    throw "popup glass got only $($glass.framesSent) desktop frame(s) - the refraction loop is not feeding the popup. Aborting."
+  }
+  # 核心断言：**渲染层应用到玻璃上的帧，必须是主进程最新发出的那一帧**。
+  #
+  # 为什么不用像素差当主判据：QA 里内容保护是关掉的（否则 capturePage 只能拿到空白
+  # 帧），于是抓帧会拍到弹窗自身，玻璃采样区域被它自己的模糊残影占住 —— 背景变化
+  # 落在像素上只剩 0.4-5 的差别，量级取决于纱层浓度，判不稳。帧序号是端到端的确定
+  # 事实：玻璃上显示的是第 N 帧，主进程发到了第 N 帧，就说明它一路在更新，而不是
+  # "钉在出现那一刻"。
+  #
+  # 允许落后 1 帧（采样时可能正好有新帧在飞）。
+  if ([int]$glass.appliedSeq -le 0) {
+    throw "popup glass never applied a backdrop frame (appliedSeq=$($glass.appliedSeq)) - the renderer is not consuming frames. Aborting."
+  }
+  if ([int]$glass.sentSeq - [int]$glass.appliedSeq -gt 1) {
+    throw "popup glass is stuck: applied frame $($glass.appliedSeq) while the main process already sent $($glass.sentSeq) - the backdrop is frozen. Aborting."
+  }
+  # 像素差只记录不判定：QA 里内容保护必须关掉（否则 capturePage 是空白帧），于是抓帧
+  # 会拍到弹窗自身，玻璃采样区被自己的模糊残影占住，背景变化落在像素上只有 0.3-5，
+  # 量级取决于纱层与窗口层叠，判不稳。真实证据是上面那对帧序号。
+  Write-Output "  [popup] pixel delta (informational only) = $($glass.liveFrameDelta)"
+} else {
+  if ($glass.pipeline -ne 'snapshot') {
+    throw "Software screenshot mode expected snapshot glass, got $($glass.pipeline). Aborting."
+  }
+  Write-Output '  [popup] static snapshot verified; live frame transport is covered by npm run bench'
 }
-# 核心断言：**渲染层应用到玻璃上的帧，必须是主进程最新发出的那一帧**。
-#
-# 为什么不用像素差当主判据：QA 里内容保护是关掉的（否则 capturePage 只能拿到空白
-# 帧），于是抓帧会拍到弹窗自身，玻璃采样区域被它自己的模糊残影占住 —— 背景变化
-# 落在像素上只剩 0.4-5 的差别，量级取决于纱层浓度，判不稳。帧序号是端到端的确定
-# 事实：玻璃上显示的是第 N 帧，主进程发到了第 N 帧，就说明它一路在更新，而不是
-# "钉在出现那一刻"。
-#
-# 允许落后 1 帧（采样时可能正好有新帧在飞）。
-if ([int]$glass.appliedSeq -le 0) {
-  throw "popup glass never applied a backdrop frame (appliedSeq=$($glass.appliedSeq)) - the renderer is not consuming frames. Aborting."
-}
-if ([int]$glass.sentSeq - [int]$glass.appliedSeq -gt 1) {
-  throw "popup glass is stuck: applied frame $($glass.appliedSeq) while the main process already sent $($glass.sentSeq) - the backdrop is frozen. Aborting."
-}
-# 像素差只记录不判定：QA 里内容保护必须关掉（否则 capturePage 是空白帧），于是抓帧
-# 会拍到弹窗自身，玻璃采样区被自己的模糊残影占住，背景变化落在像素上只有 0.3-5，
-# 量级取决于纱层与窗口层叠，判不稳。真实证据是上面那对帧序号。
-Write-Output "  [popup] pixel delta (informational only) = $($glass.liveFrameDelta)"
 
 if ($BackgroundPath) {
   Assert-ImageHasContent (Join-Path $OutputDir 'video-bg.png') 'video background'

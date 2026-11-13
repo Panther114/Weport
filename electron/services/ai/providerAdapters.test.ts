@@ -326,3 +326,33 @@ describe('工具结果里的图片 → 内容块', () => {
     expect(contents).toHaveLength(1)
   })
 })
+
+
+describe('provider stream integrity', () => {
+  const stream = (events: unknown[]) => new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'Content-Type': 'text/event-stream' } })
+  it('resolves Responses function arguments by item ID while preserving the tool call ID', async () => {
+    const selected = profile({ protocol: 'openai' })
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(stream([
+      { type: 'response.output_item.added', item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'read_session_messages', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '{"sessionId":"room"}' },
+      { type: 'response.completed', response: { status: 'completed' } },
+    ]))
+    try {
+      const result = await getProviderAdapter(selected).stream(streamInput({ profile: selected }))
+      expect(result.toolCalls).toEqual([{ id: 'call-1', name: 'read_session_messages', args: { sessionId: 'room' } }])
+    } finally { fetch.mockRestore() }
+  })
+  it.each(['openai', 'openai-compatible', 'anthropic', 'google'] as const)('reports in-band %s errors instead of returning a partial success', async protocol => {
+    const selected = profile({ protocol })
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(stream([{ type: 'error', error: { message: 'Overloaded fixture' } }]))
+    try { await expect(getProviderAdapter(selected).stream(streamInput({ profile: selected }))).rejects.toThrow('Overloaded fixture') }
+    finally { fetch.mockRestore() }
+  })
+  it('rejects malformed function arguments before a tool can run with missing inputs', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(stream([
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call', function: { name: 'write_note', arguments: '{truncated' } }] } }] },
+    ]))
+    try { await expect(getProviderAdapter(profile()).stream(streamInput())).rejects.toThrow('invalid tool arguments') }
+    finally { fetch.mockRestore() }
+  })
+})

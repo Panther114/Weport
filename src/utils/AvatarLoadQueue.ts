@@ -19,8 +19,9 @@ export class AvatarLoadQueue {
         return AvatarLoadQueue.instance
     }
 
-    async enqueue(url: string): Promise<void> {
+    async enqueue(url: string, retry = false): Promise<void> {
         if (!url) return Promise.resolve()
+        if (retry) this.clearFailed(url)
         if (this.hasFailed(url)) {
             return Promise.reject(new Error(`Failed: ${url}`))
         }
@@ -64,6 +65,7 @@ export class AvatarLoadQueue {
     markFailed(url: string) {
         if (!url) return
         this.failed.set(url, Date.now())
+        if (this.failed.size > 3000) this.failed.delete(this.failed.keys().next().value!)
     }
 
     clearFailed(url: string) {
@@ -83,28 +85,32 @@ export class AvatarLoadQueue {
 
         const img = new Image()
         img.referrerPolicy = 'no-referrer'
-        img.onload = () => {
+        let settled = false
+        const finish = (ok: boolean) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            img.onload = null
+            img.onerror = null
             this.activeCount--
-            this.clearFailed(task.url)
-            task.resolve()
+            if (ok) { this.clearFailed(task.url); task.resolve() }
+            else { this.markFailed(task.url); task.reject(new Error(`Failed: ${task.url}`)) }
             setTimeout(() => this.processQueue(), this.delayBetweenBatches)
         }
-        img.onerror = () => {
-            this.activeCount--
-            this.markFailed(task.url)
-            task.reject(new Error(`Failed: ${task.url}`))
-            setTimeout(() => this.processQueue(), this.delayBetweenBatches)
-        }
+        const timeout = setTimeout(() => { finish(false); img.src = '' }, 15000)
+        img.onload = () => finish(true)
+        img.onerror = () => finish(false)
         img.src = task.url
 
         this.processQueue()
     }
 
     clear() {
-        this.queue = []
-        this.loading.clear()
+        const pending = this.queue.splice(0)
+        for (const task of pending) task.reject(new Error('Avatar queue cleared'))
         this.failed.clear()
-        this.activeCount = 0
+        // Active requests retain their slots until completion or timeout.
+
     }
 }
 
