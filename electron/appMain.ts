@@ -9000,6 +9000,7 @@ function startApp() {
   })
 
   app.on('window-all-closed', () => {
+    if (mainWindowReclaimInProgress) return
     if (process.platform !== 'darwin') {
       if (!isAppQuitting && tray) {
         // 托盘模式：窗口全关不等于退出（正常流程走 hide，这里兜底）
