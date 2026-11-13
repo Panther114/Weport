@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 const state = vi.hoisted(() => ({ account: 'A', root: '' }))
@@ -45,7 +45,7 @@ describe('actual AI account and task boundaries', () => {
     expect(retrieveIndexedMessages).toHaveBeenLastCalledWith(expect.objectContaining({ scope: { sessionIds: ['room'], from, to } }))
   })
   it('carries contradictory bilingual evidence through the agent loop into a dated uncertain correction', async () => {
-    const { service, call } = setup(), chat = service.createChat('Contradiction evaluation')
+    const { service, call } = setup(), chat = service.createChat('Contradiction evaluation', undefined, { memoryEnabled: true })
     const messages = [
       { localId: 1, createTime: 1700000000, rawContent: 'Deadline is Friday.', parsedContent: 'Deadline is Friday.' },
       { localId: 2, createTime: 1700000100, rawContent: '更正：截止时间改为周一，仍待确认。', parsedContent: '更正：截止时间改为周一，仍待确认。' },
@@ -74,7 +74,7 @@ describe('actual AI account and task boundaries', () => {
     expect(claims[1]).toMatchObject({ status: 'uncertain', kind: 'interpretation', evidenceIds: [sourceIds[1]], counterEvidenceIds: [sourceIds[0]], asOf: 1700000100000 })
   })
   it.each(['unavailable', 'changed'])('refuses a model-requested observation when its source is %s', async failure => {
-    const { service, call } = setup(), chat = service.createChat('Unavailable evidence evaluation')
+    const { service, call } = setup(), chat = service.createChat('Unavailable evidence evaluation', undefined, { memoryEnabled: true })
     const message = { localId: 1, createTime: 1700000000, rawContent: 'Original', parsedContent: 'Original',
       senderUsername: 'person', localType: 1, _db_path: 'message.db', _table_name: 'Msg_room' } as any
     const [link] = service.registerEvidence('A', 'room', [message])
@@ -93,7 +93,7 @@ describe('actual AI account and task boundaries', () => {
       _db_path: 'db_storage/message/message_0.db', _table_name: 'Msg_room', senderUsername: 'person', localType: 1 } as any
     const [url] = service.registerEvidence('A', 'room', [message]), id = url.slice('weport-evidence:'.length)
     vi.mocked(chatService.getMessageByIdentity).mockResolvedValue({ success: true, message })
-    expect((await service.resolveEvidence(id)).success).toBe(true)
+    expect(await service.resolveEvidence(id)).toMatchObject({ success: true, message: { content: '你好 evidence', sender: 'person', createTime: 1700000000 } })
     expect(chatService.getMessageByIdentity).toHaveBeenLastCalledWith(expect.objectContaining({ localId: '9007199254740993', db: message._db_path, table: message._table_name }))
     vi.mocked(chatService.getMessageByIdentity).mockResolvedValue({ success: true, message: { ...message, parsedContent: 'changed' } })
     expect((await service.resolveEvidence(id)).error).toContain('changed')
@@ -110,7 +110,7 @@ describe('actual AI account and task boundaries', () => {
     expect(rows[0].status).toBe('superseded'); expect(rows[1].counterEvidenceIds).toEqual([id])
   })
   it('isolates chats and Markdown memory across account switches', () => {
-    const { service } = setup(), chat = service.createChat('Account A')
+    const { service } = setup(), chat = service.createChat('Account A', undefined, { memoryEnabled: true })
     const memory = (service as any).memoryDir()
     writeFileSync(join(memory, 'fact.md'), 'Only A')
     state.account = 'B'
@@ -152,7 +152,7 @@ describe('actual AI account and task boundaries', () => {
     expect(service.listMemoryClaims()).toEqual([])
   })
   it('rejects supplied context labels when a model tries to save them as a verified observation', async () => {
-    const { service, call } = setup(), chat = service.createChat('Supplied context cannot become provenance')
+    const { service, call } = setup(), chat = service.createChat('Supplied context cannot become provenance', undefined, { memoryEnabled: true })
     call.mockResolvedValueOnce({ ok: true, content: '', toolCalls: [{ id: 'save-context', name: 'save_memory_claim', args: {
       statement: 'User supplied text claimed a meeting.', kind: 'observation', asOf: Date.now(), evidenceIds: ['memo-a'],
     } }], usage: { totalTokens: 20 } }).mockResolvedValueOnce({ ok: true, content: 'The supplied text is not verified local history.', usage: { totalTokens: 20 } })
@@ -181,9 +181,14 @@ describe('actual AI account and task boundaries', () => {
 
 
 describe('per-chat memory and automation ownership', () => {
-  it('defaults memory on and persists an explicitly disabled creation choice across restart', () => {
+  it('defaults memory off and persists explicit choices and live changes across restart', () => {
     const { service } = setup()
-    const enabled = service.createChat('Enabled')
+    const enabled = service.createChat('Enabled', undefined, { memoryEnabled: true })
+    const defaultChat = service.createChat('Default')
+    expect(defaultChat.memoryEnabled).toBe(false)
+    expect(service.setMemoryEnabled(defaultChat.id, true).chat.memoryEnabled).toBe(true)
+    expect(service.isMemoryEnabled(defaultChat.id)).toBe(true)
+    expect(service.setMemoryEnabled(defaultChat.id, false).memoryDir).toBe('')
     const disabled = service.createChat('Disabled', undefined, { memoryEnabled: false })
     expect(enabled.memoryEnabled).toBe(true)
     const restarted = new WeportAiService()
@@ -214,6 +219,69 @@ describe('per-chat memory and automation ownership', () => {
     expect(service.getChat(chat.id)?.messages[0].content).toBe(original)
     expect(new WeportAiService().getChat(chat.id)?.messages[0].content).toBe(original)
     expect((service as any).buildApiMessages([message], '', 'minimal')[1].content).toBe(original)
+  })
+  it('preserves interactive archived turns after compaction and restart', () => {
+    const { service } = setup(), chat = service.createChat('History')
+    const old = { id: 'old', role: 'user', content: 'Original request', createdAt: 1 }
+    const recent = { id: 'new', role: 'assistant', content: 'Latest answer', createdAt: 2 }
+    ;(service as any).archiveMessages(chat.id, [old])
+    ;(service as any).persistMessages(chat.id, [old, recent])
+    expect(new WeportAiService().getChat(chat.id)?.messages.map(row => row.id)).toEqual(['old', 'new'])
+  })
+  it('compacts only the provider projection while every original turn survives restart', () => {
+    const { service } = setup(), chat = service.createChat('Compaction')
+    const messages = Array.from({ length: 24 }, (_, i) => ({ id: `turn-${i}`, role: i % 2 ? 'assistant' : 'user', content: '历史证据'.repeat(500), createdAt: i }))
+    ;(service as any).persistMessages(chat.id, messages)
+    vi.spyOn(service as any, 'resolveContextWindow').mockReturnValue(16000)
+    expect(service.compactChat(chat.id)).toMatchObject({ success: true, changed: true })
+    expect((service as any).loadMessages(chat.id).messages.length).toBeLessThan(messages.length)
+    expect(new WeportAiService().getChat(chat.id)?.messages).toEqual(messages)
+  })
+  it('does not replace original turns when archiving fails during compaction', () => {
+    const { service } = setup(), chat = service.createChat('Archive failure')
+    const messages = Array.from({ length: 24 }, (_, i) => ({ id: `turn-${i}`, role: i % 2 ? 'assistant' : 'user', content: 'evidence '.repeat(500), createdAt: i }))
+    ;(service as any).persistMessages(chat.id, messages)
+    vi.spyOn(service as any, 'resolveContextWindow').mockReturnValue(16000)
+    vi.spyOn(service as any, 'archiveMessages').mockImplementation(() => { throw new Error('Archive unavailable') })
+    expect(service.compactChat(chat.id)).toMatchObject({ success: false, changed: false })
+    expect(new WeportAiService().getChat(chat.id)?.messages).toEqual(messages)
+  })
+  it('never registers a run after a damaged transcript read', async () => {
+    const { service, call } = setup(), chat = service.createChat('Damaged')
+    writeFileSync((service as any).chatFilePath(chat.id), '{truncated')
+    await expect(service.runChat(chat.id, 'Continue')).rejects.toThrow()
+    expect(service.hasActiveRuns()).toBe(false)
+    expect(call).not.toHaveBeenCalled()
+  })
+  it('always ends the run when saving the transcript fails', async () => {
+    const { service, call } = setup(), chat = service.createChat('Disk failure')
+    const events: any[] = []; service.setEventEmitter(event => events.push(event))
+    vi.spyOn(service as any, 'persistMessages').mockImplementation(() => { throw new Error('Disk full') })
+    expect(await service.runChat(chat.id, 'Continue')).toMatchObject({ success: false, error: 'Disk full' })
+    expect(service.hasActiveRuns()).toBe(false)
+    expect(events).toContainEqual({ type: 'status', chatId: chat.id, running: false })
+    expect(call).not.toHaveBeenCalled()
+  })
+  it('retains cancellation ownership until a deleted run settles and never recreates its transcript', async () => {
+    const { service, call } = setup(), chat = service.createChat('Deleted while running')
+    let finish!: (value: any) => void
+    call.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const run = service.runChat(chat.id, 'Analyze', { tools: 'none' })
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const file = (service as any).chatFilePath(chat.id)
+    service.deleteChat(chat.id)
+    expect(service.hasActiveRuns()).toBe(true)
+    finish({ ok: true, content: 'Late answer', usage: { totalTokens: 20 } })
+    await run
+    expect(service.hasActiveRuns()).toBe(false)
+    expect(existsSync(file)).toBe(false)
+    expect(service.listChats()).toEqual([])
+  })
+  it('rejects memory changes and manual compaction while a run is active', () => {
+    const { service } = setup(), chat = service.createChat('Busy')
+    ;(service as any).running.set(chat.id, new AbortController())
+    expect(() => service.setMemoryEnabled(chat.id, true)).toThrow('任务结束')
+    expect(service.compactChat(chat.id)).toMatchObject({ success: false, changed: false })
   })
   it('keeps full automation history out of interactive lists and reloads it after restart', () => {
     const { service } = setup()

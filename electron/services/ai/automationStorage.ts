@@ -57,13 +57,19 @@ export function loadChatIndexes<T extends StoredChat>(dataDir: string, workspace
     if (!chat.invocation) {
       const file = join(dataDir, 'sessions', `${chat.id}.json`)
       const archive = join(dataDir, 'sessions', `${chat.id}.archive.jsonl`)
-      const saved = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
-      const archived = existsSync(archive) ? readFileSync(archive, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) : []
-      const first = [...archived, ...(saved.messages || [])].find((message: { role: string }) => message.role === 'user')?.content || ''
-      // Old dispatchers supplied both exact markers; a title is never proof.
-      if (first.includes('这是 WeBot 定时任务的自动执行（') && first.includes('请只输出简洁结论，正文控制在 300 字以内')) {
-        chat.invocation = { kind: 'automation', taskId: 'legacy' }
-        changed = true
+      try {
+        const saved = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+        const archived = existsSync(archive) ? readFileSync(archive, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) : []
+        const first = [...archived, ...(saved.messages || [])].find((message: { role: string }) => message.role === 'user')?.content || ''
+        // Old dispatchers supplied both exact markers; a title is never proof.
+        if (first.includes('这是 WeBot 定时任务的自动执行（') && first.includes('请只输出简洁结论，正文控制在 300 字以内')) {
+          chat.invocation = { kind: 'automation', taskId: 'legacy' }
+          changed = true
+        }
+      } catch (error) {
+        // One damaged transcript must not hide every other conversation. The
+        // original remains untouched and opening it reports the read failure.
+        console.warn('[WeportAI] 无法识别旧版自动任务:', chat.id, error)
       }
     }
     if (chat.invocation?.kind !== 'automation') continue

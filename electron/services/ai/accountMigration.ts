@@ -26,6 +26,6 @@ export function migrateLegacyAi(dataRoot: string, workspaceRoot: string, account
     writeFileSync(join(staging, '.legacy-migrated'), '1')
     renameSync(staging, target)
   }
-  migrate(dataRoot, ['index.json', 'sessions', 'prefix-probe.json'])
+  migrate(dataRoot, ['index.json', 'sessions', 'prefix-probe.json', 'evidence.json'])
   migrate(workspaceRoot, ['memory', 'chats'])
 }

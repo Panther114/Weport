@@ -606,7 +606,8 @@ interface ElectronApi {
     } | null>
     listNotes: (chatId: string) => Promise<{ notes: Array<{ path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }> }>
     readNoteFile: (chatId: string, path: string) => Promise<{ content: string | null }>
-    resolveEvidence: (id: string) => Promise<{ success: boolean; reference?: { accountId: string; sessionId: string; localId: string; idKind: 'local'; db: string; table: string; ts: number; contentHash: string }; error?: string }>
+    setMemoryEnabled: (chatId: string, enabled: boolean) => ReturnType<ElectronApi['ai']['getChat']>
+    resolveEvidence: (id: string) => Promise<{ success: boolean; reference?: { accountId: string; sessionId: string; localId: string; idKind: 'local'; db: string; table: string; ts: number; contentHash: string }; message?: { content: string; sender: string; createTime: number; localType: number }; error?: string }>
     correctMemoryClaim: (value: { id: string; statement: string; correction: string }) => Promise<unknown>
     previewContext: (scope: { accountId: string; sessionIds: string[]; from: number; to: number }) => Promise<{ scope: { accountId: string; sessionIds: string[]; from: number; to: number }; text: string; snapshotAt: number; truncated: boolean }>
     listMemoryClaims: () => Promise<Array<{ id: string; statement: string; kind: 'observation' | 'interpretation'; status: 'active' | 'superseded' | 'uncertain'; asOf: number; evidenceIds: string[]; counterEvidenceIds: string[]; supersedes?: string; correction?: string }>>

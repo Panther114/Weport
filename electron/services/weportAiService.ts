@@ -33,6 +33,9 @@ import type { ModelRecord, ResolvedModel } from './ai/modelRegistry'
 import type { ProviderProfile } from './ai/providerTypes'
 import {
   CHARS_PER_TOKEN,
+  messageChars,
+  weightedTextChars,
+  truncateToolResult,
   COMPACT_RETAIN_RATIO,
   COMPACT_TRIGGER_RATIO,
   buildPrefixFrame,
@@ -55,6 +58,7 @@ import { assertDataScope, restrictSearchResult, validateDataScope, type DataAcce
 import { retrieveIndexedMessages } from './searchRetrieval'
 import { migrateLegacyAi } from './ai/accountMigration'
 import { loadChatIndexes, persistChatIndexes } from './ai/automationStorage'
+import { appendArchive, readArchive, readTranscript, mergeTranscript } from './ai/transcriptStorage'
 import { resolveStorageLocation } from './storageLocations'
 export type { AiImagePart } from './ai/imageParts'
 
@@ -559,6 +563,7 @@ export class WeportAiService {
       persistChatIndexes(this.dataDir, this.chats)
     } catch (e) {
       console.warn('[WeportAI] 写入会话索引失败:', e)
+      throw e
     }
   }
 
@@ -608,6 +613,7 @@ export class WeportAiService {
     try {
       const chat = this.loadChats().find((c) => c.id === chatId)
       if (!chat) return { success: false, changed: false, reason: 'not-found', error: '会话不存在' }
+      if (this.running.has(chatId)) throw new Error('请等待当前任务结束后再压缩上下文')
       const stored = this.loadMessages(chatId)
       const consumer = options?.consumer || 'chat'
       const contextWindow = this.resolveContextWindow(consumer, this.providerProfiles.getForConsumer(consumer))
@@ -631,42 +637,15 @@ export class WeportAiService {
   /** Preserve canonical old turns before the provider projection is compacted. */
   private archiveMessages(chatId: string, messages: AiMessage[]): void {
     if (messages.length === 0) return
-    try {
-      const { appendFileSync } = require('fs') as typeof import('fs')
-      appendFileSync(this.chatArchivePath(chatId), messages.map((message) => JSON.stringify(message)).join('\n') + '\n', 'utf8')
-    } catch (e) {
-      console.warn('[WeportAI] 归档旧会话轮次失败:', e)
-    }
+    appendArchive(this.chatArchivePath(chatId), messages)
   }
 
   private loadArchivedMessages(chatId: string): AiMessage[] {
-    try {
-      const path = this.chatArchivePath(chatId)
-      if (!existsSync(path)) return []
-      return readFileSync(path, 'utf8')
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as AiMessage)
-    } catch {
-      return []
-    }
+    return readArchive<AiMessage>(this.chatArchivePath(chatId))
   }
 
   private loadMessages(chatId: string): { messages: AiMessage[]; compressed: string; lastRun?: AiChatData['lastRun'] } {
-    try {
-      const p = this.chatFilePath(chatId)
-      if (!existsSync(p)) return { messages: [], compressed: '' }
-      const raw = JSON.parse(readFileSync(p, 'utf8')) as {
-        messages?: AiMessage[]
-        compressed?: string
-        lastRun?: AiChatData['lastRun']
-      }
-      const messages = Array.isArray(raw.messages) ? raw.messages : []
-      let compressed = typeof raw.compressed === 'string' ? raw.compressed : ''
-      return { messages, compressed, lastRun: raw.lastRun }
-    } catch {
-      return { messages: [], compressed: '' }
-    }
+    return readTranscript<AiMessage, AiChatData['lastRun']>(this.chatFilePath(chatId))
   }
 
   private persistMessages(
@@ -675,6 +654,7 @@ export class WeportAiService {
     compressed = '',
     lastRun?: AiChatData['lastRun']
   ): void {
+    if (!this.chats.some(chat => chat.id === chatId)) return
     try {
       const target = this.chatFilePath(chatId)
       const tmp = `${target}.${process.pid}.tmp`
@@ -703,6 +683,7 @@ export class WeportAiService {
       renameSync(tmp, target)
     } catch (e) {
       console.warn('[WeportAI] 写入会话消息失败:', e)
+      throw e
     }
   }
 
@@ -822,7 +803,7 @@ export class WeportAiService {
     return lines
   }
 
-  async resolveEvidence(id: string): Promise<{ success: boolean; reference?: EvidenceReference; error?: string }> {
+  async resolveEvidence(id: string): Promise<{ success: boolean; reference?: EvidenceReference; message?: { content: string; sender: string; createTime: number; localType: number }; error?: string }> {
     if (!/^[a-f0-9]{64}$/.test(id)) return { success: false, error: 'Invalid evidence reference.' }
     const account = this.currentAccount()
     const reference = this.readEvidence()[id]
@@ -831,7 +812,12 @@ export class WeportAiService {
     if (this.currentAccount() !== account) return { success: false, error: 'The selected account changed.' }
     if (!result.success || !result.message) return { success: false, error: result.error || 'The source is unavailable.' }
     if (evidenceContentHash(result.message) !== reference.contentHash) return { success: false, error: 'The source changed since this evidence was captured.' }
-    return { success: true, reference }
+    return { success: true, reference, message: {
+      content: String(result.message.parsedContent || result.message.rawContent || ''),
+      sender: result.message.isSend === 1 ? '我' : (result.message.senderDisplayName || result.message.senderUsername || reference.sessionId),
+      createTime: result.message.createTime,
+      localType: result.message.localType,
+    } }
   }
 
   listMemoryClaims(): MemoryClaim[] {
@@ -963,7 +949,7 @@ export class WeportAiService {
 
   isMemoryEnabled(chatId: string): boolean {
     const chat = this.loadChats().find(chat => chat.id === chatId)
-    return Boolean(chat && chat.memoryEnabled !== false)
+    return Boolean(chat && chat.memoryEnabled === true)
   }
 
   createChat(title?: string, invocation?: AiChatMeta['invocation'], options?: { memoryEnabled?: boolean }): AiChatMeta {
@@ -976,7 +962,7 @@ export class WeportAiService {
     const chat: AiChatMeta = {
       id: randomUUID(),
       invocation,
-      memoryEnabled: options?.memoryEnabled !== false,
+      memoryEnabled: options?.memoryEnabled === true,
       title: String(title || '').trim().slice(0, 60) || '新对话',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -988,6 +974,16 @@ export class WeportAiService {
     if (chat.memoryEnabled) mkdirSync(this.memoryDir(), { recursive: true })
     mkdirSync(this.noteDir(chat.id), { recursive: true })
     return chat
+  }
+
+  setMemoryEnabled(chatId: string, enabled: boolean): AiChatData {
+    const chat = this.loadChats().find(chat => chat.id === chatId)
+    if (!chat) throw new Error('对话不存在')
+    if (this.running.has(chatId)) throw new Error('请等待当前任务结束后再切换记忆')
+    const previous = chat.memoryEnabled
+    chat.memoryEnabled = enabled === true
+    try { this.persistChats() } catch (error) { chat.memoryEnabled = previous; throw error }
+    return this.getChat(chatId)!
   }
 
   /** 手动拖拽排序：按传入的 id 顺序写入 sortOrder */
@@ -1025,7 +1021,6 @@ export class WeportAiService {
     if (idx < 0) return false
     // 先中止正在进行的 agent 运行，避免删除后运行继续写回已删除的文件
     this.abort(chatId)
-    this.running.delete(chatId)
     const files = [this.chatFilePath(chatId), this.chatArchivePath(chatId)]
     const workspace = this.chatWorkspaceDir(chatId)
     chats.splice(idx, 1)
@@ -1050,7 +1045,7 @@ export class WeportAiService {
       running: this.running.has(chatId),
       workspaceDir: this.chatWorkspaceDir(chatId),
       memoryDir: this.isMemoryEnabled(chatId) ? this.memoryDir() : '',
-      messages: stored.messages,
+      messages: mergeTranscript(this.loadArchivedMessages(chatId), stored.messages),
       compressed: stored.compressed,
       lastRun: stored.lastRun,
     }
@@ -1062,7 +1057,7 @@ export class WeportAiService {
     const data = this.loadMessages(chatId)
     return { chat, running: this.running.has(chatId), workspaceDir: this.chatWorkspaceDir(chatId),
       memoryDir: this.isMemoryEnabled(chatId) ? this.memoryDir() : '',
-      messages: [...this.loadArchivedMessages(chatId), ...data.messages], compressed: data.compressed, lastRun: data.lastRun }
+      messages: mergeTranscript(this.loadArchivedMessages(chatId), data.messages), compressed: data.compressed, lastRun: data.lastRun }
   }
 
   listNotes(chatId: string): Array<{ path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }> {
@@ -1877,7 +1872,7 @@ export class WeportAiService {
           const keyword = String(args.keyword || '').trim().toLowerCase()
           const limit = clampInt(args.limit, 1, 10, 5)
           const rows = this.loadChats()
-            .filter((chat) => chat.id !== ctx.chatId && chat.memoryEnabled !== false && chat.invocation?.kind !== 'automation')
+            .filter((chat) => chat.id !== ctx.chatId && chat.memoryEnabled === true && chat.invocation?.kind !== 'automation')
             .map((chat) => {
               const stored = this.loadMessages(chat.id)
               const canonical = [...this.loadArchivedMessages(chat.id), ...stored.messages]
@@ -2808,13 +2803,13 @@ export class WeportAiService {
     this.persistChats()
     if (!activeProfile?.apiKey && !getProviderCatalogEntry(activeProfile?.providerId || '')?.apiKeyOptional) return { success: false, error: '未配置 AI API Key，请在「设置 → AI 服务」中添加服务配置' }
 
+    const stored = this.loadMessages(chatId)
     const ctrl = new AbortController()
     this.running.set(chatId, ctrl)
     this.emit({ type: 'status', chatId, running: true })
     this.emit({ type: 'error', chatId, message: '' })
 
     // 首次消息 → 立即生成对话标题（先文本截断兜底，再异步用 AI 提炼更贴切的标题）
-    const stored = this.loadMessages(chatId)
     const firstTitle = chat.title === '新对话' && stored.messages.length === 0
 
     let messages = stored.messages
@@ -2826,44 +2821,7 @@ export class WeportAiService {
       createdAt: Date.now(),
     }
     messages.push(userMessage)
-    if (firstTitle) {
-      const fallbackTitle = this.fallbackTitleFromText(userText) || chat.title
-      chat.title = fallbackTitle
-      chat.titleVersion = processing === 'local-only' ? 2 : 1
-      chat.updatedAt = Date.now()
-      this.persistChats()
-      void (processing === 'local-only' ? Promise.resolve(null) : this.generateAITitle(userText)).then((t) => {
-        if (!t) return
-        const meta = this.loadChats().find((c) => c.id === chatId)
-        // 用户未手动改名（titleVersion=2）时才覆盖（避免吞掉用户起的标题）
-        if (!meta || meta.titleVersion === 2) return
-        meta.title = t
-        meta.titleVersion = 2
-        meta.updatedAt = Date.now()
-        this.persistChats()
-        this.emit({ type: 'chat_title', chatId, title: t })
-      })
-    }
-
-    // 上下文压缩：只在用户回合边界，且只在真正接近窗口上限时触发。
-    //
-    // 触发条件由「条数 > weportAiConversationLimit」改为「体积 > 0.8 × 模型
-    // 窗口」。条数触发几乎每轮都会命中，等于每轮都把整段前缀缓存清零 —— 这是
-    // 命中率被钉在 95% 的直接原因。压缩做得罕见且足够大，这一次 prefix miss
-    // 才能被之后几十轮的高命中摊薄。
     const contextWindow = this.resolveContextWindow(consumer, activeProfile)
-    const compactBudget = this.compactBudgetFor(contextWindow)
-    const { kept, digest, dropped } = this.compressOverflow(messages, compactBudget)
-    if (digest) {
-      this.archiveMessages(chatId, dropped)
-      messages = kept
-      // 唯一一份摘要：合并而不是追加。旧实现是
-      // `compressed = compressed + '\n\n' + digest`，既让摘要无界增长，
-      // 又让每一轮都改写前缀头部。
-      compressed = this.mergeDigest(compressed, digest)
-      this.persistMessages(chatId, messages, compressed)
-    }
-
     let usage: AiRunUsage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0, totalTokens: 0, promptCacheHitTokens: 0 }
     let lastRequestTokens = 0
     let recentRates: number[] = []
@@ -2871,6 +2829,44 @@ export class WeportAiService {
     let error: string | null = null
 
     try {
+      if (firstTitle) {
+        const fallbackTitle = this.fallbackTitleFromText(userText) || chat.title
+        chat.title = fallbackTitle
+        chat.titleVersion = processing === 'local-only' ? 2 : 1
+        chat.updatedAt = Date.now()
+        this.persistChats()
+        void (processing === 'local-only' ? Promise.resolve(null) : this.generateAITitle(userText)).then((t) => {
+          if (!t || this.currentAccount() !== runAccount) return
+          const meta = this.loadChats().find((c) => c.id === chatId)
+          // 用户未手动改名（titleVersion=2）时才覆盖（避免吞掉用户起的标题）
+          if (!meta || meta.titleVersion === 2) return
+          meta.title = t
+          meta.titleVersion = 2
+          meta.updatedAt = Date.now()
+          this.persistChats()
+          this.emit({ type: 'chat_title', chatId, title: t })
+        }).catch(error => console.warn('[WeportAI] 标题生成失败:', error))
+      }
+
+      this.persistMessages(chatId, messages, compressed, stored.lastRun)
+      // 上下文压缩：只在用户回合边界，且只在真正接近窗口上限时触发。
+      //
+      // 触发条件由「条数 > weportAiConversationLimit」改为「体积 > 0.8 × 模型
+      // 窗口」。条数触发几乎每轮都会命中，等于每轮都把整段前缀缓存清零 —— 这是
+      // 命中率被钉在 95% 的直接原因。压缩做得罕见且足够大，这一次 prefix miss
+      // 才能被之后几十轮的高命中摊薄。
+      const compactBudget = this.compactBudgetFor(contextWindow)
+      const { kept, digest, dropped } = this.compressOverflow(messages, compactBudget)
+      if (digest) {
+        this.archiveMessages(chatId, dropped)
+        messages = kept
+        // 唯一一份摘要：合并而不是追加。旧实现是
+        // `compressed = compressed + '\n\n' + digest`，既让摘要无界增长，
+        // 又让每一轮都改写前缀头部。
+        compressed = this.mergeDigest(compressed, digest)
+        this.persistMessages(chatId, messages, compressed)
+      }
+
       const maxSteps = options?.maxSteps === undefined
         ? toolRoundLimit(this.configService.get('weportAiMaxSteps'))
         : toolRoundLimit(options.maxSteps, false)
@@ -2879,7 +2875,7 @@ export class WeportAiService {
       // or plugin/tool changes take effect on the next user turn, never midway
       // through an append-only cache epoch.
       const availableTools = options?.tools === 'none' ? [] : this.buildTools().filter(tool =>
-        (chat.memoryEnabled !== false || !['list_memory_claims', 'save_memory_claim', 'review_prior_analyses'].includes(tool.name)) &&
+        (chat.memoryEnabled === true || !['list_memory_claims', 'save_memory_claim', 'review_prior_analyses'].includes(tool.name)) &&
         (processing !== 'local-only' || !['list_connector_targets', 'create_connector_task'].includes(tool.name)))
       const runToolDefinitions = scope ? availableTools.filter(tool => ['read_session_messages', 'search_messages'].includes(tool.name)).map(tool => ({ ...tool,
         handler: async (args: Record<string, unknown>, toolContext: ToolHandlerContext) => {
@@ -2920,7 +2916,9 @@ export class WeportAiService {
           aborted = true
           break
         }
-        const finalize = runGuard.shouldFinalize(loopCount, maxSteps, lastRequestTokens, contextWindow)
+        const estimatedPromptTokens = (messages.reduce((sum, message) => sum + messageChars(message), 0) +
+          weightedTextChars(compressed + requestShape.systemContent + JSON.stringify(requestShape.tools))) / CHARS_PER_TOKEN
+        const finalize = runGuard.shouldFinalize(loopCount, maxSteps, Math.max(lastRequestTokens, estimatedPromptTokens), contextWindow)
         loopCount += 1
 
         const outputCap = options?.maxTotalTokens ? Math.max(1, Math.floor(options.maxTotalTokens - usage.totalTokens)) : undefined
@@ -3094,15 +3092,10 @@ export class WeportAiService {
           }
           const callsRemaining = toolCalls.length - toolIndex
           const resultBudget = Math.max(0, Math.floor(remainingToolBudget / Math.max(1, callsRemaining)))
-          if (result.length > resultBudget) {
-            const omitted = result.length - resultBudget
-            const suffix = `\n…（截断，剩余 ${omitted} 字符）`
-            result = resultBudget > suffix.length
-              ? result.slice(0, resultBudget - suffix.length) + suffix
-              : result.slice(0, resultBudget)
-          }
-          stepToolChars += result.length
-          remainingToolBudget = Math.max(0, remainingToolBudget - result.length)
+          result = truncateToolResult(result, resultBudget)
+          const resultSize = weightedTextChars(result)
+          stepToolChars += resultSize
+          remainingToolBudget = Math.max(0, remainingToolBudget - resultSize)
           call.ok = ok
           call.result = result
           const callImages = callImagesByIndex[toolIndex]
@@ -3164,11 +3157,13 @@ export class WeportAiService {
         console.warn('[WeportAI] run 异常:', e)
       }
     } finally {
-      this.running.delete(chatId)
-      if (!error && !aborted) {
-        chat.updatedAt = Date.now()
-        this.persistChats()
-      }
+      const stillExists = this.chats.some(row => row.id === chatId)
+      try {
+        if (stillExists && !error && !aborted) {
+          chat.updatedAt = Date.now()
+          this.persistChats()
+        }
+      } catch (failure) { error = readRunError(failure) }
       const contextForRun = {
         promptTokens: usage.promptTokens,
         cacheHitTokens: usage.promptCacheHitTokens,
@@ -3179,10 +3174,13 @@ export class WeportAiService {
         contextWindow,
       }
       // 每次运行结束都记录本会话的用量/命中统计（切换会话后仍显示各自的数据）
-      this.persistMessages(chatId, messages, compressed, {
-        usage: usage.totalTokens > 0 ? usage : undefined,
-        context: contextForRun,
-      })
+      try {
+        if (stillExists) this.persistMessages(chatId, messages, compressed, {
+          usage: usage.totalTokens > 0 ? usage : undefined,
+          context: contextForRun,
+        })
+      } catch (failure) { error = readRunError(failure) }
+      if (this.running.get(chatId) === ctrl) this.running.delete(chatId)
       this.emit({
         type: 'done',
         chatId,

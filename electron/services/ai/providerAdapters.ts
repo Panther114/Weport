@@ -174,34 +174,44 @@ async function* sseEvents(response: Response): AsyncGenerator<{ event: string; d
     const event = eventName
     eventName = ''
     if (!raw || raw === '[DONE]') return
-    try { yield { event, data: JSON.parse(raw) } } catch { /* ignore malformed provider fragments */ }
-  }
-  while (true) {
-    // 流中途断开（ND_ERR_SOCKET / ECONNRESET）同样只抛 `terminated` 这类裸错误。
-    // 这里补一次翻译，让"回答写到一半网络断了"也能读出来是什么原因。
-    let chunk: { value?: Uint8Array; done: boolean }
-    try {
-      chunk = await reader.read()
-    } catch (error) {
-      throw enrichNetworkError(error)
+    let data: any
+    try { data = JSON.parse(raw) } catch { throw new Error('The model returned an invalid streaming event.') }
+    if (event === 'error' || data?.error || ['error', 'response.failed'].includes(data?.type)) {
+      throw new Error(providerError(data?.response || data) || 'The model reported a streaming error.')
     }
-    const { value, done } = chunk
-    buffer += decoder.decode(value, { stream: !done })
-    const lines = buffer.split(/\r?\n/)
-    buffer = lines.pop() || ''
-    for (const line of lines) {
-      if (line === '') {
-        for await (const item of flush()) yield item
-      } else if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim()
-      } else if (line.startsWith('data:')) {
-        dataLines.push(line.slice(5).trim())
+    yield { event, data }
+  }
+  try {
+    while (true) {
+      // 流中途断开（ND_ERR_SOCKET / ECONNRESET）同样只抛 `terminated` 这类裸错误。
+      // 这里补一次翻译，让"回答写到一半网络断了"也能读出来是什么原因。
+      let chunk: { value?: Uint8Array; done: boolean }
+      try {
+        chunk = await reader.read()
+      } catch (error) {
+        throw enrichNetworkError(error)
       }
+      const { value, done } = chunk
+      buffer += decoder.decode(value, { stream: !done })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (line === '') {
+          for await (const item of flush()) yield item
+        } else if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim()
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trim())
+        }
+      }
+      if (done) break
     }
-    if (done) break
+    if (buffer.startsWith('data:')) dataLines.push(buffer.slice(5).trim())
+    for await (const item of flush()) yield item
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
   }
-  if (buffer.startsWith('data:')) dataLines.push(buffer.slice(5).trim())
-  for await (const item of flush()) yield item
 }
 
 function emptyResult(): ProviderStreamResult {
@@ -298,6 +308,7 @@ const openAIResponsesAdapter: ProviderAdapter = {
     if (!response.ok) return readError(response)
     const result = emptyResult()
     const calls = new Map<string, { id: string; name: string; args: string }>()
+    const itemIds = new Map<string, string>()
     for await (const item of sseEvents(response)) {
       const data = item.data as Record<string, any>
       if (item.event === 'response.output_text.delta' || data.type === 'response.output_text.delta') {
@@ -310,13 +321,23 @@ const openAIResponsesAdapter: ProviderAdapter = {
         input.onReasoning(text)
       } else if (item.event === 'response.output_item.added' || data.type === 'response.output_item.added') {
         const output = data.item
-        if (output?.type === 'function_call') calls.set(String(output.call_id || output.id || randomUUID()), { id: String(output.call_id || output.id || randomUUID()), name: String(output.name || ''), args: String(output.arguments || '') })
+        if (output?.type === 'function_call') {
+          const id = String(output.call_id || output.id || randomUUID())
+          calls.set(id, { id, name: String(output.name || ''), args: String(output.arguments || '') })
+          if (output.id) itemIds.set(String(output.id), id)
+        }
       } else if (item.event === 'response.function_call_arguments.delta' || data.type === 'response.function_call_arguments.delta') {
         const id = String(data.call_id || data.item_id || '')
-        const call = calls.get(id)
+        const call = calls.get(itemIds.get(id) || id)
         const piece = String(data.delta || '')
         if (call) call.args += piece
         input.onToolArgs?.(piece)
+      } else if (item.event === 'response.function_call_arguments.done' || data.type === 'response.function_call_arguments.done') {
+        const id = String(data.call_id || data.item_id || '')
+        const call = calls.get(itemIds.get(id) || id)
+        if (call && typeof data.arguments === 'string') call.args = data.arguments
+      } else if (item.event === 'response.incomplete' || data.type === 'response.incomplete') {
+        throw new Error('The model response was incomplete: ' + String(data.response?.incomplete_details?.reason || 'unknown reason'))
       } else if (item.event === 'response.completed' || data.type === 'response.completed') {
         result.usage = usageFromOpenAI(data.response?.usage || data.usage)
         result.finishReason = String(data.response?.status || 'completed')
@@ -330,7 +351,10 @@ const openAIResponsesAdapter: ProviderAdapter = {
 }
 
 function parseArgs(value: string): Record<string, unknown> {
-  try { return JSON.parse(value || '{}') as Record<string, unknown> } catch { return { _raw: value } }
+  let args: unknown
+  try { args = JSON.parse(value || '{}') } catch { throw new Error('The model returned invalid tool arguments.') }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be a JSON object.')
+  return args as Record<string, unknown>
 }
 
 /** Exported for the prefix-stability test: the wire body must be byte-identical across calls. */

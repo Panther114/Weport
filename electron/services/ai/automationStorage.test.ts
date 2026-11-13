@@ -67,6 +67,13 @@ describe('account-local automation history migration', () => {
     persistChatIndexes(data, loadChatIndexes(data, workspace))
     expect(loadChatIndexes(data, workspace)).toHaveLength(2)
   })
+  it('keeps other chats available when one transcript cannot be inspected', () => {
+    const { data, workspace } = fixture()
+    writeFileSync(join(data, 'sessions', 'interactive.json'), '{truncated')
+    const chats = loadChatIndexes(data, workspace)
+    expect(chats.map(chat => chat.id).sort()).toEqual(['automated', 'interactive'])
+    expect(readFileSync(join(data, 'sessions', 'interactive.json'), 'utf8')).toBe('{truncated')
+  })
   it('refuses path traversal from a corrupt stored ID', () => {
     const { data, workspace } = fixture()
     writeFileSync(join(data, 'index.json'), JSON.stringify({ chats: [{ id: '../other' }] }))

@@ -2,6 +2,7 @@ import { wcdbService } from './wcdbService'
 import { ConfigService } from './config'
 import { ContactCacheService } from './contactCacheService'
 import { avatarCacheService } from './avatarCacheService'
+import { chatService } from './chatService'
 import { app, nativeImage } from 'electron'
 import { existsSync, mkdirSync, unlinkSync, renameSync } from 'fs'
 import { readFile, writeFile, mkdir } from 'fs/promises'
@@ -1408,6 +1409,15 @@ class SnsService {
         const result = await wcdbService.getSnsTimeline(limit, offset, usernames, keyword, startTime, endTime)
         if (!result.success || !result.timeline || result.timeline.length === 0) return result
 
+        const authors = [...new Set(result.timeline.map((post: SnsPost) => post.username).filter(Boolean))]
+        const heads = avatarCacheService.getLocalizedHeadAvatars(authors)
+        // SNS may include authors outside the startup contact warmup. Resolve these
+        // through the same batched, local-first pipeline as chat and group avatars.
+        const missing = authors.filter(username => !heads.map[username] &&
+            !avatarCacheService.isResolvable(this.contactCache.get(username)?.avatarUrl))
+        const enriched = missing.length ? await chatService.enrichSessionsContactInfo(missing) : undefined
+        const contacts = enriched?.contacts || {}
+
         const enrichedTimeline = result.timeline.map((post: any) => {
             const contact = this.contactCache.get(post.username)
             const isVideoPost = post.type === 15
@@ -1456,7 +1466,8 @@ class SnsService {
 
             // 头像本地化：head_image.db / 磁盘缓存 → weport-media:// 即时显示；
             // CDN 未缓存时后台下载，下次查询命中本地文件
-            const rawAvatarUrl = contact?.avatarUrl || post.avatarUrl
+            const rawAvatarUrl = heads.map[post.username] || contacts[post.username]?.avatarUrl ||
+                (avatarCacheService.isResolvable(contact?.avatarUrl) ? contact?.avatarUrl : undefined) || post.avatarUrl
             const localAvatarUrl = avatarCacheService.localUrlOrOriginal(rawAvatarUrl)
             if (rawAvatarUrl && localAvatarUrl === rawAvatarUrl) {
                 void avatarCacheService.ensure(rawAvatarUrl)

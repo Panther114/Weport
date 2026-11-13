@@ -105,3 +105,9 @@
         }
     }
 }
+
+@media (prefers-reduced-motion: reduce) {
+    .avatar-component img.avatar-image { transition: none; }
+    .avatar-component .avatar-skeleton,
+    .avatar-component .avatar-loading-icon { animation: none; }
+}

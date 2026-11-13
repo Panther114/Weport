@@ -1199,7 +1199,7 @@ export default function SnsPage({ accountId }: { accountId: string }) {
                       className={`sns-author ${selected.has(a.username) ? 'sns-author-active' : ''}`}
                       onClick={() => toggleAuthor(a.username)}
                     >
-                      <Avatar src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
+                      <Avatar username={a.username} src={a.avatarUrl} name={a.displayName} size={26} shape="circle" />
                       <span className="sns-author-name">{a.displayName}</span>
                       <span className="sns-author-count">{a.postCount ?? ''}</span>
                     </button>

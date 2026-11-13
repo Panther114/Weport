@@ -95,8 +95,30 @@ export function mergeDigest(previous: string, incoming: string, maxChars = DIGES
 }
 
 /** 消息体积估算（工具结果单独成一条 role=tool 消息，不重复计数）。 */
+export function weightedTextChars(text: string): number {
+  const nonAscii = text.match(/[^\x00-\x7f]/g)?.length || 0
+  return text.length + nonAscii * (CHARS_PER_TOKEN - 1)
+}
+
+/** Tool-result budgets use the same conservative multilingual units as compaction. */
+export function truncateToolResult(text: string, budget: number): string {
+  if (weightedTextChars(text) <= budget) return text
+  const suffix = '\n…（工具结果超出上下文预算，已截断）'
+  const suffixSize = weightedTextChars(suffix)
+  const available = Math.max(0, budget - suffixSize)
+  let used = 0, end = 0
+  for (const char of text) {
+    const size = weightedTextChars(char)
+    if (used + size > available) break
+    used += size; end += char.length
+  }
+  return text.slice(0, end) + (budget >= suffixSize ? suffix : '')
+}
+
 export function messageChars(message: CompressibleMessage): number {
-  return message.content.length + (message.reasoning?.length || 0) + 40
+  const body = message.content + (message.reasoning || '') +
+    (message.toolCalls?.length ? JSON.stringify(message.toolCalls) : '')
+  return weightedTextChars(body) + 40
 }
 
 /**
