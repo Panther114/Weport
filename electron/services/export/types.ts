@@ -101,6 +101,7 @@ export interface ExportOptions {
  */
 export interface ExportRequest extends ExportOptions {
   sessionIds?: string[]
+  onlyUnmuted?: boolean
 }
 
 export interface MediaExportItem {

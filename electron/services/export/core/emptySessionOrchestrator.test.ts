@@ -17,7 +17,7 @@ const options: ExportOptions = {
   format: 'txt',
   contentType: 'text',
   exportMedia: false,
-  exportWriteLayout: 'B',
+  exportWriteLayout: 'A', // Keep the previous-artifact fixture in the advertised flat root.
   exportConflictStrategy: 'overwrite',
   sessionLayout: 'shared',
   sessionNameWithTypePrefix: false,

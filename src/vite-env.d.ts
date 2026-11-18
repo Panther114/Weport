@@ -239,6 +239,7 @@ interface ExportRequest {
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
   sessionIds?: string[]
+  onlyUnmuted?: boolean
 }
 
 interface ElectronApi {
@@ -585,16 +586,17 @@ interface ElectronApi {
       error?: string
     }>
     getChat: (chatId: string) => Promise<{
-      chat: { id: string; title: string; createdAt: number; updatedAt: number; memoryEnabled?: boolean; invocation?: { kind: 'automation'; taskId: string; runId?: string } }
+      chat: { id: string; title: string; createdAt: number; updatedAt: number; memoryEnabled?: boolean; accessScope?: import('../electron/services/dataAccessService').DataAccessScope; invocation?: { kind: 'automation'; taskId: string; runId?: string } }
       running: boolean
       workspaceDir: string
       memoryDir: string
+      codingDirectory?: string
       messages: Array<{
         id: string
         role: 'user' | 'assistant' | 'tool'
         content: string
         reasoning?: string
-        toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string }>
+        toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown>; friendly: string; ok: boolean; result?: string; history?: import('../electron/services/ai/chatHistoryDisplay').ChatHistoryDisplay }>
         createdAt: number
         /** 本轮解码计时（ttft / decode / output tokens），用于消息尾部 tok/s 读数 */
         timing?: { ttftMs: number; decodeMs: number; outputTokens: number }
@@ -607,6 +609,7 @@ interface ElectronApi {
     listNotes: (chatId: string) => Promise<{ notes: Array<{ path: string; bytes: number; mtime: number; scope: 'memory' | 'notes' }> }>
     readNoteFile: (chatId: string, path: string) => Promise<{ content: string | null }>
     setMemoryEnabled: (chatId: string, enabled: boolean) => ReturnType<ElectronApi['ai']['getChat']>
+    selectCodingDirectory: (chatId: string, enabled: boolean) => Promise<{ directory?: string | null; cancelled?: boolean }>
     resolveEvidence: (id: string) => Promise<{ success: boolean; reference?: { accountId: string; sessionId: string; localId: string; idKind: 'local'; db: string; table: string; ts: number; contentHash: string }; message?: { content: string; sender: string; createTime: number; localType: number }; error?: string }>
     correctMemoryClaim: (value: { id: string; statement: string; correction: string }) => Promise<unknown>
     previewContext: (scope: { accountId: string; sessionIds: string[]; from: number; to: number }) => Promise<{ scope: { accountId: string; sessionIds: string[]; from: number; to: number }; text: string; snapshotAt: number; truncated: boolean }>

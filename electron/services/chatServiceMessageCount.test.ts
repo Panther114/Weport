@@ -4,7 +4,7 @@ vi.mock('./config', () => ({ ConfigService: class {
   getCacheBasePath() { return process.env.TEMP || '.' }
   get() { return '' }
 } }))
-vi.mock('./wcdbService', () => ({ wcdbService: { getSessionMessageCounts: vi.fn(), getMessageCounts: vi.fn(), openMessageCursor: vi.fn() } }))
+vi.mock('./wcdbService', () => ({ wcdbService: { getSessionMessageCounts: vi.fn(), getMessageCounts: vi.fn(), openMessageCursor: vi.fn(), getContactStatus: vi.fn() } }))
 
 import { chatService, parseExplicitMessageCountHint } from './chatService'
 import { wcdbService } from './wcdbService'
@@ -12,6 +12,25 @@ import { wcdbService } from './wcdbService'
 const countByTableScan = Object.getPrototypeOf(chatService).countSessionMessageCountsByTableScan
 const getSessionMessageCounts = Object.getPrototypeOf(chatService).getSessionMessageCounts
 const getMessages = Object.getPrototypeOf(chatService).getMessages
+const getSessionStatuses = Object.getPrototypeOf(chatService).getSessionStatuses
+
+describe('strict mute status coverage for export (#59)', () => {
+  it.each([{ rawKeys: [] as string[] }, { rawKeys: ['other'] }])('rejects synthesized unmuted status when native keys are %j', async ({ rawKeys }) => {
+    vi.mocked(wcdbService.getContactStatus).mockResolvedValue({ success: true,
+      map: { friend: { isMuted: false, isFolded: false } }, rawKeys })
+    const target = { ensureConnected: async () => ({ success: true }), sessionStatusCache: new Map() }
+    const result = await getSessionStatuses.call(target, ['friend'], true)
+    expect(result.success).toBe(false)
+    expect(target.sessionStatusCache.size).toBe(0)
+  })
+  it('accepts a covered contact and preserves its mute flag', async () => {
+    vi.mocked(wcdbService.getContactStatus).mockResolvedValue({ success: true,
+      map: { friend: { isMuted: true, isFolded: false } }, rawKeys: ['friend'] })
+    const target = { ensureConnected: async () => ({ success: true }), sessionStatusCache: new Map() }
+    expect(await getSessionStatuses.call(target, ['friend'], true)).toMatchObject({ success: true, map: { friend: { isMuted: true } } })
+    expect(target.sessionStatusCache.get('friend').isMuted).toBe(true)
+  })
+})
 const fake = () => ({
   getMessageDbCountSnapshot: vi.fn(async () => ({ success: true, dbPaths: [], dbSignature: 'fixture-signature' })),
   buildMessageDbSignature: vi.fn(() => 'fixture-signature'),

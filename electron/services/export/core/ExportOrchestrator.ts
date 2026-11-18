@@ -333,9 +333,9 @@ export class ExportOrchestrator {
               }
             }
           }
-          // Media ledger paths are relative to the selected export root, including layout A sibling media.
+          // Media ledger paths are relative to the selected export root, including layout B sibling media.
           const writeLayout = this.context.resolveExportWriteLayout(effectiveOptions)
-          const exportBaseDir = writeLayout === 'A' ? path.join(outputDir, 'texts') : outputDir
+          const exportBaseDir = writeLayout === 'B' ? path.join(outputDir, 'texts') : outputDir
           this.context.resetLedgerRuntimeState()
           this.context.loadLedgerMediaIndex(runMediaHashes, outputDir)
           const ledgerSequence = new Map<string, number>()

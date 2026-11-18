@@ -43,6 +43,7 @@ export const TOOL_LABELS: Array<[string, string]> = [
   ['review_prior_analyses', '回顾既往分析'],
   ['get_group_members', '群成员名单'],
   ['read_session_messages', '读取会话消息'],
+  ['display_chat_history', '显示可复制的聊天记录'],
   ['read_chat_images', '看聊天里的图片'],
   ['read_day_events', '单日跨会话时间线'],
   ['read_period_events', '区间跨会话时间线'],

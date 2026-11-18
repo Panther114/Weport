@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 const state = vi.hoisted(() => ({ account: 'A', root: '' }))
@@ -23,6 +23,88 @@ function setup() {
   return { service, call }
 }
 describe('actual AI account and task boundaries', () => {
+  it('revokes stale file calls on a mid-run directory change and on disable', async () => {
+    const { service, call } = setup()
+    const chat = service.createChat('Coding session')
+    const a = mkdirSync(join(state.root, 'a'), { recursive: true })!
+    const b = mkdirSync(join(state.root, 'b'), { recursive: true })!
+    const step = (id: string, name: string, args: unknown) => ({ ok: true, content: '', toolCalls: [{ id, name, args }] })
+    expect(service.getChat(chat.id)?.codingDirectory).toBeUndefined()
+    service.setCodingDirectory(chat.id, 'A', a)
+    call.mockImplementationOnce(async () => {
+      service.setCodingDirectory(chat.id, 'A', b)
+      return step('stale', 'workspace_create_file', { path: 'stale.txt', content: 'Wrong directory' })
+    }).mockResolvedValueOnce(step('list', 'workspace_list', {}))
+      .mockResolvedValueOnce(step('create', 'workspace_create_file', { path: 'valid.txt', content: 'New directory' }))
+      .mockImplementationOnce(async () => {
+        service.setCodingDirectory(chat.id, 'A', null)
+        return step('revoked', 'workspace_create_file', { path: 'revoked.txt', content: 'Disabled' })
+      }).mockResolvedValueOnce(step('absent', 'workspace_create_file', { path: 'missing.txt', content: 'Disabled' }))
+    expect(await service.runChat(chat.id, 'Create a test file', undefined, true)).toMatchObject({ success: true })
+    expect(existsSync(join(a, 'stale.txt')) || existsSync(join(b, 'stale.txt'))).toBe(false)
+    expect(readFileSync(join(b, 'valid.txt'), 'utf8')).toBe('New directory')
+    expect(existsSync(join(b, 'revoked.txt')) || existsSync(join(b, 'missing.txt'))).toBe(false)
+    expect(service.getChat(chat.id)?.messages.filter(m => m.role === 'tool').map(m => m.content)).toEqual([
+      expect.stringContaining('permissions changed'), expect.stringContaining('directory'),
+      expect.stringContaining('Created'), expect.stringContaining('permissions changed'), expect.stringContaining('未知工具'),
+    ])
+  })
+
+  it('keeps workspace grants in the interactive chat and clears them on account change', async () => {
+    const { service, call } = setup()
+    const chat = service.createChat('Interactive')
+    const other = service.createChat('Other')
+    const automation = service.createChat('Automation', { kind: 'automation', taskId: 'fixture' })
+    service.setCodingDirectory(chat.id, 'A', state.root)
+    expect(service.getChat(other.id)?.codingDirectory).toBeUndefined()
+    expect(() => service.setCodingDirectory(automation.id, 'A', state.root)).toThrow()
+    await service.runChat(chat.id, 'Call from the CLI')
+    const request = call.mock.calls[0][4] as { tools: Array<{ function: { name: string } }> }
+    expect(request.tools.map(tool => tool.function.name)).not.toContain('workspace_list')
+    state.account = 'B'
+    expect(service.getChat(chat.id)).toBeNull()
+    state.account = 'A'
+    expect(service.getChat(chat.id)?.codingDirectory).toBeUndefined()
+  })
+
+  it('persists a chronological display from source records without sending card text to the model', async () => {
+    const { service, call } = setup()
+    const chat = service.createChat('Copyable history')
+    vi.mocked(chatService.getMessages).mockResolvedValueOnce({ success: true, hasMore: true, nextOffset: 7, messages: [
+      { createTime: 1700000000, sortSeq: 4, isSend: 1, parsedContent: 'second\noriginal line' },
+      { createTime: 1700000000, sortSeq: 3, senderDisplayName: '联系人', parsedContent: '<first>' },
+    ] } as any)
+    call.mockResolvedValueOnce({ ok: true, content: '', toolCalls: [{ id: 'history', name: 'display_chat_history', args: { sessionId: 'allowed', offset: 5, limit: 2 } }] })
+    expect(await service.runChat(chat.id, 'Give me the chat history', undefined, true)).toMatchObject({ success: true })
+    const transcript = new WeportAiService().getChat(chat.id)!.messages
+    expect(transcript.find(m => m.toolCalls?.length)?.toolCalls?.[0].history).toMatchObject({ hasMore: true, rows: [
+      { sender: '联系人', text: '<first>' }, { sender: '我', text: 'second\noriginal line' },
+    ] })
+    expect(transcript.find(m => m.role === 'tool')?.content).toContain('nextOffset=7')
+    expect(transcript.find(m => m.role === 'tool')?.content).not.toContain('<first>')
+    const wire = (service as any).buildApiMessages(transcript, '', 'system', {})
+    expect(JSON.stringify(wire)).not.toContain('original line')
+  })
+
+  it('rejects a display outside the allowed conversation and keeps the authorized timestamp bounds', async () => {
+    const { service, call } = setup()
+    const chat = service.createChat('Scoped display')
+    vi.mocked(chatService.getMessages).mockResolvedValueOnce({ success: true, messages: [
+      { createTime: 1699999999, parsedContent: 'outside scope' },
+      { createTime: 1700000000, parsedContent: 'inside scope' },
+    ] } as any)
+    call.mockResolvedValueOnce({ ok: true, content: '', toolCalls: [
+      { id: 'outside', name: 'display_chat_history', args: { sessionId: 'private' } },
+      { id: 'inside', name: 'display_chat_history', args: { sessionId: 'allowed' } },
+    ] })
+    expect(await service.runChat(chat.id, 'Show my allowed history', { scope: scope() }, true)).toMatchObject({ success: true })
+    const calls = service.getChat(chat.id)?.messages.find(m => m.toolCalls?.length)?.toolCalls
+    expect(calls?.[0]).toMatchObject({ ok: false })
+    expect(calls?.[0].history).toBeUndefined()
+    expect(calls?.[1].history?.rows.map(row => row.text)).toEqual(['inside scope'])
+    expect(chatService.getMessages).toHaveBeenCalledTimes(1)
+  })
+
   it('preserves fractional millisecond task bounds for reads and shared search', async () => {
     const { service, call } = setup(), chat = service.createChat('Precise date boundary')
     const from = 1700000000001, to = 1700000001999

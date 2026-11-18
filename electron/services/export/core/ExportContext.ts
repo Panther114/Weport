@@ -4681,7 +4681,7 @@ export class ExportContext {
         const exportMediaEnabled = this.isMediaExportEnabled(options);
         const outputDir = path.dirname(outputPath);
         const writeLayout = this.resolveExportWriteLayout(options);
-        if (writeLayout === 'A' && path.basename(outputDir) === 'texts') {
+        if (writeLayout === 'B' && path.basename(outputDir) === 'texts') {
           return {
             exportMediaEnabled,
             mediaRootDir: outputDir,

@@ -39,13 +39,15 @@ import AiMarkdown from './AiMarkdown'
 import MemoryClaims from './MemoryClaims'
 import ContextBoundary, { type PreparedContext } from './ContextBoundary'
 import InvestigationCoverage from './InvestigationCoverage'
+import ChatHistoryCard from './ChatHistoryCard'
+import type { ChatHistoryDisplay } from '../../../electron/services/ai/chatHistoryDisplay'
 import './providerProfiles.css'
 import './workspaceControls.css'
 
 type AiChatMeta = { memoryEnabled?: boolean; id: string; title: string; createdAt: number; updatedAt: number; invocation?: { kind: 'automation'; taskId: string } }
 // `ok` 允许缺省：调用还在进行中时既不是成功也不是失败，`undefined` 让
 // ToolChip 渲染转圈而不是把它标成失败。
-type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string; imageCount?: number }
+type AiToolCall = { id: string; name: string; args: Record<string, unknown>; friendly: string; ok?: boolean; result?: string; imageCount?: number; history?: ChatHistoryDisplay }
 type AiMessage = {
   id: string
   role: 'user' | 'assistant' | 'tool'
@@ -316,6 +318,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [chats, setChats] = useState<AiChatMeta[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [activeMemoryEnabled, setActiveMemoryEnabled] = useState(false)
+  const [codingDirectory, setCodingDirectory] = useState<string | null>(null)
+  const [codingScoped, setCodingScoped] = useState(false)
+  const [codingUpdating, setCodingUpdating] = useState(false)
+  const [codingError, setCodingError] = useState('')
   const [memoryUpdating, setMemoryUpdating] = useState(false)
   const [chatLoading, setChatLoading] = useState(false)
   const openRevision = useRef(0)
@@ -417,6 +423,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       const revision = ++openRevision.current
       setChatLoading(true)
       setActiveMemoryEnabled(false)
+      setCodingDirectory(null)
+      setCodingScoped(false)
+      setCodingError('')
       setRunning(false)
       setCtxStats(null)
       setWorkspaceDir('')
@@ -449,6 +458,8 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           setWorkspaceDir(data.workspaceDir)
           setMemoryDir(data.memoryDir)
           setActiveMemoryEnabled(data.chat.memoryEnabled === true)
+          setCodingDirectory(data.codingDirectory ?? null)
+          setCodingScoped(Boolean(data.chat.accessScope))
           // 缓存命中率/用量是「该会话专属」的：切换会话后显示各自上次运行的数据
           const last = data.lastRun as
             | {
@@ -843,7 +854,17 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       if (activeIdRef.current === sentChatId) { setError(String(e)); setLive(null) }
     } finally {
       sendPending.current.delete(sentChatId)
-      if (activeIdRef.current === sentChatId) setRunning(false)
+      if (activeIdRef.current === sentChatId) {
+        setRunning(false)
+        if (preparedContext?.chatId === sentChatId) {
+          void api.ai.getChat(sentChatId).then(data => {
+            if (activeIdRef.current === sentChatId && data?.chat.accessScope) {
+              setCodingScoped(true)
+              setCodingDirectory(null)
+            }
+          }).catch(() => undefined)
+        }
+      }
     }
   }
 
@@ -864,9 +885,25 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     } finally { setMemoryUpdating(false) }
   }
 
+  async function selectCodingDirectory(enabled: boolean) {
+    if (!activeId || chatLoading || codingUpdating) return
+    const id = activeId
+    const revision = openRevision.current
+    setCodingUpdating(true)
+    setCodingError('')
+    try {
+      const result = await api.ai.selectCodingDirectory(id, enabled)
+      if (activeIdRef.current === id && openRevision.current === revision && !result.cancelled) {
+        setCodingDirectory(result.directory ?? null)
+      }
+    } catch (error) {
+      if (activeIdRef.current === id && openRevision.current === revision) setCodingError(String(error))
+    } finally { setCodingUpdating(false) }
+  }
+
   async function handleNewChat() {
     // 当前已是空的「新对话」→ 复用，不再重复创建
-    if (activeId && !chatLoading && !running && !sendPending.current.has(activeId) && !error && !activeMemoryEnabled && messages.length === 0) {
+    if (activeId && !chatLoading && !running && !sendPending.current.has(activeId) && !error && !activeMemoryEnabled && !codingDirectory && messages.length === 0) {
       setLive(null)
       setError('')
       inputRef.current?.focus()
@@ -1146,6 +1183,20 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               <span className="ai-memory-track" aria-hidden="true"><span /></span>
               <span>记忆</span>
             </button>
+            <div className="ai-coding-control">
+              <button type="button" className="ai-memory-toggle" role="switch" aria-label="文件写入"
+                aria-checked={Boolean(codingDirectory)} disabled={!activeId || chatLoading || codingUpdating || codingScoped}
+                title={codingScoped ? '受限范围对话无法访问工作目录' : codingDirectory || '选择工作目录，允许 AI 读取和修改其文本文件'}
+                onClick={() => void selectCodingDirectory(!codingDirectory)}>
+                <span className="ai-memory-track" aria-hidden="true"><span /></span>
+                <span>文件写入</span>
+              </button>
+              {codingDirectory && <button type="button" className="ai-workspace-picker" disabled={codingUpdating || codingScoped}
+                aria-label="更换工作目录" title={`更换工作目录 · ${codingDirectory}`} onClick={() => void selectCodingDirectory(true)}>
+                <FolderOpen size={14} />
+                <span>{codingDirectory.split(/[\\/]/).filter(Boolean).pop() || codingDirectory}</span>
+              </button>}
+            </div>
             {setup?.model ? (
               <span className="ai-meter ai-meter-model" title={`当前 AI 服务与模型：${setup.model}`}>
                 <span className="ai-meter-label">模型</span>
@@ -1172,18 +1223,6 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                 <b>{usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0}%</b>
               </span>
             ) : null}
-            {usage ? (
-              <span className="ai-meter" title="本轮累计 token 用量（提示 / 补全）">
-                <span className="ai-meter-label">本轮</span>
-                <b>{fmtTokens(usage.totalTokens)} tok</b>
-              </span>
-            ) : null}
-            <button type="button" className="ai-inspector-trigger" aria-label="数据范围与发送预览" aria-pressed={!wsCollapsed && workspaceView === 'scope'}
-              data-active={localOnly || preparedContext?.chatId === activeId || undefined}
-              title={localOnly ? '仅本机模型 · 查看数据范围' : preparedContext?.chatId === activeId ? '已限制为预览范围' : '设置数据范围与发送预览'}
-              onClick={() => { setWsCollapsed(false); setWorkspaceView('scope') }}>
-              <Eye size={13} /><span>{localOnly ? '仅本机' : preparedContext?.chatId === activeId ? '预览范围' : '数据范围'}</span>
-            </button>
             {/* 压缩上下文的显式入口。自动压缩只在用户回合边界且超过 0.8 窗口时
                 触发，长任务中途想主动腾空间没有别的办法。 */}
             <button
@@ -1198,6 +1237,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             </button>
           </div>
         </div>
+        {codingError && <div className="ai-coding-error" role="alert">{codingError}</div>}
 
         {notice && (
           <div className="ai-notice" role="status">
@@ -1261,7 +1301,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                                 <pre>{chunk}</pre>
                               </details>
                             )}
-                            <ToolChip call={c} />
+                            {c.history ? <ChatHistoryCard history={c.history} /> : <ToolChip call={c} />}
                           </div>
                         )
                       })}
@@ -1453,7 +1493,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
             ref={inputRef}
             className="ai-input"
             value={input}
-            placeholder={running ? '正在执行…' : '分析你的聊天记录…'}
+            placeholder={running ? '正在执行…' : codingDirectory ? '输入要完成的代码或文件任务…' : '分析你的聊天记录…'}
             rows={1}
             onChange={(e) => {
               handleInputChange(e.target.value)
@@ -1524,7 +1564,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           <div className="ai-inspector-nav" role="group" aria-label="对话资料分类">
             <button type="button" aria-pressed={workspaceView === 'notes'} onClick={() => setWorkspaceView('notes')}><FileText size={13} />笔记</button>
             <button type="button" aria-pressed={workspaceView === 'coverage'} onClick={() => setWorkspaceView('coverage')}><BookOpen size={13} />调查</button>
-            <button type="button" aria-pressed={workspaceView === 'scope'} onClick={() => setWorkspaceView('scope')}><Eye size={13} />范围</button>
+            <button type="button" aria-label="数据范围与发送预览" aria-pressed={workspaceView === 'scope'} onClick={() => setWorkspaceView('scope')}><Eye size={13} />{localOnly ? '仅本机' : preparedContext?.chatId === activeId ? '预览范围' : '范围'}</button>
           </div>
           <div className="ai-inspector-panel" hidden={workspaceView !== 'coverage'}>
             <InvestigationCoverage messages={messages} />

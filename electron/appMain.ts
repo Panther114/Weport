@@ -1,3 +1,4 @@
+import { resolveRequestedSessionLayout, selectUnmutedConversations } from './services/export/requestPolicy'
 import { SnsProtectionService } from './services/snsProtectionService'
 import { WeBotMessageMonitor } from './services/weBotMessageMonitor'
 /**
@@ -1053,7 +1054,6 @@ function setupNotificationPipeline() {
 // 拉取并持久化到 contactCache，之后所有展示路径都能拿到真实昵称。
 let contactWarmupTimer: NodeJS.Timeout | null = null
 let timelineWarmupTimer: NodeJS.Timeout | null = null
-let groupWarmupTimer: NodeJS.Timeout | null = null
 /** 静默启动（--background）时跳过开机预热，标记为延迟到主窗口首次创建时补跑 */
 let contactWarmupDeferred = false
 
@@ -1076,59 +1076,16 @@ async function warmupContactNames(): Promise<void> {
     if (usernames.length === 0) return
     await chatService.enrichSessionsContactInfo(usernames)
     console.log(`[Weport] 联系人预热完成: ${usernames.length} 个会话`)
-    // 让会话/头像预热先释放 WCDB 队列，再预取 SNS 和群成员数据，
-    // 避免冷启动时多个全量查询争抢同一个串行宿主。
+    // 先释放联系人预热占用的队列，再预取 SNS。群成员只按需查询：
+    // 原生 getGroupMembers 可能长时间阻塞共用的串行 WCDB 宿主。
     if (timelineWarmupTimer) clearTimeout(timelineWarmupTimer)
     timelineWarmupTimer = setTimeout(() => {
       timelineWarmupTimer = null
       void snsService.warmupTimeline()
     }, 200)
     timelineWarmupTimer.unref?.()
-    if (groupWarmupTimer) clearTimeout(groupWarmupTimer)
-    groupWarmupTimer = setTimeout(() => {
-      groupWarmupTimer = null
-      void warmupGroupMembers(sessionsResult.sessions as Array<{ username: string }>)
-    }, 900)
-    groupWarmupTimer.unref?.()
   } catch (e) {
     console.warn('[Weport] 联系人预热失败:', e)
-  }
-}
-
-/** 群成员预热上限：最多预热 12 个群 / 1500 名成员（预算耗尽即停止） */
-const GROUP_WARMUP_MAX = 12
-const GROUP_WARMUP_MEMBER_BUDGET = 1500
-
-/**
- * 预生成群成员面板数据（includeMessageCounts=false，不触发全历史聚合）。
- * 成员头像与显示名进入持久化/内存缓存，后续任何入口（群聊分析面板、
- * 排行、成员画像）都命中本地文件与 LRU，零宿主调用。
- * 单群失败不阻塞；纯后台任务，不等待。
- */
-async function warmupGroupMembers(existingSessions?: Array<{ username: string }>): Promise<void> {
-  try {
-    const sessions = existingSessions || (await chatService.getSessions()).sessions
-    if (!Array.isArray(sessions)) return
-    const groupIds = sessions
-      .map((s) => String(s?.username || '').trim())
-      .filter((u) => u.includes('@chatroom'))
-      .slice(0, GROUP_WARMUP_MAX)
-    if (groupIds.length === 0) return
-    let budget = GROUP_WARMUP_MEMBER_BUDGET
-    let warmedGroups = 0
-    for (const gid of groupIds) {
-      if (budget <= 0) break
-      try {
-        const r = await groupAnalyticsService.getGroupMembersPanelData(gid, { includeMessageCounts: false })
-        if (r.success && Array.isArray(r.data)) budget -= r.data.length
-        warmedGroups += 1
-      } catch {
-        // 单群失败不阻塞其余预热
-      }
-    }
-    console.log(`[Weport] 群成员预热完成: ${warmedGroups} 个群，头像定位缓存 ${avatarCacheService.getHeadImageCacheStats().entries} 条`)
-  } catch (e) {
-    console.warn('[Weport] 群成员预热失败:', e)
   }
 }
 
@@ -3148,19 +3105,15 @@ export function registerIpcHandlers() {
     }
     let sessionIds: string[] = requestedSessionIds || availableSessionIds
 
-    // 过滤无消息会话（公众号/广告账号/空聊天室没有消息表，导出会报 -3 游标错误）。
-    // 数量查询失败时回退为导出全部。
-    try {
-      const countsResult = await wcdbService.getSessionMessageCounts(sessionIds)
-      if (countsResult.success && countsResult.counts) {
-        const withMessages = sessionIds.filter((sid) => Number(countsResult.counts?.[sid] || 0) > 0)
-        const skipped = sessionIds.length - withMessages.length
-        if (skipped > 0) console.log(`[Weport] 跳过 ${skipped} 个无消息会话`)
-        sessionIds = withMessages
+    if (userOptions.onlyUnmuted === true) {
+      try {
+        sessionIds = await selectUnmutedConversations(sessionIds, ids => chatService.getSessionStatuses(ids, true))
+      } catch (error) {
+        return { success: false, successCount: 0, failCount: 0, error: String((error as Error)?.message || error) }
       }
-    } catch (e) {
-      console.warn('[Weport] 会话数量查询失败，导出全部:', e)
     }
+    // Let the collector confirm empty history from a cursor and the message
+    // store. A missing key in a batch count response is not proof of zero rows.
 
     if (sessionIds.length === 0) {
       return { success: true, successCount: 0, failCount: 0, skipped: true, formatFolder }
@@ -3229,14 +3182,10 @@ export function registerIpcHandlers() {
       displayNamePreference: 'group-nickname',
       exportPathStyle: 'windows',
       sessionNameWithTypePrefix: true,
-      sessionLayout: 'shared',
       ...userOptions,
+      sessionLayout: resolveRequestedSessionLayout(userOptions),
     }
     if (requestedSessionIds) exportOptions.sessionIds = requestedSessionIds
-    // 开启媒体导出时按 WeFlow 语义使用 per-session 布局
-    if (exportOptions.exportMedia === true && exportOptions.sessionLayout === 'shared') {
-      exportOptions.sessionLayout = 'per-session'
-    }
 
     try {
       exportService.setRuntimeConfig({
@@ -3871,6 +3820,16 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   }))
   ipcMain.handle('ai:getChat', (_e, chatId: string) => weportAiService.getChat(String(chatId || '')))
   ipcMain.handle('ai:setMemoryEnabled', (_e, chatId: string, enabled: boolean) => weportAiService.setMemoryEnabled(chatId, enabled))
+  ipcMain.handle('ai:selectCodingDirectory', async (event, chatId: string, enabled: boolean) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window !== mainWindow) throw new Error('请在 WeportAI 主窗口中选择工作目录。')
+    const account = weportAiService.codingWorkspaceAccount(chatId)
+    if (!enabled) return { directory: weportAiService.setCodingDirectory(chatId, account, null) }
+    const result = await dialog.showOpenDialog(window, { properties: ['openDirectory'], title: '选择 WeportAI 工作目录',
+      buttonLabel: '允许访问此目录', message: 'AI 可以读取和修改此目录的文本文件。读取的内容可能发送至当前模型服务。' })
+    if (result.canceled || !result.filePaths[0] || window.isDestroyed()) return { cancelled: true }
+    return { directory: weportAiService.setCodingDirectory(chatId, account, result.filePaths[0]) }
+  })
   ipcMain.handle('ai:resolveEvidence', (_e, id: string) => weportAiService.resolveEvidence(String(id || '')))
   ipcMain.handle('ai:listMemoryClaims', () => weportAiService.listMemoryClaims())
   ipcMain.handle('ai:previewContext', (_e, scope: import('./services/dataAccessService').DataAccessScope) => weportAiService.previewContext(scope))
@@ -3904,8 +3863,8 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('ai:saveActions', (_e, actions: any) => ({
     success: weportAiService.saveActions(Array.isArray(actions) ? actions : []),
   }))
-  ipcMain.handle('ai:send', (_e, chatId: string, text: string, options?: import('./services/ai/dataScope').AiRunOptions) =>
-    weportAiService.runChat(String(chatId || ''), String(text || ''), options))
+  ipcMain.handle('ai:send', (event, chatId: string, text: string, options?: import('./services/ai/dataScope').AiRunOptions) =>
+    weportAiService.runChat(String(chatId || ''), String(text || ''), options, BrowserWindow.fromWebContents(event.sender) === mainWindow))
   ipcMain.handle('ai:abort', (_e, chatId: string) => {
     weportAiService.abort(String(chatId || ''))
     return { success: true }

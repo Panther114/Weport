@@ -1165,6 +1165,7 @@ export class WeCloneService {
     onProgress: (done: number, total: number, message: string) => void
   ): Promise<{ digests: string[]; failures: number; hardError: string | null }> {
     let failures = 0
+    let completed = 0
     let hardError: string | null = null
     const results = await this.mapWithConcurrency(
       shards,
@@ -1208,7 +1209,11 @@ export class WeCloneService {
             `涉及会话 ${sessions.join('、') || '未知'}。`
           )
         } finally {
-          onProgress(index + 1, shards.length, `已提炼 ${index + 1}/${shards.length} 段历史`)
+          if (!signal?.aborted) {
+            completed += 1
+            onProgress(completed, shards.length,
+              `已处理 ${completed}/${shards.length} 段历史${failures ? `（失败 ${failures} 段，使用本地统计）` : ''}`)
+          }
         }
       },
       signal

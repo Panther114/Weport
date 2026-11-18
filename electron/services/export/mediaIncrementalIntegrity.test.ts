@@ -25,6 +25,17 @@ afterEach(() => {
 })
 
 describe('incremental media without a previous ledger', () => {
+  it.each([
+    { layout: 'A' as const, directory: '', prefix: 'media/Room' },
+    { layout: 'B' as const, directory: 'texts', prefix: '..' },
+    { layout: 'C' as const, directory: 'Room', prefix: 'media' },
+  ])('keeps media references aligned with the advertised $layout layout', ({ layout, directory, prefix }) => {
+    const context = new ExportContext()
+    const output = path.resolve('fixture-export', directory, 'Room.txt')
+    expect(context.getMediaLayout(output, { format: 'txt', exportMedia: true, exportImages: true,
+      exportWriteLayout: layout, sessionLayout: layout === 'C' ? 'per-session' : 'shared' }))
+      .toMatchObject({ exportMediaEnabled: true, mediaRootDir: path.dirname(output), mediaRelativePrefix: prefix })
+  })
   it('does not trust a stale in-memory content address after an output is changed', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'weport-media-integrity-'))
     roots.push(root)

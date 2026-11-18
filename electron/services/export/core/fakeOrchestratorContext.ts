@@ -173,7 +173,7 @@ export function createFakeOrchestratorContext(config: FakeOrchestratorContextOpt
     getMediaLayout(outputPath: string, options: ExportOptions) {
       const mediaRootDir = path.dirname(outputPath)
       return { exportMediaEnabled: options.exportMedia === true, mediaRootDir,
-        mediaRelativePrefix: options.exportWriteLayout === 'A' && path.basename(mediaRootDir) === 'texts' ? '..'
+        mediaRelativePrefix: options.exportWriteLayout === 'B' && path.basename(mediaRootDir) === 'texts' ? '..'
           : options.sessionLayout === 'shared' ? `media/${path.basename(outputPath, path.extname(outputPath))}` : 'media' }
     },
     isUnboundedDateRange(dateRange?: { start: number; end: number } | null) {

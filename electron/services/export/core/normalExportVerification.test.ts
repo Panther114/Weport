@@ -5,6 +5,7 @@ import * as path from 'node:path'
 import { ExportOrchestrator } from './ExportOrchestrator'
 import { createFakeOrchestratorContext } from './fakeOrchestratorContext'
 import { latestArtifactUnits } from '../ledger'
+import { resolveRequestedSessionLayout } from '../requestPolicy'
 let root=''
 afterEach(()=>{vi.restoreAllMocks();if(root)fs.rmSync(root,{recursive:true,force:true})})
 describe('normal export is independent of live diagnostic checks',()=>{
@@ -23,7 +24,11 @@ describe('normal export is independent of live diagnostic checks',()=>{
     })
     const orchestrator = new ExportOrchestrator(harness.context)
     const options = { format: 'txt' as const, exportMedia: true, exportImages: true, exportConflictStrategy: 'incremental' as const, exportWriteLayout: layout, sessionLayout: layout === 'C' ? 'per-session' as const : 'shared' as const }
-    expect((await orchestrator.exportSessions(['room'], root, options)).success).toBe(true)
+    options.sessionLayout = resolveRequestedSessionLayout(options)
+    const first = await orchestrator.exportSessions(['room'], root, options)
+    expect(first.success).toBe(true)
+    expect(path.dirname(first.sessionOutputPaths!.room)).toBe(
+      layout === 'B' ? path.join(root, 'texts') : layout === 'C' ? path.join(root, 'Room') : root)
     expect((await orchestrator.exportSessions(['room'], root, options)).success).toBe(true)
     expect(harness.exportedSessions).toHaveLength(1)
     fs.writeFileSync(attachment, 'modified')

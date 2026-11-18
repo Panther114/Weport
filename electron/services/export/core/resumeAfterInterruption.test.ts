@@ -37,7 +37,7 @@ const runOptions: ExportOptions = {
   format: 'txt',
   contentType: 'text',
   exportMedia: false,
-  exportWriteLayout: 'B',
+  exportWriteLayout: 'A', // Advertised flat-root layout; this suite inspects root artifacts.
   exportConflictStrategy: 'overwrite',
   sessionLayout: 'shared',
   sessionNameWithTypePrefix: false,

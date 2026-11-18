@@ -2170,7 +2170,7 @@ class ChatService {
     }
   }
 
-  async getSessionStatuses(usernames: string[]): Promise<{
+  async getSessionStatuses(usernames: string[], requireKnown = false): Promise<{
     success: boolean
     map?: Record<string, { isFolded?: boolean; isMuted?: boolean }>
     error?: string
@@ -2188,6 +2188,15 @@ class ChatService {
       const result = await wcdbService.getContactStatus(usernames)
       if (!result.success || !result.map) {
         return { success: false, error: result.error || '获取会话状态失败' }
+      }
+
+      // Native normalization fills absent contacts with false. An explicit
+      // export restriction must verify native coverage before trusting it.
+      if (requireKnown) {
+        const returned = new Set(result.rawKeys || [])
+        if (usernames.some(username => !returned.has(username))) {
+          return { success: false, error: '部分会话免打扰状态未知，请重试' }
+        }
       }
 
       const now = Date.now()

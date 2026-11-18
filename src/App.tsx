@@ -630,6 +630,7 @@ export default function App() {
   const [writeLayout, setWriteLayout] = useState<WriteLayout>('A')
   const [showAdvanced, setShowAdvanced] = useState(true)
   const [exportSessions, setExportSessions] = useState<ExportSessionPickerItem[]>([])
+  const [exportOnlyUnmuted, setExportOnlyUnmuted] = useState(false)
   const [selectedExportSessionIds, setSelectedExportSessionIds] = useState<Set<string>>(new Set())
   const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('selected')
   const [exportFavoritesByWxid, setExportFavoritesByWxid] = useState<ExportSessionFavoritesByWxid>({})
@@ -1487,6 +1488,7 @@ export default function App() {
       // v0.9.6: the IPC integrator must scope the main-process session list to
       // this explicit selection before calling exportService.exportSessions.
       sessionIds: exportSelectionMode === 'selected' ? Array.from(selectedExportSessionIds) : undefined,
+      onlyUnmuted: exportOnlyUnmuted,
       format,
       dateRange,
       exportImages: exportMedia.images,
@@ -3096,6 +3098,12 @@ export default function App() {
                     allVisibleSelected={allVisibleExportSessionsSelected}
                     disabled={busy}
                   />
+                  <label className="check-row">
+                    <input type="checkbox" checked={exportOnlyUnmuted} disabled={busy} style={{ accentColor: 'var(--accent)' }}
+                      onChange={event => setExportOnlyUnmuted(event.target.checked)} />
+                    仅导出未开启免打扰的私聊和群聊
+                  </label>
+                  {exportOnlyUnmuted && <p className="hint">导出时重新读取微信状态，排除公众号及免打扰会话；适用于全部或已选范围。</p>}
                 </div>
               </div>
 

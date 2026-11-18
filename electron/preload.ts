@@ -360,6 +360,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listNotes: (chatId: string) => ipcRenderer.invoke('ai:listNotes', chatId),
     readNoteFile: (chatId: string, path: string) => ipcRenderer.invoke('ai:readNoteFile', chatId, path),
     setMemoryEnabled: (chatId: string, enabled: boolean) => ipcRenderer.invoke('ai:setMemoryEnabled', chatId, enabled),
+    selectCodingDirectory: (chatId: string, enabled: boolean) => ipcRenderer.invoke('ai:selectCodingDirectory', chatId, enabled),
     resolveEvidence: (id: string) => ipcRenderer.invoke('ai:resolveEvidence', id),
     listMemoryClaims: () => ipcRenderer.invoke('ai:listMemoryClaims'),
     correctMemoryClaim: (value: { id: string; statement: string; correction: string }) => ipcRenderer.invoke('ai:correctMemoryClaim', value),

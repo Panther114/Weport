@@ -10,6 +10,7 @@ it('rebuilds legacy artifact references while preserving stable option ordering'
   const account = 'fixture'
   const options = { format: 'json', exportFiles: true }
   expect(exportArtifactFingerprint(account, options)).not.toBe(optionsFingerprint({ account, options }))
+  expect(exportArtifactFingerprint(account, options)).not.toBe(optionsFingerprint({ contractVersion: 3, account, options }))
   expect(exportArtifactFingerprint(account, options)).toBe(exportArtifactFingerprint(account, { exportFiles: true, format: 'json' }))
   expect(exportArtifactFingerprint('another-account', options)).not.toBe(exportArtifactFingerprint(account, options))
 })

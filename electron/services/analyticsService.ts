@@ -255,7 +255,22 @@ class AnalyticsService {
   ): Promise<void> {
     const account = this.accountScope()
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, true, beginTimestamp, endTimestamp)
-    if (!cursorResult.success || !cursorResult.cursor) throw new Error(cursorResult.error || '无法读取分析消息游标')
+    if (!cursorResult.success || !cursorResult.cursor) {
+      // Native -3 also covers synchronized conversations without a local Msg table.
+      // Match the Reader's empty-history check: never hide a missing store or an
+      // unknown/failed count, and never trust a stale session-list count hint.
+      if (cursorResult.errorCode === -3) {
+        if (account !== this.accountScope()) throw new Error('分析期间账号已切换')
+        const databases = await wcdbService.listMessageDbs()
+        if (databases.success && databases.data?.some(path => String(path || '').trim())) {
+          const counted = await wcdbService.getSessionMessageCounts([sessionId])
+          if (account !== this.accountScope()) throw new Error('分析期间账号已切换')
+          if (counted.success && Object.prototype.hasOwnProperty.call(counted.counts || {}, sessionId) &&
+              counted.counts![sessionId] === 0) return
+        }
+      }
+      throw new Error(cursorResult.error || '无法读取分析消息游标')
+    }
 
     try {
       let hasMore = true

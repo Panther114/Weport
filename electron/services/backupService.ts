@@ -3,6 +3,7 @@ import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync
 import { copyFile, link, readFile as readFileAsync, mkdtemp, writeFile } from 'fs/promises'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { tmpdir } from 'os'
+import { randomUUID } from 'crypto'
 import * as tar from 'tar'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
@@ -704,6 +705,14 @@ export class BackupService {
   async createBackup(outputPath: string, options: BackupOptions = {}): Promise<{ success: boolean; filePath?: string; manifest?: BackupManifest; error?: string }> {
     let stagingDir = ''
     try {
+      if (!String(outputPath || '').trim()) throw new Error('未指定备份输出路径')
+      // The directory picker and older clients pass a folder; explicit file
+      // destinations remain supported. Keep .zip for the existing restore picker
+      // (the backup format is still tar, optionally gzip-compressed).
+      if (existsSync(outputPath) && statSync(outputPath).isDirectory()) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        outputPath = join(outputPath, `Weport-Backup-${stamp}-${randomUUID().slice(0, 8)}.zip`)
+      }
       emitBackupProgress({ phase: 'preparing', message: '正在连接数据库' })
       const connected = await this.ensureConnected()
       if (!connected.success || !connected.wxid || !connected.dbPath || !connected.dbStorage) {

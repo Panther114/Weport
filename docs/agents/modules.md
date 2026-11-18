@@ -156,8 +156,10 @@ ARKME-JSON / WECLONE / SQL) with `群聊_`/`私聊_` prefixes. Defaults: 目录�
 (exportWriteLayout A + sessionLayout `shared`, text flat at root), conflict
 `overwrite`, `sessionNameWithTypePrefix: true`; layout C maps to
 `sessionLayout: per-session` (text-only exports honor it too —
-`ExportOrchestrator` respects an explicit sessionLayout). Media export
-auto-switches to per-session dirs. `export_log.txt` is only updated for TXT
+`ExportOrchestrator` respects an explicit sessionLayout). Layout B writes text
+under `texts/` with media grouped by type beside it. Explicit layout choices are
+preserved for media exports; callers without a sessionLayout fall back to
+per-session dirs when media is enabled. `export_log.txt` is only updated for TXT
 and JSON runs (legacy v0.6.x format: `TXT: <time> · success=N fail=N` lines);
 清空导出库 clears every format folder + the log.
 
