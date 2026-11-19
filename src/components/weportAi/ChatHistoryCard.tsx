@@ -3,6 +3,8 @@ import { Check, Copy } from 'lucide-react'
 import type { ChatHistoryDisplay } from '../../../electron/services/ai/chatHistoryDisplay'
 import { copyTextToClipboard } from '../../utils/clipboard'
 
+const historyTimestamp = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}):\d{2}$/
+
 export default function ChatHistoryCard({ history }: { history: ChatHistoryDisplay }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const { title, rows, hasMore, clipped } = history
@@ -22,9 +24,16 @@ export default function ChatHistoryCard({ history }: { history: ChatHistoryDispl
       </button>}
     </header>
     {rows.length > 0 ? <ol tabIndex={0} aria-label="聊天记录内容">
-      {rows.map((row, index) => <li key={index}>
-        <time>{row.time}</time> <b>{row.sender}</b> <span>{row.text}</span>
-      </li>)}
+      {rows.map((row, index) => {
+        const [, day, minute] = historyTimestamp.exec(row.time) ?? []
+        const startsDay = day && !rows[index - 1]?.time.startsWith(`${day} `)
+
+        return <li key={index}>
+          {startsDay ? <div className="ai-history-day"><time dateTime={day}>{day}</time></div> : null}
+          <time dateTime={day ? row.time.replace(' ', 'T') : undefined} title={row.time}>{minute ?? row.time}</time>{' '}
+          <b>{row.sender}</b> <span>{row.text}</span>
+        </li>
+      })}
     </ol> : <p>此页没有聊天记录</p>}
   </section>
 }

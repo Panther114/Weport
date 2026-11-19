@@ -41,10 +41,14 @@
 .ai-history-card header > span { color: var(--text-dim); font-size: 11px; white-space: nowrap; }
 .ai-history-card button { margin-inline-start: auto; flex: none; min-width: 71px; min-height: 26px; }
 .ai-history-card ol { margin: 0; padding: 5px 9px; list-style: none; max-height: 14rem; overflow: auto; }
-.ai-history-card li { padding-block: 2px; color: var(--text); line-height: 1.5; overflow-wrap: anywhere; }
-.ai-history-card time { margin-inline-end: 3px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
-.ai-history-card li b { margin-inline-end: 3px; color: var(--accent); font-weight: 600; }
+.ai-history-card li { padding-block: 1px; color: var(--text); font-size: 11px; line-height: 1.3; overflow-wrap: anywhere; }
+.ai-history-card time { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ai-history-card li > time, .ai-history-card li b { margin-inline-end: 2px; }
+.ai-history-card li b { color: var(--accent); font-weight: 600; }
 .ai-history-card li span { white-space: pre-wrap; }
+.ai-history-day { display: flex; align-items: center; gap: 8px; margin-block: 5px 3px; }
+.ai-history-card li:first-child .ai-history-day { margin-block-start: 0; }
+.ai-history-day::before, .ai-history-day::after { content: ''; flex: 1; border-top: 1px solid var(--stroke-l1); }
 .ai-history-card p { margin: 0; padding: 7px 9px; color: var(--text-dim); }
 .ai-inspector-nav button:focus-visible, .ai-workspace-picker:focus-visible, .ai-history-card :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @media (prefers-reduced-motion: reduce) {
