@@ -380,23 +380,19 @@ function formatMessageLine(m: Message, sessionName: string, myWxid: string, sess
   return `[${formatTime(Number(m.createTime) || 0)}] ${sessionPrefix}${sender}: ${body}`
 }
 
+const CHAT_HISTORY_PAGE_LIMIT = 1000
+
 function buildHistoryDisplay(name: string, messages: Message[], hasMore: boolean): ChatHistoryDisplay {
-  const display: ChatHistoryDisplay = { title: name, rows: [], hasMore, clipped: false }
-  let budget = 60_000
-  for (const message of messages) {
-    const text = message.parsedContent || (message.localType === 1 ? message.rawContent : '') || '[媒体消息]'
-    if (text.length > budget) {
-      display.clipped = true
-      if (display.rows.length) break
-    }
-    display.rows.push({
+  return {
+    title: name,
+    hasMore,
+    clipped: false,
+    rows: messages.map(message => ({
       time: formatTime(message.createTime),
       sender: message.isSend === 1 ? '我' : message.senderDisplayName || message.senderUsername || name,
-      text: text.length > budget ? text.slice(0, budget) + '…' : text,
-    })
-    budget -= text.length
+      text: message.parsedContent || (message.localType === 1 ? message.rawContent : '') || '[媒体消息]',
+    })),
   }
-  return display
 }
 
 function countMatchesInRange(
@@ -1995,7 +1991,7 @@ export class WeportAiService {
             startTime: { type: 'string', description: 'Optional window start: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (default: beginning)' },
             endTime: { type: 'string', description: 'Optional window end: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (default: now)' },
             limit: toolName === 'display_chat_history'
-              ? { type: 'integer', minimum: 1, maximum: 100, description: 'Maximum displayed messages (default 50)' }
+              ? { type: 'integer', minimum: 1, maximum: CHAT_HISTORY_PAGE_LIMIT, description: `Maximum displayed messages (default ${CHAT_HISTORY_PAGE_LIMIT})` }
               : { type: 'integer', minimum: 1, maximum: 500, description: 'Max messages (default 400); substantial contiguous reading for general analysis' },
             offset: { type: 'integer', minimum: 0, description: 'Pagination offset (default 0); use nextOffset from the previous result' },
             oldestFirst: { type: 'boolean', description: 'Return oldest first when true (default false = newest first)' },
@@ -2012,7 +2008,9 @@ export class WeportAiService {
           const sessionId = String(args.sessionId || '').trim()
           if (!sessionId) return '错误：缺少 sessionId。'
           const display = toolName === 'display_chat_history'
-          const limit = display ? clampInt(args.limit, 1, 100, 50) : clampInt(args.limit, 1, 500, 400)
+          const limit = display
+            ? clampInt(args.limit, 1, CHAT_HISTORY_PAGE_LIMIT, CHAT_HISTORY_PAGE_LIMIT)
+            : clampInt(args.limit, 1, 500, 400)
           const offset = Math.max(0, Math.floor(Number(args.offset) || 0))
           const startSec = Number.isFinite(Number(args.__scopeFrom)) ? Math.ceil(Number(args.__scopeFrom) / 1000) : normalizeTimeSec(args.startTime)
           const endSec = Number.isFinite(Number(args.__scopeTo)) ? Math.floor(Number(args.__scopeTo) / 1000) : normalizeTimeSec(args.endTime)
@@ -2031,8 +2029,7 @@ export class WeportAiService {
             const chronological = messages.slice().sort((a, b) => a.createTime - b.createTime || a.sortSeq - b.sortSeq)
             const history = buildHistoryDisplay(name, chronological, Boolean(result.hasMore))
             ctx.attachHistory?.(history)
-            const more = history.clipped ? ' Page exceeded the display size; use a smaller limit for that page if needed.'
-              : result.hasMore ? ` More results: nextOffset=${nextOffset}.` : ''
+            const more = result.hasMore ? ` More results: nextOffset=${nextOffset}.` : ''
             return `Displayed ${history.rows.length} messages from "${name}" at offset ${offset}.${more}`
           }
           if (messages.length === 0) return '该页没有返回消息；这不证明其他分页或时间段没有消息。\nCoverage: ' + JSON.stringify({ requestedStart: startSec || null, requestedEnd: endSec || null, offset, returned: 0, hasMore: Boolean(result.hasMore), completeWindow: offset === 0 && !result.hasMore, snapshotTime: Date.now() })

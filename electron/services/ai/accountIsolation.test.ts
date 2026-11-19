@@ -86,6 +86,28 @@ describe('actual AI account and task boundaries', () => {
     expect(JSON.stringify(wire)).not.toContain('original line')
   })
 
+  it.each([undefined, 1500])('displays a full 1000-row page with requested limit %s', async (limit) => {
+    const { service, call } = setup()
+    const chat = service.createChat('Full history page')
+    const messages = Array.from({ length: 1000 }, (_, index) => ({
+      createTime: 1700000000 + index, parsedContent: `Message ${index}: ${'x'.repeat(100)}`,
+    }))
+    vi.mocked(chatService.getMessages).mockResolvedValueOnce({
+      success: true, hasMore: true, nextOffset: 1000, messages,
+    } as Awaited<ReturnType<typeof chatService.getMessages>>)
+    call.mockResolvedValueOnce({
+      ok: true, content: '', toolCalls: [{
+        id: 'history', name: 'display_chat_history', args: { sessionId: 'allowed', limit },
+      }],
+    })
+    expect(await service.runChat(chat.id, 'Give me the chat history', undefined, true)).toMatchObject({ success: true })
+    expect(chatService.getMessages).toHaveBeenCalledWith('allowed', 0, 1000, 0, 0, false)
+    const transcript = service.getChat(chat.id)!.messages
+    const history = transcript.find(message => message.toolCalls?.length)?.toolCalls?.[0].history
+    expect(history?.rows.map(row => row.text)).toEqual(messages.map(message => message.parsedContent))
+    expect(transcript.find(message => message.role === 'tool')?.content).toContain('nextOffset=1000')
+  })
+
   it('rejects a display outside the allowed conversation and keeps the authorized timestamp bounds', async () => {
     const { service, call } = setup()
     const chat = service.createChat('Scoped display')
