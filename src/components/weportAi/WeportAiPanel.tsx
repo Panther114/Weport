@@ -330,6 +330,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const [messages, setMessages] = useState<AiMessage[]>([])
   const [running, setRunning] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
+  const liveByChat = useRef(new Map<string, LiveState>())
   const [input, setInput] = useState('')
   const [preparedContext, setPreparedContext] = useState<{ chatId: string; context: PreparedContext } | null>(null)
   const [localOnly, setLocalOnly] = useState(false)
@@ -413,12 +414,6 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
   const openChat = useCallback(
     async (id: string) => {
       if (activeIdRef.current === id && !chatLoading && !error) return
-      // 切换前中止旧会话的运行：否则旧会话的 status:false 事件会被下面的
-      // chatId 过滤丢弃，running 永远卡在 true，Stop 也会打到错误的会话
-      if (activeId && activeId !== id) {
-        void api.ai.abort(activeId)
-        setRunning(false)
-      }
       // Loading or failed reads are never evidence that a stored chat is empty.
       const revision = ++openRevision.current
       setChatLoading(true)
@@ -440,7 +435,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       // 页面就永远停在空态（真机上表现为「打开 WeportAI 看不到上次的对话」）。
       activeIdRef.current = id
       setMessages([])
-      setLive(null)
+      setLive(liveByChat.current.get(id) ?? null)
       setError('')
       setUsage(null)
       setNotes([])
@@ -454,7 +449,9 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           // A recreated renderer missed the initial status event. A newer event
           // wins over this snapshot if the run finishes while getChat is pending.
           if (runStatusRevisionRef.current === statusRevision) setRunning(data.running === true)
-          setMessages(data.messages || [])
+          const stored = data.messages || []
+          const storedIds = new Set(stored.map(message => message.id))
+          setMessages(current => [...stored, ...current.filter(message => !storedIds.has(message.id))])
           setWorkspaceDir(data.workspaceDir)
           setMemoryDir(data.memoryDir)
           setActiveMemoryEnabled(data.chat.memoryEnabled === true)
@@ -502,7 +499,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
         if (openRevision.current === revision) setChatLoading(false)
       }
     },
-    [api, activeId, chatLoading, error],
+    [api, chatLoading, error],
   )
 
   const ensureChat = useCallback(async () => {
@@ -523,7 +520,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       void ensureChat().catch(failure => setError(String(failure))).finally(() => { initializing.current = false })
     }
     void refreshActions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
 
+  useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
       // 菜单渲染在 body 下的浮层里（不在 actionsRef 内），所以两处都要看：
       // 只查 actionsRef 会让"点菜单项"先把菜单关掉，点击落空。
@@ -535,26 +535,34 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
     document.addEventListener('mousedown', onDocClick)
 
     const unsub = api.ai.onEvent((e: AiEvent) => {
-      if (e.chatId !== activeIdRef.current) return
+      const selected = e.chatId === activeIdRef.current
+      // Keep the current step available when the user returns mid-stream.
+      const updateLive = (update: (previous: LiveState | null) => LiveState | null) => {
+        const next = update(liveByChat.current.get(e.chatId) ?? null)
+        if (next) liveByChat.current.set(e.chatId, next)
+        else liveByChat.current.delete(e.chatId)
+        if (selected) setLive(next)
+      }
       switch (e.type) {
         case 'status':
+          if (!selected) break
           runStatusRevisionRef.current += 1
           setRunning(e.running)
           break
         case 'context':
-          setCtxStats({ promptTokens: e.promptTokens, cacheHitTokens: e.cacheHitTokens, lastRequestTokens: e.lastRequestTokens, recentRate: e.recentRate, contextWindow: e.contextWindow })
+          if (selected) setCtxStats({ promptTokens: e.promptTokens, cacheHitTokens: e.cacheHitTokens, lastRequestTokens: e.lastRequestTokens, recentRate: e.recentRate, contextWindow: e.contextWindow })
           break
         case 'reasoning_delta':
-          setLive((prev) => applyDelta(prev, 'reasoning', e.delta))
+          updateLive((prev) => applyDelta(prev, 'reasoning', e.delta))
           break
         case 'text_delta':
-          setLive((prev) => applyDelta(prev, 'text', e.delta))
+          updateLive((prev) => applyDelta(prev, 'text', e.delta))
           break
         case 'deltas': {
           // 批量 delta：一批只做一次状态更新（逐 token 更新会把整段 markdown
           // 每个 delta 都重新解析一遍，长回复下渲染层自己把自己拖慢）。
           const items = e.items
-          setLive((prev) => {
+          updateLive((prev) => {
             let cur = prev
             for (const item of items) cur = applyDelta(cur, item.kind, item.delta)
             return cur
@@ -562,7 +570,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           break
         }
         case 'tool_start':
-          setLive((prev) => ({
+          updateLive((prev) => ({
             reasoning: prev?.reasoning || '',
             text: prev?.text || '',
             firstTokenAt: prev?.firstTokenAt,
@@ -574,7 +582,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           }))
           break
         case 'tool_result':
-          setLive((prev) => ({
+          updateLive((prev) => ({
             reasoning: prev?.reasoning || '',
             text: prev?.text || '',
             firstTokenAt: prev?.firstTokenAt,
@@ -585,12 +593,13 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
                 : t,
             ),
           }))
-          if (e.name === 'write_note' || e.name === 'list_notes') setNotesDirty(true)
+          if (selected && (e.name === 'write_note' || e.name === 'list_notes')) setNotesDirty(true)
           break
         case 'assistant_message': {
           // 每个步骤（含工具轮次）归档进 transcript，live 开一个全新的气泡 ——
           // 工具卡不再跨步骤累积，TPS 时间窗也回到本步（见 emptyLive 注释）。
-          setLive(emptyLive())
+          updateLive(emptyLive)
+          if (!selected) break
           const msg = e as unknown as { message: AiMessage; timing?: AiMessage['timing'] }
           setMessages((prev) => (prev.some((m) => m.id === msg.message.id) ? prev : [...prev, msg.timing ? { ...msg.message, timing: msg.timing } : msg.message]))
           break
@@ -599,12 +608,15 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
           void refreshChats().catch(() => undefined)
           break
         case 'error':
-          if (e.message) {
+          if (selected && e.message) {
             setError(e.message)
-            setLive(null)
           }
+          if (e.message) updateLive(() => null)
           break
         case 'done': {
+          updateLive(() => null)
+          void refreshChats().catch(() => undefined)
+          if (!selected) break
           setUsage(
             e.usage
               ? {
@@ -617,22 +629,10 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
               : null,
           )
           if (e.context) setCtxStats(e.context)
-          setLive(null)
-          void refreshChats().catch(() => undefined)
-          void (async () => {
-            if (activeId) {
-              try {
-                const data = await api.ai.getChat(activeId)
-                if (data && activeIdRef.current === activeId) setMessages(data.messages || [])
-              } catch { /* noop */ }
-            }
-          })()
-          if (notesDirty) {
-            setNotesDirty(false)
-            if (activeId) {
-              void api.ai.listNotes(activeId).then((n) => { if (activeIdRef.current === activeId) setNotes(n.notes || []) }).catch(() => undefined)
-            }
-          }
+          const revision = openRevision.current
+          void api.ai.getChat(e.chatId).then(data => {
+            if (data && activeIdRef.current === e.chatId && openRevision.current === revision) setMessages(data.messages || [])
+          }).catch(() => undefined)
           break
         }
       }
@@ -641,8 +641,7 @@ export default function WeportAiPanel({ onOpenSettings }: { onOpenSettings?: () 
       unsub()
       document.removeEventListener('mousedown', onDocClick)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId])
+  }, [api, refreshChats])
 
   useEffect(() => {
     if (notesDirty && activeId) {
