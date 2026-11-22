@@ -4,6 +4,20 @@
  */
 
 /**
+ * 表达风格（v1.3.3）。定义在 `src/utils/weCloneStyle.ts`，主进程与渲染层共用；
+ * 这里只做 re-export，避免出现两份互相漂移的字符串联合。
+ */
+export type { WeCloneStylePreset } from '../utils/weCloneStyle'
+
+/** 说话复盘的类型定义在 `src/utils/weCloneReview.ts`（主进程也要用）。 */
+export type {
+  WeCloneVoiceIssue,
+  WeCloneVoiceIssueSeverity,
+  WeCloneVoiceMetrics,
+  WeCloneVoiceReview,
+} from '../utils/weCloneReview'
+
+/**
  * 生成阶段。
  *
  * `failed` / `aborted` 是**终态**，不来自主进程的进度事件，而是渲染层在

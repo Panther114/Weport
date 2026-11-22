@@ -535,3 +535,30 @@ Pipeline: `chatService` monitor pipe → `messagePushService.handleDbMonitorChan
 - **量它的探针**：`.ui-probe/probe-popup-latency.mjs` 只看弹窗出现延迟；看帧率要读弹窗
   里的 `data-glass-seq` 随时间的变化。注意：主窗口移出屏幕后，Chromium 会让弹窗页的
   DOM 查询返回空（`#root` 长度 0）—— 那是探针假象，不是渲染失败。
+
+## 页面字体自定义 — v1.3.3
+
+设置 → 外观 提供三种页面字体来源：内置仓耳今楷05 W04 / 本机已安装字体族 /
+用户选择的字体文件。实现边界：
+
+- 字体通过 `src/utils/appearance.ts` 的 `applyFont()` **在 `document.documentElement`
+  上内联设置 `--font`**，不要改 `styles.css` 的 `:root` 去切换用户字体。
+- 自定义字体由主进程复制到 `{userData}/fonts/`，**只能**通过 `weport-font://local/<文件名>`
+  读取。该协议只允许 fonts 目录、只接受 ttf/otf/woff/woff2；不要改用
+  `weport-media://` 或 `file://`（前者能读任意路径，后者会被 CSP/协议限制）。
+- CSP 的 `font-src` 必须包含 `weport-font:`（`vite.config.mts`，主窗口与 popup
+  共用注入），`connect-src` 也要包含它。协议在 `appMain.ts` 的
+  `registerSchemesAsPrivileged` 与 `protocol.handle` 两处都要注册。
+- **字体是 CORS-enabled fetch**：`registerSchemesAsPrivileged` 里
+  `corsEnabled: true`，并且 `protocol.handle` 的响应必须带
+  `Access-Control-Allow-Origin: *`。缺任一项，`FontFace.load()` 会在 `file://`
+  页面里报 `Cross origin requests are only supported for protocol schemes:
+  chrome, chrome-extension, chrome-untrusted, data, http, https` —— 图/视频没有
+  这条限制，所以不要拿 `weport-media` 的经验推断字体。
+- 字体族名先经过 `normalizeFontFamily()`（去掉引号、分号、括号、反斜杠），
+  再拼进 `--font`，避免用户输入变成额外的 CSS 声明。
+- 主题/背景/强调色变化也会走 `applyDom()`；`applyFont()` 用
+  `fontMode|fontFamily|fontFile` 做键，字体没变时**不得重复加载**几十 MB 的
+  自定义字体。
+- 通知弹窗是独立入口：`popupBase.css` 用 `var(--font, …)`，并在
+  `NotificationWindow.tsx` 挂载时调用 `initAppearanceFont()`（只读字体配置）。

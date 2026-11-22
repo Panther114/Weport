@@ -88,6 +88,14 @@ import {
 } from './ai/voiceExemplars'
 import { profileFromVoice, shapeReply, type VoiceRow, type VoiceShapeProfile } from './ai/voiceShape'
 import { readerCloneGuardError, readerDraftLanguageText, type ReaderCloneGuard } from '../../src/utils/readerCloneGuard'
+import {
+  normalizeWeCloneStyle,
+  normalizeWeCloneStyleNote,
+  weCloneStyleAnchor,
+  type WeCloneStylePreset,
+} from '../../src/utils/weCloneStyle'
+import { analyzeVoiceReview } from './ai/voiceReview'
+import type { WeCloneVoiceReview } from '../../src/utils/weCloneReview'
 export type { ReaderCloneGuard } from '../../src/utils/readerCloneGuard'
 
 export type { WeCloneRefusalMode } from './weClonePrompts'
@@ -184,6 +192,20 @@ export interface WeCloneSettings {
    * 生成时的约束。做成开关是为了能单独量它 —— 与 shape 一起开时不容易归因。
    */
   lengthHint: 'on' | 'off'
+  /**
+   * 表达风格（v1.3.3）。
+   *
+   * 只影响**聊天时怎么说**，不改档案、语料与拒答策略。默认 `original`
+   * 表示不加任何额外取向，与旧版逐字一致。
+   */
+  style: WeCloneStylePreset
+  /**
+   * 用户自己写的一句补充表达要求（最多 200 字）。
+   *
+   * 它是"怎么说"的补充，不是新的角色设定；提示词里明确要求模型不要复读
+   * 这句话，也不要用它覆盖身份、记忆与安全规则。
+   */
+  styleNote: string
 }
 
 /**
@@ -203,6 +225,9 @@ export const WECLONE_SETTINGS_DEFAULT: WeCloneSettings = {
   // 而 chrF / 抄写率不变。因此默认**开**。
   shape: 'on',
   lengthHint: 'off',
+  // 不额外加表达取向：这是与旧版逐字一致的默认，也是"最像本人"的基准。
+  style: 'original',
+  styleNote: '',
 }
 
 /** 一条对话里的一轮 */
@@ -573,6 +598,8 @@ export class WeCloneService {
         exemplars: raw?.exemplars === 'on' ? 'on' : 'off',
         shape: raw?.shape === 'off' ? 'off' : 'on',
         lengthHint: raw?.lengthHint === 'on' ? 'on' : 'off',
+        style: normalizeWeCloneStyle(raw?.style),
+        styleNote: normalizeWeCloneStyleNote(raw?.styleNote),
       }
     } catch {
       return { ...WECLONE_SETTINGS_DEFAULT }
@@ -587,7 +614,14 @@ export class WeCloneService {
 
   setSettings(
     cloneId: string,
-    patch: { refusal?: string; exemplars?: string; shape?: string; lengthHint?: string }
+    patch: {
+      refusal?: string
+      exemplars?: string
+      shape?: string
+      lengthHint?: string
+      style?: string
+      styleNote?: string
+    }
   ): { success: boolean; settings?: WeCloneSettings; error?: string } {
     const dir = this.findCloneDir(String(cloneId || ''))
     if (!dir) return { success: false, error: '找不到该克隆' }
@@ -599,6 +633,10 @@ export class WeCloneService {
       shape: patch?.shape === 'off' ? 'off' : patch?.shape === 'on' ? 'on' : current.shape,
       lengthHint:
         patch?.lengthHint === 'off' ? 'off' : patch?.lengthHint === 'on' ? 'on' : current.lengthHint,
+      // 未传 style 时保持已保存的值；传了非法值则回落到 original。
+      style: patch?.style === undefined ? current.style : normalizeWeCloneStyle(patch.style),
+      styleNote:
+        patch?.styleNote === undefined ? current.styleNote : normalizeWeCloneStyleNote(patch.styleNote),
     }
     try {
       this.atomicWriteFile(this.settingsFile(dir), JSON.stringify(next, null, 2))
@@ -611,6 +649,94 @@ export class WeCloneService {
   /** 克隆使用哪一套拒答行为（生成时的默认值来自配置，之后由用户按克隆改） */
   private refusalForClone(dir: string): WeCloneRefusalMode {
     return this.readSettings(dir).refusal
+  }
+
+  /**
+   * 「说话复盘」—— 纯本地统计，不调用任何模型。
+   *
+   * 材料：
+   * - `voice.jsonl`：本人原话（只取文本，最多均匀取样 5 万行）；
+   * - `fingerprint.json` / `shape.json`：生成时已经算好的统计，存在就用；
+   * - `weclone-chats/<cloneId>.json`：分身实际回复，配对上一条用户消息。
+   *
+   * 结论只包含聚合数字与极短证据，不返回整段聊天。没有回复样本时仍然输出
+   * 本人语料的统计，并明确写"回复样本不足"。
+   */
+  analyzeVoice(cloneId: string): { success: boolean; review?: WeCloneVoiceReview; error?: string } {
+    const dir = this.findCloneDir(String(cloneId || ''))
+    if (!dir) return { success: false, error: '找不到该克隆' }
+    const voicePath = join(dir, 'voice.jsonl')
+    if (!existsSync(voicePath)) return { success: false, error: '克隆语料缺失，请重新生成一次。' }
+
+    let voiceTexts: string[] = []
+    try {
+      const lines = readFileSync(voicePath, 'utf8').split(/\r?\n/).filter(Boolean)
+      // 语料可能很大：均匀取样而不是只取前 5 万行，避免结果只反映最开始那段历史。
+      const step = Math.max(1, Math.ceil(lines.length / 50_000))
+      for (let index = 0; index < lines.length; index += step) {
+        try {
+          const row = JSON.parse(lines[index]) as { text?: unknown }
+          const text = typeof row?.text === 'string' ? row.text.trim() : ''
+          if (text) voiceTexts.push(text)
+        } catch {
+          /* 单行坏掉不影响其余样本 */
+        }
+      }
+    } catch (error) {
+      return { success: false, error: `读取语料失败：${String((error as Error)?.message || error)}` }
+    }
+    if (voiceTexts.length === 0) return { success: false, error: '语料里没有可分析的本人原话。' }
+
+    let fingerprint: WeCloneFingerprint | undefined
+    try {
+      const file = join(dir, 'fingerprint.json')
+      if (existsSync(file)) {
+        const raw = JSON.parse(readFileSync(file, 'utf8')) as WeCloneFingerprint
+        if (Number(raw?.sampleSize) > 0 && Array.isArray(raw?.lengthHistogram)) fingerprint = raw
+      }
+    } catch {
+      /* 指纹文件坏了就由 analyzeVoiceReview 重算 */
+    }
+
+    let shape: VoiceShapeProfile | undefined
+    try {
+      const file = join(dir, 'shape.json')
+      if (existsSync(file)) {
+        const raw = JSON.parse(readFileSync(file, 'utf8')) as { profile?: VoiceShapeProfile }
+        if (Number(raw?.profile?.sampleSize) > 0 && raw.profile) shape = raw.profile
+      }
+    } catch {
+      /* 形态缓存坏了就由 analyzeVoiceReview 重算 */
+    }
+
+    // 分身回复：从最近的对话里取，最多 400 条；每条配对上一条 user 消息。
+    const replies: Array<{ content: string; prompt?: string; at: number }> = []
+    for (const chat of this.readChatStore(String(cloneId || ''))) {
+      let lastUser = ''
+      for (const turn of chat.turns) {
+        if (turn.role === 'user') {
+          lastUser = String(turn.content || '').trim()
+          continue
+        }
+        if (turn.role !== 'assistant') continue
+        const content = String(turn.content || '').trim()
+        if (!content || turn.error) continue
+        replies.push({ content, prompt: lastUser || undefined, at: Number(turn.at) || 0 })
+      }
+    }
+    const recentReplies = replies
+      .sort((a, b) => a.at - b.at)
+      .slice(-400)
+
+    return {
+      success: true,
+      review: analyzeVoiceReview({
+        voiceTexts,
+        replies: recentReplies,
+        fingerprint,
+        shape,
+      }),
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -2180,10 +2306,41 @@ export class WeCloneService {
     history?: Array<{ role: string; content: string }>
     signal?: AbortSignal
     readerGuard?: ReaderCloneGuard
+    /**
+     * 检索/语气样本用的查询词（v1.3.3）。
+     *
+     * 自动草稿的 `message` 是一整段上下文 + 提示词；直接拿它做 BM25 会把
+     * 检索意图稀释掉。这里允许单独传"对方最后说了什么"，只用于检索与语言判断，
+     * 不改变真正发给模型的消息。
+     */
+    retrievalQuery?: string
+    /** 回复语言跟随哪段文本（默认从 message 里解析） */
+    replyLanguageText?: string
+    /**
+     * 本次生成临时覆盖表达风格（v1.3.3）。
+     *
+     * 阅读器的草稿可以按会话选风格，而不改动克隆本身的设置；不传则用
+     * `settings.json` 里的 style（WeClone 对话始终走后者）。
+     */
+    styleOverride?: WeCloneStylePreset
+    /**
+     * Reader 草稿的上下文上限（字符）。
+     *
+     * 手动选取沿用 12,000 的既有契约；自动草稿的上下文可以到 24k，主进程调用时
+     * 显式传 32,000。渲染层走 `weclone:chat` 时不会传这个字段，因此手动草稿的
+     * 上限仍然由 UI 和这里的默认值共同保证。
+     */
+    readerDraftMaxChars?: number
   }): Promise<LocalChatResult> {
     const message = String(input.message || '').trim()
     if (!message) return { success: false, error: '消息不能为空' }
-    if (input.readerGuard !== undefined && message.length > 12_000) return { success: false, error: '回复草稿的选取片段超过 12,000 字符，请缩小范围。' }
+    if (input.readerGuard !== undefined) {
+      const cap = Math.min(64_000, Math.max(1_000, Math.floor(Number(input.readerDraftMaxChars) || 12_000)))
+      if (message.length > cap) {
+        return { success: false, error: `回复草稿的上下文超过 ${cap.toLocaleString()} 字符，请缩小时间范围或消息数量。` }
+      }
+    }
+    const retrievalQuery = String(input.retrievalQuery || message).trim() || message
 
     const listed = this.listLocalClones()
     if (listed.length === 0) {
@@ -2225,7 +2382,7 @@ export class WeCloneService {
     const t0 = Date.now()
     if (existsSync(jsonlPath)) {
       try {
-        const r = await this.retrieveLocalChunks(jsonlPath, message, meta.wxid, {
+        const r = await this.retrieveLocalChunks(jsonlPath, retrievalQuery, meta.wxid, {
           topK: RETRIEVE_TOP_K,
           charLimit: RETRIEVED_CONTEXT_CHAR_LIMIT,
         })
@@ -2249,7 +2406,7 @@ export class WeCloneService {
      */
     if (existsSync(voicePath)) {
       try {
-        const r = await this.retrieveLocalChunks(voicePath, message, meta.wxid, {
+        const r = await this.retrieveLocalChunks(voicePath, retrievalQuery, meta.wxid, {
           topK: VOICE_TOP_K,
           charLimit: VOICE_CONTEXT_CHAR_LIMIT,
           // 语气样本要的是"本人怎么说"，不按说话人分组标注
@@ -2270,12 +2427,17 @@ export class WeCloneService {
     retrieveCostMs = Date.now() - t0
 
     const refusal = this.refusalForClone(dir)
+    /** 风格设置只影响"怎么说"；档案、语料与拒答策略保持独立。 */
+    const cloneSettings = this.readSettings(dir)
+    const effectiveStyle = input.styleOverride ?? cloneSettings.style
     const systemPrompt = buildWeCloneChatSystemPrompt({
       displayName: meta.displayName || meta.wxid,
       knowledgeCutoff: meta.knowledgeCutoff,
       corpusRange:
         meta.corpusStart && meta.knowledgeCutoff ? `${meta.corpusStart} ~ ${meta.knowledgeCutoff}` : meta.knowledgeCutoff,
       refusal,
+      style: effectiveStyle,
+      styleNote: cloneSettings.styleNote,
       // language.md 不进 system prompt（那是逐字语料）；它的作用已经由语气
       // 样本检索承担，画像/知识/时间线/关系这四份才是"背景资料"。
       mds: {
@@ -2301,7 +2463,10 @@ export class WeCloneService {
      * 转写里的说话人标签跟着语言走：对方用英文时把 `对方：`/`名字：` 换成 `Them:`/`Me:`，
      * 否则光是标签就足以把模型拉回中文（这是实测过的一种"越改越中文"的来源）。
      */
-    const replyLanguage = detectLanguage(input.readerGuard ? readerDraftLanguageText(message) : message)
+    const replyLanguage = detectLanguage(
+      String(input.replyLanguageText || '').trim() ||
+        (input.readerGuard ? readerDraftLanguageText(message) : message),
+    )
     const english = replyLanguage === 'en'
     const selfLabel = english ? 'Me' : meta.displayName || meta.wxid
     const otherLabel = english ? 'Them' : '对方'
@@ -2312,7 +2477,6 @@ export class WeCloneService {
      * 离生成位置有几千 token 远 —— 长对话里人格会漂回助手的默认腔调。
      * 在最近处再放一句极短的身份提醒，是最便宜的抑制手段。
      */
-    const cloneSettings = this.readSettings(dir)
     /**
      * 形态 profile（长度中位、连发均值/上限）在**锚点之前**就要拿到：
      * 迭代 3 的长度约束写在锚点里（紧邻生成位置），而锚点比示范注入更早构造。
@@ -2333,6 +2497,7 @@ export class WeCloneService {
         cloneSettings.lengthHint === 'on' && shapeProfile
           ? { medianLength: shapeProfile.medianLength, burstMean: shapeProfile.burstMean }
           : undefined,
+      styleAnchor: weCloneStyleAnchor(effectiveStyle),
     })
     /**
      * 迭代 1：**真实示范**（"对方说 → 本人回"的成对样本）压进本轮 user 消息。
@@ -2347,7 +2512,7 @@ export class WeCloneService {
       if (cloneSettings.exemplars !== 'off') {
         const picked = await this.buildVoiceExemplarBlock(
           dir,
-          [...history.slice(-4).map((h) => h.content), message].filter(Boolean).join('\n'),
+          [...history.slice(-4).map((h) => h.content), retrievalQuery].filter(Boolean).join('\n'),
           {
             selfLabel,
             otherLabel,

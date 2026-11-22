@@ -16,8 +16,8 @@ const cspPlugin = (mode: string): Plugin => {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: http: data: blob: weport-media:",
     "media-src 'self' https: http: data: blob: weport-media:",
-    "font-src 'self' data:",
-    "connect-src 'self' https: http: weport-media:",
+    "font-src 'self' data: weport-font:",
+    "connect-src 'self' https: http: weport-media: weport-font:",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'none'"

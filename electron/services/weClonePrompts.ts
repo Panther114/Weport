@@ -29,6 +29,11 @@
 // 类型
 // ---------------------------------------------------------------------------
 
+import {
+  weCloneStyleInstruction,
+  type WeCloneStylePreset,
+} from '../../src/utils/weCloneStyle'
+
 /** 拒答行为：以本人方式拒答 / 完全不拒答 */
 export type WeCloneRefusalMode = 'character' | 'off'
 
@@ -270,6 +275,10 @@ export interface WeCloneChatPromptInput {
   corpusLanguage?: string
   /** 拒答行为 */
   refusal?: WeCloneRefusalMode
+  /** 表达风格（v1.3.3）：只改"怎么说"，不改身份与记忆 */
+  style?: WeCloneStylePreset
+  /** 用户自己的补充表达要求（已限制长度） */
+  styleNote?: string
   /** 人格 MD（不含 language.md —— 逐字语料改为按话题检索，不进 system prompt） */
   mds?: Partial<Record<'profile' | 'relationships' | 'knowledge' | 'timeline', string>>
   /** 风格指纹的渲染文本 */
@@ -289,6 +298,8 @@ export interface WeCloneChatPromptInput {
  */
 const SECTION_PRIORITY = {
   rules: 100,
+  /** 用户显式选择的表达风格：优先级高于检索与档案，低于硬规则 */
+  style: 96,
   retrieved: 90,
   voice: 85,
   profile: 70,
@@ -401,6 +412,8 @@ export function buildWeCloneChatSystemPrompt(input: WeCloneChatPromptInput): str
 
   push('rules', rules)
   push('rules', refusalSection)
+  // 表达风格是用户显式选择，优先级紧跟硬规则；"保持原样且无补充"时整节不出现。
+  push('style', weCloneStyleInstruction(input.style, input.styleNote))
   if (input.retrievedChunks && input.retrievedChunks.length > 0) {
     push(
       'retrieved',
@@ -446,6 +459,13 @@ export function buildWeCloneTurnAnchor(input: {
    * 放在**紧邻生成位置**的本轮锚点里，而不是丢在几千 token 之外的 system prompt。
    */
   brevity?: { medianLength: number; burstMean: number }
+  /**
+   * 表达风格的一行提醒（v1.3.3）。
+   *
+   * 放在本轮锚点里而不是只写在 system prompt：锚点紧邻生成位置，长对话里
+   * persona drift 最先吃掉的就是几千 token 之外的风格描述。
+   */
+  styleAnchor?: string
 }): string {
   const name = String(input.displayName || '我')
   const langRule =
@@ -459,5 +479,6 @@ export function buildWeCloneTurnAnchor(input: {
     ? `你平时是**连发几条**、每条大约 ${Math.max(4, Math.round(input.brevity.medianLength))} 个字、一次总共也只说几十个字；` +
       `这次也一样：2–4 条、每条十几个字，短到可以一句话说完就别凑长。`
     : ''
-  return `（提醒：你是 ${name}，不是助手。${langRule}${brevityRule}不要分点、不要解释、不要问"还需要什么"。${refusalRule}）`
+  const styleRule = String(input.styleAnchor || '').trim()
+  return `（提醒：你是 ${name}，不是助手。${langRule}${brevityRule}${styleRule ? `${styleRule}` : ''}不要分点、不要解释、不要问"还需要什么"。${refusalRule}）`
 }

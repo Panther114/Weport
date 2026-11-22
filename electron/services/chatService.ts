@@ -3499,6 +3499,87 @@ class ChatService {
   }
 
 
+  /**
+   * 阅读器自动草稿用的**区间消息**（v1.3.3）。
+   *
+   * 为什么不复用 `getMessages`：那个接口按会话维护一个共享游标，自动草稿用
+   * 不同的 start/end 查询会把阅读器正在翻页的游标关掉重建。这里走
+   * `wcdbService.getMessages` 的直接 offset 读取（offset 0 = 最新），
+   * 不碰 `messageCursors`，也不会让阅读器的分页位置漂移。
+   *
+   * 返回按时间升序。最多扫描 `maxRows` 条；遇到早于 `startTimeMs` 的消息即停止。
+   */
+  async getMessagesForReaderDraft(
+    sessionId: string,
+    options: { startTimeMs: number; endTimeMs: number; maxRows?: number }
+  ): Promise<{ success: boolean; messages?: Message[]; scannedRows?: number; reachedStart?: boolean; exhausted?: boolean; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error || '数据库未连接' }
+      }
+      const toSeconds = (value: number): number => {
+        const n = Number(value) || 0
+        if (n <= 0) return 0
+        return n > 10_000_000_000 ? Math.floor(n / 1000) : Math.floor(n)
+      }
+      const startSeconds = toSeconds(options.startTimeMs)
+      const endSeconds = toSeconds(options.endTimeMs)
+      const maxRows = Math.max(100, Math.min(5_000, Math.floor(Number(options.maxRows) || 2_000)))
+      const pageSize = 120
+
+      const collected: Message[] = []
+      let scannedRows = 0
+      let reachedStart = false
+      let exhausted = false
+      let offset = 0
+
+      while (scannedRows < maxRows) {
+        const limit = Math.min(pageSize, maxRows - scannedRows)
+        const result = await wcdbService.getMessages(sessionId, limit, offset)
+        if (!result.success || !Array.isArray(result.messages)) {
+          return { success: false, error: result.error || '读取消息失败' }
+        }
+        const rows = result.messages as Record<string, any>[]
+        if (rows.length === 0) {
+          exhausted = true
+          break
+        }
+        const mapped = this.mapRowsToMessages(rows, sessionId)
+        for (const message of mapped) {
+          scannedRows += 1
+          const createTime = toSeconds(Number(message.createTime || 0))
+          if (endSeconds > 0 && createTime > endSeconds) continue
+          if (startSeconds > 0 && createTime < startSeconds) {
+            reachedStart = true
+            continue
+          }
+          collected.push(message)
+        }
+        offset += rows.length
+        if (reachedStart) break
+        if (rows.length < limit) {
+          exhausted = true
+          break
+        }
+      }
+
+      const visible = collected.filter((message) => this.isMessageVisibleForSession(sessionId, message))
+      const output = (visible.length === 0 && collected.length > 0) ? collected : visible
+      const normalized = this.normalizeMessageOrder(output)
+      if (normalized.length > 0 && sessionId.includes('@chatroom')) {
+        try {
+          await this.enrichGroupMessageSenderProfiles(normalized, sessionId)
+        } catch {
+          /* 发送者显示名拿不到不影响正文草稿 */
+        }
+      }
+      return { success: true, messages: normalized, scannedRows, reachedStart, exhausted }
+    } catch (error) {
+      return { success: false, error: (error as Error)?.message || String(error) }
+    }
+  }
+
   async getLatestMessages(sessionId: string, limit: number = this.messageBatchDefault): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; nextOffset?: number; error?: string }> {
     try {
       const connectResult = await this.ensureConnected()

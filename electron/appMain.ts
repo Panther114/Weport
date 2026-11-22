@@ -32,12 +32,13 @@ import { ImageKeyReadiness } from './services/imageKeyReadiness'
 import { registerBugReportHandlers } from './services/bugReportService'
 import { toLocalMediaUrl } from './services/localMediaUrl'
 import { autoUpdater } from 'electron-updater'
-import { dirname, join, resolve, sep } from 'path'
+import { basename, dirname, join, resolve, sep } from 'path'
+import { createHash } from 'crypto'
 import { compareVersions, compatibilityError, currentUpdateRestriction, loadUpdatePolicy } from './services/updatePolicy'
-import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from 'fs'
 import { atomicWriteFile } from './services/export/atomicWrite'
 import { readIntegrityReport, runIntegrityCheckForExportRoot } from './services/export/integrityChecker'
-import { readdir, copyFile, mkdir as mkdirAsync, rm as rmAsync, writeFile as writeFileAsync } from 'fs/promises'
+import { readdir, copyFile, mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync, writeFile as writeFileAsync } from 'fs/promises'
 import { Worker } from 'worker_threads'
 import { ConfigService } from './services/config'
 import { avatarCacheService, toProtocolUrl, protocolUrlToPath } from './services/avatarCacheService'
@@ -83,6 +84,9 @@ import { collectDigestBatch } from './services/weBotDigestCollector'
 import { DIGEST_TEMPLATES } from './services/weBotDigest'
 import { setWeBotService } from './services/weBotRegistry'
 import { weCloneService } from './services/weCloneService'
+import { cloneAccountIdentity } from '../src/utils/readerCloneGuard'
+import { readerAutoDraftService } from './services/readerAutoDraftService'
+import { readerDraftSettingsService } from './services/readerDraftSettingsService'
 import { TASK_KEY, taskStatusService } from './services/taskStatusService'
 import { AnnotationsService } from './services/annotationsService'
 import { SearchIndexService, createExportContextDecoder } from './services/searchIndexService'
@@ -111,6 +115,10 @@ const APP_VERSION = app.getVersion()
 // 必须在 app ready 之前注册特权，否则 file:// 在 webSecurity 下无法渲染。
 protocol.registerSchemesAsPrivileged([
   { scheme: 'weport-media', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } },
+  // 页面字体：只服务 {userData}/fonts/ 下的用户字体，供 FontFace 加载。
+  // 字体是 CORS-enabled fetch；corsEnabled 必须为 true，否则 FontFace 会在
+  // file:// 页面里以 "Cross origin requests are only supported for ..." 拒绝。
+  { scheme: 'weport-font', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
 ])
 
 let mainWindow: BrowserWindow | null = null
@@ -692,6 +700,8 @@ let updateCheckScheduled = false
 
 function checkForUpdatesOnStartup() {
   if (!isUpdaterSupported || !app.isPackaged || updateCheckScheduled) return
+  // 自动更新提示默认关闭（v1.3.3）。用户仍可在设置里手动检查。
+  if (configService?.get('autoCheckUpdates') !== true) return
   updateCheckScheduled = true
   updateCheckTimer = setTimeout(async () => {
     const result = await checkForUpdatesManual()
@@ -1029,6 +1039,16 @@ function buildPopupData(p: MessagePushPayload) {  const title = p.groupName && p
 }
 
 function setupNotificationPipeline() {
+  // 阅读器自动草稿：状态与草稿正文都从主进程推回渲染层。窗口被销毁时
+  // `mainWindow` 为空，丢掉即可；重新打开阅读器会调 `readerDraft:status` 恢复。
+  readerAutoDraftService.setEmitter((snapshot) => {
+    try {
+      mainWindow?.webContents.send('readerDraft:event', snapshot)
+      // taskStatusService.progress 不会主动发 transition；把最新快照一起推给
+      // 左下角任务条，否则它会一直停在"正在监听新消息…"。
+      mainWindow?.webContents.send('task:statusChanged', taskStatusService.all())
+    } catch { /* noop */ }
+  })
   messagePushService = new MessagePushService()
   messagePushService.onPush((payload: MessagePushPayload) => {
     // 弹窗渲染 CDN 头像同样需要 UA/Referer 拦截（注册是幂等的）。
@@ -2565,6 +2585,8 @@ export function registerIpcHandlers() {
       await messagePushService?.handleConfigChanged(key)
     }
     if (key === 'dbPath' || key === 'decryptKey' || key === 'myWxid') {
+      // 账号 / 数据库切换后，旧会话的自动草稿不再有意义。
+      readerAutoDraftService.stop('账号或数据库已改变，自动草稿已停止')
       // 连接条件就绪后预热联系人缓存（首次使用即可显示真实昵称）
       scheduleContactWarmup()
       syncWeBotScheduler()
@@ -2576,6 +2598,7 @@ export function registerIpcHandlers() {
     if (wcdbService.isMaintenanceActive()) return { success: false, error: '数据库正在恢复快照，暂时无法清除配置' }
     configService?.clear()
     messagePushService?.handleConfigCleared()
+    readerAutoDraftService.stop('配置已清除，自动草稿已停止')
     return { success: true }
   })
   ipcMain.handle('config:updateWxidEntry', async (_e, wxid: string, patch: Record<string, unknown>) => {
@@ -3890,6 +3913,40 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
     const luminance = await backgroundVideoService.meanLuminance(String(path || ''))
     return { success: luminance !== null, luminance }
   })
+  /**
+   * 选择页面字体文件：复制到 {userData}/fonts/ 后由 weport-font:// 提供给渲染层。
+   * 只存文件名（内容哈希），原件移动/删除后已复制的字体仍然可用。
+   */
+  ipcMain.handle('appearance:pickFont', async () => {
+    try {
+      const options = {
+        title: '选择页面字体',
+        properties: ['openFile'] as const,
+        filters: [{ name: '字体文件', extensions: ['ttf', 'otf', 'woff', 'woff2'] }],
+      }
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options as any)
+        : await dialog.showOpenDialog(options as any)
+      if (result.canceled || !result.filePaths[0]) return { success: false, canceled: true }
+      const source = result.filePaths[0]
+      const stat = statSync(source)
+      if (!stat.isFile()) return { success: false, error: '请选择一个字体文件。' }
+      if (stat.size > 128 * 1024 * 1024) return { success: false, error: '字体文件超过 128MB，请换一个更小的字体。' }
+      const ext = source.split('.').pop()?.toLowerCase() || ''
+      if (!['ttf', 'otf', 'woff', 'woff2'].includes(ext)) {
+        return { success: false, error: '仅支持 .ttf / .otf / .woff / .woff2 字体文件。' }
+      }
+      const bytes = readFileSync(source)
+      const file = `${createHash('sha1').update(bytes).digest('hex').slice(0, 16)}.${ext}`
+      const dir = join(app.getPath('userData'), 'fonts')
+      mkdirSync(dir, { recursive: true })
+      const dest = join(dir, file)
+      if (!existsSync(dest)) writeFileSync(dest, bytes)
+      return { success: true, file, name: basename(source) }
+    } catch (error) {
+      return { success: false, error: String((error as Error)?.message || error) }
+    }
+  })
   ipcMain.handle('ai:listNotes', (_e, chatId: string) => ({ notes: weportAiService.listNotes(String(chatId || '')) }))
   ipcMain.handle('ai:readNoteFile', (_e, chatId: string, path: string) => ({
     content: weportAiService.readNoteFile(String(chatId || ''), String(path || '')),
@@ -4028,7 +4085,18 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('weclone:setRedact', (_e, enabled: boolean) => weCloneService.setRedactEnabled(enabled !== false))
   ipcMain.handle('weclone:list', () => weCloneService.getClones())
   ipcMain.handle('weclone:get', (_e, id: string) => weCloneService.getClone(String(id || '')))
-  ipcMain.handle('weclone:delete', (_e, id: string) => weCloneService.deleteClone(String(id || '')))
+  ipcMain.handle('weclone:delete', async (_e, id: string) => {
+    const cloneId = String(id || '')
+    const result = await weCloneService.deleteClone(cloneId)
+    if (result.success) {
+      // 删除克隆后，指向它的按会话设置与正在运行的自动草稿都不该继续存在。
+      readerDraftSettingsService.forgetClone(cloneId)
+      if (readerAutoDraftService.snapshot().cloneId === cloneId) {
+        readerAutoDraftService.stop('分身已删除，自动草稿已停止')
+      }
+    }
+    return result
+  })
   // 和分身对话：**完全在本机完成**（人格 MD 注入上下文 + 本地检索语料），
   // 没有服务器可转发，也不上传任何东西。返回体带 `hint`，因为最常见的失败
   // （还没生成过克隆、模型 key 不可用）需要具体的下一步指引。
@@ -4211,12 +4279,63 @@ ipcMain.handle('groupAnalytics:getGroupMediaStats', (_e, chatroomId: string, sta
   ipcMain.handle('weclone:deleteChat', (_e, cloneId: string, chatId: string) =>
     weCloneService.deleteChat(String(cloneId || ''), String(chatId || ''))
   )
-  // 每个克隆自己的设置（v1.0.1）：目前只有拒答行为。存在克隆目录里，
-  // 跟着它的档案与语料一起生灭。
+  // 每个克隆自己的设置（v1.0.1）：拒答行为；v1.3.3 起增加表达风格与补充要求。
+  // 存在克隆目录里，跟着它的档案与语料一起生灭。
   ipcMain.handle('weclone:getSettings', (_e, cloneId: string) => weCloneService.getSettings(String(cloneId || '')))
-  ipcMain.handle('weclone:setSettings', (_e, cloneId: string, patch: { refusal?: string }) =>
-    weCloneService.setSettings(String(cloneId || ''), patch || {})
+  ipcMain.handle(
+    'weclone:setSettings',
+    (_e, cloneId: string, patch: { refusal?: string; exemplars?: string; shape?: string; lengthHint?: string; style?: string; styleNote?: string }) =>
+      weCloneService.setSettings(String(cloneId || ''), patch || {})
   )
+  // 说话复盘：纯本地统计（本人原话 + 分身历史回复），不调用模型、不上传。
+  ipcMain.handle('weclone:analyzeVoice', (_e, cloneId: string) =>
+    weCloneService.analyzeVoice(String(cloneId || ''))
+  )
+
+  // -------------------------------------------------------------------------
+  // 阅读器自动回复草稿（v1.3.3）
+  //
+  // 监听与生成都在主进程；渲染层只负责展示和开关。按会话保存的 clone/range/
+  // 补充提示词走 `reader-draft-settings.json`，下次打开会话自动带出。
+  // -------------------------------------------------------------------------
+  ipcMain.handle('readerDraft:start', (_e, config: Record<string, unknown>) =>
+    readerAutoDraftService.start({
+      accountId: String(config?.accountId || ''),
+      sessionId: String(config?.sessionId || ''),
+      sessionName: config?.sessionName ? String(config.sessionName) : undefined,
+      cloneId: String(config?.cloneId || ''),
+      range: String(config?.range || 'today'),
+    })
+  )
+  ipcMain.handle('readerDraft:stop', () => readerAutoDraftService.stop())
+  ipcMain.handle('readerDraft:status', () => readerAutoDraftService.snapshot())
+  ipcMain.handle('readerDraft:regenerate', () => readerAutoDraftService.regenerate())
+  ipcMain.handle('readerDraft:getSettings', (_e, accountId: string, sessionId: string) => {
+    const active = String(configService?.get('myWxid') || '').trim()
+    if (active && cloneAccountIdentity(String(accountId || '')) !== cloneAccountIdentity(active)) {
+      return { success: false, error: '账号已改变，请重新打开阅读器。' }
+    }
+    return { success: true, settings: readerDraftSettingsService.get(String(accountId || ''), String(sessionId || '')) }
+  })
+  ipcMain.handle('readerDraft:setSettings', (_e, patch: Record<string, unknown>) => {
+    try {
+      const accountId = String(patch?.accountId || '').trim()
+      const active = String(configService?.get('myWxid') || '').trim()
+      if (active && cloneAccountIdentity(accountId) !== cloneAccountIdentity(active)) {
+        return { success: false, error: '账号已改变，请重新打开阅读器。' }
+      }
+      const settings = readerDraftSettingsService.set({
+        accountId,
+        sessionId: String(patch?.sessionId || ''),
+        cloneId: patch?.cloneId === undefined ? undefined : String(patch.cloneId),
+        range: patch?.range === undefined ? undefined : String(patch.range),
+        note: patch?.note === undefined ? undefined : String(patch.note),
+      })
+      return { success: true, settings }
+    } catch (error) {
+      return { success: false, error: (error as Error)?.message || String(error) }
+    }
+  })
   // v1.0：`weclone:getForcedProviderStatus` / `weclone:ensureProvider` /
   // `weclone:setForcedApiKey` 三个通道已删除 —— 人格克隆不再有自己的服务，
   // 它用「设置 → AI 服务」里用户配的那一个（默认 DeepSeek）。
@@ -8676,6 +8795,45 @@ export async function startEngineServices(
     console.warn('[Weport] 注册本地媒体协议失败:', e)
   }
 
+  // weport-font://local/<文件名>：只读、只允许 {userData}/fonts/ 下的字体。
+  // 与 weport-media 分开是为了不给渲染层一个"任意文件转字体"的入口。
+  try {
+    protocol.handle('weport-font', async (request) => {
+      try {
+        const url = new URL(request.url)
+        const name = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+        if (!name || name.includes('/') || name.includes('\\') || name.includes('..')) {
+          return new Response('Not Found', { status: 404 })
+        }
+        const file = join(app.getPath('userData'), 'fonts', name)
+        if (!existsSync(file)) return new Response('Not Found', { status: 404 })
+        const ext = name.split('.').pop()?.toLowerCase() || ''
+        const mime = ext === 'ttf' ? 'font/ttf'
+          : ext === 'otf' ? 'font/otf'
+            : ext === 'woff' ? 'font/woff'
+              : ext === 'woff2' ? 'font/woff2'
+                : ''
+        if (!mime) return new Response('Not Found', { status: 404 })
+        const bytes = await readFileAsync(file)
+        return new Response(bytes, {
+          // 文件名是内容哈希：可以长期缓存，避免每次通知弹窗都重新读几十 MB 字体。
+          // 字体加载是 CORS-enabled fetch；自定义协议必须显式放行，否则 FontFace.load()
+          // 会被当成跨源资源拒绝（图/视频没有这条限制，字体有）。
+          headers: {
+            'Content-Type': mime,
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+            'Cross-Origin-Resource-Policy': 'cross-origin',
+          },
+        })
+      } catch {
+        return new Response('Not Found', { status: 404 })
+      }
+    })
+  } catch (e) {
+    console.warn('[Weport] 注册字体协议失败:', e)
+  }
+
   if (options.coreOnly) return
 
   migrateLegacySettings()
@@ -9027,8 +9185,9 @@ try { tray?.destroy() } catch { /* noop */ }
       snsProtectionService?.stop()
       weBotService?.stop()
     } catch { /* noop */ }
-    // WeClone：中止正在进行的克隆生成
+    // WeClone：中止正在进行的克隆生成；阅读器自动草稿：清定时器与在飞请求
     try { weCloneService.cancel() } catch { /* noop */ }
+    try { readerAutoDraftService.dispose() } catch { /* noop */ }
     messagePushService?.stop()
     for (const chatId of weportAiService.listChats({ includeAutomations: true }).map((c) => c.id)) {
       weportAiService.abort(chatId)

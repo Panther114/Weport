@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Copy, Sparkles } from 'lucide-react'
 import { copyTextToClipboard } from '../../utils/clipboard'
 import type { ReaderMessage } from './readerTypes'
@@ -6,6 +6,8 @@ import {
   prepareReaderDraftContext, readerDraftClones, requireReaderDraftClone,
   READER_DRAFT_MAX_CHARS, READER_DRAFT_MAX_MESSAGES, type ReaderDraftClone,
 } from './readerDraftContext'
+import { normalizeReaderDraftNote } from '../../utils/readerDraftSettings'
+import { normalizeDraftText } from '../../utils/readerDraftFormat'
 import './readerReplyDraft.css'
 
 interface Props {
@@ -15,12 +17,17 @@ interface Props {
   disabled: boolean
 }
 
-/** An inline workspace section, never a popup or a second WeClone history writer. */
+/**
+ * 手动选取聊天片段生成回复草稿（v1.2 起）。
+ *
+ * 自动草稿已经移到阅读器底部的 `ReaderAutoDraftPanel`；这里只保留"先选消息再
+ * 生成"的手动路径。按会话保存的补充提示词对手动草稿同样生效。
+ */
 export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: Props) {
   const [open, setOpen] = useState(false)
   const [clones, setClones] = useState<ReaderDraftClone[]>([])
-  const [cloneId, setCloneId] = useState('')
   const [loading, setLoading] = useState(false)
+  const [cloneId, setCloneId] = useState('')
   const [consent, setConsent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
@@ -28,27 +35,16 @@ export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: P
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [provider, setProvider] = useState('')
-  const alive = useRef(true)
+  const [savedNote, setSavedNote] = useState('')
   const inFlight = useRef(false)
+  const alive = useRef(true)
   useEffect(() => {
     alive.current = true
     return () => { alive.current = false }
   }, [])
 
-  const { context, contextError } = useMemo(() => {
-    try { return { context: prepareReaderDraftContext(accountId, sessionId, messages), contextError: '' } }
-    catch (cause) { return { context: undefined, contextError: cause instanceof Error ? cause.message : String(cause) } }
-  }, [accountId, sessionId, messages])
-
-  const refresh = async () => {
-    if (inFlight.current) return
+  const loadClones = useCallback(async () => {
     setLoading(true)
-    setConsent(false)
-    setCloneId('')
-    setDraft('')
-    setDraftReady(false)
-    setProvider('')
-    setNotice('')
     setError('')
     try {
       const result = await window.electronAPI.weclone.list()
@@ -56,8 +52,61 @@ export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: P
       if (!result.success) throw new Error(result.error || '无法读取本机分身，请重试。')
       setClones(readerDraftClones(result.clones, accountId))
     } catch (cause) {
-      if (alive.current) { setClones([]); setError(cause instanceof Error ? cause.message : String(cause)) }
-    } finally { if (alive.current) setLoading(false) }
+      if (alive.current) {
+        setClones([])
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    } finally {
+      if (alive.current) setLoading(false)
+    }
+  }, [accountId])
+
+  useEffect(() => {
+    if (!open) return
+    if (clones.length > 0 || loading) return
+    void loadClones()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, accountId])
+
+  /** 按会话保存的提示词：自动草稿面板保存后会广播，这里同步更新。 */
+  useEffect(() => {
+    let cancelled = false
+    void window.electronAPI.readerDraft.getSettings(accountId, sessionId).then((result) => {
+      if (!cancelled && alive.current && result.success) {
+        setSavedNote(normalizeReaderDraftNote(result.settings?.note))
+      }
+    }).catch(() => undefined)
+    const onNote = (event: Event) => {
+      const detail = (event as CustomEvent<{ accountId?: string; sessionId?: string; note?: string }>).detail
+      if (detail?.accountId === accountId && detail?.sessionId === sessionId) {
+        setSavedNote(normalizeReaderDraftNote(detail.note))
+      }
+    }
+    window.addEventListener('weport:reader-draft-note', onNote)
+    return () => {
+      cancelled = true
+      window.removeEventListener('weport:reader-draft-note', onNote)
+    }
+  }, [accountId, sessionId])
+
+  const { context, contextError } = useMemo(() => {
+    try {
+      return { context: prepareReaderDraftContext(accountId, sessionId, messages, savedNote), contextError: '' }
+    } catch (cause) {
+      return { context: undefined, contextError: cause instanceof Error ? cause.message : String(cause) }
+    }
+  }, [accountId, sessionId, messages, savedNote])
+
+  const refreshManual = async () => {
+    if (inFlight.current) return
+    setConsent(false)
+    setCloneId('')
+    setDraft('')
+    setDraftReady(false)
+    setProvider('')
+    setNotice('')
+    setError('')
+    await loadClones()
   }
 
   const generate = async () => {
@@ -82,7 +131,9 @@ export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: P
       if (!alive.current) return
       if (!result.success || !result.reply?.trim()) throw new Error([result.error || '没有生成回复。', result.hint].filter(Boolean).join(' '))
       if (result.meta?.cloneId && result.meta.cloneId !== cloneId) throw new Error('返回的分身与选择不一致，请重试。')
-      setDraft(result.reply)
+      const reply = normalizeDraftText(result.reply)
+      if (!reply) throw new Error('模型返回的草稿为空。')
+      setDraft(reply)
       setDraftReady(true)
       setProvider([result.meta?.providerId, result.meta?.model].filter(Boolean).join(' · '))
     } catch (cause) {
@@ -98,7 +149,7 @@ export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: P
       <div className="reader-reply-heading">
         <button type="button" className="reader-reply-trigger" aria-expanded={open} onClick={() => {
           if (open) { setOpen(false); setConsent(false) }
-          else { setOpen(true); if (!busy) void refresh() }
+          else { setOpen(true); if (!busy) void loadClones() }
         }}>
           <Sparkles size={14} /><span>WeClone 回复草稿</span><ChevronDown size={14} className="reader-reply-chevron" data-open={open} />
         </button>
@@ -115,7 +166,7 @@ export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: P
               {clones.map((clone) => <option key={clone.id} value={clone.id}>{clone.displayName || clone.wxid} · {clone.generatedAt}</option>)}
             </select>
           </label>
-          <button type="button" className="ghost-btn" disabled={loading || busy} onClick={() => void refresh()}>{loading ? '读取中…' : '刷新分身'}</button>
+          <button type="button" className="ghost-btn" disabled={loading || busy} onClick={() => void refreshManual()}>{loading ? '读取中…' : '刷新分身'}</button>
         </div>
         {!loading && !clones.length && <p className="reader-hint">当前账号没有可用的本机分身，请前往 WeClone 生成后刷新。</p>}
         <div className="reader-hint">账号：{accountId || '未选择'} · 会话：{sessionId} · 已选 {messages.length} 条</div>
@@ -130,9 +181,17 @@ export function ReaderReplyDraft({ accountId, sessionId, messages, disabled }: P
         <button type="button" className="secondary-btn" disabled={busy || loading || disabled || !context || !cloneId || !consent} onClick={() => void generate()}>{busy ? '正在生成草稿…' : '生成一次草稿'}</button>
         {error && <p className="reader-gap-error" role="alert">{error}</p>}
         {draftReady && <div className="reader-reply-output">
-          <label>回复草稿 · 请审核后自行使用<textarea aria-label="可编辑的回复草稿" value={draft} onChange={(event) => { setDraft(event.target.value); setNotice('') }} rows={4} /></label>
+          <label>回复草稿 · 请审核后自行使用
+            <textarea
+              aria-label="可编辑的回复草稿"
+              value={draft}
+              onChange={(event) => { setDraft(event.target.value.replace(/\r?\n/g, '')); setNotice('') }}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.preventDefault() }}
+              rows={3}
+            />
+          </label>
           {provider && <div className="reader-hint">{provider}</div>}
-          <button type="button" className="ghost-btn" disabled={!draft.trim()} onClick={() => { void copyTextToClipboard(draft).then((ok) => { if (alive.current) setNotice(ok ? '草稿已复制，尚未发送。' : '复制失败，请手动选择草稿文字复制。') }) }}><Copy size={13} />复制草稿</button>
+          <button type="button" className="ghost-btn" disabled={!draft.trim()} onClick={() => { void copyTextToClipboard(normalizeDraftText(draft)).then((ok) => { if (alive.current) setNotice(ok ? '草稿已复制，尚未发送。' : '复制失败，请手动选择草稿文字复制。') }) }}><Copy size={13} />复制草稿</button>
         </div>}
         {notice && <p className="reader-hint" role="status">{notice}</p>}
       </div>}

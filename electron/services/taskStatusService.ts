@@ -153,6 +153,8 @@ export const TASK_KEY = {
   quoteReferences: 'reader.references',
   searchIndex: 'search.index',
   databaseMaintenance: 'db.maintenance',
+  /** 阅读器自动回复草稿：主进程持续监听当前会话的新消息 */
+  readerAutoDraft: 'reader.autoDraft',
 } as const
 
 export const taskStatusService = new TaskStatusService()

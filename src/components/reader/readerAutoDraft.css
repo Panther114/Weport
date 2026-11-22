@@ -1,0 +1,427 @@
+/**
+ * 阅读器底部「自动回复草稿」停靠卡片（v1.3.3）。
+ *
+ * 它作为 `.reader-main` 的最后一个 flex 子项：折叠时只占一条栏，展开时最多
+ * 占 42vh，消息列表自动让出高度。草稿正文是单行规范化后的文本，没有空行。
+ */
+
+.reader-auto-dock {
+  flex: 0 0 auto;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.reader-auto-dock:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.reader-auto-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px 5px 11px;
+  min-height: 34px;
+}
+
+.reader-auto-bar-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reader-auto-bar-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.reader-auto-bar-main > strong {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.reader-auto-bar-status {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  white-space: nowrap;
+}
+
+.reader-auto-bar[data-state='running'] .reader-auto-bar-status {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.reader-auto-bar[data-state='other'] .reader-auto-bar-status {
+  color: var(--warn, #f0a020);
+  background: color-mix(in srgb, var(--warn, #f0a020) 12%, transparent);
+}
+
+.reader-auto-bar-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.reader-auto-bar-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.reader-auto-bar-chevron {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform 160ms ease;
+}
+
+.reader-auto-bar-chevron[data-open='true'] {
+  transform: rotate(180deg);
+}
+
+.reader-auto-copy-quick {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 160ms ease, transform 160ms ease;
+}
+
+.reader-auto-copy-quick:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  transform: translateY(-1px);
+}
+
+.reader-auto-copy-quick:active {
+  transform: scale(0.97);
+}
+
+.reader-auto-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 11px 11px;
+  max-height: 42vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.reader-auto-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.reader-auto-controls label,
+.reader-auto-note-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.reader-auto-controls select {
+  max-width: 100%;
+}
+
+.reader-auto-note-label textarea {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+  min-height: 70px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.reader-auto-style {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.reader-auto-style-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.reader-auto-style-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.reader-auto-style-chips button {
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.reader-auto-style-chips button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--text);
+}
+
+.reader-auto-style-chips button[data-active='true'] {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.reader-auto-style-chips button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.reader-auto-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.reader-auto-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-auto-card-head strong {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.reader-auto-card-text {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.reader-auto-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.reader-auto-dot[data-on='false'] {
+  background: var(--text-faint);
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-auto-bar-chevron,
+  .reader-auto-copy-quick,
+  .reader-auto-style-chips button {
+    transition: none;
+  }
+
+  .reader-auto-copy-quick:hover,
+  .reader-auto-copy-quick:active {
+    transform: none;
+  }
+}
+
+/* ---------- 多风格草稿（生成后选择） ---------- */
+.reader-auto-variants {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.reader-auto-variant {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.reader-auto-variant:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.reader-auto-variant[data-active='true'] {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.reader-auto-variant:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.reader-auto-variant-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.reader-auto-variant-head strong {
+  font-size: 11.5px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.reader-auto-variant-head > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.reader-auto-variant-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.reader-auto-variant-copy:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.reader-auto-variant p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reader-auto-variant-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--warn, #f0a020);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-auto-variant {
+    transition: none;
+  }
+}
+
+/* ---------- 聊天区底部的草稿候选卡片（从设置面板摘出来） ---------- */
+.reader-auto-shelf {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.reader-auto-shelf-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-auto-shelf-head strong {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.reader-auto-shelf-scroll {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  overscroll-behavior-x: contain;
+}
+
+.reader-auto-shelf-scroll .reader-auto-variant {
+  flex: 0 0 min(260px, 82vw);
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.reader-auto-shelf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}

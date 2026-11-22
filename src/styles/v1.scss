@@ -3331,3 +3331,36 @@ textarea,
 
 // Keep settings headings readable when supporting copy wraps.
 .settings-pane .panel-head h2 { flex-shrink: 0; white-space: nowrap; }
+
+/* ---------- 页面字体自定义（v1.3.3） ---------- */
+.font-setting-block {
+  .font-system-input {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-width: 460px;
+  }
+
+  .font-system-input input {
+    width: 100%;
+  }
+
+  .font-custom-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .font-preview {
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+}

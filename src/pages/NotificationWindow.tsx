@@ -31,6 +31,7 @@ import {
     type NotificationAnimationStyle,
     type NotificationSlideFrom
 } from '../utils/notificationAnimation'
+import { initAppearanceFont } from '../utils/appearance'
 
 /**
  * 与 NotificationToast 传给 LiquidGlass 的参数保持一致（原生面板需要同一套值）。
@@ -101,6 +102,8 @@ function normalizeNotificationDuration(value: unknown): number {
 }
 
 export default function NotificationWindow() {
+    // 页面字体与主窗口保持一致；只读字体配置，不碰背景/主题。
+    useEffect(() => { void initAppearanceFont() }, [])
     const [notification, setNotification] = useState<NotificationData | null>(null)
     const [prevNotification, setPrevNotification] = useState<NotificationData | null>(null)
     const [position, setPosition] = useState<string>('top-right')
