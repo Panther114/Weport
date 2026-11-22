@@ -22,6 +22,8 @@ export type AccentId = 'blue' | 'violet' | 'teal' | 'rose' | 'amber' | 'graphite
 export type Density = 'compact'
 export type Mode = 'dark' | 'light'
 export type BackgroundKind = 'none' | 'image' | 'video'
+/** 页面字体来源：内置字体 / 系统已安装字体 / 用户选择的字体文件。 */
+export type FontMode = 'default' | 'system' | 'custom'
 /** 强调色的用量：只影响色块浓度，不改色相。 */
 export type AccentStrength = 'soft' | 'standard' | 'vivid'
 /**
@@ -61,6 +63,14 @@ export const VIDEO_QUALITY_OPTIONS: ReadonlyArray<{
 ]
 
 export interface Appearance {
+  /** 页面字体来源（默认内置 / 系统字体 / 自定义文件）。 */
+  fontMode: FontMode
+  /** `fontMode === 'system'` 时的字体族名（用户在设置里填写）。 */
+  fontFamily: string
+  /** `fontMode === 'custom'` 时，复制到 `{userData}/fonts/` 的文件名。 */
+  fontFile: string
+  /** 自定义字体的原始文件名，仅用于界面显示。 */
+  fontName: string
   /** 用户选择的绝对路径（界面显示、扩展名判断都用它）；空字符串＝纯色背景。 */
   backgroundPath: string
   /**
@@ -103,6 +113,10 @@ export interface Appearance {
 }
 
 export const APPEARANCE_DEFAULT: Appearance = {
+  fontMode: 'default',
+  fontFamily: '',
+  fontFile: '',
+  fontName: '',
   backgroundPath: '',
   backgroundPlaybackPath: '',
   backgroundRejected: '',
@@ -145,6 +159,98 @@ export const MODE_OPTIONS: Array<{ id: Mode; label: string; hint: string }> = [
   { id: 'light', label: '浅色', hint: '白天 / 强光环境下更清晰' },
 ]
 
+export const FONT_MODE_OPTIONS: Array<{ id: FontMode; label: string; hint: string }> = [
+  { id: 'default', label: '默认', hint: '内置字体' },
+  { id: 'system', label: '系统字体', hint: '使用本机已安装的字体族' },
+  { id: 'custom', label: '自定义文件', hint: '选择一个 .ttf / .otf / .woff2 文件' },
+]
+
+/** 与 src/styles.css 的 --font 保持一致；兜底字体不依赖用户配置。 */
+const DEFAULT_FONT_STACK =
+  '"Weport", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif'
+const CUSTOM_FONT_FAMILY = 'WeportCustom'
+const CUSTOM_FONT_STACK = `"${CUSTOM_FONT_FAMILY}", ${DEFAULT_FONT_STACK}`
+
+/** 字体族名只允许普通字符，避免把用户输入拼成额外的 CSS 声明。 */
+export function normalizeFontFamily(value: unknown): string {
+  return String(value || '')
+    .replace(/["'\\;,{}]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+}
+
+const isFontMode = (value: unknown): value is FontMode =>
+  value === 'default' || value === 'system' || value === 'custom'
+
+let customFontFace: FontFace | null = null
+let fontLoadToken = 0
+/** 主题/背景变化也会触发 applyDom；字体没变时不要重复加载几十 MB 的字体。 */
+let lastFontKey = ''
+
+function removeCustomFontFace(): void {
+  if (!customFontFace) return
+  try { document.fonts.delete(customFontFace) } catch { /* noop */ }
+  customFontFace = null
+}
+
+async function loadCustomFont(file: string, token: number): Promise<void> {
+  try {
+    const url = `weport-font://local/${encodeURIComponent(file)}`
+    const face = new FontFace(CUSTOM_FONT_FAMILY, `url("${url}")`, { display: 'swap' })
+    await face.load()
+    if (token !== fontLoadToken) return
+    removeCustomFontFace()
+    document.fonts.add(face)
+    customFontFace = face
+  } catch (error) {
+    if (token !== fontLoadToken) return
+    removeCustomFontFace()
+    document.documentElement.style.setProperty('--font', DEFAULT_FONT_STACK)
+    try {
+      window.dispatchEvent(new CustomEvent('weport-font-error', { detail: { file, error: String(error) } }))
+    } catch { /* noop */ }
+  }
+}
+
+function applyFont(appearance: Appearance): void {
+  const root = document.documentElement
+  const key = `${appearance.fontMode}|${appearance.fontFamily}|${appearance.fontFile}`
+  if (key === lastFontKey) {
+    // 只是换了主题/背景：字体栈保持不变，不要重新加载自定义字体。
+    if (appearance.fontMode === 'custom' && appearance.fontFile) {
+      root.style.setProperty('--font', CUSTOM_FONT_STACK)
+    } else if (appearance.fontMode === 'system') {
+      const family = normalizeFontFamily(appearance.fontFamily)
+      root.style.setProperty('--font', family ? `"${family}", ${DEFAULT_FONT_STACK}` : DEFAULT_FONT_STACK)
+    } else {
+      root.style.setProperty('--font', DEFAULT_FONT_STACK)
+    }
+    return
+  }
+  lastFontKey = key
+
+  if (appearance.fontMode === 'custom' && appearance.fontFile) {
+    const token = (fontLoadToken += 1)
+    // 换文件时先把旧 face 拿掉，避免新文件加载期间继续用上一款字体。
+    removeCustomFontFace()
+    // 先走内置兜底，字体加载完成前也不让页面变成默认系统字体。
+    root.style.setProperty('--font', CUSTOM_FONT_STACK)
+    void loadCustomFont(appearance.fontFile, token)
+    return
+  }
+  fontLoadToken += 1
+  removeCustomFontFace()
+  if (appearance.fontMode === 'system') {
+    const family = normalizeFontFamily(appearance.fontFamily)
+    if (family) {
+      root.style.setProperty('--font', `"${family}", ${DEFAULT_FONT_STACK}`)
+      return
+    }
+  }
+  root.style.setProperty('--font', DEFAULT_FONT_STACK)
+}
+
 /** 视频背景支持的扩展名（Chromium 能直接播的容器）。 */
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'm4v', 'mov']
 
@@ -156,6 +262,10 @@ export function backgroundKindOf(filePath: string): BackgroundKind {
 }
 
 const KEYS = {
+  fontMode: 'appearanceFontMode',
+  fontFamily: 'appearanceFontFamily',
+  fontFile: 'appearanceFontFile',
+  fontName: 'appearanceFontName',
   backgroundPath: 'appearanceBackgroundPath',
   backgroundDim: 'appearanceBackgroundDim',
   backgroundBlur: 'appearanceBackgroundBlur',
@@ -236,6 +346,7 @@ function applyDom(appearance: Appearance): void {
   }
   // 旧字段：仍有少量 CSS（以及 ECharts 主题）按 data-theme 判断灰阶。
   root.dataset.theme = appearance.accent === 'graphite' ? 'mono' : 'colorful'
+  applyFont(appearance)
 }
 
 export const getAppearance = (): Appearance => current
@@ -360,6 +471,56 @@ export const setModeAuto = (auto: boolean): void =>
 export const setAccentStrength = (strength: AccentStrength): void =>
   commit({ accentStrength: isStrength(strength) ? strength : 'standard' }, (key, value) => void window.electronAPI.config.set(key, value))
 
+/** 页面字体来源。选 custom 但还没选文件时先回退默认，直到文件被选中。 */
+export const setFontMode = (mode: FontMode): void =>
+  commit({ fontMode: isFontMode(mode) ? mode : 'default' }, (key, value) => void window.electronAPI.config.set(key, value))
+
+export const setFontFamily = (family: string): void =>
+  // 保留用户正在输入的原始文本（包括末尾空格），CSS 拼接时再 sanitize。
+  commit({ fontFamily: String(family || '').slice(0, 80) }, (key, value) => void window.electronAPI.config.set(key, value))
+
+/** 主进程把用户选的字体复制到 userData/fonts 后调用。 */
+export const setCustomFont = (file: string, name: string): void => {
+  const safeFile = String(file || '').trim()
+  if (!safeFile) return
+  commit(
+    { fontMode: 'custom', fontFile: safeFile, fontName: String(name || safeFile) },
+    (key, value) => void window.electronAPI.config.set(key, value)
+  )
+}
+
+export const resetFont = (): void =>
+  commit(
+    { fontMode: 'default', fontFamily: '', fontFile: '', fontName: '' },
+    (key, value) => void window.electronAPI.config.set(key, value)
+  )
+
+/**
+ * 只恢复字体设置（通知弹窗独立入口用；不要顺带读背景/主题配置）。
+ */
+export async function initAppearanceFont(): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.config?.get) return
+  const read = async (key: string): Promise<unknown> => {
+    try { return await api.config.get(key) } catch { return undefined }
+  }
+  const [mode, family, file, name] = await Promise.all([
+    read(KEYS.fontMode),
+    read(KEYS.fontFamily),
+    read(KEYS.fontFile),
+    read(KEYS.fontName),
+  ])
+  current = {
+    ...current,
+    fontMode: isFontMode(mode) ? mode : APPEARANCE_DEFAULT.fontMode,
+    fontFamily: normalizeFontFamily(family),
+    fontFile: typeof file === 'string' ? file : '',
+    fontName: typeof name === 'string' ? name : '',
+  }
+  applyFont(current)
+  listeners.forEach((listener) => listener())
+}
+
 /**
  * 背景存在性探测。
  *
@@ -445,7 +606,7 @@ export async function initAppearance(): Promise<Appearance> {
     }
   }
 
-  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, accentStrength, modeAuto, legacyColorMode, backgroundPlaybackPath, backgroundRejected, videoQuality, videoInfo] = await Promise.all([
+  const [backgroundPath, backgroundDim, backgroundBlur, accent, customAccent, mode, accentStrength, modeAuto, legacyColorMode, backgroundPlaybackPath, backgroundRejected, videoQuality, videoInfo, fontMode, fontFamily, fontFile, fontName] = await Promise.all([
     // 存的两个键：Source = 用户选的文件（界面显示），Path = 实际该播的
     // （主进程可能换成转码缓存；被拒时为空串）。
     read('appearanceBackgroundSource'),
@@ -464,12 +625,20 @@ export async function initAppearance(): Promise<Appearance> {
     read(KEYS.videoQuality),
     // 实际生效的档位由主进程回答（它知道显示器设备宽度与模糊规则）。
     read('appearanceBackgroundVideoInfo'),
+    read(KEYS.fontMode),
+    read(KEYS.fontFamily),
+    read(KEYS.fontFile),
+    read(KEYS.fontName),
   ])
 
   const legacyAccent: AccentId | undefined =
     legacyColorMode === 'mono' ? 'graphite' : legacyColorMode === 'colorful' ? 'blue' : undefined
 
   const next: Appearance = {
+    fontMode: isFontMode(fontMode) ? fontMode : APPEARANCE_DEFAULT.fontMode,
+    fontFamily: normalizeFontFamily(fontFamily),
+    fontFile: typeof fontFile === 'string' ? fontFile : '',
+    fontName: typeof fontName === 'string' ? fontName : '',
     backgroundPath: typeof backgroundPath === 'string' ? backgroundPath.trim() : APPEARANCE_DEFAULT.backgroundPath,
     // 主进程**总是**回答这个键（被拒时明确回空串），所以"是字符串"就照它用；
     // 只有它完全没回答（undefined，例如主进程还没起来）才退回用户选的文件。

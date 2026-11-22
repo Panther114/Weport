@@ -35,6 +35,7 @@ import { ReaderImageScope } from '../components/reader/MessageBlocks'
 import { ReaderImageViewer } from '../components/reader/ReaderImageViewer'
 import { ReaderToolbar } from '../components/reader/ReaderToolbar'
 import { ReaderReplyDraft } from '../components/reader/ReaderReplyDraft'
+import { ReaderAutoDraftPanel } from '../components/reader/ReaderAutoDraftPanel'
 import { ReaderExportOptions } from '../components/reader/ReaderExportOptions'
 import { SessionRail } from '../components/reader/SessionRail'
 import { exportReaderSession, type ReaderExportOptions as ExportOptions } from '../components/reader/readerExport'
@@ -48,8 +49,8 @@ import {
   searchSession,
   type ReaderChannelStatus,
 } from '../components/reader/readerSource'
-import type { ReaderMessage, ReaderSearchHit, ReaderSession, ReaderSessionKind } from '../components/reader/readerTypes'
-import { dayKeyOf, dayRangeFromInput, formatDateTime, messageToPlainText, rangeToPlainText } from '../components/reader/readerMessage'
+import type { EngineMessageLike, ReaderMessage, ReaderSearchHit, ReaderSession, ReaderSessionKind } from '../components/reader/readerTypes'
+import { dayKeyOf, dayRangeFromInput, formatDateTime, messageToPlainText, normalizeMessage, rangeToPlainText } from '../components/reader/readerMessage'
 import { annotationIdentityFields } from '../utils/annotationIdentity'
 import {
   INITIAL_FIRST_ITEM_INDEX,
@@ -231,10 +232,26 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
     setSessionsLoading(false)
   }, [])
 
+  /**
+   * 静默刷新会话栏：不切 `sessionsLoading`，否则左侧每分钟都会闪一次加载态。
+   * 新消息会更新 lastAt / unreadCount / summary，用户在看别的会话时也能看到。
+   */
+  const refreshSessionsSilent = useCallback(async () => {
+    const result = await loadReaderSessions()
+    if (!aliveRef.current) return
+    setSessions(result.sessions)
+    setSessionsError(result.error)
+  }, [])
+
   useEffect(() => {
     setChannels(readerChannels())
     void refreshSessions()
   }, [refreshSessions])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => { void refreshSessionsSilent() }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [refreshSessionsSilent])
 
   // ---- 消息加载 ----
   const loadFirstPage = useCallback(
@@ -320,6 +337,56 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
     },
     [],
   )
+
+  /**
+   * 阅读器自动刷新（v1.3.3）：当前会话有新消息时追加到列表底部。
+   *
+   * 只在"最新窗口"刷新：用户正在看某一天（timeWindow）或正在加载时不动列表，
+   * 否则会把别的日期的新消息混进来。`followOutput` 只在用户已经贴底时跟随，
+   * 往上翻历史时不会被拽回底部。
+   */
+  const liveStateRef = useRef({
+    selectedId: '',
+    timeWindow: null as { start: number; end: number } | null,
+    loadingWindow: false,
+    messagesError: undefined as string | undefined,
+    channelMissing: false,
+    latestTs: 0,
+  })
+  useEffect(() => {
+    liveStateRef.current = {
+      selectedId,
+      timeWindow,
+      loadingWindow,
+      messagesError,
+      channelMissing,
+      latestTs: messages.length > 0 ? messages[messages.length - 1].ts : 0,
+    }
+  }, [selectedId, timeWindow, loadingWindow, messagesError, channelMissing, messages])
+
+  const refreshLatestMessages = useCallback(async () => {
+    const state = liveStateRef.current
+    if (!state.selectedId || state.timeWindow || state.loadingWindow || state.messagesError || state.channelMissing || !state.latestTs) return
+    const sessionId = state.selectedId
+    const result = await window.electronAPI.chat.getNewMessages(
+      sessionId,
+      Math.max(0, Math.floor(state.latestTs / 1000) - 2),
+      50,
+    )
+    if (!aliveRef.current || liveStateRef.current.selectedId !== sessionId) return
+    if (!result.success || !Array.isArray(result.messages) || result.messages.length === 0) return
+    const incoming = result.messages.map((row, index) => normalizeMessage(row as EngineMessageLike, sessionId, index))
+    setMessages((previous) => {
+      const merged = mergeMessages(previous, incoming)
+      return merged.length === previous.length ? previous : merged
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!selectedId || timeWindow || messagesError || channelMissing) return
+    const timer = window.setInterval(() => { void refreshLatestMessages() }, 4_000)
+    return () => window.clearInterval(timer)
+  }, [selectedId, timeWindow, messagesError, channelMissing, refreshLatestMessages])
 
   const openSession = useCallback(
     (session: ReaderSession) => {
@@ -705,6 +772,8 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
               className="reader-messages"
               data={messages}
               firstItemIndex={firstItemIndex}
+              // 只在用户已经贴底时跟随新消息；正在往上翻历史时不会被拽回底部。
+              followOutput="auto"
               // 数据下标（见 itemContent 上面的说明）：消息列表的新消息在下，首屏落在最后一条
               initialTopMostItemIndex={Math.max(0, messages.length - 1)}
               startReached={() => void loadOlder()}
@@ -745,6 +814,16 @@ export default function ReaderPage({ accountId = '', openRequest, onCreatePoster
               }}
             />
           </>
+        )}
+
+        {selected && !channelMissing && (
+          <ReaderAutoDraftPanel
+            key={`auto-${selected.id}`}
+            accountId={accountId}
+            sessionId={selected.id}
+            sessionName={selected.name}
+            disabled={loadingWindow || Boolean(messagesError)}
+          />
         )}
       </div>
 

@@ -298,4 +298,11 @@ export const LIVE_TASK = {
   quoteReferences: 'reader.references',
   searchIndex: 'search.index',
   databaseMaintenance: 'db.maintenance',
+  /**
+   * 阅读器自动回复草稿（v1.3.3）。
+   *
+   * 监听与生成都跑在主进程：用户切到别的标签、窗口被托盘隐藏销毁，草稿仍然
+   * 会在主进程内存里更新。这个 key 只负责让左下角的任务条可见。
+   */
+  readerAutoDraft: 'reader.autoDraft',
 } as const

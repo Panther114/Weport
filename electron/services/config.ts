@@ -128,6 +128,12 @@ interface ConfigSchema {
   // 更新相关
   ignoredUpdateVersion: string
   updateChannel: 'auto' | 'stable' | 'preview' | 'dev'
+  /**
+   * 启动时是否自动检查更新并弹出提示（v1.3.3，默认关闭）。
+   *
+   * 关闭只影响"自动弹提示"；设置页里的「检查更新」仍然可用。
+   */
+  autoCheckUpdates: boolean
 
   // 通知
   notificationCaptureMode: 'compatible' | 'live-glass'
@@ -373,6 +379,8 @@ export class ConfigService {
       authHelloSecret: '',
       ignoredUpdateVersion: '',
       updateChannel: 'auto',
+      // 用户要求关闭自动更新提示：默认不检查，手动「检查更新」仍可用。
+      autoCheckUpdates: false,
       notificationCaptureMode: 'compatible',
       notificationEnabled: true,
       aiInsightNotificationEnabled: true,

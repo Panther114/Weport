@@ -13,6 +13,14 @@ releases retain the three-platform gate. Windows-first releases still require
 
 > 从 `AGENTS.md` 拆出：这里是模块与历史说明，不是动手前必读的不变量。
 
+## Automatic update prompts — v1.3.3
+
+`autoCheckUpdates` defaults to **false**. `appMain.ts::checkForUpdatesOnStartup`
+returns early unless it is explicitly `true`, so installed copies do not show the
+automatic update banner/toast. The manual 「检查更新」 button and the forced-update
+policy check still work. The toggle lives in 设置 → 关于. Do not re-enable the
+startup check by calling `checkForUpdatesManual()` from a timer elsewhere.
+
 ## Windows NSIS reinstall (v1.2)
 
 - Windows packaging uses the checked-in `assets/icons/icon.ico` generated from the canonical PNG. This avoids electron-builder's PNG-to-ICO WASM converter failing under memory pressure; refresh both assets together when changing branding. Linux still uses PNG and macOS ICNS.

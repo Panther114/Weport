@@ -40,6 +40,19 @@ describe('Reader draft context boundary', () => {
     expect(prepareReaderDraftContext('wxid_me', 'chat', [row(1, 'x'.repeat(11_000))]).message.length).toBeLessThanOrEqual(READER_DRAFT_MAX_CHARS)
   })
 
+  it('injects the per-conversation note and counts it toward the character cap', () => {
+    const context = prepareReaderDraftContext('wxid_me', 'chat', [row(1, '在吗')], '对方是我老板，收着点说')
+    expect(context.message).toContain('本会话补充提示词')
+    expect(context.message).toContain('对方是我老板')
+    expect(() => prepareReaderDraftContext(
+      'wxid_me',
+      'chat',
+      [row(1, 'x'.repeat(11_900))],
+      'y'.repeat(500),
+    )).toThrow('字符')
+    expect(prepareReaderDraftContext('wxid_me', 'chat', [row(1, '在吗')], '').message).not.toContain('本会话补充提示词')
+  })
+
   it('preserves an exact uint64 message identity', () => {
     expect(prepareReaderDraftContext('wxid_me', 'chat', [row(1, 'text', { localIdRaw: '18446744073709551614' })]).identities[0].localId).toBe('18446744073709551614')
   })

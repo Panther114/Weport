@@ -15,6 +15,9 @@ larger type, rounded controls.
 - User-selected dark/light surfaces with palette-derived icons, titles, active states and actions; semantic success/warning/error colors stay distinct
 - Rounded corners (~10px) on panels and buttons
 - Custom face `src/assets/fonts/weport.ttf`
+- Page font is user-selectable in 设置 → 外观: bundled default / system family /
+  custom `.ttf` `.otf` `.woff` `.woff2` copied to `{userData}/fonts` and served by
+  `weport-font://`. Never serve a custom font from an arbitrary path.
 - App icon sole source: `assets/branding/weport-icon.jpg` →
   `assets/icons/icon.png` (rounded corners + transparent background, used by
   installer / tray / taskbar / window / navbar; `public/icon.png` mirrors it

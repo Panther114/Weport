@@ -113,8 +113,49 @@ interface WeCloneMetaInfo {
  * `character` = 以本人的方式带过去（默认）；`off` = 完全不设限。
  */
 type WeCloneRefusalMode = 'character' | 'off'
+/** 与 src/utils/weCloneStyle.ts 的 WeCloneStylePreset 保持一致。 */
+type WeCloneStylePreset = 'original' | 'relaxed' | 'gentle' | 'humorous' | 'concise' | 'earnest'
 interface WeCloneSettings {
   refusal: WeCloneRefusalMode
+  exemplars: 'on' | 'off'
+  shape: 'on' | 'off'
+  lengthHint: 'on' | 'off'
+  style: WeCloneStylePreset
+  styleNote: string
+}
+
+/** 与 src/types/weclone.ts 的 WeCloneVoiceReview 保持一致。 */
+interface WeCloneVoiceIssue {
+  id: string
+  title: string
+  detail: string
+  severity: 'info' | 'warn'
+  evidence?: string[]
+}
+interface WeCloneVoiceReview {
+  generatedAt: number
+  sampleSize: number
+  replySampleSize: number
+  summary: string
+  issues: WeCloneVoiceIssue[]
+  cautions: string[]
+  suggestions: string[]
+  metrics: {
+    voiceSampleSize: number
+    replySampleSize: number
+    voiceMedianLength: number
+    voiceMeanLength: number
+    voiceBurstMean: number
+    replyMedianLength: number
+    replyMeanLength: number
+    replyP90Length: number
+    replyToVoiceRatio: number
+    assistantToneRate: number
+    structureRate: number
+    questionRate: number
+    voiceEndsWithPunctuation: number
+    voiceEmojiRatio: number
+  }
 }
 
 /**
@@ -339,6 +380,10 @@ interface ElectronApi {
   dialog: {
     openDirectory: (options?: any) => Promise<string | null>
     openFile: (options?: any) => Promise<string | null>
+  }
+  /** 外观：页面字体文件选择（主进程复制到 {userData}/fonts/）。 */
+  appearance: {
+    pickFont: () => Promise<{ success: boolean; file?: string; name?: string; canceled?: boolean; error?: string }>
   }
   shell: {
     openPath: (path: string) => Promise<string>
@@ -781,9 +826,18 @@ interface ElectronApi {
     /** 导出（生成）时的脱敏开关，持久化在配置里 */
     getRedact: () => Promise<{ success: boolean; redact: boolean }>
     setRedact: (enabled: boolean) => Promise<{ success: boolean; redact: boolean }>
-    /** 单个克隆自己的设置（拒答行为等） */
+    /** 单个克隆自己的设置（拒答行为、表达风格与补充要求） */
     getSettings: (cloneId: string) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
-    setSettings: (cloneId: string, patch: { refusal?: WeCloneRefusalMode }) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
+    setSettings: (cloneId: string, patch: {
+      refusal?: WeCloneRefusalMode
+      exemplars?: 'on' | 'off'
+      shape?: 'on' | 'off'
+      lengthHint?: 'on' | 'off'
+      style?: WeCloneStylePreset
+      styleNote?: string
+    }) => Promise<{ success: boolean; settings?: WeCloneSettings; error?: string }>
+    /** 说话复盘：纯本地统计，不调用模型。 */
+    analyzeVoice: (cloneId: string) => Promise<{ success: boolean; review?: WeCloneVoiceReview; error?: string }>
     generate: (opts?: { redact?: boolean }) => Promise<{
       success: boolean
       clone?: WeCloneMetaInfo
@@ -832,6 +886,24 @@ interface ElectronApi {
    * 生成、导出、连接都跑在主进程里。新文档启动时调一次 `status()` 就能把进度、
    * 日志、开始时间原样拿回来 —— 否则重建后的界面看起来像什么都没发生过。
    */
+  /**
+   * 阅读器自动回复草稿（v1.3.3）。
+   *
+   * 监听在主进程运行，切页/托盘隐藏不会停；渲染层用 `onEvent` 接收状态，
+   * 重新打开阅读器时先 `status()` 恢复。设置按账号+会话保存，下次自动带出。
+   */
+  readerDraft: {
+    start: (config: { accountId: string; sessionId: string; sessionName?: string; cloneId: string; range: string }) =>
+      Promise<{ success: boolean; snapshot?: import('./utils/readerAutoDraft').ReaderAutoDraftSnapshot; error?: string }>
+    stop: () => Promise<{ success: boolean; snapshot?: import('./utils/readerAutoDraft').ReaderAutoDraftSnapshot }>
+    status: () => Promise<import('./utils/readerAutoDraft').ReaderAutoDraftSnapshot>
+    regenerate: () => Promise<{ success: boolean; snapshot?: import('./utils/readerAutoDraft').ReaderAutoDraftSnapshot; error?: string }>
+    getSettings: (accountId: string, sessionId: string) =>
+      Promise<{ success: boolean; settings?: import('./utils/readerDraftSettings').ReaderDraftSessionSettings | null; error?: string }>
+    setSettings: (patch: { accountId: string; sessionId: string; cloneId?: string; range?: string; note?: string }) =>
+      Promise<{ success: boolean; settings?: import('./utils/readerDraftSettings').ReaderDraftSessionSettings; error?: string }>
+    onEvent: (callback: (snapshot: import('./utils/readerAutoDraft').ReaderAutoDraftSnapshot) => void) => () => void
+  }
   task: {
     status: () => Promise<Record<string, LiveTaskSnapshot>>
     onStatusChanged: (callback: (snapshots: Record<string, LiveTaskSnapshot>) => void) => () => void

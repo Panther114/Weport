@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowRight, Clock, DatabaseBackup, Download, Fingerprint, Loader2, PlugZap, Search, X } from 'lucide-react'
+import { ArrowRight, Clock, DatabaseBackup, Download, Fingerprint, Loader2, PlugZap, Search, Sparkles, X } from 'lucide-react'
 import { useLiveTask } from '../hooks/useLiveTask'
 import { LIVE_TASK, type LiveTaskState } from '../utils/liveTask'
 
@@ -58,6 +58,7 @@ const ROWS: TaskRow[] = [
   { key: LIVE_TASK.quoteReferences, label: '检索消息引用', icon: Search, tab: 'reader', cancellable: false, indeterminate: true },
   { key: LIVE_TASK.searchIndex, label: '建立搜索索引', icon: Search, tab: 'search', cancellable: true },
   { key: LIVE_TASK.databaseMaintenance, label: '数据库维护', icon: DatabaseBackup, tab: 'diagnostics', cancellable: false, indeterminate: true },
+  { key: LIVE_TASK.readerAutoDraft, label: '自动回复草稿', icon: Sparkles, tab: 'reader', cancellable: true, indeterminate: true },
 ]
 
 function formatElapsed(ms: number): string {
@@ -86,6 +87,7 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
   const quoteReferences = useLiveTask(LIVE_TASK.quoteReferences)
   const searchIndex = useLiveTask(LIVE_TASK.searchIndex)
   const databaseMaintenance = useLiveTask(LIVE_TASK.databaseMaintenance)
+  const readerAutoDraft = useLiveTask(LIVE_TASK.readerAutoDraft)
   const states: Record<string, LiveTaskState> = {
     [LIVE_TASK.connect]: connect,
     [LIVE_TASK.export]: exportTask,
@@ -97,6 +99,7 @@ export default function BackgroundTasks({ onOpen, onCancel }: Props) {
     [LIVE_TASK.quoteReferences]: quoteReferences,
     [LIVE_TASK.searchIndex]: searchIndex,
     [LIVE_TASK.databaseMaintenance]: databaseMaintenance,
+    [LIVE_TASK.readerAutoDraft]: readerAutoDraft,
   }
 
   const running = ROWS.filter((row) => states[row.key]?.status === 'running')

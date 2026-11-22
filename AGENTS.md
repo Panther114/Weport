@@ -21,6 +21,7 @@
 | 打包 / 平台差异 / TUI / 连接器 / 视频背景 / 托盘 | [`docs/agents/platform.md`](docs/agents/platform.md) |
 | 朋友圈、分析、防撤回、导出、MCP | [`docs/agents/modules.md`](docs/agents/modules.md) |
 | V1.2、免登录连接、阅读器、搜索、便携导出与验收 | [`docs/agents/v12.md`](docs/agents/v12.md) |
+| 阅读器自动回复草稿、按会话保存的提示词、WeClone 风格调整 | [`docs/agents/reader-auto-draft.md`](docs/agents/reader-auto-draft.md) |
 
 **这个文件只放"动手前必须知道、违反了会做出静默坏掉的东西"的条款。**
 上面那些文档是同一份约束的正文 —— 需要细节时打开它们，不要把内容再抄回来。

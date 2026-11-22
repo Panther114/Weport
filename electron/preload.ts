@@ -119,6 +119,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openFile: (options?: any) => ipcRenderer.invoke('dialog:openFile', options)
   },
 
+  /** 外观：页面字体文件选择（文件会被复制到本机配置目录）。 */
+  appearance: {
+    pickFont: () => ipcRenderer.invoke('appearance:pickFont')
+  },
+
   // 外壳
   shell: {
     openPath: (path: string) => ipcRenderer.invoke('shell:openPath', path),
@@ -449,8 +454,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
      * 存在克隆目录里的 settings.json —— 和它的档案、语料同生共死。
      */
     getSettings: (cloneId: string) => ipcRenderer.invoke('weclone:getSettings', cloneId),
-    setSettings: (cloneId: string, patch: { refusal?: string }) =>
-      ipcRenderer.invoke('weclone:setSettings', cloneId, patch)
+    setSettings: (cloneId: string, patch: { refusal?: string; exemplars?: string; shape?: string; lengthHint?: string; style?: string; styleNote?: string }) =>
+      ipcRenderer.invoke('weclone:setSettings', cloneId, patch),
+    /** 说话复盘：纯本地统计，不调用模型。 */
+    analyzeVoice: (cloneId: string) => ipcRenderer.invoke('weclone:analyzeVoice', cloneId)
+  },
+
+  /**
+   * 阅读器自动回复草稿（v1.3.3）。
+   *
+   * 监听跑在主进程：切页、托盘隐藏、窗口销毁都不会停。渲染层只负责开关与展示；
+   * 掉线后重新打开阅读器时先调 `status()` 把当前状态与草稿拿回来。
+   */
+  readerDraft: {
+    start: (config: { accountId: string; sessionId: string; sessionName?: string; cloneId: string; range: string }) =>
+      ipcRenderer.invoke('readerDraft:start', config),
+    stop: () => ipcRenderer.invoke('readerDraft:stop'),
+    status: () => ipcRenderer.invoke('readerDraft:status'),
+    regenerate: () => ipcRenderer.invoke('readerDraft:regenerate'),
+    getSettings: (accountId: string, sessionId: string) =>
+      ipcRenderer.invoke('readerDraft:getSettings', accountId, sessionId),
+    setSettings: (patch: { accountId: string; sessionId: string; cloneId?: string; range?: string; note?: string }) =>
+      ipcRenderer.invoke('readerDraft:setSettings', patch),
+    onEvent: (callback: (snapshot: any) => void) => subscribe('readerDraft:event', callback)
   },
 
   /** 海报导出落盘（v1.2 §4）：PNG data URL → 真实文件；返回**真实写入路径** */

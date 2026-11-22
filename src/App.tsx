@@ -37,6 +37,7 @@ import {
   RotateCcw,
   Paperclip,
   FileType,
+  Type,
   // ListChecks 已不再导入：v1.0 移除了通知页的「前置条件」清单，
   // 它与左侧栏的全局状态栏重复表达同一件事。
   Filter,
@@ -157,6 +158,7 @@ import {
   ACCENT_OPTIONS,
   ACCENT_STRENGTH_OPTIONS,
   BLUR_FORCES_BALANCED_PX,
+  FONT_MODE_OPTIONS,
   MODE_OPTIONS,
   PRESET_ACCENTS,
   VIDEO_QUALITY_OPTIONS,
@@ -167,12 +169,16 @@ import {
   probeBackground,
   adoptModeFromBackground,
   refreshVideoQualityInfo,
+  resetFont,
   setAccent,
   setAccentStrength,
   setBackgroundBlur,
   setBackgroundDim,
   setBackgroundPath,
   setCustomAccent,
+  setCustomFont,
+  setFontFamily,
+  setFontMode,
   setMode,
   setModeAuto,
   setVideoQuality,
@@ -468,6 +474,8 @@ export default function App() {
   const [closeToTray, setCloseToTray] = useState(true)
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string; forced?: boolean; reason?: string | null; url?: string | null; hasUpdate?: boolean; allowReadOnly?: boolean } | null>(null)
   const [updateChecking, setUpdateChecking] = useState(false)
+  /** 启动时自动检查更新（默认关闭，见 config.ts autoCheckUpdates） */
+  const [autoCheckUpdates, setAutoCheckUpdates] = useState(false)
   const updatePhase = useLiveTaskPhase(LIVE_TASK.updateDownload)
   const updateBusy = updateChecking || updatePhase.startsWith('running:')
   useEffect(() => {
@@ -687,6 +695,13 @@ export default function App() {
     }, ms)
     toastTimers.current.set(id, t)
   }, [dismissToast])
+
+  // 自定义字体文件可能被移走/删除，或根本不是字体：applyFont 会回退默认并广播。
+  useEffect(() => {
+    const onFontError = () => pushToast('err', '自定义字体加载失败', '已回退默认字体；请确认文件是有效的 .ttf / .otf / .woff / .woff2。', 9000)
+    window.addEventListener('weport-font-error', onFontError)
+    return () => window.removeEventListener('weport-font-error', onFontError)
+  }, [pushToast])
 
   useEffect(() => {
     let active = true
@@ -1138,6 +1153,9 @@ export default function App() {
         try {
           setMcpStatus(await api.mcp.getStatus())
         } catch { /* noop */ }
+        try {
+          setAutoCheckUpdates((await api.config.get('autoCheckUpdates')) === true)
+        } catch { /* noop */ }
         const silent = await api.config.get('silentStartup')
         setSilentStartup(silent === true)
         const close = await api.config.get('windowCloseBehavior')
@@ -1434,6 +1452,9 @@ export default function App() {
       if (key === LIVE_TASK.wecloneGenerate) {
         void api.weclone.cancel()
       }
+      if (key === LIVE_TASK.readerAutoDraft) {
+        void api.readerDraft.stop()
+      }
       if (key === LIVE_TASK.searchIndex) {
         void api.search.cancelIndex().catch((error: unknown) => {
           pushToast('err', '取消索引失败', error instanceof Error ? error.message : String(error))
@@ -1704,6 +1725,11 @@ export default function App() {
     } catch {
       setHttpApiRunning(false)
     }
+  }
+
+  async function toggleAutoCheckUpdates(on: boolean) {
+    setAutoCheckUpdates(on)
+    await api.config.set('autoCheckUpdates', on)
   }
 
   /**
@@ -2309,6 +2335,20 @@ export default function App() {
       void refreshVideoQualityInfo()
     } catch (error) {
       pushToast('err', '选择背景失败', String((error as Error)?.message || error), 9000)
+    }
+  }
+
+  /** 选择页面字体文件：主进程复制到 {userData}/fonts/，渲染层只拿文件名。 */
+  async function pickCustomFont(): Promise<void> {
+    try {
+      const result = await api.appearance.pickFont()
+      if (!result.success) {
+        if (!result.canceled) pushToast('err', '选择字体失败', result.error || '', 9000)
+        return
+      }
+      if (result.file) setCustomFont(result.file, result.name || result.file)
+    } catch (error) {
+      pushToast('err', '选择字体失败', String((error as Error)?.message || error), 9000)
     }
   }
 
@@ -4095,6 +4135,69 @@ export default function App() {
                 })()}
               </div>
 
+              {/* 页面字体：默认内置 / 系统已安装字体 / 用户选择的字体文件。
+                  自定义文件由主进程复制到 {userData}/fonts/，经 weport-font:// 提供。 */}
+              <div className="setting-block font-setting-block">
+                <div className="setting-label">
+                  <Type size={14} />
+                  <div>
+                    <strong>页面字体</strong>
+                    <span className="hint">
+                      {appearance.fontMode === 'default'
+                        ? '默认：仓耳今楷05 W04'
+                        : appearance.fontMode === 'system'
+                          ? `系统字体：${appearance.fontFamily || '未填写字体名'}`
+                          : `自定义文件：${appearance.fontName || appearance.fontFile || '未选择'}`}
+                    </span>
+                  </div>
+                </div>
+                <div className="seg" role="radiogroup" aria-label="页面字体来源">
+                  {FONT_MODE_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      data-active={appearance.fontMode === option.id}
+                      title={option.hint}
+                      onClick={() => setFontMode(option.id)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                {appearance.fontMode === 'system' && (
+                  <label className="font-system-input">
+                    <span className="hint">本机已安装的字体名</span>
+                    <input
+                      className="filter-input"
+                      value={appearance.fontFamily}
+                      maxLength={80}
+                      spellCheck={false}
+                      placeholder="例如：Microsoft YaHei / PingFang SC / Noto Sans CJK SC"
+                      onChange={(e) => setFontFamily(e.target.value)}
+                    />
+                  </label>
+                )}
+                {appearance.fontMode === 'custom' && (
+                  <div className="font-custom-row">
+                    <button className="secondary-btn" type="button" onClick={() => void pickCustomFont()}>
+                      {appearance.fontFile ? '更换字体文件…' : '选择字体文件…'}
+                    </button>
+                    {appearance.fontFile && (
+                      <span className="hint">{appearance.fontName || appearance.fontFile}</span>
+                    )}
+                    <button className="secondary-btn" type="button" onClick={() => resetFont()}>
+                      恢复默认
+                    </button>
+                  </div>
+                )}
+                <div className="font-preview" aria-label="页面字体预览">
+                  微信聊天记录 · 自然轻松 温柔 幽默 · 123 ABC
+                </div>
+                <span className="hint">
+                  字体只在本机生效，不会上传；自定义字体会复制到本机配置目录。缺字时自动回退默认字体。
+                </span>
+              </div>
+
               <div className="setting-row">
                 <div className="setting-label">
                   <Images size={14} />
@@ -4571,6 +4674,25 @@ export default function App() {
                       </button>
                     )}
                   </div>
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-label">
+                      <RefreshCw size={14} />
+                      <div>
+                        <strong>启动时自动检查更新</strong>
+                        <span className="hint">
+                          默认关闭：不会自动弹出更新提示。仍可随时点上方「检查更新」。
+                        </span>
+                      </div>
+                    </div>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={autoCheckUpdates}
+                        onChange={(e) => void toggleAutoCheckUpdates(e.target.checked)}
+                      />
+                      <span className="track" />
+                    </label>
                   </div>
                 </section>
               )}
